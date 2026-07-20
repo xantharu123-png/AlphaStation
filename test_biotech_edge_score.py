@@ -61,3 +61,14 @@ def test_biotech_edge_marks_sell_the_news_extension():
     assert edge["sell_the_news_risk"] >= 25
     assert "sell_the_news_risk_extended_chart" in edge["risk_flags"]
     assert "distribution_volume" in edge["risk_flags"]
+
+
+def test_biotech_edge_preserves_explicit_zero_chart_health():
+    trial_data, news_data, tech_data, details = _base_inputs()
+    tech_data["details"]["chart_health"] = 0
+
+    edge = _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details)
+
+    assert "weak_chart_before_catalyst" in edge["risk_flags"]
+    assert edge["sell_the_news_risk"] >= 10
+    assert edge["trade_mode"] == "WAIT_CHART_CONFIRMATION"

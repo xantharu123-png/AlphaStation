@@ -180,6 +180,80 @@ def _live_rr(
     return geometry.get("rr")
 
 
+def _execution_cost_pct(row: Dict[str, Any], spread_pct: Optional[float]) -> Optional[float]:
+    """Return estimated round-trip execution costs as percent of entry.
+
+    Explicit all-in costs take precedence. Otherwise one full spread plus
+    two-sided fees/slippage are combined. Missing inputs stay missing instead
+    of inventing a market-independent default.
+    """
+    all_in = _to_float(
+        _first(
+            row,
+            [
+                "execution_cost_pct",
+                "round_trip_cost_pct",
+                "estimated_round_trip_cost_pct",
+            ],
+        )
+    )
+    if all_in is not None:
+        return round(max(0.0, all_in), 6)
+
+    spread_bps = _to_float(_first(row, ["spread_bps"]))
+    spread_component = spread_pct
+    if spread_component is None and spread_bps is not None:
+        spread_component = spread_bps / 100.0
+
+    round_trip_fee = _to_float(_first(row, ["round_trip_fee_pct", "fees_pct"]))
+    if round_trip_fee is None:
+        one_way_fee = _to_float(_first(row, ["fee_pct", "commission_pct"]))
+        round_trip_fee = 2.0 * one_way_fee if one_way_fee is not None else None
+
+    round_trip_slippage = _to_float(_first(row, ["round_trip_slippage_pct"]))
+    if round_trip_slippage is None:
+        one_way_slippage = _to_float(_first(row, ["slippage_pct"]))
+        slippage_bps = _to_float(_first(row, ["slippage_bps"]))
+        if one_way_slippage is not None:
+            round_trip_slippage = 2.0 * one_way_slippage
+        elif slippage_bps is not None:
+            round_trip_slippage = 2.0 * slippage_bps / 100.0
+
+    components = [
+        value
+        for value in (spread_component, round_trip_fee, round_trip_slippage)
+        if value is not None
+    ]
+    if not components:
+        return None
+    return round(sum(max(0.0, value) for value in components), 6)
+
+
+def _net_live_rr(
+    current: Optional[float],
+    entry: Optional[float],
+    stop: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+    direction: str,
+    execution_cost_pct: Optional[float],
+) -> Optional[float]:
+    if execution_cost_pct is None or any(value is None for value in (entry, stop, tp1, tp2)):
+        return None
+    live_entry = entry
+    if current is not None:
+        live_entry = max(current, entry) if direction == "LONG" else min(current, entry)
+    geometry = trade_geometry(live_entry, stop, tp1, tp2, direction)
+    if not geometry.get("valid"):
+        return 0.0
+    cost_amount = live_entry * max(0.0, execution_cost_pct) / 100.0
+    net_risk = geometry["risk"] + cost_amount
+    net_reward = 0.5 * geometry["reward1"] + 0.5 * geometry["reward2"] - cost_amount
+    if net_risk <= 0:
+        return 0.0
+    return round(max(0.0, net_reward) / net_risk, 2)
+
+
 def _risk_band(score: int) -> str:
     if score >= 80:
         return "LOW"
@@ -282,8 +356,19 @@ def calculate_trade_health(
     planned_rr = _to_float(_first(row, ["risk_reward", "RiskReward", "rr_effective", "rr_ratio", "rr1"]))
     atr_value = _to_float(_first(row, ["atr", "ATR", "atr_14", "atr14"]))
     spread_pct = _to_float(_first(row, ["spread_pct", "spread_percent"]))
+    execution_cost_pct = _execution_cost_pct(row, spread_pct)
     distance_r = _distance_to_entry_r(row, current, entry, risk, direction)
-    live_rr = _live_rr(row, current, entry, stop, tp1, tp2, direction)
+    live_rr_gross = _live_rr(row, current, entry, stop, tp1, tp2, direction)
+    live_rr_net = _net_live_rr(
+        current,
+        entry,
+        stop,
+        tp1,
+        tp2,
+        direction,
+        execution_cost_pct,
+    )
+    live_rr = live_rr_net if live_rr_net is not None else live_rr_gross
     tp1_missed, tp2_missed = _target_missed(row, current, direction, tp1, tp2)
 
     if levels_complete and not geometry_valid:
@@ -387,7 +472,8 @@ def calculate_trade_health(
             entry_score -= 16
             warnings.append(f"Live R:R {live_rr:.2f} unter Wunschbereich")
         else:
-            positives.append(f"Live R:R {live_rr:.2f} akzeptabel")
+            rr_label = "Netto-R:R" if live_rr_net is not None else "Live R:R"
+            positives.append(f"{rr_label} {live_rr:.2f} akzeptabel")
 
     rvol = _to_float(_first(row, ["rvol", "RVOL", "relative_volume"]))
     if rvol is not None:
@@ -574,6 +660,9 @@ def calculate_trade_health(
         fakeout_score = min(fakeout_score, 15)
         near_entry_distance = False
         live_rr = 0.0
+        live_rr_gross = 0.0
+        if live_rr_net is not None:
+            live_rr_net = 0.0
 
     if near_entry_distance:
         if entry_score >= 70 and not tactical_reasons and raw_entry_quality not in {"CHASE", "LATE", "EXTENDED"}:
@@ -673,6 +762,10 @@ def calculate_trade_health(
             "risk": risk,
             "distance_to_entry_r": distance_r,
             "live_rr": live_rr,
+            "live_rr_gross": live_rr_gross,
+            "live_rr_net": live_rr_net,
+            "execution_cost_pct": execution_cost_pct,
+            "rr_cost_basis": "net" if live_rr_net is not None else "gross_no_cost_data",
             "planned_rr": planned_rr,
             "min_stop_distance": round(min_stop_distance, 8) if min_stop_distance is not None else None,
             "rvol": rvol,

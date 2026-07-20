@@ -23,9 +23,55 @@ from modules.indicators import (
 from modules.data_fetchers import rate_limited_get
 from modules.trade_levels import trade_geometry
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
+from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline
 
 
 log = logging.getLogger(__name__)
+
+
+def _positive_volume_values(values):
+    """Return finite positive volumes; missing data is not zero volume."""
+    valid = []
+    for value in values or []:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number > 0:
+            valid.append(number)
+    return valid
+
+
+def _covered_volume_baseline(values, *, method="mean", minimum_coverage=0.60):
+    """Return a baseline only when the requested window has enough real volume."""
+    window = list(values or [])
+    if not window:
+        return 0.0
+    minimum_periods = max(5, math.ceil(len(window) * minimum_coverage))
+    return historical_volume_baseline(
+        window,
+        lookback=len(window),
+        method=method,
+        minimum_periods=minimum_periods,
+    ) or 0.0
+
+
+def _relative_volume_state(volumes, index, lookback=20, minimum_periods=5):
+    """Return point-in-time RVOL or None when volume evidence is incomplete."""
+    if index < 0 or index >= len(volumes):
+        return None
+    baseline = historical_volume_baseline(
+        volumes[max(0, index - lookback):index],
+        lookback=lookback,
+        minimum_periods=minimum_periods,
+    )
+    try:
+        current = float(volumes[index])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if baseline is None or baseline <= 0 or not math.isfinite(current) or current <= 0:
+        return None
+    return current / baseline
 
 
 
@@ -345,35 +391,29 @@ def analyze_candles(candles):
     # =====================================================
     # 4. ATR (Average True Range, 14 Perioden)
     # =====================================================
-    true_ranges = []
-    for i in range(1, n):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-        true_ranges.append(tr)
-    atr = sum(true_ranges[-14:]) / min(14, len(true_ranges)) if true_ranges else 0
+    atr, _ = calculate_atr_14(candles)
 
     # =====================================================
     # 5. VOLUME TREND (Accumulation / Distribution)
     # =====================================================
     if n >= 10:
-        recent_vol = sum(volumes[-5:]) / 5
-        prior_vol = sum(volumes[-10:-5]) / 5 if sum(volumes[-10:-5]) > 0 else 1
-        vol_ratio = recent_vol / prior_vol if prior_vol > 0 else 1.0
+        recent_values = _positive_volume_values(volumes[-5:])
+        prior_values = _positive_volume_values(volumes[-10:-5])
+        recent_vol = historical_volume_baseline(recent_values, lookback=5) if len(recent_values) >= 3 else None
+        prior_vol = historical_volume_baseline(prior_values, lookback=5) if len(prior_values) >= 3 else None
+        vol_ratio = recent_vol / prior_vol if recent_vol is not None and prior_vol else None
 
         # Prüfe ob Volumen mit Preis steigt (Accumulation) oder dagegen (Distribution)
         recent_price_up = closes[-1] > closes[-5]
-        if vol_ratio > 1.2 and recent_price_up:
+        if vol_ratio is not None and vol_ratio > 1.2 and recent_price_up:
             volume_trend = "accumulation"
-        elif vol_ratio > 1.2 and not recent_price_up:
+        elif vol_ratio is not None and vol_ratio > 1.2 and not recent_price_up:
             volume_trend = "distribution"
         else:
             volume_trend = "neutral"
     else:
         volume_trend = "neutral"
-        vol_ratio = 1.0
+        vol_ratio = None
 
     # =====================================================
     # 6. CONSOLIDATION DETECTION
@@ -404,10 +444,12 @@ def analyze_candles(candles):
     # Enge Konsolidierung + steigendes Volumen = Breakout imminent
     breakout_ready = False
     if is_consolidating and consol_days >= 3:
-        if n >= 5:
-            last3_vol = sum(volumes[-3:]) / 3
-            prior3_vol = sum(volumes[-6:-3]) / 3 if n >= 6 else last3_vol
-            if prior3_vol > 0 and last3_vol / prior3_vol > 1.3:
+        if n >= 6:
+            last3_values = _positive_volume_values(volumes[-3:])
+            prior3_values = _positive_volume_values(volumes[-6:-3])
+            last3_vol = historical_volume_baseline(last3_values, lookback=3) if len(last3_values) >= 2 else None
+            prior3_vol = historical_volume_baseline(prior3_values, lookback=3) if len(prior3_values) >= 2 else None
+            if last3_vol is not None and prior3_vol and last3_vol / prior3_vol > 1.3:
                 breakout_ready = True
 
     # =====================================================
@@ -626,7 +668,15 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
                     continue
 
                 # Pole-Volumen (Durchschnitt)
-                pole_vol = sum(volumes[pole_start:pole_end + 1]) / (pole_len + 1) if pole_len > 0 else 0
+                pole_volumes = _positive_volume_values(
+                    volumes[pole_start:pole_end + 1]
+                )
+                minimum_pole_volumes = max(2, int((pole_len + 1) * 0.6))
+                pole_vol = (
+                    sum(pole_volumes) / len(pole_volumes)
+                    if len(pole_volumes) >= minimum_pole_volumes
+                    else 0
+                )
 
                 # =====================================================
                 # SCHRITT 2: Flag nach dem Pole suchen
@@ -677,8 +727,16 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
                     continue  # Zu tiefes Retracement → kein Flag
 
                 # Flag-Volumen vs Pole-Volumen
-                flag_vol_avg = sum(flag_vols) / len(flag_vols) if flag_vols else 0
-                vol_decline = (flag_vol_avg / pole_vol) if pole_vol > 0 else 1.0
+                valid_flag_vols = _positive_volume_values(flag_vols)
+                flag_vol_avg = (
+                    historical_volume_baseline(
+                        valid_flag_vols,
+                        lookback=len(valid_flag_vols),
+                        minimum_periods=2,
+                    )
+                    if len(valid_flag_vols) >= 2 else None
+                )
+                vol_decline = (flag_vol_avg / pole_vol) if flag_vol_avg is not None and pole_vol > 0 else None
 
                 # =====================================================
                 # SCHRITT 3: Score berechnen
@@ -735,7 +793,9 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
                     _details.append(f" Tiefes Retracement: {retracement_pct:.1f}%")
 
                 # E) Volumen-Decline in Flag (max 20)
-                if vol_decline <= 0.5:
+                if vol_decline is None:
+                    _details.append(" Volumenbasis fehlt: keine Volumenpunkte")
+                elif vol_decline <= 0.5:
                     _score += 20
                     _details.append(f" Volumen stark gesunken: {vol_decline:.0%} des Pole-Vol")
                 elif vol_decline <= 0.75:
@@ -854,7 +914,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         if b["close"] > 0:
             daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
 
-    avg_volume = sum(volumes) / len(volumes) if volumes else 0
+    avg_volume = _covered_volume_baseline(volumes)
     close = closes[-1] if closes else 0
     is_penny_illiquid = (avg_volume < 500000 and close < 5)
     # V3.2: Smart-Money-Signale brauchen Mindest-Liquidität
@@ -924,10 +984,11 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             details.append(" Body-Kompression: Nicht genug Daten")
     elif not is_penny_illiquid:
         if len(volumes) >= 15:
-            recent_vol = sum(volumes[-5:]) / 5
-            prior_vol = sum(volumes[-20:-5]) / max(1, len(volumes[-20:-5]))
-
-            if prior_vol > 0:
+            recent_values = _positive_volume_values(volumes[-5:])
+            prior_values = _positive_volume_values(volumes[-20:-5])
+            if len(recent_values) >= 3 and len(prior_values) >= 5:
+                recent_vol = sum(recent_values) / len(recent_values)
+                prior_vol = sum(prior_values) / len(prior_values)
                 vol_decline = recent_vol / prior_vol
                 if vol_decline < 0.5:
                     score += 5
@@ -941,7 +1002,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 else:
                     details.append(f" Kein Vol Dry-Up: {vol_decline:.2f}x")
             else:
-                details.append(" Vol Dry-Up: Kein Prior-Volumen")
+                details.append(" Vol Dry-Up: Unvollstaendige Volumendaten")
         else:
             details.append(" Vol Dry-Up: Nicht genug Daten (min 15 Tage)")
     else:
@@ -1140,10 +1201,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
             # FIX (BUG 1): Check volume TREND over test period (accumulation vs exhaustion)
             # Compare avg volume of last 5 bars vs last 15 bars
-            vol_last_5 = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else sum(volumes) / len(volumes)
-            vol_last_15 = sum(volumes[-15:]) / 15 if len(volumes) >= 15 else sum(volumes) / len(volumes)
-            vol_trend_ratio = vol_last_5 / vol_last_15 if vol_last_15 > 0 else 0
-            volume_increasing = vol_trend_ratio > 1.2  # Volume is rising (accumulation)
+            recent_values = _positive_volume_values(volumes[-5:])
+            baseline_values = _positive_volume_values(volumes[-15:])
+            volume_trend_available = len(recent_values) >= 3 and len(baseline_values) >= 8
+            vol_last_5 = sum(recent_values) / len(recent_values) if recent_values else 0
+            vol_last_15 = sum(baseline_values) / len(baseline_values) if baseline_values else 0
+            vol_trend_ratio = (
+                vol_last_5 / vol_last_15
+                if volume_trend_available and vol_last_15 > 0
+                else None
+            )
+            volume_increasing = vol_trend_ratio is not None and vol_trend_ratio > 1.2
 
             if direction == "long" and upper_tests >= 4:
                 if volume_increasing:
@@ -1153,14 +1221,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 else:
                     # Multiple tests + DECLINING volume = exhaustion (reduced score)
                     score += 3
-                    details.append(f" {upper_tests}x Resistance OHNE Volumen-Steigerung (Wyckoff Exhaust): {vol_trend_ratio:.2f}x")
+                    ratio_text = f"{vol_trend_ratio:.2f}x" if vol_trend_ratio is not None else "N/A"
+                    details.append(f" {upper_tests}x Resistance OHNE bestaetigtes Volumen ({ratio_text})")
             elif direction == "long" and upper_tests >= 3:
                 if volume_increasing:
                     score += 5
                     details.append(f" {upper_tests}x Resistance + steigende Volumen: {vol_trend_ratio:.2f}x")
                 else:
                     score += 2
-                    details.append(f" {upper_tests}x Resistance ohne Volumen-Boost: {vol_trend_ratio:.2f}x")
+                    ratio_text = f"{vol_trend_ratio:.2f}x" if vol_trend_ratio is not None else "N/A"
+                    details.append(f" {upper_tests}x Resistance ohne Volumen-Boost: {ratio_text}")
             elif direction == "short" and lower_tests >= 4:
                 if volume_increasing:
                     # Multiple tests + RISING volume = distribution at support (full score)
@@ -1169,14 +1239,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 else:
                     # Multiple tests + DECLINING volume = exhaustion (reduced score)
                     score += 3
-                    details.append(f" {lower_tests}x Support OHNE Volumen-Steigerung (Wyckoff Exhaust): {vol_trend_ratio:.2f}x")
+                    ratio_text = f"{vol_trend_ratio:.2f}x" if vol_trend_ratio is not None else "N/A"
+                    details.append(f" {lower_tests}x Support OHNE bestaetigtes Volumen ({ratio_text})")
             elif direction == "short" and lower_tests >= 3:
                 if volume_increasing:
                     score += 5
                     details.append(f" {lower_tests}x Support + steigende Volumen: {vol_trend_ratio:.2f}x")
                 else:
                     score += 2
-                    details.append(f" {lower_tests}x Support ohne Volumen-Boost: {vol_trend_ratio:.2f}x")
+                    ratio_text = f"{vol_trend_ratio:.2f}x" if vol_trend_ratio is not None else "N/A"
+                    details.append(f" {lower_tests}x Support ohne Volumen-Boost: {ratio_text}")
             else:
                 details.append(f" Wenig Boundary-Tests (Upper: {upper_tests}, Lower: {lower_tests})")
         else:
@@ -1223,11 +1295,11 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     elif closes[i] < closes[i-1]:
                         distri_days += 1
         else:
-            avg_vol = sum(volumes) / n
+            avg_vol = _covered_volume_baseline(volumes)
             accum_days = 0
             distri_days = 0
             for i in range(1, n):
-                if volumes[i] > avg_vol * 1.5:
+                if avg_vol > 0 and volumes[i] and volumes[i] > avg_vol * 1.5:
                     if closes[i] > closes[i-1]:
                         accum_days += 1
                     elif closes[i] < closes[i-1]:
@@ -1512,7 +1584,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         ob_data = detect_order_blocks(bars, max_blocks=5)
         range_high_15 = max(highs[-min(15, n):])
         range_low_15 = min(lows[-min(15, n):])
-        atr_ob = sum((bars[i]["high"] - bars[i]["low"]) for i in range(max(0, n-10), n)) / min(10, n)
+        atr_ob, _ = calculate_atr_14(bars)
         # M-2 (BI-Audit 2026-06-10): Zonen-Naehe einheitlich auf 3% des Preises
         # gedeckelt. atr*2 allein war bei volatilen Serien 3-5% vom Preis ->
         # 42% OB-Treffer auf Random Walks. In engen Konsolidierungen (dem
@@ -1912,9 +1984,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         up_day_vols = [volumes[i] for i in range(1, n) if closes[i] > closes[i - 1]]
         down_day_vols = [volumes[i] for i in range(1, n) if closes[i] < closes[i - 1]]
         if dist_lh_share >= 0.65 and down_day_vols:
-            avg_up_v = (sum(up_day_vols) / len(up_day_vols)) if up_day_vols else 0.0
-            avg_down_v = sum(down_day_vols) / len(down_day_vols)
-            if avg_down_v > avg_up_v * 1.2:
+            avg_up_v = _covered_volume_baseline(up_day_vols) if up_day_vols else 0.0
+            avg_down_v = _covered_volume_baseline(down_day_vols)
+            volume_evidence_complete = bool(avg_down_v > 0 and (not up_day_vols or avg_up_v > 0))
+            if volume_evidence_complete and avg_down_v > avg_up_v * 1.2:
                 score = max(0, score - 10)
                 details.append(
                     f" Distribution-Malus: -10 (Lower Highs {dist_lh_share:.0%}, "
@@ -2480,18 +2553,29 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
 
                 # ── VOLUME CONFIRMATION: D-Punkt sollte über-durchschnittliches Volumen haben ──
                 volume_penalty = 0
+                volume_status = "missing"
                 d_point_index = potential_xabcd[4]['index']
                 if d_point_index < len(prices):
                     d_volume = prices[d_point_index].get('volume', 0)
                     # Berechne Durchschnittsvolumen über das Pattern (X bis D)
                     x_point_index = potential_xabcd[0]['index']
                     pattern_bars = prices[x_point_index:d_point_index+1]
-                    avg_volume = sum(p.get('volume', 0) for p in pattern_bars) / len(pattern_bars) if pattern_bars else 1
+                    avg_volume = _covered_volume_baseline(
+                        [p.get('volume') for p in pattern_bars[:-1]]
+                    )
 
-                    # Wenn D-Volumen unter Durchschnitt: -20 Punkte
-                    if d_volume < avg_volume and avg_volume > 0:
+                    try:
+                        d_volume = float(d_volume)
+                    except (TypeError, ValueError, OverflowError):
+                        d_volume = 0
+                    if d_volume > 0 and avg_volume > 0:
+                        volume_status = "confirmed" if d_volume >= avg_volume else "weak"
+                    if volume_status == "weak":
                         volume_penalty = 20
                         details.append(f" D-Punkt Volumen schwach ({d_volume:.0f} vs avg {avg_volume:.0f})")
+                    elif volume_status == "missing":
+                        volume_penalty = 10
+                        details.append(" D-Punkt Volumen nicht belastbar")
 
                 # ── AGE PENALTY: Lange Patterns sind weniger zuverlässig ──
                 age_penalty = 0
@@ -2513,6 +2597,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     "direction": direction,
                     "score": adjusted_score,
                     "raw_score": score,
+                    "volume_status": volume_status,
                     "entry_distance_pct": round(entry_distance_pct, 1),
                     "matches": f"{matches}/{total_checks}",
                     "success_rate": pattern_def["success_rate"],
@@ -2711,22 +2796,18 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
         
         def is_high_volume(i, lookback=20):
             """Volume > 1.5x Durchschnitt"""
-            start = max(0, i - lookback)
-            avg_vol = sum(volumes[start:i]) / max(1, i - start)
-            return volumes[i] > avg_vol * 1.5, volumes[i] / max(1, avg_vol)
+            ratio = _relative_volume_state(volumes, i, lookback=lookback)
+            return ratio is not None and ratio > 1.5, ratio or 0.0
         
         def is_low_volume(i, lookback=20):
             """Volume < 0.7x Durchschnitt"""
-            start = max(0, i - lookback)
-            avg_vol = sum(volumes[start:i]) / max(1, i - start)
-            return volumes[i] < avg_vol * 0.7, volumes[i] / max(1, avg_vol)
+            ratio = _relative_volume_state(volumes, i, lookback=lookback)
+            return ratio is not None and ratio < 0.7, ratio or 0.0
         
         # ATR fuer Stop-Berechnung
-        atr_values = []
-        for i in range(1, n):
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-            atr_values.append(tr)
-        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        atr, _ = calculate_atr_14(data)
+        if atr <= 0:
+            atr = current_price * 0.02
         
         results = []
         lookback_end = int(n * 0.5)
@@ -2834,11 +2915,29 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                     
                     # Volume-Decay in Phase B
                     if ar_idx + 20 < n:
-                        early_range_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        early_values = _positive_volume_values(
+                            volumes[ar_idx:ar_idx + 10]
+                        )
+                        early_range_vol = (
+                            sum(early_values) / len(early_values)
+                            if len(early_values) >= 5
+                            else None
+                        )
                         mid_point = ar_idx + (n - ar_idx) // 2
                         if mid_point + 10 <= n:
-                            later_range_vol = sum(volumes[mid_point:mid_point + 10]) / 10
-                            if later_range_vol < early_range_vol * 0.75:
+                            later_values = _positive_volume_values(
+                                volumes[mid_point:mid_point + 10]
+                            )
+                            later_range_vol = (
+                                sum(later_values) / len(later_values)
+                                if len(later_values) >= 5
+                                else None
+                            )
+                            if (
+                                early_range_vol is not None
+                                and later_range_vol is not None
+                                and later_range_vol < early_range_vol * 0.75
+                            ):
                                 events.append(f"Vol Decay: {later_range_vol/early_range_vol:.0%}")
                                 score += 5
                     
@@ -3178,7 +3277,15 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     min_gap_size = avg_range * 0.30
     
     volumes = [d.get("volume", 0) for d in ohlcv_data]
-    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+
+    def _impulse_rvol(index):
+        if index < 0 or index >= len(volumes):
+            return 0.0
+        return completed_bar_rvol(
+            volumes[index],
+            volumes[max(0, index - 20):index],
+            lookback=20,
+        )
     
     # ================================================================
     # PASS 1a: Volume Imbalances (VI) — 2-Kerzen Body-to-Body Gap
@@ -3197,9 +3304,14 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         
         # Volume-Filter: Impulse-Kerze muss mindestens durchschnittliches Volume haben
         impulse_vol = c_curr.get("volume", 0)
-        if avg_vol > 0 and impulse_vol < avg_vol * 0.8:
+        impulse_baseline = historical_volume_baseline(
+            volumes[max(0, i - 20):i],
+            lookback=20,
+            minimum_periods=3,
+        )
+        if impulse_baseline is None or impulse_vol <= 0 or impulse_vol < impulse_baseline * 0.8:
             continue  # Kein institutionelles Interesse
-        vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
+        vol_ratio = _impulse_rvol(i)
         
         # --- BULLISH VI: Body Kerze 2 startet ÜBER Body Kerze 1 ---
         if body_bot_2 > body_top_1 + min_gap_size:
@@ -3262,9 +3374,15 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         
         # Volume der Impulse-Kerze (Kerze 2)
         impulse_vol = c2.get("volume", 0)
-        if avg_vol > 0 and impulse_vol < avg_vol * 0.8:
+        impulse_idx = i - 1
+        impulse_baseline = historical_volume_baseline(
+            volumes[max(0, impulse_idx - 20):impulse_idx],
+            lookback=20,
+            minimum_periods=3,
+        )
+        if impulse_baseline is None or impulse_vol <= 0 or impulse_vol < impulse_baseline * 0.8:
             continue
-        vol_ratio = impulse_vol / avg_vol if avg_vol > 0 else 1
+        vol_ratio = _impulse_rvol(impulse_idx)
         
         # --- BULLISH FVG: High[K1] < Low[K3] ---
         # Wick von Kerze 1 berührt NICHT Wick von Kerze 3
@@ -3436,7 +3554,7 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
     current_price = ohlcv_data[-1]["close"]
     ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
     atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
-    avg_vol = sum(d.get("volume", 0) for d in ohlcv_data) / n if n > 0 else 1
+    volumes = [d.get("volume", 0) for d in ohlcv_data]
     bullish_obs = []
     bearish_obs = []
 
@@ -3465,7 +3583,11 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 if impulse_up > atr * 4.0: strength += 1
                 # Volume der Displacement-Kerze (die stärkere von c1/c2)
                 disp_vol = max(c1.get("volume", 0), c2.get("volume", 0))
-                vol_ratio = disp_vol / avg_vol if avg_vol > 0 else 0
+                vol_baseline = historical_volume_baseline(
+                    volumes[max(0, i - 20):i],
+                    lookback=20,
+                )
+                vol_ratio = disp_vol / vol_baseline if vol_baseline else 0
                 if vol_ratio > 1.5: strength += 1
                 if vol_ratio > 2.5: strength += 1
                 strength = min(5, strength)
@@ -3505,7 +3627,11 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 if impulse_down > atr * 2.5: strength += 1
                 if impulse_down > atr * 4.0: strength += 1
                 disp_vol = max(c1.get("volume", 0), c2.get("volume", 0))
-                vol_ratio = disp_vol / avg_vol if avg_vol > 0 else 1
+                vol_baseline = historical_volume_baseline(
+                    volumes[max(0, i - 20):i],
+                    lookback=20,
+                )
+                vol_ratio = disp_vol / vol_baseline if vol_baseline else 0
                 if vol_ratio > 1.5: strength += 1
                 if vol_ratio > 2.5: strength += 1
                 strength = min(5, strength)
@@ -3895,13 +4021,11 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
     avg_range = sum(highs[i] - lows[i] for i in range(n)) / n if n > 0 else 1
     
     # ATR für Stop-Berechnung (14-Perioden)
-    atr_values = []
-    for i in range(1, n):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        atr_values.append(tr)
-    atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else avg_range
+    atr, _ = calculate_atr_14(data)
+    if atr <= 0:
+        atr = avg_range
     
-    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+    avg_vol = _covered_volume_baseline(volumes)
     
     # ================================================================
     # SWING POINT DETECTION (mit kleinerem Window für mehr Pivots)
@@ -4071,13 +4195,15 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                             score -= 5   # Schon älter
                         
                         # Volume bei Punkt 5 (niedriger als Durchschnitt = Exhaustion der Seller)
-                        if avg_vol > 0 and p5["vol"] < avg_vol * 0.8:
+                        if avg_vol > 0 and p5["vol"] and p5["vol"] > 0 and p5["vol"] < avg_vol * 0.8:
                             score += 5  # Low Volume am Punkt 5 = Seller erschöpft
                         
                         # Volume Reversal Check: Bars NACH P5 zeigen steigendes Volume?
                         if p5["idx"] + 2 < n:
-                            post_p5_vols = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
-                            if post_p5_vols and avg_vol > 0:
+                            post_p5_window = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
+                            post_p5_vols = _positive_volume_values(post_p5_window)
+                            minimum_post_bars = max(2, math.ceil(len(post_p5_window) * 0.67))
+                            if len(post_p5_vols) >= minimum_post_bars and avg_vol > 0:
                                 avg_post = sum(post_p5_vols) / len(post_p5_vols)
                                 if avg_post > avg_vol * 1.2:
                                     score += 8  # Steigendes Volume nach P5 = Reversal bestätigt
@@ -4261,13 +4387,15 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                             score -= 5
                         
                         avg_vol_local = avg_vol
-                        if avg_vol_local > 0 and p5["vol"] < avg_vol_local * 0.8:
+                        if avg_vol_local > 0 and p5["vol"] and p5["vol"] > 0 and p5["vol"] < avg_vol_local * 0.8:
                             score += 5
                         
                         # Volume Reversal Check: Bars NACH P5 zeigen steigendes Volume?
                         if p5["idx"] + 2 < n:
-                            post_p5_vols = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
-                            if post_p5_vols and avg_vol_local > 0:
+                            post_p5_window = volumes[p5["idx"]+1:min(p5["idx"]+4, n)]
+                            post_p5_vols = _positive_volume_values(post_p5_window)
+                            minimum_post_bars = max(2, math.ceil(len(post_p5_window) * 0.67))
+                            if len(post_p5_vols) >= minimum_post_bars and avg_vol_local > 0:
                                 avg_post = sum(post_p5_vols) / len(post_p5_vols)
                                 if avg_post > avg_vol_local * 1.2:
                                     score += 8
@@ -4419,14 +4547,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         volumes = [d.get("volume", 0) for d in data]
         
         current_price = closes[-1]
-        avg_volume = sum(volumes) / len(volumes) if volumes else 1
+        avg_volume = _covered_volume_baseline(volumes)
         
         # ATR-basierte Toleranz (adaptiv statt hardcoded)
-        atr_values = []
-        for i in range(1, len(data)):
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-            atr_values.append(tr)
-        atr = sum(atr_values[-14:]) / min(14, len(atr_values)) if atr_values else current_price * 0.02
+        atr, _ = calculate_atr_14(data)
+        if atr <= 0:
+            atr = current_price * 0.02
         atr_pct = atr / current_price if current_price > 0 else 0.02
         
         # V4.0: Mindestabstand proportional zum Lookback
@@ -4506,7 +4632,16 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         continue
                     
                     # KRITERIUM 7: Volume-Divergenz (weniger Vol beim 2. Top)
-                    vol_confirmation = h2_data["volume"] < h1_data["volume"] * 1.2
+                    h1_volume = h1_data["volume"]
+                    h2_volume = h2_data["volume"]
+                    vol_confirmation = (
+                        avg_volume > 0
+                        and h1_volume is not None
+                        and h2_volume is not None
+                        and h1_volume > 0
+                        and h2_volume > 0
+                        and h2_volume < h1_volume * 1.2
+                    )
                     
                     # Preis unter Neckline = bestätigt
                     if current_price < neckline:
@@ -4597,8 +4732,13 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                         continue
                     
                     # KRITERIUM 7: Volume-Bestätigung
-                    recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else avg_volume
-                    vol_confirmation = recent_vol > avg_volume * 0.8
+                    recent_values = _positive_volume_values(volumes[-5:])
+                    recent_vol = (
+                        sum(recent_values) / len(recent_values)
+                        if len(recent_values) >= 3
+                        else 0
+                    )
+                    vol_confirmation = avg_volume > 0 and recent_vol > avg_volume * 0.8
                     
                     # Preis über Neckline = bestätigt
                     if current_price > neckline:

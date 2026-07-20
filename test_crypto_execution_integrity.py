@@ -61,6 +61,18 @@ def test_early_mover_rejects_stale_execution_candle():
     assert scored["execution_data_age_seconds"] > 600
 
 
+def test_early_mover_missing_volume_history_cannot_confirm_entry():
+    bars = _execution_bars(age_bars=1)
+    for bar in bars[:-1]:
+        bar["volume"] = 0
+        bar["volume_usd"] = 0
+
+    scored = api._score_early_mover_trigger_bars(_early_row(), bars, "5m", {})
+
+    assert scored["ok"] is False
+    assert scored["reason"] == "missing_5m_volume_baseline"
+
+
 def test_early_mover_trigger_cache_is_bound_to_trade_plan(monkeypatch):
     api._EARLY_MOVER_TRIGGER_CACHE.clear()
     calls = []

@@ -168,6 +168,19 @@ def test_unfinished_5m_candle_cannot_create_a_breakout_signal():
     assert intraday["trigger_confirmed"] is False
 
 
+def test_missing_5m_volume_baseline_cannot_create_a_penny_trigger():
+    now_ts = time.time()
+    bars = _bars(now_ts)
+    for bar in bars[2:12]:
+        bar["volume"] = 0
+
+    intraday = analyze_penny_intraday(bars, now_ts=now_ts)
+
+    assert intraday["data_ok"] is False
+    assert intraday["trigger_confirmed"] is False
+    assert intraday["warnings"] == ["insufficient_5m_volume_baseline"]
+
+
 def test_recent_offering_or_reverse_split_news_blocks_buy_mail_state():
     now_ts = time.time()
     risky_details = {
@@ -517,6 +530,34 @@ def test_robust_rvol_uses_twenty_day_median_not_single_outlier():
     )
     assert enriched["rvol"] == 4.0
     assert enriched["rvol_source"] == "projected_volume_vs_20d_median"
+
+
+def test_robust_rvol_does_not_replace_missing_recent_days_with_older_volume():
+    import api
+
+    now = api.datetime(2026, 7, 10, 16, 0, tzinfo=api.timezone.utc)
+    bars = []
+    for days_ago in range(40, 20, -1):
+        bars.append({
+            "volume": 1_000_000,
+            "timestamp": (now - api.timedelta(days=days_ago)).timestamp() * 1000,
+        })
+    for days_ago in range(20, 0, -1):
+        bars.append({
+            "volume": 1_000_000 if days_ago <= 9 else 0,
+            "timestamp": (now - api.timedelta(days=days_ago)).timestamp() * 1000,
+        })
+
+    enriched = api._penny_apply_robust_rvol(
+        dict(_snapshot(), volume=2_000_000, rvol=1.25),
+        bars,
+        0.5,
+        now_utc=now,
+    )
+
+    assert enriched["rvol"] == 1.25
+    assert enriched["rvol_history_days"] == 9
+    assert enriched["rvol_source"] == "previous_day_volume_fallback"
 
 
 def test_news_keyword_matching_does_not_flag_software_or_sector():

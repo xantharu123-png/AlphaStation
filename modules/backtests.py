@@ -18,6 +18,9 @@ from modules.patterns import analyze_breakout_imminent
 from modules.scanners import _compute_biotech_technical_from_bars
 from modules.data_fetchers import fetch_backtest_daily_data
 from modules.trade_levels import trade_geometry
+from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
+from modules.volume_metrics import historical_volume_baseline
+from modules.vrvp_levels import calculate_wilder_atr
 
 
 # ── Backtest Universes (kopiert aus scanner.py) ──
@@ -75,8 +78,21 @@ BIOTECH_BACKTEST_UNIVERSE = [
 ]
 
 
+def _initial_universe_average_volume(bars, window_size, lookback=20, minimum_periods=10):
+    """Rank a backtest universe from information available at test start only."""
+    if not bars or window_size <= 0:
+        return None
+    initial_window = bars[:window_size]
+    if len(initial_window) < minimum_periods:
+        return None
+    return historical_volume_baseline(
+        (bar.get("volume") for bar in initial_window),
+        lookback=lookback,
+        minimum_periods=minimum_periods,
+    )
 
-def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0, 
+
+def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0,
                                min_volume=100000, progress_callback=None):
     """
     Backtest über ALLE US-Aktien mit Grouped Daily Bars.
@@ -168,7 +184,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     # ============================================================
     all_results = {s: [] for s in strategies}
     tickers_with_data = [t for t, bars in ticker_history.items() if len(bars) >= 30]
-    seen_signals = set()  # Dedup: max 1 Signal pro Ticker pro Tag
+    seen_signals = set()  # Dedup: max 1 Signal pro Strategie/Ticker/Tag
     
     for t_idx, ticker in enumerate(tickers_with_data):
         if progress_callback and t_idx % 500 == 0:
@@ -318,8 +334,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     ticker_avg_vol = {}
     for t, bars_list in ticker_history.items():
         if len(bars_list) >= (window_size + 5):  # Genug History für Window + Simulation
-            avg_vol = sum(b["volume"] for b in bars_list[-20:]) / 20
-            ticker_avg_vol[t] = avg_vol
+            avg_vol = _initial_universe_average_volume(bars_list, window_size)
+            if avg_vol is not None:
+                ticker_avg_vol[t] = avg_vol
 
     # Priorisiere Mid-Cap-Volumen (500K-10M) — hier passieren die besten Breakouts
     # Aber schliesse High-Volume nicht komplett aus (niedrigere Prio)
@@ -406,19 +423,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # Fixes: #1 Phase-2 Logik, #2 Risk-Calc, #3 Stop-Weite,
             #        #4 Same-Day Entry, #5-8 HIGH Issues
             # ============================================
-            # Calculate True Range for last 5 bars
-            tr_values = []
-            for i, b in enumerate(window[-5:]):
-                high = b["high"]
-                low = b["low"]
-                if i == 0:
-                    # First bar: use simple range
-                    tr = high - low
-                else:
-                    prev_close = window[-5 + i - 1]["close"]
-                    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                tr_values.append(tr)
-            atr_5 = sum(tr_values) / len(tr_values)
+            atr_5 = calculate_wilder_atr(window, period=5)
+            if atr_5 <= 0:
+                continue
             breakout_threshold = atr_5 * 0.25  # ATR-basiert statt fixer 0.5% (#20)
 
             # Stop ATR×1.2 für alle Grades (bewährt — NICHT ändern!)
@@ -497,7 +504,13 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             }
 
             # === VOLUME AVERAGE für Breakout-Confirmation ===
-            avg_vol_20 = sum(b["volume"] for b in window[-20:]) / 20 if len(window) >= 20 else sum(b["volume"] for b in window) / len(window)
+            avg_vol_20 = historical_volume_baseline(
+                (b.get("volume") for b in window),
+                lookback=20,
+                minimum_periods=10,
+            )
+            if avg_vol_20 is None:
+                continue
 
             # === BREAKOUT-FILTER (V2.8 — Grade-abhängig für C) ===
             # Grade B+: Standard Minervini 1.4x Volume
@@ -777,7 +790,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         # Profit Factor
         gross_profit = sum(t["pnl_pct"] for t in winners)
         gross_loss = abs(sum(t["pnl_pct"] for t in losers))
-        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
+        profit_factor_summary = profit_factor_metrics(gross_profit, gross_loss)
 
         # Avg R
         avg_r = sum(t["r_multiple"] for t in grade_trades) / len(grade_trades) if grade_trades else 0
@@ -794,13 +807,18 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             "avg_winner": round(avg_winner, 2),
             "avg_loser": round(avg_loser, 2),
             "total_pnl": round(total_pnl, 2),
-            "profit_factor": profit_factor,
+            "profit_factor": profit_factor_summary["value"],
+            "profit_factor_display": profit_factor_summary["display"],
+            "profit_factor_unbounded": profit_factor_summary["unbounded"],
             "avg_r": round(avg_r, 2),
             "tp1_rate": round(tp1_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
             "tp2_rate": round(tp2_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
         }
 
-    filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+    filled_trades = sorted(
+        (t for t in all_trades if t.get("outcome") != "NO_FILL"),
+        key=chronological_trade_key,
+    )
 
     # Calculate Max Drawdown from equity curve
     equity = 10000
@@ -940,8 +958,9 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     # Sortiere nach avg Volumen (aktivste zuerst)
     ticker_avg_vol = {}
     for t, bars_list in valid_tickers.items():
-        avg_vol = sum(b["volume"] for b in bars_list[-20:]) / 20
-        ticker_avg_vol[t] = avg_vol
+        avg_vol = _initial_universe_average_volume(bars_list, window_size)
+        if avg_vol is not None:
+            ticker_avg_vol[t] = avg_vol
 
     tickers_to_test = sorted(ticker_avg_vol.keys(),
                               key=lambda t: ticker_avg_vol[t], reverse=True)[:max_tickers]
@@ -1016,19 +1035,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 grade = "C"
 
             # === ATR für Stop/Target Berechnung ===
-            # Calculate True Range for last 10 bars
-            tr_values = []
-            for i, b in enumerate(window[-10:]):
-                high = b["high"]
-                low = b["low"]
-                if i == 0:
-                    # First bar: use simple range
-                    tr = high - low
-                else:
-                    prev_close = window[-10 + i - 1]["close"]
-                    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                tr_values.append(tr)
-            atr_10 = sum(tr_values) / len(tr_values)
+            atr_10 = calculate_wilder_atr(window, period=10)
             if atr_10 <= 0:
                 continue
 
@@ -1201,7 +1208,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
 
         gross_profit = sum(t["pnl_pct"] for t in winners)
         gross_loss = abs(sum(t["pnl_pct"] for t in losers))
-        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
+        profit_factor_summary = profit_factor_metrics(gross_profit, gross_loss)
 
         avg_r = sum(t["r_multiple"] for t in grade_trades) / len(grade_trades) if grade_trades else 0
 
@@ -1217,13 +1224,18 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             "avg_winner": round(avg_winner, 2),
             "avg_loser": round(avg_loser, 2),
             "total_pnl": round(total_pnl, 2),
-            "profit_factor": profit_factor,
+            "profit_factor": profit_factor_summary["value"],
+            "profit_factor_display": profit_factor_summary["display"],
+            "profit_factor_unbounded": profit_factor_summary["unbounded"],
             "avg_r": round(avg_r, 2),
             "tp1_rate": round(tp1_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
             "tp2_rate": round(tp2_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
         }
 
-    filled_trades = [t for t in all_trades if t.get("outcome") != "NO_FILL"]
+    filled_trades = sorted(
+        (t for t in all_trades if t.get("outcome") != "NO_FILL"),
+        key=chronological_trade_key,
+    )
 
     # Calculate Max Drawdown from equity curve
     equity = 10000
@@ -1272,19 +1284,44 @@ def simulate_trade(bars, signal_idx, strategy):
     signal_day = bars[signal_idx]
     
     # === ENTRY BESTIMMEN ===
+    entry_trigger = None
+    entry_fill_basis = entry_type
     if entry_type == "next_open":
         if signal_idx + 1 >= len(bars):
             return None
-        entry_price = bars[signal_idx + 1]["open"]
         trade_start_idx = signal_idx + 1
+        entry_price = bars[trade_start_idx]["open"]
+        entry_date = bars[trade_start_idx]["date"]
     elif entry_type == "at_close":
         entry_price = signal_day["close"]
         trade_start_idx = signal_idx + 1
+        entry_date = signal_day["date"]
     elif entry_type == "prev_high":
         if signal_idx < 1 or signal_idx + 1 >= len(bars):
             return None
-        entry_price = bars[signal_idx - 1]["high"]
         trade_start_idx = signal_idx + 1
+        trigger_bar = bars[trade_start_idx]
+        entry_trigger = bars[signal_idx - 1]["high"]
+        if direction == "long":
+            if trigger_bar["open"] >= entry_trigger:
+                entry_price = trigger_bar["open"]
+                entry_fill_basis = "gap_open_above_trigger"
+            elif trigger_bar["high"] >= entry_trigger:
+                entry_price = entry_trigger
+                entry_fill_basis = "trigger_touch"
+            else:
+                return None
+        else:
+            # Built-in prev_high is LONG-only; keep custom short rules symmetric.
+            if trigger_bar["open"] <= entry_trigger:
+                entry_price = trigger_bar["open"]
+                entry_fill_basis = "gap_open_below_trigger"
+            elif trigger_bar["low"] <= entry_trigger:
+                entry_price = entry_trigger
+                entry_fill_basis = "trigger_touch"
+            else:
+                return None
+        entry_date = trigger_bar["date"]
     else:
         return None
     
@@ -1334,10 +1371,6 @@ def simulate_trade(bars, signal_idx, strategy):
         
         if direction == "long":
             # Prüfe ob Entry überhaupt erreicht wird (bei prev_high Entry)
-            if entry_type == "prev_high" and day_offset == 0:
-                if bar["high"] < entry_price:
-                    return None  # Entry nicht erreicht
-            
             # Stop Check (Low des Tages)
             if bar["low"] <= stop_price:
                 # Wenn auch TP1 an diesem Tag möglich → konservativ: Stop first
@@ -1363,10 +1396,6 @@ def simulate_trade(bars, signal_idx, strategy):
                 stop_price = entry_price  # Trail Stop auf Breakeven nach TP1!
         
         else:  # short
-            if entry_type == "prev_high" and day_offset == 0:
-                if bar["low"] > entry_price:
-                    return None
-            
             if bar["high"] >= stop_price:
                 if bar["open"] >= stop_price:
                     runner_exit = bar["open"]
@@ -1415,7 +1444,9 @@ def simulate_trade(bars, signal_idx, strategy):
     
     return {
         "signal_date": signal_day["date"],
-        "entry_date": bars[trade_start_idx]["date"] if trade_start_idx < len(bars) else signal_day["date"],
+        "entry_date": entry_date,
+        "entry_trigger": round(entry_trigger, 4) if entry_trigger is not None else None,
+        "entry_fill_basis": entry_fill_basis,
         "exit_date": exit_date,
         "entry_price": round(entry_price, 2),
         "stop_price": round(initial_stop_price, 2),
@@ -1462,7 +1493,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     
     all_results = {s: [] for s in strategies}
     ticker_data_cache = {}
-    seen_signals = set()  # Dedup: max 1 Signal pro Ticker pro Tag
+    seen_signals = set()  # Dedup per strategy, ticker and signal date.
     
     total_tickers = len(tickers)
     skipped_no_data = 0
@@ -1510,8 +1541,8 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
                 
                 # Signal prüfen
                 if check_signal(metrics, strat["signal"]):
-                    # Dedup: Max 1 Trade pro Ticker pro Tag
-                    dedup_key = (ticker, bars[idx]["date"])
+                    # Different strategies may legitimately fire on the same ticker/day.
+                    dedup_key = (ticker, bars[idx]["date"], strat_name)
                     if dedup_key in seen_signals:
                         continue
                     
@@ -1538,9 +1569,12 @@ def compute_backtest_stats(trades):
     if not trades:
         return {
             "total_trades": 0, "winners": 0, "losers": 0, "win_rate": 0,
-            "avg_pnl": 0, "avg_r": 0, "best_r": 0, "worst_r": 0,
+            "avg_pnl": 0, "avg_win": 0, "avg_loss": 0,
+            "avg_r": 0, "best_r": 0, "worst_r": 0,
             "avg_hold": 0, "tp1_rate": 0, "tp2_rate": 0, "stop_rate": 0,
-            "profit_factor": 0, "expectancy": 0, "total_r": 0
+            "full_stop_rate": 0, "post_tp1_stop_rate": 0, "eod_rate": 0,
+            "profit_factor": 0, "profit_factor_display": "0.00",
+            "profit_factor_unbounded": False, "expectancy": 0, "total_r": 0
         }
     
     winners = [t for t in trades if t["is_winner"]]
@@ -1554,15 +1588,36 @@ def compute_backtest_stats(trades):
     total_r = sum(t["r_multiple"] for t in trades)
     
     avg_win = sum(t["pnl_pct"] for t in winners) / len(winners) if winners else 0
-    avg_loss = abs(sum(t["pnl_pct"] for t in losers) / len(losers)) if losers else 1
+    avg_loss = abs(sum(t["pnl_pct"] for t in losers) / len(losers)) if losers else 0
     
     gross_profit = sum(t["r_multiple"] for t in winners) if winners else 0
-    gross_loss = abs(sum(t["r_multiple"] for t in losers)) if losers else 1
+    gross_loss = abs(sum(t["r_multiple"] for t in losers)) if losers else 0
+    profit_factor_summary = profit_factor_metrics(gross_profit, gross_loss)
     
-    tp2_count = sum(1 for t in trades if t["exit_reason"] == "TP2")
-    tp1_eod_count = sum(1 for t in trades if t["exit_reason"] == "TP1+EOD")
-    stop_count = sum(1 for t in trades if t["exit_reason"] == "STOP")
-    eod_count = sum(1 for t in trades if t["exit_reason"] == "EOD")
+    tp1_reasons = {"TP1", "TP2", "BLENDED_TP", "TP1_STOP", "TP1+EOD"}
+    tp2_reasons = {"TP2", "BLENDED_TP"}
+    tp1_count = sum(
+        1 for trade in trades
+        if bool(trade.get("tp1_hit"))
+        or str(trade.get("exit_reason") or "").upper() in tp1_reasons
+    )
+    tp2_count = sum(
+        1 for trade in trades
+        if str(trade.get("exit_reason") or "").upper() in tp2_reasons
+    )
+    full_stop_count = sum(
+        1 for trade in trades
+        if str(trade.get("exit_reason") or "").upper() == "STOP"
+    )
+    post_tp1_stop_count = sum(
+        1 for trade in trades
+        if str(trade.get("exit_reason") or "").upper() == "TP1_STOP"
+    )
+    stop_count = full_stop_count + post_tp1_stop_count
+    eod_count = sum(
+        1 for trade in trades
+        if str(trade.get("exit_reason") or "").upper() in {"EOD", "TP1+EOD"}
+    )
     
     return {
         "total_trades": total,
@@ -1577,11 +1632,15 @@ def compute_backtest_stats(trades):
         "best_r": round(max(t["r_multiple"] for t in trades), 2) if trades else 0,
         "worst_r": round(min(t["r_multiple"] for t in trades), 2) if trades else 0,
         "avg_hold": round(sum(t["bars_held"] for t in trades) / total, 1) if total > 0 else 0,
-        "tp1_rate": round((tp2_count + tp1_eod_count) / total * 100, 1) if total > 0 else 0,
+        "tp1_rate": round(tp1_count / total * 100, 1) if total > 0 else 0,
         "tp2_rate": round(tp2_count / total * 100, 1) if total > 0 else 0,
         "stop_rate": round(stop_count / total * 100, 1) if total > 0 else 0,
+        "full_stop_rate": round(full_stop_count / total * 100, 1) if total > 0 else 0,
+        "post_tp1_stop_rate": round(post_tp1_stop_count / total * 100, 1) if total > 0 else 0,
         "eod_rate": round(eod_count / total * 100, 1) if total > 0 else 0,
-        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999,
+        "profit_factor": profit_factor_summary["value"],
+        "profit_factor_display": profit_factor_summary["display"],
+        "profit_factor_unbounded": profit_factor_summary["unbounded"],
         "expectancy": round(avg_r, 2)
     }
 

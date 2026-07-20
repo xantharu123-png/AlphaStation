@@ -121,6 +121,17 @@ def test_insufficient_history_returns_neutral_not_block():
     assert sig["reason"] == "insufficient_history"
 
 
+def test_incomplete_volume_history_cannot_confirm_ad_divergence():
+    bars = _bullish_divergence_bars()
+    for bar in bars[:12]:
+        bar["volume"] = 0
+
+    sig = _ad_divergence_signal(bars)
+
+    assert sig["signal"] == "NEUTRAL"
+    assert sig["reason"] == "volume_history_incomplete"
+
+
 def test_running_day_bar_is_excluded_from_window():
     """Konvention der Umgebung: laufender Tag zaehlt nicht als kompletter Bar.
 

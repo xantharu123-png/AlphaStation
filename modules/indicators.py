@@ -151,18 +151,13 @@ def calculate_atr_14(ohlcv_data):
     if not ohlcv_data or len(ohlcv_data) < 15:
         return 0, 0
 
-    true_ranges = []
-    for i in range(1, len(ohlcv_data)):
-        h = ohlcv_data[i]["high"]
-        l = ohlcv_data[i]["low"]
-        pc = ohlcv_data[i-1]["close"]
-        tr = max(h - l, abs(h - pc), abs(l - pc))
-        true_ranges.append(tr)
+    # Keep this legacy tuple-returning API as a thin compatibility wrapper.
+    # All productive paths therefore share one Wilder smoothing implementation.
+    from modules.vrvp_levels import calculate_wilder_atr
 
-    # Wilder's Smoothed ATR (wie TradingView)
-    atr = sum(true_ranges[:14]) / 14
-    for tr in true_ranges[14:]:
-        atr = (atr * 13 + tr) / 14
+    atr = calculate_wilder_atr(ohlcv_data, period=14)
+    if atr <= 0:
+        return 0, 0
 
     current_price = ohlcv_data[-1]["close"]
     atr_pct = (atr / current_price * 100) if current_price > 0 else 0

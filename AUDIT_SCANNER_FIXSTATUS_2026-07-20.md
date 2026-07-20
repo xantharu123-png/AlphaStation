@@ -57,9 +57,39 @@ und durch den vollstaendigen Regressionstest abgesichert.
 - Backtests trennen NO_FILL von Verlusten und simulieren chronologisch ohne Signaltag-Historienfilter.
 - Der vorcompilierte Frontend-Bundle wird per Quellhash auf Aktualitaet geprueft.
 
+## Unabhaengige Codex-Nachpruefung
+
+Nach der Umsetzung des Claude-Audits wurde der produktive Code nochmals
+unabhaengig nach parallelen Berechnungen, Look-ahead, Teilkerzen, fehlenden
+Daten, falscher R:R-Geometrie und optimistischen Fallbacks durchsucht. Dabei
+wurden zusaetzlich folgende Restpfade korrigiert:
+
+- Volumen-Baselines bleiben strikt im angeforderten Zeitfenster; fehlende
+  neue Bars werden nicht durch aeltere gueltige Bars aufgefuellt.
+- Fehlende 5m-Volumenhistorie kann keinen Krypto-Entry mehr bestaetigen.
+  Distribution und Wolfe-Reversal erhalten ebenfalls keine Volumenpunkte
+  ohne ausreichende reale Datenabdeckung.
+- AutoTrader, BI, SPAC-Erkennung, Gap-Recovery, Order-Block-Naehe,
+  Wyckoff-Chart, Sidebar und Backtests verwenden dieselbe True-Range-/Wilder-
+  ATR-Definition. Einfache High-Low-Mittel wurden aus diesen Pfaden entfernt.
+- Penny-5m-Trigger, Pattern- und Biotech-Volumenlogik behandeln Datenmangel
+  fail-closed statt mit Eins-, Null- oder Current-Bar-Fallbacks.
+- Market-Cap-Turnover wird nicht mehr als RVOL bezeichnet oder wie eine
+  historische Relativvolumen-Messung bewertet.
+- Profit Factor ohne Verlust wird als `INF`/nicht endlich ausgewiesen statt
+  kuenstlich gedeckelt; Equity/Drawdown, Gap-Fills, NO_FILL und OOS-Chronologie
+  werden zeitlich korrekt berechnet.
+- Live-R:R beruecksichtigt Execution-Kosten und wird bei Stopbruch oder
+  veralteter Preisbasis nicht als handelbar weitergereicht.
+
+Ergebnis der Gegenpruefung: Alle nummerierten Claude-Befunde und alle dabei
+neu gefundenen Codex-Restbefunde sind im aktuellen Stand adressiert. Es gibt
+keinen bekannten offenen Rechen-, Datenintegritaets- oder Zustandswiderspruch
+aus diesen beiden Audits.
+
 ## Abnahme
 
-- `python -m pytest -q --tb=short`: 892 bestanden.
+- `python -m pytest -q --tb=short`: 928 bestanden.
 - Python-Kompilierung aller geaenderten Produktivmodule: bestanden.
 - `scripts/verify_frontend_bundle.py`: bestanden.
 - `node --check frontend/app.bundle.js`: bestanden.

@@ -41,6 +41,7 @@ from modules.vrvp_levels import (
     calculate_wilder_atr,
 )
 from modules.trade_levels import trade_geometry
+from modules.volume_metrics import historical_volume_baseline
 
 try:
     import requests as req
@@ -1366,11 +1367,24 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    Vergleiche Volume erste Hälfte vs zweite Hälfte.
     #    Sinkend = Distribution (Smart Money verkauft)
     # ═══════════════════════════════════════════════════════════════════════
-    mid = max(1, n // 2)
-    vol_first = sum(c["volume_usd"] for c in candles[:mid]) / max(1, mid)
-    vol_second = sum(c["volume_usd"] for c in candles[mid:]) / max(1, n - mid)
+    # The newest exchange candle can still be forming. Treating its partial
+    # volume as a completed collapse creates false pump-exhaustion shorts.
+    volume_candles = candles[:-1] if len(candles) >= 6 else candles
+    volume_mid = max(1, len(volume_candles) // 2)
+    first_half = volume_candles[:volume_mid]
+    second_half = volume_candles[volume_mid:]
+    vol_first = historical_volume_baseline(
+        (c.get("volume_usd") for c in first_half),
+        lookback=len(first_half),
+        minimum_periods=max(2, int(len(first_half) * 0.6)),
+    )
+    vol_second = historical_volume_baseline(
+        (c.get("volume_usd") for c in second_half),
+        lookback=len(second_half),
+        minimum_periods=max(2, int(len(second_half) * 0.6)),
+    )
 
-    if vol_first > 0:
+    if vol_first and vol_second:
         vol_ratio = vol_second / vol_first
         if vol_ratio < 0.3:      # Volume kollapiert (< 30% der ersten Hälfte)
             pts = 20
@@ -1384,11 +1398,14 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
             pts = 0
     else:
         pts = 0
-        vol_ratio = 0
+        vol_ratio = None
 
     score += pts
-    pump_data["vol_ratio"] = round(vol_ratio, 2)
-    details.append(f" Volume Decline: {vol_ratio:.0%} der ersten Hälfte → {pts}/20")
+    pump_data["vol_ratio"] = round(vol_ratio, 2) if vol_ratio is not None else None
+    if vol_ratio is None:
+        details.append(" Volume Decline: N/A (zu wenig vollständige Volumendaten) → 0/20")
+    else:
+        details.append(f" Volume Decline: {vol_ratio:.0%} der ersten Hälfte → {pts}/20")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 3. MOMENTUM DECAY (0-15)
@@ -2074,9 +2091,17 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     recent_3 = window[-3:]
     avg_upper_wick = sum(_upper_wick_pct(c) for c in recent_3) / max(1, len(recent_3))
     avg_vol_window = window[-25:-5]
-    avg_vol = sum(_to_float(c.get("volume_usd")) for c in avg_vol_window) / max(1, len(avg_vol_window))
-    recent_vol = sum(_to_float(c.get("volume_usd")) for c in recent_3) / max(1, len(recent_3))
-    sell_volume = recent_vol >= avg_vol * 1.15 if avg_vol > 0 else False
+    avg_vol = historical_volume_baseline(
+        (_to_float(c.get("volume_usd")) for c in avg_vol_window),
+        lookback=20,
+        minimum_periods=10,
+    )
+    recent_vol = historical_volume_baseline(
+        (_to_float(c.get("volume_usd")) for c in recent_3),
+        lookback=3,
+        minimum_periods=2,
+    )
+    sell_volume = bool(avg_vol and recent_vol and recent_vol >= avg_vol * 1.15)
 
     pump_ref = window[-13]["open"] if len(window) >= 13 else window[0]["open"]
     micro_pump_pct = (micro_high - pump_ref) / pump_ref * 100 if pump_ref > 0 else 0

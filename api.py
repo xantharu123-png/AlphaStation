@@ -99,6 +99,8 @@ from modules.data_fetchers import (
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import normalize_alert_trade_levels, trade_geometry, trade_plan_quality
+from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
+from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline, project_partial_rvol
 from modules.email_dedupe import (
     email_dedupe_active as _shared_email_dedupe_active,
     email_dedupe_claim as _shared_email_dedupe_claim,
@@ -894,7 +896,7 @@ def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, per
 
     cache_key = f"{tk}:{as_of_et.strftime('%Y-%m-%d')}:{periods}"
     if cache_key in _ORB_ATR_CACHE:
-        return _ORB_ATR_CACHE[cache_key], "atr14_cached"
+        return _ORB_ATR_CACHE[cache_key], f"wilder_atr{periods}_cached"
 
     try:
         end_day = (as_of_et - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -911,30 +913,43 @@ def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, per
 
         bars = resp.json().get("results", []) or []
         bars = [b for b in bars if b.get("h", 0) > 0 and b.get("l", 0) > 0 and b.get("c", 0) > 0]
-        if len(bars) < 6:
+        if len(bars) < periods + 1:
             return fallback, "prev_day_range_short_history"
-
-        true_ranges = []
-        prev_close = None
-        for bar in bars:
-            high = float(bar.get("h", 0))
-            low = float(bar.get("l", 0))
-            close = float(bar.get("c", 0))
-            if prev_close is not None:
-                true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-            prev_close = close
-
-        true_ranges = true_ranges[-periods:]
         ref_close = float(bars[-1].get("c", 0))
-        if not true_ranges or ref_close <= 0:
+        atr = calculate_wilder_atr(bars, period=periods)
+        if atr <= 0 or ref_close <= 0:
             return fallback, "prev_day_range_no_atr"
 
-        atr_pct = (sum(true_ranges) / len(true_ranges)) / ref_close * 100
+        atr_pct = atr / ref_close * 100
         atr_pct = round(max(0.0, atr_pct), 4)
         _ORB_ATR_CACHE[cache_key] = atr_pct
-        return atr_pct, f"atr{len(true_ranges)}"
+        return atr_pct, f"wilder_atr{periods}"
     except Exception as e:
         return fallback, f"prev_day_range_error:{e}"
+
+
+def _orb_volume_score(
+    breakout_confirmed: bool,
+    breakout_bar_volume: Any,
+    opening_range_average_volume: Any,
+    volume_available: bool,
+) -> Tuple[int, str]:
+    """Score ORB volume only when a complete, positive baseline exists."""
+    try:
+        breakout_volume = float(breakout_bar_volume or 0)
+        baseline = float(opening_range_average_volume or 0)
+    except (TypeError, ValueError):
+        return 0, "Vol N/A"
+    if not volume_available or baseline <= 0 or breakout_volume <= 0:
+        return 0, "Vol N/A"
+    ratio = breakout_volume / baseline
+    if breakout_confirmed:
+        if ratio >= 2.0:
+            return 25, "Vol 2x+"
+        if ratio >= 1.5:
+            return 20, "Vol 1.5x"
+        return 12, "Vol OK"
+    return 5, "Vol unconfirmed"
 
 
 # ── Email Alert System ──
@@ -1361,9 +1376,7 @@ def _project_us_equity_rvol(raw_rvol: Any, now_utc: Optional[datetime] = None) -
     except (TypeError, ValueError):
         return 0.0
     expected_fraction = _us_equity_expected_volume_fraction(now_utc)
-    if expected_fraction >= 1.0:
-        return value
-    return value / max(expected_fraction, 0.01)
+    return project_partial_rvol(value, expected_fraction)
 
 
 def _normalize_trade_horizon_value(value: Any) -> str:
@@ -3019,8 +3032,21 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             typical_value += typical * bar["volume"]
             volume_sum += bar["volume"]
         vwap = typical_value / volume_sum if volume_sum > 0 else _median_float([b.get("close") for b in recent], last_close)
-        median_vol = _median_float([b.get("volume", 0) for b in prev[-30:]], max(last_vol, 1))
-        vol_ratio = last_vol / max(median_vol, 1)
+        median_vol = historical_volume_baseline(
+            (b.get("volume") for b in prev),
+            lookback=30,
+            method="median",
+            minimum_periods=8,
+        )
+        if median_vol is None or median_vol <= 0 or last_vol <= 0:
+            return {
+                "ok": False,
+                "reason": "missing_5m_volume_baseline",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "execution_data_age_seconds": freshness.get("age_seconds"),
+            }
+        vol_ratio = last_vol / median_vol
         prev_high = max(bar["high"] for bar in prev_window)
         prev_low = min(bar["low"] for bar in prev_window)
         prev_close = prev[-1]["close"] if prev else last_close
@@ -7088,6 +7114,15 @@ def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
     return sig if isinstance(sig, dict) else {}
 
 
+def _new_listing_age_sort_value(value: Any) -> float:
+    """Keep a valid zero-hour listing first; unknown/invalid ages sort last."""
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        return float("inf")
+    return age if math.isfinite(age) and age >= 0 else float("inf")
+
+
 def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not isinstance(payload, dict):
@@ -7206,7 +7241,12 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
             visible.append(c)
     return sorted(
         visible,
-        key=lambda c: (c["bucket"] == "announcement", c["bucket"] != "signals", -(c["exh_score"] or 0), c.get("age") or 999),
+        key=lambda c: (
+            c["bucket"] == "announcement",
+            c["bucket"] != "signals",
+            -(c["exh_score"] or 0),
+            _new_listing_age_sort_value(c.get("age")),
+        ),
     )[:12]
 
 
@@ -8666,6 +8706,7 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
             "LOW_QUALITY",
             "AVOID_NEWS_RISK",
             "WAIT_PULLBACK",
+            "WAIT_CHART_CONFIRMATION",
             "SMALL_SIZE_BINARY_RISK",
             "NEAR_BINARY_EVENT",
         }
@@ -9402,15 +9443,18 @@ def _turtle_score_cap(score: float, change_pct: Any, rvol: Any, breakout_pct: An
     flags: List[str] = []
     change = _alert_float(change_pct, 0.0) or 0.0
     parsed_rvol = _alert_float(rvol, None)
-    rel_vol = parsed_rvol if parsed_rvol is not None else 1.0
-    breakout = _alert_float(breakout_pct, 0.0) or 0.0
-
-    if rel_vol < 1.0:
+    rel_vol = parsed_rvol if parsed_rvol is not None else 0.0
+    if parsed_rvol is None:
+        capped = min(capped, 69)
+        flags.append("RVOL fehlt")
+    elif rel_vol < 1.0:
         capped = min(capped, 69)
         flags.append("RVOL unter 1.0x")
     elif rel_vol < 1.3:
         capped = min(capped, 79)
         flags.append("RVOL nur leicht bestaetigt")
+
+    breakout = _alert_float(breakout_pct, 0.0) or 0.0
 
     if change < 0.75 and rel_vol < 1.5:
         capped = min(capped, 79)
@@ -9997,15 +10041,11 @@ def _strategy_daily_history_metrics(
     if completed and completed[-1].get("date") == today_str:
         completed = completed[:-1]
 
-    vols20 = [b["volume"] for b in completed[-20:] if b.get("volume", 0) > 0]
-    avg_vol20 = sum(vols20) / len(vols20) if vols20 else 0.0
+    vols20 = [b["volume"] for b in completed[-20:]]
+    avg_vol20 = historical_volume_baseline(vols20, lookback=20, minimum_periods=10) or 0.0
     volume_fraction = _us_equity_expected_volume_fraction(now_utc)
-    raw_rvol20 = (float(day_volume or 0) / avg_vol20) if avg_vol20 > 0 else None
-    rvol20 = (
-        min(round(raw_rvol20 / max(volume_fraction, 0.01), 2), 50.0)
-        if raw_rvol20 is not None
-        else None
-    )
+    raw_rvol20 = completed_bar_rvol(day_volume, vols20, lookback=20, minimum_periods=10)
+    rvol20 = min(round(project_partial_rvol(raw_rvol20, volume_fraction), 2), 50.0)
     projected_day_volume = (
         float(day_volume or 0) / max(volume_fraction, 0.01)
         if volume_fraction < 1.0
@@ -10024,16 +10064,9 @@ def _strategy_daily_history_metrics(
     high_50d = max(highs50) if highs50 else high_20d
     low_50d = min(lows50) if lows50 else low_20d
 
-    true_ranges: List[float] = []
-    atr_bars = completed[-15:]
-    for idx, bar in enumerate(atr_bars):
-        prev_close = atr_bars[idx - 1]["close"] if idx > 0 else bar["close"]
-        true_ranges.append(max(
-            bar["high"] - bar["low"],
-            abs(bar["high"] - prev_close),
-            abs(bar["low"] - prev_close),
-        ))
-    atr14 = sum(true_ranges[-14:]) / min(len(true_ranges), 14) if true_ranges else max(float(price or 0) * 0.03, 0.01)
+    atr14 = calculate_wilder_atr(completed, period=14, lookback=90)
+    if atr14 is None or atr14 <= 0:
+        atr14 = max(float(price or 0) * 0.03, 0.01)
     atr_pct = max(0.1, atr14 / price * 100) if price > 0 else 2.5
 
     support_candidates = [float(day_low or 0)] + [b["low"] for b in completed[-50:]]
@@ -10088,7 +10121,7 @@ def _strategy_daily_history_metrics(
         "history_ok": len(completed) >= 20,
         "avg_vol20": avg_vol20,
         "rvol20": rvol20,
-        "rvol20_raw": round(raw_rvol20, 2) if raw_rvol20 is not None else None,
+        "rvol20_raw": round(raw_rvol20, 2),
         "rvol_source": rvol_source,
         "expected_volume_fraction": round(volume_fraction, 4),
         "projected_day_volume": round(projected_day_volume),
@@ -10197,7 +10230,14 @@ def _ad_divergence_signal(
     ad_lower_low = ad_low_second < ad_low_first
 
     volumes = [b["volume"] for b in window if b["volume"] > 0]
-    avg_volume = (sum(volumes) / len(volumes)) if volumes else 0.0
+    avg_volume = historical_volume_baseline(
+        volumes,
+        lookback=lookback,
+        minimum_periods=max(5, int(math.ceil(lookback * 0.60))),
+    ) or 0.0
+    if avg_volume <= 0:
+        result["reason"] = "volume_history_incomplete"
+        return result
     ad_slope_norm = ((ad_line[-1] - ad_line[0]) / avg_volume) if avg_volume > 0 else 0.0
 
     # Preis-Schwaeche: Lower Low in der zweiten Haelfte ODER Netto-Slope
@@ -10776,18 +10816,7 @@ def _bar_num(bar: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
 
 
 def _calc_recent_atr(bars: List[Dict[str, Any]], period: int = 14) -> float:
-    if len(bars) < 2:
-        return 0.0
-    true_ranges: List[float] = []
-    recent = bars[-(period + 1):]
-    for idx in range(1, len(recent)):
-        high = _bar_num(recent[idx], "high", "h")
-        low = _bar_num(recent[idx], "low", "l")
-        prev_close = _bar_num(recent[idx - 1], "close", "c")
-        if high <= 0 or low <= 0:
-            continue
-        true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    return sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
+    return calculate_wilder_atr(bars, period=period)
 
 
 def _cup_handle_quality_band(value: float, ideal_low: float, ideal_high: float,
@@ -11006,7 +11035,11 @@ def _detect_cup_handle_breakout(
 
             recent_volumes = [_bar_num(bar, "volume", "v") for bar in segment[-21:-1] if _bar_num(bar, "volume", "v") > 0]
             last_volume = _bar_num(last, "volume", "v")
-            avg20_volume = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
+            avg20_volume = historical_volume_baseline(
+                recent_volumes,
+                lookback=20,
+                minimum_periods=10,
+            ) or 0.0
             if avg20_volume <= 0 or last_volume <= 0:
                 continue
             rvol = last_volume / avg20_volume
@@ -11017,8 +11050,21 @@ def _detect_cup_handle_breakout(
 
             cup_volumes = [_bar_num(bar, "volume", "v") for bar in cup if _bar_num(bar, "volume", "v") > 0]
             handle_volumes = [_bar_num(bar, "volume", "v") for bar in handle[:-1] if _bar_num(bar, "volume", "v") > 0]
-            cup_avg_volume = sum(cup_volumes) / len(cup_volumes) if cup_volumes else 0
-            handle_avg_volume = sum(handle_volumes) / len(handle_volumes) if handle_volumes else 0
+            cup_min_volume_bars = max(5, int(math.ceil(len(cup) * 0.60)))
+            handle_history_size = max(0, len(handle) - 1)
+            handle_min_volume_bars = max(3, int(math.ceil(handle_history_size * 0.60)))
+            cup_avg_volume = historical_volume_baseline(
+                cup_volumes,
+                lookback=len(cup_volumes),
+                minimum_periods=cup_min_volume_bars,
+            )
+            handle_avg_volume = historical_volume_baseline(
+                handle_volumes,
+                lookback=len(handle_volumes),
+                minimum_periods=handle_min_volume_bars,
+            )
+            if cup_avg_volume is None or handle_avg_volume is None:
+                continue
             # AUDIT M-2: Dry-up als Hard-Gate. Handle-Volumen ueber ~1.15x
             # Cup-Schnitt ist Distribution — das wichtigste Qualitaetssignal
             # des Patterns darf kein blosser Score-Bonus sein. Der +6-Bonus
@@ -11235,7 +11281,7 @@ def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) 
 
     change_pct = float(candidate.get("change_pct", candidate.get("Change_Pct", 0)) or 0)
     close_pos = float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)) or 0.5)
-    rvol = float(candidate.get("RVOL", candidate.get("rvol", 1)) or 1)
+    rvol = float(candidate.get("RVOL", candidate.get("rvol", 0)) or 0)
     base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
     best_match: Optional[Dict[str, Any]] = None
 
@@ -11752,16 +11798,19 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     rvol_source = str(history_metrics.get("rvol_source") or "20D_completed_session")
                     if rvol is None:
                         prev_vol = float(prev.get("v", 0) or 0)
-                        rvol = (
-                            min(round(volume / max(prev_vol * session_volume_fraction, 1.0), 2), 50.0)
-                            if prev_vol > 1000
-                            else 1.0
-                        )
-                        rvol_source = (
-                            "fallback_prev_day_intraday_time_adjusted"
-                            if session_volume_fraction < 1.0
-                            else "fallback_prev_day_completed_session"
-                        )
+                        if prev_vol > 1000:
+                            rvol = min(
+                                round(volume / max(prev_vol * session_volume_fraction, 1.0), 2),
+                                50.0,
+                            )
+                            rvol_source = (
+                                "fallback_prev_day_intraday_time_adjusted"
+                                if session_volume_fraction < 1.0
+                                else "fallback_prev_day_completed_session"
+                            )
+                        else:
+                            rvol = 0.0
+                            rvol_source = "missing_volume_baseline"
                     prev_atr_pct = float(history_metrics.get("atr_pct") or _snapshot_atr_pct(day, prev, price))
 
                     # V3.2: Multi-Day Runner Bypass — bei Vortag >10% wird RVOL
@@ -12496,8 +12545,12 @@ def _turtle_scan_wrapper() -> None:
                     score += 5  # Zu weit weg — späte Entry
 
                 # Volume Confirmation (0-25)
-                avg_vol_20 = sum(volumes[max(0, i - 20):i]) / min(20, max(1, i))
-                rvol_raw = volumes[i] / avg_vol_20 if avg_vol_20 > 0 else 0.0
+                rvol_raw = completed_bar_rvol(
+                    volumes[i],
+                    volumes[:i],
+                    lookback=20,
+                    minimum_periods=5,
+                )
                 rvol = _project_us_equity_rvol(rvol_raw)
                 if rvol >= 2.5:
                     score += 25
@@ -12670,8 +12723,12 @@ def _bear_scan_wrapper() -> None:
                     chg_20d = ((close - bars[20]["c"]) / bars[20]["c"]) * 100
 
                 vol = bars[0].get("v", 0)
-                avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(len(bars) - 1, 20) if len(bars) > 1 else 1
-                rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+                avg_vol = historical_volume_baseline(
+                    (b.get("v", 0) for b in bars[1:21]),
+                    lookback=20,
+                    minimum_periods=10,
+                )
+                rvol = round(vol / avg_vol, 2) if avg_vol else 0
 
                 if chg_5d > 5:
                     signal = "STARK"
@@ -12848,8 +12905,12 @@ def _bear_scan_wrapper() -> None:
                                         ma50 = None  # Nicht genug Daten — NICHT mit ma20 gleichsetzen
                                         ma50_dist = 0
 
-                                    avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
-                                    rvol_raw = (vol / avg_vol) if avg_vol > 0 else 0.0
+                                    avg_vol = historical_volume_baseline(
+                                        (b.get("v", 0) for b in bars[1:21]),
+                                        lookback=20,
+                                        minimum_periods=10,
+                                    )
+                                    rvol_raw = (vol / avg_vol) if avg_vol else 0.0
                                     rvol = round(_project_us_equity_rvol(rvol_raw), 2)
                                     lows_20 = [b.get("l", b.get("c", 0)) for b in bars[1:21] if b.get("l", b.get("c", 0)) > 0]
                                     lows_60 = [b.get("l", b.get("c", 0)) for b in bars[1:60] if b.get("l", b.get("c", 0)) > 0]
@@ -15526,8 +15587,8 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         # V2.7: FIX — MA nur berechnen wenn genug Bars vorhanden (sonst None statt falscher Wert)
         ma20 = round(sum(closes[:20]) / 20, 2) if len(closes) >= 20 else None
         ma50 = round(sum(closes[:50]) / 50, 2) if len(closes) >= 50 else None
-        avg_vol = sum(volumes[1:21]) / min(len(volumes) - 1, 20) if len(volumes) > 1 else 1
-        rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+        avg_vol = historical_volume_baseline(volumes[1:21], lookback=20, minimum_periods=10)
+        rvol = round(vol / avg_vol, 2) if avg_vol else 0
 
         # RSI (14-period) — Wilder's Smoothing (industry standard)
         rsi = None
@@ -15657,22 +15718,10 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         atr = None
         if len(bars) >= 15:
             # bars sind DESCENDING → reversed = chronologisch
-            chron_highs = list(reversed(highs[:60]))
-            chron_lows = list(reversed(lows[:60]))
-            chron_closes = list(reversed(closes[:60]))
-            tr_values = []
-            for i in range(1, len(chron_highs)):
-                h = chron_highs[i]
-                l = chron_lows[i]
-                pc = chron_closes[i - 1]
-                tr = max(h - l, abs(h - pc), abs(l - pc))
-                tr_values.append(tr)
-            if len(tr_values) >= 14:
-                # Wilder's: Seed mit SMA der ersten 14 TRs, dann smoothen
-                atr_val = sum(tr_values[:14]) / 14
-                for tr in tr_values[14:]:
-                    atr_val = (atr_val * 13 + tr) / 14
-                atr = round(atr_val, 2)
+            chronological_bars = list(reversed(bars[:60]))
+            atr_value = calculate_wilder_atr(chronological_bars, period=14)
+            if atr_value > 0:
+                atr = round(atr_value, 2)
 
         # 7. Signal Scoring (10-factor system)
         signals = []
@@ -19505,14 +19554,7 @@ def _ce_median(values: List[float], default: float = 0.0) -> float:
 
 
 def _ce_atr(bars: List[Dict[str, Any]], lookback: int = 14) -> float:
-    if len(bars) < 2:
-        return 0.0
-    trs = []
-    for i in range(max(1, len(bars) - lookback), len(bars)):
-        prev = bars[i - 1]["close"]
-        b = bars[i]
-        trs.append(max(b["high"] - b["low"], abs(b["high"] - prev), abs(b["low"] - prev)))
-    return sum(trs) / len(trs) if trs else 0.0
+    return calculate_wilder_atr(bars, period=lookback)
 
 
 def _ce_green_streak(bars: List[Dict[str, Any]]) -> Tuple[int, float]:
@@ -20251,7 +20293,11 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
     base_20 = float(bars[idx_20].get("c", close) or close)
     vol = float(bars[0].get("v", 0) or 0)
     vol_window = [float(b.get("v", 0) or 0) for b in bars[1:21]]
-    avg_vol = sum(vol_window) / len(vol_window) if vol_window else 0
+    avg_vol = historical_volume_baseline(
+        vol_window,
+        lookback=20,
+        minimum_periods=5,
+    )
 
     closes = [float(b.get("c", 0) or 0) for b in reversed(bars)]
     volumes = [float(b.get("v", 0) or 0) for b in reversed(bars)]
@@ -20272,7 +20318,7 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
         "change_5d": round(((close - base_5) / base_5) * 100, 2) if base_5 > 0 else 0,
         "change_20d": round(((close - base_20) / base_20) * 100, 2) if base_20 > 0 else 0,
         "volume": vol,
-        "rvol": round(vol / avg_vol, 2) if avg_vol > 0 else 0,
+        "rvol": round(_project_us_equity_rvol(vol / avg_vol), 2) if vol > 0 and avg_vol else 0,
         "obv_change": round(obv_change, 2),
         "cmf": cmf,
     }
@@ -21747,7 +21793,10 @@ def _penny_fetch_daily_bars(ticker: str) -> List[Dict[str, Any]]:
                 "volume": _alert_float(raw.get("v"), 0.0) or 0.0,
                 "timestamp": raw.get("t"),
             }
-            if bar["close"] > 0 and bar["high"] >= bar["low"] and bar["volume"] > 0:
+            # Keep valid price bars even when volume is missing. Dropping such
+            # bars would let older volume observations slide into a nominal
+            # 20-session RVOL window and overstate current evidence quality.
+            if bar["close"] > 0 and bar["high"] >= bar["low"]:
                 bars.append(bar)
         return bars
     except Exception as exc:
@@ -21782,20 +21831,25 @@ def _penny_apply_robust_rvol(
             if bar_day >= today_et:
                 continue
         volume = _alert_float(bar.get("volume", bar.get("v")), 0.0) or 0.0
-        if volume > 0:
-            completed_volumes.append(volume)
+        completed_volumes.append(volume)
 
     history = completed_volumes[-20:]
-    if len(history) < 10:
+    valid_history_days = sum(1 for volume in history if volume > 0 and math.isfinite(volume))
+    median_volume = historical_volume_baseline(
+        history,
+        lookback=20,
+        method="median",
+        minimum_periods=10,
+    )
+    if median_volume is None:
         enriched["rvol_source"] = "previous_day_volume_fallback"
-        enriched["rvol_history_days"] = len(history)
+        enriched["rvol_history_days"] = valid_history_days
         return enriched
 
-    median_volume = float(statistics.median(history))
     projected_volume = (_alert_float(snapshot.get("volume"), 0.0) or 0.0) / max(volume_fraction, 0.01)
     enriched["rvol"] = projected_volume / median_volume if median_volume > 0 else 0.0
     enriched["rvol_baseline_volume"] = round(median_volume)
-    enriched["rvol_history_days"] = len(history)
+    enriched["rvol_history_days"] = valid_history_days
     enriched["rvol_source"] = "projected_volume_vs_20d_median"
     return enriched
 
@@ -23117,7 +23171,13 @@ def _orb_scanner_wrapper() -> None:
                 vwap = total_vwap_num / total_vol if total_vol > 0 else (or_high + or_low) / 2
 
                 # ── OR Volume (für Volume-Confirmation) ──
-                or_avg_vol = sum(b.get("v", 0) for b in or_bars) / len(or_bars) if or_bars else 0
+                or_avg_vol_raw = historical_volume_baseline(
+                    (b.get("v", 0) for b in or_bars),
+                    lookback=3,
+                    minimum_periods=3,
+                )
+                or_volume_available = or_avg_vol_raw is not None
+                or_avg_vol = or_avg_vol_raw or 0.0
 
                 signal_price = float(bars[-1].get("c", 0) or 0)
                 current_price = float(cand.get("current", 0) or signal_price)
@@ -23335,20 +23395,14 @@ def _orb_scanner_wrapper() -> None:
                 score_details = []
 
                 # 1. Volume Confirmation (0-25 Punkte)
-                if breakout_confirmed:
-                    vol_ratio = breakout_bar_vol / or_avg_vol if or_avg_vol > 0 else 0
-                    if vol_ratio >= 2.0:
-                        score += 25
-                        score_details.append("Vol 2x+ ✓")
-                    elif vol_ratio >= 1.5:
-                        score += 20
-                        score_details.append("Vol 1.5x ✓")
-                    else:
-                        score += 12
-                        score_details.append("Vol OK")
-                else:
-                    score += 5
-                    score_details.append("Vol ✗")
+                volume_points, volume_label = _orb_volume_score(
+                    breakout_confirmed,
+                    breakout_bar_vol,
+                    or_avg_vol,
+                    or_volume_available,
+                )
+                score += volume_points
+                score_details.append(volume_label)
 
                 # 2. RVOL (0-20 Punkte)
                 _rvol = cand["rvol"]
@@ -25077,7 +25131,7 @@ def _bt_max_drawdown(trades: List[Dict[str, Any]]) -> float:
     equity = 100.0
     peak = equity
     max_dd = 0.0
-    for trade in trades:
+    for trade in sorted(trades, key=chronological_trade_key):
         equity *= 1 + (_bt_float(trade.get("pnl_pct")) / 100)
         peak = max(peak, equity)
         if peak > 0:
@@ -25087,9 +25141,98 @@ def _bt_max_drawdown(trades: List[Dict[str, Any]]) -> float:
 
 def _bt_compounded_return(trades: List[Dict[str, Any]]) -> float:
     equity = 100.0
-    for trade in trades:
+    for trade in sorted(trades or [], key=chronological_trade_key):
         equity *= 1 + (_bt_float(trade.get("pnl_pct")) / 100)
     return round(equity - 100.0, 2)
+
+
+def _bt_performance_snapshot(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return consistent metrics for a chronological trade subset."""
+    ordered = sorted(trades or [], key=chronological_trade_key)
+    pcts = [_bt_float(trade.get("pnl_pct")) for trade in ordered]
+    wins = [value for value in pcts if value > 0]
+    losses = [value for value in pcts if value <= 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    pf = profit_factor_metrics(gross_profit, gross_loss)
+    count = len(ordered)
+    return {
+        "total_trades": count,
+        "win_rate": round(len(wins) / count * 100, 1) if count else 0,
+        "avg_pnl": round(sum(pcts) / count, 2) if count else 0,
+        "total_return": _bt_compounded_return(ordered),
+        "max_drawdown": _bt_max_drawdown(ordered),
+        "profit_factor": pf["value"],
+        "profit_factor_display": pf["display"],
+        "profit_factor_unbounded": pf["unbounded"],
+        "profit_factor_comparison": pf["comparison_value"],
+    }
+
+
+def _bt_out_of_sample_summary(
+    trades: List[Dict[str, Any]],
+    *,
+    holdout_fraction: float = 0.20,
+) -> Dict[str, Any]:
+    """Create a date-pure chronological holdout without same-day leakage."""
+    ordered = sorted(trades or [], key=chronological_trade_key)
+    if len(ordered) < 30:
+        return {
+            "status": "insufficient_sample",
+            "holdout_fraction": holdout_fraction,
+            "minimum_total_trades": 30,
+            "total_trades": len(ordered),
+        }
+
+    dates = sorted({str(trade.get("entry_date") or trade.get("signal_date") or trade.get("exit_date") or "") for trade in ordered})
+    dates = [date for date in dates if date]
+    if len(dates) < 10:
+        return {
+            "status": "insufficient_dates",
+            "holdout_fraction": holdout_fraction,
+            "unique_dates": len(dates),
+            "total_trades": len(ordered),
+        }
+
+    split_index = min(len(dates) - 1, max(1, int(len(dates) * (1.0 - holdout_fraction))))
+    split_date = dates[split_index]
+    in_sample = []
+    holdout = []
+    for trade in ordered:
+        trade_date = str(
+            trade.get("entry_date")
+            or trade.get("signal_date")
+            or trade.get("exit_date")
+            or ""
+        )
+        (in_sample if trade_date < split_date else holdout).append(trade)
+    if len(in_sample) < 20 or len(holdout) < 6:
+        return {
+            "status": "insufficient_split",
+            "split_date": split_date,
+            "holdout_fraction": holdout_fraction,
+            "in_sample_trades": len(in_sample),
+            "holdout_trades": len(holdout),
+        }
+
+    in_stats = _bt_performance_snapshot(in_sample)
+    holdout_stats = _bt_performance_snapshot(holdout)
+    holdout_pf = holdout_stats.pop("profit_factor_comparison")
+    in_stats.pop("profit_factor_comparison", None)
+    robust = bool(
+        holdout_stats["avg_pnl"] > 0
+        and holdout_pf >= 1.10
+        and holdout_stats["max_drawdown"] < 30.0
+    )
+    return {
+        "status": "pass" if robust else "fail",
+        "robust": robust,
+        "split_date": split_date,
+        "holdout_fraction": holdout_fraction,
+        "same_date_leakage": False,
+        "in_sample": in_stats,
+        "holdout": holdout_stats,
+    }
 
 
 def _bt_backtest_verdict(
@@ -25183,10 +25326,56 @@ def _bt_backtest_verdict(
     }
 
 
-def _bt_trade_sort_key(trade: Dict[str, Any]) -> Tuple[str, str]:
-    date_key = str(trade.get("entry_date") or trade.get("signal_date") or trade.get("exit_date") or "")
-    ticker_key = str(trade.get("ticker") or trade.get("symbol") or "")
-    return (date_key, ticker_key)
+def _bt_apply_oos_verdict(
+    verdict: Dict[str, Any],
+    out_of_sample: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Require chronological holdout confirmation before live approval.
+
+    A weak or blocked full-sample result stays blocked. Only an otherwise
+    approved result is downgraded when the holdout fails or is too small.
+    """
+    base = dict(verdict or {})
+    if base.get("status") != "approved":
+        return base
+
+    oos_status = str((out_of_sample or {}).get("status") or "").lower()
+    if oos_status == "pass" and bool(out_of_sample.get("robust")):
+        reasons = list(base.get("reasons") or [])
+        reasons.append("Chronologischer Holdout bestaetigt die Edge.")
+        base["reasons"] = reasons
+        return base
+
+    if oos_status == "fail":
+        holdout = out_of_sample.get("holdout") or {}
+        pf_display = holdout.get("profit_factor_display", "N/A")
+        return {
+            "status": "validation_failed",
+            "label": "OOS NICHT BESTAETIGT",
+            "color": "red",
+            "tradable": False,
+            "summary": "Die Gesamtstichprobe wirkt positiv, der spaetere Holdout bestaetigt die Edge aber nicht.",
+            "reasons": [
+                f"Holdout Avg PnL {float(holdout.get('avg_pnl') or 0):.2f}%.",
+                f"Holdout Profit Factor {pf_display}.",
+                f"Holdout Drawdown {float(holdout.get('max_drawdown') or 0):.1f}%.",
+            ],
+        }
+
+    return {
+        "status": "validation_open",
+        "label": "VALIDIERUNG OFFEN",
+        "color": "orange",
+        "tradable": False,
+        "summary": "Die Gesamtstichprobe ist positiv, aber der unabhaengige Holdout ist noch zu klein.",
+        "reasons": [
+            "Mehr zeitlich getrennte Trades sammeln, bevor die Strategie live freigegeben wird."
+        ],
+    }
+
+
+def _bt_trade_sort_key(trade: Dict[str, Any]) -> Tuple[str, str, str]:
+    return chronological_trade_key(trade)
 
 
 def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -25199,6 +25388,7 @@ def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
         losses = [t for t in grade_trades if _bt_float(t.get("pnl_pct")) <= 0]
         gross_profit = sum(_bt_float(t.get("pnl_pct")) for t in wins)
         gross_loss = abs(sum(_bt_float(t.get("pnl_pct")) for t in losses))
+        profit_factor = profit_factor_metrics(gross_profit, gross_loss)
         stats[grade] = {
             "total": len(grade_trades),
             "winners": len(wins),
@@ -25206,7 +25396,9 @@ def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
             "win_rate": round(len(wins) / len(grade_trades) * 100, 1),
             "avg_pnl": round(sum(_bt_float(t.get("pnl_pct")) for t in grade_trades) / len(grade_trades), 2),
             "avg_r": round(sum(_bt_float(t.get("r_multiple")) for t in grade_trades) / len(grade_trades), 2),
-            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0),
+            "profit_factor": profit_factor["value"],
+            "profit_factor_display": profit_factor["display"],
+            "profit_factor_unbounded": profit_factor["unbounded"],
         }
     return stats
 
@@ -25260,8 +25452,21 @@ def _build_backtest_result(
     sum_pnl = round(sum(pcts), 2) if total_trades else 0
     total_return = _bt_compounded_return(filled)
     max_drawdown = _bt_max_drawdown(filled)
-    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0)
+    profit_factor = profit_factor_metrics(gross_profit, gross_loss)
     avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in filled) / total_trades, 2) if total_trades else 0
+    out_of_sample = _bt_out_of_sample_summary(filled)
+    verdict = _bt_apply_oos_verdict(
+        _bt_backtest_verdict(
+            total_trades,
+            win_rate,
+            avg_pnl,
+            profit_factor["comparison_value"],
+            avg_r,
+            max_drawdown,
+            total_return,
+        ),
+        out_of_sample,
+    )
     return {
         "ticker": "Crypto Universe" if crypto else "Scanner Universe",
         "strategy": strategy,
@@ -25282,9 +25487,12 @@ def _build_backtest_result(
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
         "best_trade": round(max(pcts), 2) if pcts else 0,
         "worst_trade": round(min(pcts), 2) if pcts else 0,
-        "profit_factor": profit_factor,
+        "profit_factor": profit_factor["value"],
+        "profit_factor_display": profit_factor["display"],
+        "profit_factor_unbounded": profit_factor["unbounded"],
         "avg_r": avg_r,
-        "verdict": _bt_backtest_verdict(total_trades, win_rate, avg_pnl, profit_factor, avg_r, max_drawdown, total_return),
+        "verdict": verdict,
+        "out_of_sample": out_of_sample,
         "stats_by_grade": stats_by_grade or _bt_stats_by_grade(filled),
         "trades": normalized_trades,
         "note": note,
@@ -25446,16 +25654,9 @@ def _validated_exchange_daily_crypto_bars(
 
 
 def _bt_atr(bars: List[Dict[str, Any]], idx: int, period: int = 14) -> float:
-    if idx <= 0:
+    if idx < period:
         return 0.0
-    start = max(1, idx - period + 1)
-    trs = []
-    for i in range(start, idx + 1):
-        high = bars[i]["high"]
-        low = bars[i]["low"]
-        prev_close = bars[i - 1]["close"]
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    return sum(trs) / len(trs) if trs else 0.0
+    return calculate_wilder_atr(bars[:idx + 1], period=period)
 
 
 def _simulate_crypto_trade(
@@ -25639,8 +25840,8 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
             closes20 = [b["close"] for b in bars[idx - 20:idx]]
             volumes20 = [b["volume"] for b in bars[idx - 20:idx] if b.get("volume", 0) > 0]
             sma20 = sum(closes20) / len(closes20)
-            avg_vol20 = sum(volumes20) / len(volumes20) if volumes20 else 0
-            volume_ratio = bars[idx]["volume"] / avg_vol20 if avg_vol20 > 0 else 1.0
+            avg_vol20 = historical_volume_baseline(volumes20, lookback=20, minimum_periods=10)
+            volume_ratio = bars[idx]["volume"] / avg_vol20 if avg_vol20 else 0.0
             atr = _bt_atr(bars, idx, 14)
             if atr <= 0:
                 continue
@@ -25785,14 +25986,17 @@ def _calc_ema_series(data, period):
 
 def _backtest_stats(trades, ticker, strategy, months):
     """Calculate backtest statistics from a list of trades."""
+    trades = sorted(trades or [], key=chronological_trade_key)
     total_trades = len(trades)
     if total_trades == 0:
         return {
             "ticker": ticker, "strategy": strategy, "months": months,
             "total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_return": 0,
             "max_drawdown": 0, "avg_win": 0, "avg_loss": 0, "best_trade": 0,
-            "profit_factor": 0, "avg_r": 0,
+            "profit_factor": 0, "profit_factor_display": "0.00",
+            "profit_factor_unbounded": False, "avg_r": 0,
             "verdict": _bt_backtest_verdict(0, 0, 0, 0, 0, 0, 0),
+            "out_of_sample": _bt_out_of_sample_summary([]),
             "worst_trade": 0, "trades": [], "timestamp": datetime.now().isoformat(),
         }
     wins = [t for t in trades if t["pnl_pct"] > 0]
@@ -25806,7 +26010,7 @@ def _backtest_stats(trades, ticker, strategy, months):
     worst_trade = round(min(t["pnl_pct"] for t in trades), 2)
     gross_profit = sum(t["pnl_pct"] for t in wins)
     gross_loss = abs(sum(t["pnl_pct"] for t in losses_list))
-    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0)
+    profit_factor = profit_factor_metrics(gross_profit, gross_loss)
     avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in trades) / total_trades, 2) if any("r_multiple" in t for t in trades) else 0
     # Max Drawdown als % des Equity-Peaks (nicht in Prozentpunkten)
     max_dd = 0
@@ -25819,13 +26023,32 @@ def _backtest_stats(trades, ticker, strategy, months):
         dd_pct = ((peak - equity) / peak) * 100 if peak > 0 else 0
         if dd_pct > max_dd:
             max_dd = dd_pct
+    rounded_max_dd = round(max_dd, 2)
+    out_of_sample = _bt_out_of_sample_summary(trades)
+    verdict = _bt_apply_oos_verdict(
+        _bt_backtest_verdict(
+            total_trades,
+            win_rate,
+            avg_pnl,
+            profit_factor["comparison_value"],
+            avg_r,
+            rounded_max_dd,
+            total_return,
+        ),
+        out_of_sample,
+    )
     return {
         "ticker": ticker, "strategy": strategy, "months": months,
         "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
-        "total_return": total_return, "max_drawdown": round(max_dd, 2),
+        "total_return": total_return, "max_drawdown": rounded_max_dd,
         "avg_win": avg_win, "avg_loss": avg_loss, "best_trade": best_trade,
-        "worst_trade": worst_trade, "profit_factor": profit_factor, "avg_r": avg_r,
-        "verdict": _bt_backtest_verdict(total_trades, win_rate, avg_pnl, profit_factor, avg_r, round(max_dd, 2), total_return),
+        "worst_trade": worst_trade,
+        "profit_factor": profit_factor["value"],
+        "profit_factor_display": profit_factor["display"],
+        "profit_factor_unbounded": profit_factor["unbounded"],
+        "avg_r": avg_r,
+        "verdict": verdict,
+        "out_of_sample": out_of_sample,
         "trades": trades[-50:],
         "timestamp": datetime.now().isoformat(),
     }
@@ -26128,7 +26351,11 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             # dort kein Signal generieren.
             avg_vols = [None] * len(bars)
             for i in range(20, len(bars)):
-                avg_vols[i] = sum(volumes[i-20:i]) / 20 if sum(volumes[i-20:i]) > 0 else 1
+                avg_vols[i] = historical_volume_baseline(
+                    volumes[i-20:i],
+                    lookback=20,
+                    minimum_periods=10,
+                )
 
             for i in range(2, len(bars) - 1):
                 if position is not None:

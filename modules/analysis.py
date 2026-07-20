@@ -25,6 +25,7 @@ from modules.data_fetchers import (
     _fetch_historical_yahoo, fetch_historical_data_stocks
 )
 from modules.helpers import calculate_sr_levels_simple
+from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline
 
 
 def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
@@ -87,7 +88,9 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
                 gap_high = prev_close  # Level das recovered werden müsste
                 # Recovery-Toleranz: 2% ODER 1× ATR (was größer ist)
                 # → volatile Aktien brauchen mehr Toleranz
-                _atr_for_gap = sum((bars[k]["high"] - bars[k]["low"]) for k in range(max(0, idx-5), idx)) / max(1, min(5, idx))
+                # Use only information available before the gap. A plain high-low
+                # mean understates volatility whenever overnight gaps are present.
+                _atr_for_gap, _ = calculate_atr_14(bars[:idx])
                 _recovery_tol = max(0.98, 1.0 - (_atr_for_gap / gap_high)) if gap_high > 0 else 0.98
                 recovered = False
                 for j in range(idx + 1, len(bars)):
@@ -326,7 +329,11 @@ def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
             details.append(f" Gute Volatilität ({atr_pct:.1f}%) für Intraday")
 
         # Average Volume muss hoch sein für Intraday
-        avg_vol = sum(volumes[-10:]) / max(1, len(volumes[-10:]))
+        avg_vol = historical_volume_baseline(
+            volumes[-10:],
+            lookback=10,
+            minimum_periods=5,
+        ) or 0
         if avg_vol >= 5_000_000:
             bonus += 3
             details.append(f" Hohes Avg Volume ({avg_vol/1e6:.1f}M) — gute Liquidität")
@@ -402,8 +409,15 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
     
     Returns: Normalisiertes RVOL
     """
+    try:
+        current_vol = float(current_vol)
+        prev_day_vol = float(prev_day_vol)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(current_vol) or not math.isfinite(prev_day_vol):
+        return 0.0
     if prev_day_vol <= 0 or current_vol <= 0:
-        return 1.0
+        return 0.0
     
     try:
         et_tz = pytz.timezone('US/Eastern')
@@ -421,7 +435,7 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         
         # Wenn Markt noch nicht offen oder schon geschlossen
         if current_hour < market_open:
-            return 1.0
+            return 0.0
         if current_hour >= market_close:
             # Nach 16:00: Normaler Vergleich da Tag vorbei
             return round(current_vol / prev_day_vol, 2)
@@ -467,13 +481,13 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         expected_vol = prev_day_vol * expected_pct
         
         # RVOL-at-Time
-        rvol_normalized = current_vol / expected_vol if expected_vol > 0 else 1.0
+        rvol_normalized = current_vol / expected_vol if expected_vol > 0 else 0.0
         
         return round(min(rvol_normalized, 999.0), 2)
         
     except Exception as e:
         # Fallback: Einfache Berechnung
-        return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 1.0
+        return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 0.0
 
 
 def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
@@ -512,10 +526,20 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     all_lows = [b["low"] for b in bars]
     total_range_pct = ((max(all_highs) - min(all_lows)) / current_price) * 100 if current_price > 0 else 0
 
-    volumes = [b["volume"] for b in bars]
-    avg_vol = sum(volumes) / len(volumes) if volumes else 1
+    volumes = []
+    for bar in bars:
+        try:
+            volume = float(bar.get("volume", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            volume = 0.0
+        volumes.append(volume if math.isfinite(volume) and volume > 0 else 0.0)
+    avg_vol = historical_volume_baseline(
+        volumes[:-1],
+        lookback=max(1, len(volumes) - 1),
+        minimum_periods=min(3, max(1, len(volumes) - 1)),
+    )
     recent_vol = volumes[-1] if volumes else 0
-    vol_trend = recent_vol / avg_vol if avg_vol > 0 else 1.0
+    vol_trend = recent_vol / avg_vol if avg_vol and avg_vol > 0 and recent_vol > 0 else None
 
     # Intraday-Range pro Tag (High-Low)/Close — besserer Volatilitaets-Indikator
     daily_ranges = []
@@ -555,7 +579,9 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
             details.append(f"Range zu gross: {total_range_pct:.1f}%")
 
         # Volumen sollte sinken (zeigt Erschoepfung = Breakout kommt)
-        if vol_trend < 0.8:
+        if vol_trend is None:
+            details.append("Volumenbasis fehlt")
+        elif vol_trend < 0.8:
             score += 20
             details.append(f"Volumen sinkt: {vol_trend:.2f}x")
         elif vol_trend < 1.2:
@@ -628,11 +654,17 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                 details.append(f"Leicht volatile Vortage: {avg_pre_range:.1f}%")
 
             # Kriterium 3: Volumen-Explosion am Breakout-Tag (max 25 Punkte)
-            pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
+            pre_vol_avg = historical_volume_baseline(
+                volumes[:-1],
+                lookback=max(1, len(volumes) - 1),
+                minimum_periods=3,
+            )
             breakout_vol = volumes[-1]
-            vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
+            vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg and breakout_vol > 0 else None
 
-            if vol_ratio > 3.0:
+            if vol_ratio is None:
+                details.append("Keine valide Volumenbasis fuer den Breakout")
+            elif vol_ratio > 3.0:
                 score += 25
                 details.append(f"Volumen-Explosion: {vol_ratio:.1f}x vs Vortage")
             elif vol_ratio > 2.0:
@@ -644,12 +676,20 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
 
             # Kriterium 4: Volumen sank VOR Breakout (Erschoepfung) (max 20 Punkte)
             if len(volumes) >= 5:
-                first_half_vol = sum(volumes[:len(volumes)//2]) / (len(volumes)//2)
-                pre_half_vol = sum(volumes[len(volumes)//2:-1]) / max(1, len(volumes)//2 - 1)
-                if first_half_vol > 0 and pre_half_vol < first_half_vol * 0.8:
+                first_half_vol = historical_volume_baseline(
+                    volumes[:len(volumes)//2],
+                    lookback=max(1, len(volumes)//2),
+                    minimum_periods=2,
+                )
+                pre_half_vol = historical_volume_baseline(
+                    volumes[len(volumes)//2:-1],
+                    lookback=max(1, len(volumes)//2 - 1),
+                    minimum_periods=2,
+                )
+                if first_half_vol and pre_half_vol and pre_half_vol < first_half_vol * 0.8:
                     score += 20
                     details.append(f"Vol sank vor Breakout: {pre_half_vol/first_half_vol:.1f}x")
-                elif first_half_vol > 0 and pre_half_vol < first_half_vol * 1.0:
+                elif first_half_vol and pre_half_vol and pre_half_vol < first_half_vol:
                     score += 10
                     details.append(f"Vol stabil vor Breakout")
         else:
@@ -673,8 +713,9 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
 
         # Kriterium 2: Hohes SUSTAINED Volumen (nicht nur ein Tag) (max 30 Punkte)
         # Zaehle Tage mit ueberdurchschnittlichem Vol
-        high_vol_days = sum(1 for v in volumes if v > avg_vol * 1.2)
-        high_vol_pct = high_vol_days / n if n > 0 else 0
+        valid_volumes = [v for v in volumes if v > 0]
+        high_vol_days = sum(1 for v in valid_volumes if avg_vol and v > avg_vol * 1.2)
+        high_vol_pct = high_vol_days / len(valid_volumes) if len(valid_volumes) >= 3 else 0
         if high_vol_pct >= 0.6:
             score += 30
             details.append(f"Sustained High Vol: {high_vol_days}/{n} Tage > Avg")
@@ -723,11 +764,17 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
 
         # Kriterium 2: Volumen nimmt ab (Erschoepfung des Verkaufsdrucks) (max 25 Punkte)
         if n >= 6:
-            first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
-            last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
-            vol_decline = last_third_vol / first_third_vol if first_third_vol > 0 else 1
+            first_third_vol = historical_volume_baseline(
+                volumes[:n//3], lookback=max(1, n//3), minimum_periods=2
+            )
+            last_third_vol = historical_volume_baseline(
+                volumes[-(n//3):], lookback=max(1, n//3), minimum_periods=2
+            )
+            vol_decline = last_third_vol / first_third_vol if first_third_vol and last_third_vol else None
 
-            if vol_decline < 0.7:
+            if vol_decline is None:
+                details.append("Volumenbasis fuer Wyckoff fehlt")
+            elif vol_decline < 0.7:
                 score += 25
                 details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
             elif vol_decline < 0.9:
@@ -776,11 +823,17 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
 
         # Kriterium 2: Volumen nimmt ab (max 25)
         if n >= 6:
-            first_third_vol = sum(volumes[:n//3]) / max(1, n//3)
-            last_third_vol = sum(volumes[-(n//3):]) / max(1, n//3)
-            vol_decline = last_third_vol / first_third_vol if first_third_vol > 0 else 1
+            first_third_vol = historical_volume_baseline(
+                volumes[:n//3], lookback=max(1, n//3), minimum_periods=2
+            )
+            last_third_vol = historical_volume_baseline(
+                volumes[-(n//3):], lookback=max(1, n//3), minimum_periods=2
+            )
+            vol_decline = last_third_vol / first_third_vol if first_third_vol and last_third_vol else None
 
-            if vol_decline < 0.7:
+            if vol_decline is None:
+                details.append("Volumenbasis fuer Wyckoff fehlt")
+            elif vol_decline < 0.7:
                 score += 25
                 details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
             elif vol_decline < 0.9:
@@ -838,14 +891,20 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
                     details.append(f" {red_days}/{total_pre_days} Vortage rot")
                 else:
                     details.append(f" Nur {red_days}/{total_pre_days} rote Vortage")
-            
+
             # Kriterium 3: Heutiges Reversal mit erhöhtem Volumen
             if len(volumes) >= 2:
-                pre_vol_avg = sum(volumes[:-1]) / len(volumes[:-1])
+                pre_vol_avg = historical_volume_baseline(
+                    volumes[:-1],
+                    lookback=max(1, len(volumes) - 1),
+                    minimum_periods=3,
+                )
                 today_vol = volumes[-1]
-                vol_ratio = today_vol / pre_vol_avg if pre_vol_avg > 0 else 1.0
-                
-                if vol_ratio > 1.5:
+                vol_ratio = today_vol / pre_vol_avg if pre_vol_avg and today_vol > 0 else None
+
+                if vol_ratio is None:
+                    details.append(" Reversal-Volumen nicht messbar")
+                elif vol_ratio > 1.5:
                     score += 20
                     details.append(f" Reversal-Volumen: {vol_ratio:.1f}x über Vortage")
                 elif vol_ratio > 1.0:
@@ -870,6 +929,32 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     threshold = threshold_map.get(pattern_type, 40)
     is_valid = score >= threshold
     return is_valid, score, details
+
+
+def _historical_relative_volume(volumes, index, lookback=20, minimum_periods=5):
+    """Return point-in-time RVOL or ``None`` when the baseline is unusable."""
+    if index < 0 or index >= len(volumes):
+        return None
+    try:
+        current = float(volumes[index])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(current) or current <= 0:
+        return None
+
+    start = max(0, index - max(1, int(lookback or 1)))
+    history = []
+    for value in volumes[start:index]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(number) and number > 0:
+            history.append(number)
+    if len(history) < max(1, int(minimum_periods or 1)):
+        return None
+    baseline = historical_volume_baseline(history, lookback=lookback)
+    return current / baseline if baseline and baseline > 0 else None
 
 
 def find_wyckoff_for_chart(ohlcv_data):
@@ -898,14 +983,18 @@ def find_wyckoff_for_chart(ohlcv_data):
             s = max(0, i - lb)
             return sum(spread(j) for j in range(s, i)) / max(1, i - s)
         def avg_vol(i, lb=20):
-            s = max(0, i - lb)
-            return sum(volumes[s:i]) / max(1, i - s)
+            ratio = _historical_relative_volume(volumes, i, lb)
+            if ratio is None:
+                return 0
+            try:
+                current = float(volumes[i])
+            except (TypeError, ValueError, OverflowError):
+                return 0
+            return current / ratio if ratio > 0 else 0
         
-        atr_vals = []
-        for i in range(1, n):
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-            atr_vals.append(tr)
-        atr = sum(atr_vals[-14:]) / min(14, len(atr_vals)) if atr_vals else current_price * 0.02
+        atr, _ = calculate_atr_14(ohlcv_data)
+        if atr <= 0:
+            return []
         
         results = []
         lookback_end = int(n * 0.5)
@@ -963,8 +1052,9 @@ def find_wyckoff_for_chart(ohlcv_data):
                     prev_st_vol = best_sc["vol_r"]
                     for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
                         if lows[i] <= rl + rw * 0.25:
-                            av = avg_vol(i)
-                            vr = volumes[i] / av if av > 0 else 1
+                            vr = _historical_relative_volume(volumes, i)
+                            if vr is None:
+                                continue
                             if vr < prev_st_vol * 0.9:
                                 st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
                                 events.append({"name": st_label, "label": f"{st_label} ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
@@ -977,8 +1067,9 @@ def find_wyckoff_for_chart(ohlcv_data):
                     # Resistance Tests (Phase B): Rallies to AR zone on weak volume
                     for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
                         if highs[i] >= rh - rw * 0.20:
-                            av = avg_vol(i)
-                            vr = volumes[i] / av if av > 0 else 1
+                            vr = _historical_relative_volume(volumes, i)
+                            if vr is None:
+                                continue
                             if vr < 1.3:
                                 events.append({"name": "RT", "label": f"RT ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
                                 score += 5
@@ -986,11 +1077,15 @@ def find_wyckoff_for_chart(ohlcv_data):
                     
                     # Volume-Decay in Phase B
                     if ar_idx + 20 < n:
-                        early_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        early_vol = historical_volume_baseline(
+                            volumes[ar_idx:ar_idx + 10], lookback=10, minimum_periods=5
+                        )
                         mid_pt = ar_idx + (n - ar_idx) // 2
-                        if mid_pt + 10 <= n and early_vol > 0:
-                            later_vol = sum(volumes[mid_pt:mid_pt + 10]) / 10
-                            if later_vol < early_vol * 0.75:
+                        if mid_pt + 10 <= n and early_vol:
+                            later_vol = historical_volume_baseline(
+                                volumes[mid_pt:mid_pt + 10], lookback=10, minimum_periods=5
+                            )
+                            if later_vol and later_vol < early_vol * 0.75:
                                 events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "below"})
                                 score += 5
                     
@@ -999,9 +1094,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
                     for i in range(spring_start, n - 3):
                         if lows[i] < rl:
-                            av = avg_vol(i)
-                            vol_r = volumes[i] / av if av > 0 else 1
-                            if vol_r < 0.85:
+                            vol_r = _historical_relative_volume(volumes, i)
+                            if vol_r is not None and vol_r < 0.85:
                                 for j in range(1, min(6, n - i)):
                                     if closes[i + j] > rl + rw * 0.10:
                                         spring_idx = i
@@ -1014,9 +1108,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     if spring_idx and spring_idx + 5 < n:
                         for i in range(spring_idx + 2, min(spring_idx + 15, n)):
                             if lows[i] <= lows[spring_idx] + rw * 0.05:
-                                av = avg_vol(i)
-                                vol_r = volumes[i] / av if av > 0 else 1
-                                if vol_r < 0.7:
+                                vol_r = _historical_relative_volume(volumes, i)
+                                if vol_r is not None and vol_r < 0.7:
                                     events.append({"name": "TestSpring", "label": f"Test Spring ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
                                     score += 10
                                     break
@@ -1036,9 +1129,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     if sos_idx and sos_idx + 3 < n:
                         for i in range(sos_idx + 1, n):
                             if lows[i] < closes[sos_idx]:
-                                av = avg_vol(i)
-                                vol_r = volumes[i] / av if av > 0 else 1
-                                if lows[i] >= rh - rw * 0.10 and vol_r < 0.9:
+                                vol_r = _historical_relative_volume(volumes, i)
+                                if vol_r is not None and lows[i] >= rh - rw * 0.10 and vol_r < 0.9:
                                     events.append({"name": "LPS", "label": f"LPS ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
                                     score += 15
                                     break
@@ -1113,8 +1205,9 @@ def find_wyckoff_for_chart(ohlcv_data):
                     prev_st_vol = best_bc["vol_r"]
                     for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
                         if highs[i] >= rh - rw * 0.25:
-                            av = avg_vol(i)
-                            vr = volumes[i] / av if av > 0 else 1
+                            vr = _historical_relative_volume(volumes, i)
+                            if vr is None:
+                                continue
                             if vr < prev_st_vol * 0.9:
                                 st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
                                 events.append({"name": st_label, "label": f"{st_label} ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
@@ -1127,8 +1220,9 @@ def find_wyckoff_for_chart(ohlcv_data):
                     # Support Tests (Phase B): Drops to AR zone on weak volume
                     for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
                         if lows[i] <= rl + rw * 0.20:
-                            av = avg_vol(i)
-                            vr = volumes[i] / av if av > 0 else 1
+                            vr = _historical_relative_volume(volumes, i)
+                            if vr is None:
+                                continue
                             if vr < 1.3:
                                 events.append({"name": "ST-S", "label": f"ST-S ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
                                 score += 5
@@ -1136,11 +1230,15 @@ def find_wyckoff_for_chart(ohlcv_data):
                     
                     # Volume-Decay in Phase B
                     if ar_idx + 20 < n:
-                        early_vol = sum(volumes[ar_idx:ar_idx + 10]) / 10
+                        early_vol = historical_volume_baseline(
+                            volumes[ar_idx:ar_idx + 10], lookback=10, minimum_periods=5
+                        )
                         mid_pt = ar_idx + (n - ar_idx) // 2
-                        if mid_pt + 10 <= n and early_vol > 0:
-                            later_vol = sum(volumes[mid_pt:mid_pt + 10]) / 10
-                            if later_vol < early_vol * 0.75:
+                        if mid_pt + 10 <= n and early_vol:
+                            later_vol = historical_volume_baseline(
+                                volumes[mid_pt:mid_pt + 10], lookback=10, minimum_periods=5
+                            )
+                            if later_vol and later_vol < early_vol * 0.75:
                                 events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "above"})
                                 score += 5
                     
@@ -1149,9 +1247,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
                     for i in range(utad_start, n - 3):
                         if highs[i] > rh:
-                            av = avg_vol(i)
-                            vol_r = volumes[i] / av if av > 0 else 1
-                            if vol_r < 0.85:
+                            vol_r = _historical_relative_volume(volumes, i)
+                            if vol_r is not None and vol_r < 0.85:
                                 for j in range(1, min(6, n - i)):
                                     if closes[i + j] < rh - rw * 0.10:
                                         utad_idx = i
@@ -1164,9 +1261,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     if utad_idx and utad_idx + 5 < n:
                         for i in range(utad_idx + 2, min(utad_idx + 15, n)):
                             if highs[i] >= highs[utad_idx] - rw * 0.05:
-                                av = avg_vol(i)
-                                vol_r = volumes[i] / av if av > 0 else 1
-                                if vol_r < 0.7:
+                                vol_r = _historical_relative_volume(volumes, i)
+                                if vol_r is not None and vol_r < 0.7:
                                     events.append({"name": "TestUTAD", "label": f"Test UTAD ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
                                     score += 10
                                     break
@@ -1186,9 +1282,8 @@ def find_wyckoff_for_chart(ohlcv_data):
                     if sow_idx and sow_idx + 3 < n:
                         for i in range(sow_idx + 1, n):
                             if highs[i] > closes[sow_idx]:
-                                av = avg_vol(i)
-                                vol_r = volumes[i] / av if av > 0 else 1
-                                if highs[i] <= rl + rw * 0.10 and vol_r < 0.9:
+                                vol_r = _historical_relative_volume(volumes, i)
+                                if vol_r is not None and highs[i] <= rl + rw * 0.10 and vol_r < 0.9:
                                     events.append({"name": "LPSY", "label": f"LPSY ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
                                     score += 15
                                     break
@@ -1525,16 +1620,14 @@ def calculate_sr_from_historical(ohlc_data, current_price):
     # =========================================================================
     # ATR-basierter dynamischer Swing-Threshold
     # =========================================================================
-    atr_values = []
-    for i in range(1, min(20, len(closes))):
-        tr = max(
-            highs[-(i)] - lows[-(i)],
-            abs(highs[-(i)] - closes[-(i+1)]) if i + 1 < len(closes) else 0,
-            abs(lows[-(i)] - closes[-(i+1)]) if i + 1 < len(closes) else 0
-        )
-        atr_values.append(tr)
-    
-    atr = sum(atr_values) / len(atr_values) if atr_values else price_range * 0.03
+    atr_bars = [
+        {"high": candle[2], "low": candle[3], "close": candle[4]}
+        for candle in ohlc_data
+        if len(candle) > 4
+    ]
+    atr, _ = calculate_atr_14(atr_bars)
+    if atr <= 0:
+        atr = price_range * 0.03
     atr_pct = atr / current_price if current_price > 0 else 0.03
     
     # Dynamischer Threshold: 2x ATR% (minimum 3%, maximum 15%)
@@ -2073,9 +2166,21 @@ def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
         # 3. Volume Trend (max 20 Punkte)
         vol_change = 0  # V67.5 FIX: Default damit vol_change immer definiert ist
         if len(volumes) >= 10:
-            first_half_vol = sum(volumes[:len(volumes)//2])
-            second_half_vol = sum(volumes[len(volumes)//2:])
-            vol_change = ((second_half_vol - first_half_vol) / first_half_vol) * 100 if first_half_vol > 0 else 0
+            first_half_vol = historical_volume_baseline(
+                volumes[:len(volumes)//2],
+                lookback=max(1, len(volumes)//2),
+                minimum_periods=3,
+            )
+            second_half_vol = historical_volume_baseline(
+                volumes[len(volumes)//2:],
+                lookback=max(1, len(volumes) - len(volumes)//2),
+                minimum_periods=3,
+            )
+            vol_change = (
+                ((second_half_vol - first_half_vol) / first_half_vol) * 100
+                if first_half_vol and second_half_vol
+                else 0
+            )
             result["volume_trend"] = round(vol_change, 2)
             
             # Abnehmendes Volumen = Konsolidierung (gut für Akkumulation)
@@ -2537,8 +2642,11 @@ def compute_daily_metrics(bars, idx):
     # RVOL (Volumen heute vs 20-Tage Durchschnitt)
     lookback_start = max(0, idx - 20)
     avg_vol_bars = bars[lookback_start:idx]
-    avg_vol = sum(b["volume"] for b in avg_vol_bars) / len(avg_vol_bars) if avg_vol_bars else 1
-    rvol = today["volume"] / avg_vol if avg_vol > 0 else 1.0
+    rvol = completed_bar_rvol(
+        today.get("volume"),
+        (bar.get("volume") for bar in avg_vol_bars),
+        lookback=20,
+    )
     
     # Previous day change %
     prev_change_pct = 0
@@ -2571,153 +2679,129 @@ def _earnings_flag(ear):
     return ""
 
 
+def _timing_number(row_data, *keys):
+    """Return a finite numeric input without inventing a neutral fallback."""
+    for key in keys:
+        value = row_data.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, str):
+                value = value.replace("%", "").replace(",", "").strip()
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _timing_result(score, max_score, factors, thresholds, labels):
+    """Build a timing result and report the amount of real evidence."""
+    score = min(max(float(score), 0.0), float(max_score))
+    available = sum(1 for factor in factors if factor.get("available", True))
+    if score >= thresholds[0]:
+        rating, emoji, risk, color = labels[0]
+    elif score >= thresholds[1]:
+        rating, emoji, risk, color = labels[1]
+    else:
+        rating, emoji, risk, color = labels[2]
+    return {
+        "score": round(score, 1), "max_score": max_score, "rating": rating,
+        "emoji": emoji, "factors": factors, "risk": risk, "color": color,
+        "evidence_available": available, "evidence_total": len(factors),
+        "evidence_complete": available == len(factors),
+    }
+
+
 def calculate_breakout_timing(row_data, fib_info=None):
-    """
-    Bewertet ob ein Breakout-Einstieg noch gut ist oder schon überdehnt.
-    
-    Faktoren:
-    1. Distanz vom Breakout (Change%) - wie weit ist der Move schon?
-    2. Momentum (Tages-Move als RSI-Proxy) - überdehnt?
-    3. Fib Extension - über 127.2% / 161.8%?
-    4. RVOL - Volumen-Bestätigung?
-    5. ATR - ist der Move überdehnt vs. normale Volatilität?
-    
-    Returns:
-        dict mit:
-        - score: 0-6 Punkte
-        - rating: "FRÜH", "OK", oder "ZU SPÄT"
-        - emoji: [OK], [!], oder [X]
-        - factors: Liste der Einzelbewertungen
-        - risk: Risiko-Einschätzung
-    """
+    """Rate breakout timing from independent, explicitly available evidence."""
     factors = []
-    score = 0
-    
-    # Extrahiere Daten
-    change_pct = abs(row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0)
-    rvol = row_data.get("RVOL", 1) or 1
-    atr_pct = row_data.get("ATR%", 0) or 0
-    price = row_data.get("Preis", 0) or row_data.get("Price", 0) or 0
-    
-    # 1. DISTANZ VOM BREAKOUT (Change%)
-    if change_pct <= 3:
-        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Früh im Move"})
+    score = 0.0
+    change_raw = _timing_number(row_data, "Chg%", "Change %")
+    change_pct = abs(change_raw) if change_raw is not None else None
+    rvol = _timing_number(row_data, "RVOL", "rvol", "relative_volume")
+    atr_pct = _timing_number(row_data, "ATR%", "atr_pct")
+    price = _timing_number(row_data, "Preis", "Price", "price")
+    rsi = _timing_number(row_data, "RSI", "rsi")
+
+    if change_pct is None:
+        factors.append({"name": "Distanz", "value": "N/A", "ok": None, "available": False, "detail": "Tagesbewegung fehlt"})
+    elif change_pct <= 3:
+        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Frueh im Move"})
         score += 1
     elif change_pct <= 7:
-        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Noch OK"})
+        factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Noch akzeptabel"})
         score += 0.5
     else:
         factors.append({"name": "Distanz", "value": f"+{change_pct:.1f}%", "ok": False, "detail": "Schon weit gelaufen"})
-    
-    # 2. MOMENTUM (basierend auf heutigem Move — KEIN echtes RSI!)
-    # Echtes RSI braucht 14 Tage History, hier nur Tages-Momentum verfügbar
-    momentum = change_pct  # Einfach: wie weit ist der Move heute?
-    if momentum <= 5:
-        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Moderate Bewegung"})
+
+    if rsi is None:
+        factors.append({"name": "Momentum", "value": "N/A", "ok": None, "available": False, "detail": "RSI fehlt"})
+    elif 50 <= rsi <= 70:
+        factors.append({"name": "Momentum", "value": f"RSI {rsi:.1f}", "ok": True, "detail": "Trend-Momentum bestaetigt"})
         score += 1
-    elif momentum <= 10:
-        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": True, "detail": "Starke Bewegung"})
+    elif 45 <= rsi < 50 or 70 < rsi <= 78:
+        factors.append({"name": "Momentum", "value": f"RSI {rsi:.1f}", "ok": True, "detail": "Grenzbereich"})
         score += 0.5
     else:
-        factors.append({"name": "Momentum", "value": f"+{momentum:.1f}%", "ok": False, "detail": "Überdehnt (>10%)"})
-    
-    # 3. FIBONACCI EXTENSION
-    if fib_info and price > 0:
-        fib_127 = fib_info.get("fib_1272", 0) or fib_info.get("period_high", 0) * 1.05
-        fib_161 = fib_info.get("fib_1618", 0) or fib_info.get("period_high", 0) * 1.15
-        
-        if fib_127 > 0:
-            if price < fib_127:
-                factors.append({"name": "Fib Extension", "value": "Unter 127.2%", "ok": True, "detail": "Raum nach oben"})
-                score += 1
-            elif price < fib_161:
-                factors.append({"name": "Fib Extension", "value": "Bei 127.2%", "ok": True, "detail": "Erstes Ziel erreicht"})
-                score += 0.5
-            else:
-                factors.append({"name": "Fib Extension", "value": "Über 161.8%", "ok": False, "detail": "Stark überdehnt"})
-    else:
-        # Fallback ohne Fib-Daten
-        if change_pct < 5:
-            factors.append({"name": "Fib Extension", "value": "N/A", "ok": True, "detail": "Früh im Move"})
-            score += 1
-    
-    # 4. RVOL (Relative Volume)
-    if rvol >= 2.0:
-        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starke Bestätigung"})
+        factors.append({"name": "Momentum", "value": f"RSI {rsi:.1f}", "ok": False, "detail": "Nicht bestaetigt oder ueberdehnt"})
+
+    fib_127 = _timing_number(fib_info or {}, "fib_1272")
+    fib_161 = _timing_number(fib_info or {}, "fib_1618")
+    if price is None or price <= 0 or fib_127 is None or fib_127 <= 0:
+        factors.append({"name": "Fib Extension", "value": "N/A", "ok": None, "available": False, "detail": "Belastbare Fib-Level fehlen"})
+    elif price < fib_127:
+        factors.append({"name": "Fib Extension", "value": "Unter 127.2%", "ok": True, "detail": "Raum bis zur Extension"})
         score += 1
+    elif fib_161 is not None and fib_161 > fib_127 and price < fib_161:
+        factors.append({"name": "Fib Extension", "value": "Bei 127.2%", "ok": True, "detail": "Erstes Ziel erreicht"})
+        score += 0.5
+    else:
+        factors.append({"name": "Fib Extension", "value": "Ueber Extension", "ok": False, "detail": "Ueberdehnt"})
+
+    if rvol is None:
+        factors.append({"name": "RVOL", "value": "N/A", "ok": None, "available": False, "detail": "Volumenbasis fehlt"})
     elif rvol >= 1.5:
-        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Gute Bestätigung"})
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Bestaetigt"})
         score += 1
     elif rvol >= 1.0:
-        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Normal"})
+        factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": True, "detail": "Nur normal"})
         score += 0.5
     else:
         factors.append({"name": "RVOL", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwaches Volumen"})
-    
-    # 5. ATR ÜBERDEHNUNG
-    if atr_pct > 0:
-        atr_multiple = change_pct / atr_pct if atr_pct > 0 else 0
+
+    if change_pct is None or atr_pct is None or atr_pct <= 0:
+        factors.append({"name": "ATR", "value": "N/A", "ok": None, "available": False, "detail": "ATR oder Bewegung fehlt"})
+    else:
+        atr_multiple = change_pct / atr_pct
         if atr_multiple <= 1.0:
             factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": True, "detail": "Normal"})
             score += 1
         elif atr_multiple <= 1.5:
-            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": True, "detail": "Leicht erhöht"})
-            score += 0.5
-        elif atr_multiple <= 2.0:
-            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Überdehnt"})
-        else:
-            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Stark überdehnt!"})
-    else:
-        # Kein echtes ATR → Schätze konservativ basierend auf Change%
-        # Durchschnitt US-Aktie: ~2-3% ATR, aber variiert stark
-        if change_pct <= 3:
-            factors.append({"name": "ATR (est.)", "value": "Früh", "ok": True, "detail": "Move noch klein"})
-            score += 0.75
-        elif change_pct <= 6:
-            factors.append({"name": "ATR (est.)", "value": "Moderat", "ok": True, "detail": "Normaler Move"})
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": True, "detail": "Leicht erhoeht"})
             score += 0.5
         else:
-            factors.append({"name": "ATR (est.)", "value": "Weit", "ok": False, "detail": "Schon weit gelaufen"})
-    
-    # 6. VOLUME TREND (basierend auf RVOL Stärke)
-    if rvol >= 1.5:
-        factors.append({"name": "Vol. Trend", "value": "Steigend", "ok": True, "detail": "Kaufdruck"})
+            factors.append({"name": "ATR", "value": f"{atr_multiple:.1f}x", "ok": False, "detail": "Ueberdehnt"})
+
+    volume_trend = _timing_number(row_data, "Volume_Trend", "volume_trend", "volume_trend_pct")
+    if volume_trend is None:
+        factors.append({"name": "Vol. Trend", "value": "N/A", "ok": None, "available": False, "detail": "Historischer Trend fehlt"})
+    elif volume_trend >= 10:
+        factors.append({"name": "Vol. Trend", "value": f"{volume_trend:+.1f}%", "ok": True, "detail": "Kaufdruck nimmt zu"})
         score += 1
-    elif rvol >= 1.0:
-        factors.append({"name": "Vol. Trend", "value": "Flat", "ok": True, "detail": "Stabil"})
+    elif volume_trend >= -5:
+        factors.append({"name": "Vol. Trend", "value": f"{volume_trend:+.1f}%", "ok": True, "detail": "Stabil"})
         score += 0.5
     else:
-        factors.append({"name": "Vol. Trend", "value": "Fallend", "ok": False, "detail": "Nachlassend"})
-    
-    # GESAMTBEWERTUNG
-    max_score = 6
-    score = min(score, max_score)
-    
-    if score >= 5:
-        rating = "FRÜH"
-        emoji = "[OK]"
-        risk = "Niedrig - Guter Einstieg möglich"
-        color = "green"
-    elif score >= 3:
-        rating = "OK"
-        emoji = "[!]"
-        risk = "Mittel - Vorsichtig positionieren"
-        color = "orange"
-    else:
-        rating = "ZU SPÄT"
-        emoji = "[X]"
-        risk = "Hoch - Besser auf Pullback warten"
-        color = "red"
-    
-    return {
-        "score": round(score, 1),
-        "max_score": max_score,
-        "rating": rating,
-        "emoji": emoji,
-        "factors": factors,
-        "risk": risk,
-        "color": color
-    }
+        factors.append({"name": "Vol. Trend", "value": f"{volume_trend:+.1f}%", "ok": False, "detail": "Nachlassend"})
+
+    return _timing_result(
+        score, 6, factors, (5, 3),
+        (("FRUEH", "[OK]", "Niedrig - guter Einstieg moeglich", "green"),
+         ("OK", "[!]", "Mittel - vorsichtig positionieren", "orange"),
+         ("ZU SPAET", "[X]", "Hoch - besser auf Pullback warten", "red")),
+    )
 
 
 # =============================================================================
@@ -2738,52 +2822,51 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     factors = []
     score = 0
     
-    def _num(*keys, default=0):
-        for key in keys:
-            value = row_data.get(key)
-            if value in (None, ""):
-                continue
-            try:
-                if isinstance(value, str):
-                    value = value.replace("%", "").replace(",", "").strip()
-                return float(value)
-            except (TypeError, ValueError):
-                continue
-        return default
-
-    day_change_pct = _num("Chg%", "Change %", default=0)
-    rvol = _num("RVOL", default=1) or 1
-    atr_pct = _num("ATR%", default=2.5) or 2.5
-    gap_pct = _num("gap_pct", "Gap%", "Gap %", "Gap_Pct", "GapPct", default=None)
+    day_change_pct = _timing_number(row_data, "Chg%", "Change %")
+    rvol = _timing_number(row_data, "RVOL", "rvol", "relative_volume")
+    atr_pct = _timing_number(row_data, "ATR%", "atr_pct")
+    gap_pct = _timing_number(row_data, "gap_pct", "Gap%", "Gap %", "Gap_Pct", "GapPct")
 
     if gap_pct is None:
-        day_open = _num("Open", "open", default=0)
-        prev_close = _num("Prev Close", "PrevClose", "prev_close", default=0)
-        if day_open > 0 and prev_close > 0:
+        day_open = _timing_number(row_data, "Open", "open")
+        prev_close = _timing_number(row_data, "Prev Close", "PrevClose", "prev_close")
+        if day_open is not None and prev_close is not None and day_open > 0 and prev_close > 0:
             gap_pct = ((day_open - prev_close) / prev_close) * 100
-        else:
-            gap_pct = day_change_pct
 
-    abs_gap_pct = abs(gap_pct)
-    follow_through_pct = day_change_pct - gap_pct
-    gap_display = f"{gap_pct:+.1f}%"
-    change_pct = abs_gap_pct
+    abs_gap_pct = abs(gap_pct) if gap_pct is not None else None
+    follow_through_pct = (
+        day_change_pct - gap_pct
+        if day_change_pct is not None and gap_pct is not None
+        else None
+    )
+    gap_display = f"{gap_pct:+.1f}%" if gap_pct is not None else "N/A"
+    direction_matches = bool(
+        gap_pct is not None
+        and ((is_gap_up and gap_pct > 0) or (not is_gap_up and gap_pct < 0))
+    )
     
     # 1. GAP SIZE - Optimal 3-8%
-    if 3 <= abs_gap_pct <= 8:
+    if abs_gap_pct is None:
+        factors.append({"name": "Gap Size", "value": "N/A", "ok": None, "available": False, "detail": "Open/Prev-Close fehlen"})
+    elif not direction_matches:
+        factors.append({"name": "Gap Size", "value": gap_display, "ok": False, "detail": "Gap-Richtung widerspricht dem Setup"})
+    elif 3 <= abs_gap_pct <= 8:
         factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Optimale Größe"})
         score += 1
-    elif 1 <= change_pct < 3:
+    elif 1 <= abs_gap_pct < 3:
         factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Klein aber OK"})
         score += 0.5
-    elif 8 < change_pct <= 15:
+    elif 8 < abs_gap_pct <= 15:
         factors.append({"name": "Gap Size", "value": gap_display, "ok": True, "detail": "Groß - Vorsicht"})
         score += 0.5
     else:
         factors.append({"name": "Gap Size", "value": gap_display, "ok": False, "detail": "Zu klein/groß"})
     
     # 2. RVOL als Proxy für PM Volume
-    if rvol >= 2.0:
+    if rvol is None:
+        factors.append({"name": "Volume", "value": "N/A", "ok": None, "available": False, "detail": "Volumenbasis fehlt"})
+        gap_fill_risk = "Unknown"
+    elif rvol >= 2.0:
         factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starke Bestätigung"})
         score += 1
         gap_fill_risk = "Low"
@@ -2800,20 +2883,25 @@ def calculate_gap_timing(row_data, is_gap_up=True):
         gap_fill_risk = "High"
     
     # 3. GAP FILL RISIKO
-    # High Volume Gaps: nur 45% füllen in 5+ Tagen
-    # Low Volume Gaps: 85% füllen in 2 Tagen
+    # This is a qualitative warning, not a second score from the same RVOL.
     if gap_fill_risk == "Low":
-        factors.append({"name": "Fill Risiko", "value": "~45%", "ok": True, "detail": "Trend wahrscheinlich"})
-        score += 1
+        factors.append({"name": "Fill Risiko", "value": "Niedrig", "ok": True, "detail": "Volumen stuetzt den Gap"})
     elif gap_fill_risk == "Medium":
-        factors.append({"name": "Fill Risiko", "value": "~60%", "ok": True, "detail": "Moderat"})
-        score += 0.5
+        factors.append({"name": "Fill Risiko", "value": "Mittel", "ok": True, "detail": "Keine starke Volumenbestaetigung"})
+    elif gap_fill_risk == "High":
+        factors.append({"name": "Fill Risiko", "value": "Hoch", "ok": False, "detail": "Schwaches Volumen"})
     else:
-        factors.append({"name": "Fill Risiko", "value": "~85%", "ok": False, "detail": "Fill sehr wahrscheinlich"})
+        factors.append({"name": "Fill Risiko", "value": "N/A", "ok": None, "available": False, "detail": "Ohne RVOL nicht belastbar"})
     
     # 4. ATR CONTEXT - Gap vs. normale Volatilität
-    gap_atr_ratio = change_pct / atr_pct if atr_pct > 0 else 1
-    if gap_atr_ratio >= 1.5:
+    gap_atr_ratio = (
+        abs_gap_pct / atr_pct
+        if abs_gap_pct is not None and atr_pct is not None and atr_pct > 0
+        else None
+    )
+    if gap_atr_ratio is None:
+        factors.append({"name": "Gap/ATR", "value": "N/A", "ok": None, "available": False, "detail": "ATR oder echter Gap fehlt"})
+    elif gap_atr_ratio >= 1.5:
         factors.append({"name": "Gap/ATR", "value": f"{gap_atr_ratio:.1f}x", "ok": True, "detail": "Signifikanter Gap"})
         score += 1
     elif gap_atr_ratio >= 1.0:
@@ -2824,7 +2912,9 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     
     # 5. MOMENTUM BESTÄTIGUNG (basierend auf Change-Richtung vs Gap)
     # Wenn Gap Up und Change positiv = Momentum hält
-    if is_gap_up:
+    if not direction_matches or day_change_pct is None or gap_pct is None:
+        factors.append({"name": "Momentum", "value": "N/A", "ok": None, "available": False, "detail": "Gap/Folgebewegung nicht belastbar"})
+    elif is_gap_up:
         if day_change_pct >= gap_pct:
             factors.append({"name": "Momentum", "value": "Hält", "ok": True, "detail": "Gap hält über Open"})
             score += 1
@@ -2839,7 +2929,9 @@ def calculate_gap_timing(row_data, is_gap_up=True):
     
     # 6. OPENING RANGE CONTEXT
     # Schätze basierend auf Change und RVOL
-    if rvol >= 1.5 and ((follow_through_pct >= 0.5) if is_gap_up else (follow_through_pct <= -0.5)):
+    if rvol is None or follow_through_pct is None or not direction_matches:
+        factors.append({"name": "OR Break", "value": "N/A", "ok": None, "available": False, "detail": "Folgebewegung oder RVOL fehlt"})
+    elif rvol >= 1.5 and ((follow_through_pct >= 0.5) if is_gap_up else (follow_through_pct <= -0.5)):
         factors.append({"name": "OR Break", "value": "Wahrscheinlich", "ok": True, "detail": "Starker Start"})
         score += 1
     elif rvol >= 1.0:
@@ -2849,15 +2941,20 @@ def calculate_gap_timing(row_data, is_gap_up=True):
         factors.append({"name": "OR Break", "value": "Unsicher", "ok": False, "detail": "Schwacher Start"})
     
     # GESAMTBEWERTUNG
-    max_score = 6
+    max_score = 5
     score = min(score, max_score)
     
-    if score >= 4.5:
+    if not direction_matches:
+        rating = "FADE"
+        emoji = "[X]"
+        risk = "Gap-Richtung passt nicht zum Setup"
+        recommendation = "Setup ueberspringen"
+    elif score >= 4:
         rating = "GO"
         emoji = "[OK]"
         risk = "Gap & Go Setup - Trend folgen"
         recommendation = "Gap hält wahrscheinlich - Trend folgen"
-    elif score >= 3:
+    elif score >= 2.5:
         rating = "WARTEN"
         emoji = "[!]"
         risk = "Abwarten - Opening Range beobachten"
@@ -2876,7 +2973,12 @@ def calculate_gap_timing(row_data, is_gap_up=True):
         "factors": factors,
         "risk": risk,
         "recommendation": recommendation,
-        "color": "green" if score >= 4.5 else "orange" if score >= 3 else "red"
+        "color": "green" if direction_matches and score >= 4 else "orange" if direction_matches and score >= 2.5 else "red",
+        "evidence_available": sum(1 for factor in factors if factor.get("available", True)),
+        "evidence_total": len(factors),
+        "evidence_complete": all(factor.get("available", True) for factor in factors),
+        "gap_pct": round(gap_pct, 3) if gap_pct is not None else None,
+        "gap_direction_matches": direction_matches,
     }
 
 
@@ -2897,19 +2999,20 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     factors = []
     score = 0
     
-    ma_distance = abs(row_data.get("MA_Distance%", 0) or row_data.get("MA Distance", 0) or 0)
-    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
-    rvol = row_data.get("RVOL", 1) or 1
+    ma_distance_raw = _timing_number(row_data, "MA_Distance%", "MA Distance")
+    ma_distance = abs(ma_distance_raw) if ma_distance_raw is not None else None
+    change_pct = _timing_number(row_data, "Chg%", "Change %")
+    rvol = _timing_number(row_data, "RVOL", "rvol", "relative_volume")
+    rsi = _timing_number(row_data, "RSI", "rsi")
+    ma_slope = _timing_number(row_data, "ma_slope_pct", "MA_Slope%", "MA Slope")
     
     # 1. DISTANZ ZUM MA - Näher = besser
     # WICHTIG: Wenn kein MA-Daten vorhanden (ma_distance=0 weil nicht befüllt),
     # vergeben wir neutralen Score statt Maximum
-    has_ma_data = (row_data.get("MA_Distance%") is not None and row_data.get("MA_Distance%") != 0) or \
-                  (row_data.get("MA Distance") is not None and row_data.get("MA Distance") != 0)
+    has_ma_data = ma_distance is not None
     
     if not has_ma_data:
-        factors.append({"name": "MA Distanz", "value": "N/A", "ok": True, "detail": "Keine MA-Daten"})
-        score += 0.5  # Neutral statt 1.5 Maximum
+        factors.append({"name": "MA Distanz", "value": "N/A", "ok": None, "available": False, "detail": "Keine MA-Daten"})
     elif ma_distance <= 0.5:
         factors.append({"name": "MA Distanz", "value": f"{ma_distance:.1f}%", "ok": True, "detail": "Perfekt am MA"})
         score += 1.5
@@ -2927,7 +3030,9 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     
     # 2. BOUNCE BESTÄTIGUNG (Change-Richtung nach Touch)
     # Bei Long-Setup: Change sollte positiv sein (Bounce nach oben)
-    if change_pct > 0:
+    if change_pct is None:
+        factors.append({"name": "Bounce", "value": "N/A", "ok": None, "available": False, "detail": "Aktuelle Reaktion fehlt"})
+    elif change_pct > 0:
         if change_pct >= 1:
             factors.append({"name": "Bounce", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Starke Reaktion"})
             score += 1
@@ -2940,20 +3045,22 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     else:
         factors.append({"name": "Bounce", "value": f"{change_pct:.1f}%", "ok": False, "detail": "Kein Bounce - Durchbruch?"})
     
-    # 3. MOMENTUM ZONE (basierend auf heutigem Move — KEIN RSI)
-    # Ideal für Bounce: Moderate Bewegung (±3%)
-    momentum = abs(change_pct)
-    if momentum <= 3:
-        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": True, "detail": "Moderat — Ideal für Bounce"})
+    # 3. RSI ZONE: independent evidence instead of scoring Change% twice.
+    if rsi is None:
+        factors.append({"name": "RSI", "value": "N/A", "ok": None, "available": False, "detail": "RSI fehlt"})
+    elif 40 <= rsi <= 60:
+        factors.append({"name": "RSI", "value": f"{rsi:.1f}", "ok": True, "detail": "Ideale Bounce-Zone"})
         score += 1
-    elif momentum <= 5:
-        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": True, "detail": "Leicht extended"})
+    elif 35 <= rsi < 40 or 60 < rsi <= 68:
+        factors.append({"name": "RSI", "value": f"{rsi:.1f}", "ok": True, "detail": "Akzeptabler Grenzbereich"})
         score += 0.5
     else:
-        factors.append({"name": "Momentum", "value": f"{change_pct:+.1f}%", "ok": False, "detail": "Zu stark bewegt"})
+        factors.append({"name": "RSI", "value": f"{rsi:.1f}", "ok": False, "detail": "Kein sauberer Bounce-Kontext"})
     
     # 4. VOLUME BESTÄTIGUNG
-    if rvol >= 1.5:
+    if rvol is None:
+        factors.append({"name": "Volume", "value": "N/A", "ok": None, "available": False, "detail": "Volumenbasis fehlt"})
+    elif rvol >= 1.5:
         factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Starkes Interesse"})
         score += 1
     elif rvol >= 1.0:
@@ -2962,16 +3069,17 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
     else:
         factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwaches Interesse"})
     
-    # 5. MA TYP KONTEXT
-    if "200" in ma_type:
-        factors.append({"name": "MA Typ", "value": "SMA 200", "ok": True, "detail": "Stärkster Support"})
+    # 5. MA TREND: the MA label alone is not evidence of an upward trend.
+    if ma_slope is None:
+        factors.append({"name": "MA Trend", "value": "N/A", "ok": None, "available": False, "detail": f"Steigung fuer {ma_type} fehlt"})
+    elif ma_slope > 0.1:
+        factors.append({"name": "MA Trend", "value": f"{ma_slope:+.2f}%", "ok": True, "detail": "MA steigt"})
         score += 0.5
-    elif "50" in ma_type:
-        factors.append({"name": "MA Typ", "value": "SMA 50", "ok": True, "detail": "Starker Support"})
-        score += 0.5
+    elif ma_slope >= -0.05:
+        factors.append({"name": "MA Trend", "value": f"{ma_slope:+.2f}%", "ok": True, "detail": "MA flach"})
+        score += 0.25
     else:
-        factors.append({"name": "MA Typ", "value": "EMA 21", "ok": True, "detail": "Swing-Trading MA"})
-        score += 0.5
+        factors.append({"name": "MA Trend", "value": f"{ma_slope:+.2f}%", "ok": False, "detail": "MA faellt"})
     
     # GESAMTBEWERTUNG
     max_score = 5
@@ -3001,7 +3109,10 @@ def calculate_ma_bounce_timing(row_data, ma_type="EMA 21"):
         "factors": factors,
         "risk": risk,
         "recommendation": recommendation,
-        "color": "green" if score >= 4 else "orange" if score >= 2.5 else "red"
+        "color": "green" if score >= 4 else "orange" if score >= 2.5 else "red",
+        "evidence_available": sum(1 for factor in factors if factor.get("available", True)),
+        "evidence_total": len(factors),
+        "evidence_complete": all(factor.get("available", True) for factor in factors),
     }
 
 
@@ -3023,15 +3134,22 @@ def calculate_reversal_timing(row_data, is_long=True):
     factors = []
     score = 0
     
-    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
-    rvol = row_data.get("RVOL", 1) or 1
-    atr_pct = row_data.get("ATR%", 2.5) or 2.5
-    
+    change_pct = _timing_number(row_data, "Chg%", "Change %")
+    prior_change_pct = _timing_number(
+        row_data, "prev_change_pct", "Prev_Change%", "Previous Change %", "prior_move_pct"
+    )
+    rvol = _timing_number(row_data, "RVOL", "rvol", "relative_volume")
+    atr_pct = _timing_number(row_data, "ATR%", "atr_pct")
+    risk_reward = _timing_number(row_data, "RiskReward", "risk_reward", "live_rr_ratio", "Live R:R")
+
     # 1. SELLOFF-TIEFE (statt fake RSI)
     # Für Mean Reversion: je tiefer der Drop, desto besser für Long-Reversal
-    momentum = change_pct  # Negativer Wert bei Selloff
-    
-    if is_long:
+    # The preceding move and current confirmation must be different bars.
+    momentum = prior_change_pct
+
+    if momentum is None:
+        factors.append({"name": "Selloff" if is_long else "Rally", "value": "N/A", "ok": None, "available": False, "detail": "Vorherige Bewegung fehlt"})
+    elif is_long:
         if momentum <= -8:
             factors.append({"name": "Selloff", "value": f"{momentum:+.1f}%", "ok": True, "detail": "Starker Selloff — Reversal-Zone"})
             score += 1.5
@@ -3057,8 +3175,14 @@ def calculate_reversal_timing(row_data, is_long=True):
             factors.append({"name": "Rally", "value": f"+{momentum:.1f}%", "ok": False, "detail": "Keine echte Rally"})
     
     # 2. ÜBERDEHNUNG (Change vs ATR)
-    extension = abs(change_pct) / atr_pct if atr_pct > 0 else 0
-    if extension >= 2.0:
+    extension = (
+        abs(prior_change_pct) / atr_pct
+        if prior_change_pct is not None and atr_pct is not None and atr_pct > 0
+        else None
+    )
+    if extension is None:
+        factors.append({"name": "Extension", "value": "N/A", "ok": None, "available": False, "detail": "Vorbewegung oder ATR fehlt"})
+    elif extension >= 2.0:
         factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": True, "detail": "Stark überdehnt"})
         score += 1
     elif extension >= 1.5:
@@ -3071,7 +3195,9 @@ def calculate_reversal_timing(row_data, is_long=True):
         factors.append({"name": "Extension", "value": f"{extension:.1f}x ATR", "ok": False, "detail": "Nicht überdehnt"})
     
     # 3. VOLUME (Capitulation = gut für Reversal)
-    if rvol >= 2.5:
+    if rvol is None:
+        factors.append({"name": "Volume", "value": "N/A", "ok": None, "available": False, "detail": "Volumenbasis fehlt"})
+    elif rvol >= 2.5:
         factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": True, "detail": "Capitulation möglich"})
         score += 1
     elif rvol >= 1.5:
@@ -3084,7 +3210,9 @@ def calculate_reversal_timing(row_data, is_long=True):
         factors.append({"name": "Volume", "value": f"{rvol:.1f}x", "ok": False, "detail": "Schwach"})
     
     # 4. UMKEHR-SIGNAL (Change zeigt erste Erholung?)
-    if is_long:
+    if change_pct is None:
+        factors.append({"name": "Umkehr", "value": "N/A", "ok": None, "available": False, "detail": "Aktuelle Bestaetigung fehlt"})
+    elif is_long:
         if change_pct > 0:
             factors.append({"name": "Umkehr", "value": "Ja", "ok": True, "detail": "Erste Erholung sichtbar"})
             score += 1
@@ -3103,15 +3231,20 @@ def calculate_reversal_timing(row_data, is_long=True):
         else:
             factors.append({"name": "Umkehr", "value": "Nein", "ok": False, "detail": "Steigt noch"})
     
-    # 5. RISK/REWARD basierend auf Extension
-    if extension >= 1.5:
-        factors.append({"name": "R:R", "value": "Gut", "ok": True, "detail": f"Mean ~{extension:.0f}x ATR entfernt"})
+    # 5. RISK/REWARD: use actual setup geometry, not ATR extension twice.
+    if risk_reward is None:
+        factors.append({"name": "R:R", "value": "N/A", "ok": None, "available": False, "detail": "Entry/Stop/Ziel-Geometrie fehlt"})
+    elif risk_reward >= 2.0:
+        factors.append({"name": "R:R", "value": f"{risk_reward:.2f}R", "ok": True, "detail": "Gutes Chancen-Risiko-Verhaeltnis"})
+        score += 1.5
+    elif risk_reward >= 1.5:
+        factors.append({"name": "R:R", "value": f"{risk_reward:.2f}R", "ok": True, "detail": "Akzeptables R:R"})
         score += 1
-    elif extension >= 1.0:
-        factors.append({"name": "R:R", "value": "OK", "ok": True, "detail": "Akzeptables R:R"})
+    elif risk_reward >= 1.0:
+        factors.append({"name": "R:R", "value": f"{risk_reward:.2f}R", "ok": True, "detail": "Knappes R:R"})
         score += 0.5
     else:
-        factors.append({"name": "R:R", "value": "Schlecht", "ok": False, "detail": "Wenig Raum zum Mean"})
+        factors.append({"name": "R:R", "value": f"{risk_reward:.2f}R", "ok": False, "detail": "R:R zu niedrig"})
     
     # GESAMTBEWERTUNG
     max_score = 6
@@ -3141,7 +3274,10 @@ def calculate_reversal_timing(row_data, is_long=True):
         "factors": factors,
         "risk": risk,
         "recommendation": recommendation,
-        "color": "green" if score >= 4.5 else "orange" if score >= 3 else "red"
+        "color": "green" if score >= 4.5 else "orange" if score >= 3 else "red",
+        "evidence_available": sum(1 for factor in factors if factor.get("available", True)),
+        "evidence_total": len(factors),
+        "evidence_complete": all(factor.get("available", True) for factor in factors),
     }
 
 
@@ -3279,40 +3415,60 @@ def calculate_insider_timing(row_data):
     score = 0
     
     # Extrahiere Insider-Daten (falls verfügbar)
-    num_insiders = row_data.get("Insiders", 1) or row_data.get("InsiderCount", 1) or 1
-    transaction_value = row_data.get("InsiderValue", 0) or row_data.get("TransValue", 0) or 0
-    insider_role = row_data.get("InsiderRole", "Unknown") or "Unknown"
-    change_pct = row_data.get("Chg%", 0) or row_data.get("Change %", 0) or 0
-    change_1m = row_data.get("1M%", 0) or row_data.get("Change1M", 0) or 0
+    def _first_number(*keys):
+        for key in keys:
+            if key not in row_data or row_data.get(key) in (None, ""):
+                continue
+            value = row_data.get(key)
+            try:
+                if isinstance(value, str):
+                    value = value.replace("$", "").replace(",", "").replace("%", "").strip()
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(number):
+                return number, True
+        return 0.0, False
+
+    num_insiders, insiders_available = _first_number("Insiders", "InsiderCount")
+    transaction_value, value_available = _first_number("InsiderValue", "TransValue")
+    change_pct, change_available = _first_number("Chg%", "Change %")
+    change_1m, change_1m_available = _first_number("1M%", "Change1M")
+    insider_role = row_data.get("InsiderRole")
+    role_available = isinstance(insider_role, str) and bool(insider_role.strip())
+    insider_role = insider_role.strip() if role_available else "Unknown"
     
     # 1. CLUSTER BUYING
-    if num_insiders >= 3:
+    if not insiders_available or num_insiders <= 0:
+        factors.append({"name": "Cluster", "value": "N/A", "ok": False, "detail": "Keine belastbare Insider-Anzahl"})
+    elif num_insiders >= 3:
         factors.append({"name": "Cluster", "value": f"{num_insiders} Insider", "ok": True, "detail": "Starkes Cluster-Signal"})
         score += 1.5
     elif num_insiders >= 2:
         factors.append({"name": "Cluster", "value": f"{num_insiders} Insider", "ok": True, "detail": "Cluster-Signal"})
         score += 1
-    else:
+    elif num_insiders >= 1:
         factors.append({"name": "Cluster", "value": "1 Insider", "ok": True, "detail": "Einzelner Kauf"})
         score += 0.5
     
     # 2. TRANSAKTIONSGRÖSSE
-    if transaction_value >= 500000:
+    if not value_available or transaction_value <= 0:
+        factors.append({"name": "Größe", "value": "N/A", "ok": False, "detail": "Keine Transaktionsgröße"})
+    elif transaction_value >= 500000:
         factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Sehr große Position"})
         score += 1
     elif transaction_value >= 100000:
         factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Große Position"})
         score += 0.75
-    elif transaction_value > 0:
-        factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Moderate Position"})
-        score += 0.5
     else:
-        factors.append({"name": "Größe", "value": "N/A", "ok": True, "detail": "Keine Daten"})
+        factors.append({"name": "Größe", "value": f"${transaction_value/1000:.0f}K", "ok": True, "detail": "Moderate Position"})
         score += 0.5
     
     # 3. INSIDER-ROLLE
-    role_upper = insider_role.upper() if isinstance(insider_role, str) else ""
-    if "CEO" in role_upper or "CFO" in role_upper or "CHIEF" in role_upper:
+    role_upper = insider_role.upper() if role_available else ""
+    if not role_available:
+        factors.append({"name": "Rolle", "value": "N/A", "ok": False, "detail": "Rolle nicht gemeldet"})
+    elif "CEO" in role_upper or "CFO" in role_upper or "CHIEF" in role_upper:
         factors.append({"name": "Rolle", "value": insider_role[:10], "ok": True, "detail": "C-Suite = höchste Conviction"})
         score += 1
     elif "DIRECTOR" in role_upper or "DIR" in role_upper:
@@ -3322,11 +3478,12 @@ def calculate_insider_timing(row_data):
         factors.append({"name": "Rolle", "value": "10% Owner", "ok": True, "detail": "Großaktionär"})
         score += 0.5
     else:
-        factors.append({"name": "Rolle", "value": "Insider", "ok": True, "detail": "Unbekannte Rolle"})
-        score += 0.5
+        factors.append({"name": "Rolle", "value": insider_role[:10], "ok": False, "detail": "Rolle ohne Zusatzgewicht"})
     
     # 4. TIMING - Kauf nach Pullback ist besser
-    if change_1m < -10:
+    if not change_1m_available:
+        factors.append({"name": "Timing", "value": "N/A", "ok": False, "detail": "Keine 1M-Kursbasis"})
+    elif change_1m < -10:
         factors.append({"name": "Timing", "value": f"{change_1m:.0f}% (1M)", "ok": True, "detail": "Kauf nach starkem Pullback"})
         score += 1
     elif change_1m < -5:
@@ -3339,7 +3496,9 @@ def calculate_insider_timing(row_data):
         factors.append({"name": "Timing", "value": f"+{change_1m:.0f}% (1M)", "ok": False, "detail": "Kauf nach Run-up"})
     
     # 5. PREIS-AKTION BESTÄTIGUNG
-    if change_pct > 0:
+    if not change_available:
+        factors.append({"name": "Preis", "value": "N/A", "ok": False, "detail": "Keine aktuelle Kursreaktion"})
+    elif change_pct > 0:
         factors.append({"name": "Preis", "value": f"+{change_pct:.1f}%", "ok": True, "detail": "Positive Reaktion"})
         score += 0.5
     elif change_pct > -2:

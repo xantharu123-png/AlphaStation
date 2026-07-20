@@ -1444,8 +1444,9 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
     else:
         details.append(" RSI-Proxy: Keine Daten")
 
-    # ── 3. VOLUMEN-DIVERGENZ (0-15) ──
-    # Preis steigt aber Volumen sinkt = Distribution (Smart Money verkauft in die Stärke)
+    # ── 3. TURNOVER-INTENSITÄT (0-15) ──
+    # Ohne historische Volumenreihe ist Volumen/MarketCap kein RVOL. Es misst nur,
+    # wie intensiv der Coin relativ zu seiner Größe umgesetzt wird.
     if vol_24h and market_cap and market_cap > 0:
         turnover = (vol_24h / market_cap) * 100
         # Baseline je nach Market Cap
@@ -1455,21 +1456,21 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         elif mc > 1_000_000_000:   baseline = 10.0
         elif mc > 100_000_000:     baseline = 20.0
         else:                       baseline = 30.0
-        current_rvol = turnover / baseline
+        turnover_intensity = turnover / baseline
 
-        if change_7d and change_7d > 10 and current_rvol < 0.8:
+        if change_7d and change_7d > 10 and turnover_intensity < 0.8:
             score += 15
-            details.append(f" Volumen-Divergenz: Preis +{change_7d:.0f}% aber RVOL nur {current_rvol:.1f}x (Distribution)")
-        elif change_7d and change_7d > 5 and current_rvol < 1.0:
+            details.append(f" Turnover-Divergenz: Preis +{change_7d:.0f}% aber Intensität nur {turnover_intensity:.1f}x")
+        elif change_7d and change_7d > 5 and turnover_intensity < 1.0:
             score += 9
-            details.append(f" Leichte Vol-Divergenz: RVOL {current_rvol:.1f}x bei +{change_7d:.0f}%")
-        elif current_rvol >= 2.0 and change_7d and change_7d > 10:
+            details.append(f" Leichte Turnover-Divergenz: {turnover_intensity:.1f}x bei +{change_7d:.0f}%")
+        elif turnover_intensity >= 2.0 and change_7d and change_7d > 10:
             score += 5
-            details.append(f" Hohes Volume bei Pump: RVOL {current_rvol:.1f}x — könnte Klimax sein")
+            details.append(f" Hohe Turnover-Intensität: {turnover_intensity:.1f}x — möglicher Klimax")
         else:
-            details.append(f" Keine Vol-Divergenz: RVOL {current_rvol:.1f}x")
+            details.append(f" Turnover-Intensität neutral: {turnover_intensity:.1f}x")
     else:
-        details.append(" Vol-Divergenz: Keine Daten")
+        details.append(" Turnover-Intensität: Keine Daten")
 
     # ── 4. WICK-REJECTION (0-13) ──
     # Grosse Upper Wicks = Seller drücken den Preis von oben → Exhaustion-Zeichen

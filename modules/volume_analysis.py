@@ -261,15 +261,34 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
     """
     if not ohlcv_data or len(ohlcv_data) < 10:
         return []
-    
+
     try:
+        num_bins = int(num_bins)
+        if num_bins <= 0:
+            return []
+
         # Preis-Range
-        all_highs = [d["high"] for d in ohlcv_data]
-        all_lows = [d["low"] for d in ohlcv_data]
-        
+        all_highs = []
+        all_lows = []
+        for day in ohlcv_data:
+            try:
+                high = float(day.get("high"))
+                low = float(day.get("low"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if math.isfinite(high) and math.isfinite(low) and high > 0 and low > 0:
+                all_highs.append(high)
+                all_lows.append(low)
+        if not all_highs or not all_lows:
+            return []
+
         range_high = max(all_highs)
         range_low = min(all_lows)
+        if not math.isfinite(range_high) or not math.isfinite(range_low) or range_high <= range_low:
+            return []
         bin_size = (range_high - range_low) / num_bins
+        if not math.isfinite(bin_size) or bin_size <= 0:
+            return []
         
         # Volume pro Bin
         bins = [{"low": range_low + i * bin_size, 
@@ -277,8 +296,14 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
                  "volume": 0} for i in range(num_bins)]
         
         for d in ohlcv_data:
-            vol = d.get("volume", 0)
-            h, l = d["high"], d["low"]
+            try:
+                vol = float(d.get("volume", 0))
+                h = float(d.get("high"))
+                l = float(d.get("low"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not math.isfinite(vol) or vol <= 0 or not math.isfinite(h) or not math.isfinite(l):
+                continue
             if h <= l:
                 # M-Doji AUDIT FIX: High==Low-Bar — gesamtes Volumen in den Bin
                 # des Preises (der 0.01-Fallback war toter Code, Volumen ging verloren).
@@ -297,12 +322,14 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         
         # Durchschnitt berechnen
         avg_vol = sum(b["volume"] for b in bins) / len(bins)
+        if not math.isfinite(avg_vol) or avg_vol <= 0:
+            return []
         
         # Voids = Bins mit < 50% des Durchschnitts (konsistent mit Scanner)
         voids = []
         for bin in bins:
             if bin["volume"] < avg_vol * 0.5:
-                strength = max(0, min(1, 1 - (bin["volume"] / avg_vol))) if avg_vol > 0 else 1
+                strength = max(0, min(1, 1 - (bin["volume"] / avg_vol)))
                 voids.append({
                     "price_low": round(bin["low"], 2),
                     "price_high": round(bin["high"], 2),

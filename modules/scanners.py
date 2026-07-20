@@ -8,6 +8,7 @@ Extrahiert aus scanner.py:
 """
 import os
 import json
+import math
 import re
 import time
 import threading
@@ -34,6 +35,7 @@ from modules.vrvp_levels import (
     build_vrvp_structure,
     calculate_wilder_atr,
 )
+from modules.volume_metrics import historical_volume_baseline
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
@@ -172,6 +174,35 @@ _BIOTECH_ROMAN_PHASES = [
     (re.compile(r"\bphase\s+ii\b"), "phase 2"),
     (re.compile(r"\bphase\s+i\b"), "phase 1"),
 ]
+
+_BIOTECH_READOUT_CATEGORY_ORDER = {
+    "IMMINENT": 0,
+    "UPCOMING": 1,
+    "OVERDUE": 2,
+    "OVERDUE_STALE": 3,
+}
+
+_BIOTECH_READOUT_TIMING_WEIGHT = {
+    "IMMINENT": 3.0,
+    "UPCOMING": 1.5,
+    "OVERDUE": 0.0,
+    "OVERDUE_STALE": 0.0,
+}
+
+
+def _biotech_readout_sort_key(item):
+    """Sort readouts without treating a valid T+0 event as missing."""
+    days = item.get("days_until_readout")
+    distance = abs(days) if isinstance(days, (int, float)) else float("inf")
+    return (
+        _BIOTECH_READOUT_CATEGORY_ORDER.get(item.get("readout_category"), 9),
+        distance,
+    )
+
+
+def _biotech_readout_timing_weight(category):
+    """Only future readouts add catalyst edge; overdue dates are unconfirmed metadata."""
+    return _BIOTECH_READOUT_TIMING_WEIGHT.get(str(category or "").upper(), 0.0)
 
 
 def _biotech_normalize_text(text):
@@ -582,8 +613,14 @@ def autotrader_scan_once(poly_key, config=None):
     # Sortiere nach Volumen (Mid-Cap Prio)
     ticker_vol = {}
     for t, bars_list in valid_tickers.items():
-        avg_vol = sum(b["volume"] for b in bars_list[-20:]) / 20
-        ticker_vol[t] = avg_vol
+        complete_bars = _bi_strip_partial_bar(bars_list)
+        avg_vol = historical_volume_baseline(
+            (b.get("volume") for b in complete_bars),
+            lookback=20,
+            minimum_periods=10,
+        )
+        if avg_vol is not None:
+            ticker_vol[t] = avg_vol
 
     midcap = {t: v for t, v in ticker_vol.items() if 500_000 <= v <= 10_000_000}
     largecap = {t: v for t, v in ticker_vol.items() if v > 10_000_000}
@@ -642,13 +679,9 @@ def autotrader_scan_once(poly_key, config=None):
 
             # Berechne Entry/Stop/TP (identisch zum Backtest)
             # True Range statt Simple Range (berücksichtigt Gap-Risiko)
-            _atr_bars = analysis_window[-6:]
-            _tr_vals = []
-            for _ai in range(len(_atr_bars)):
-                _h, _l = _atr_bars[_ai]["high"], _atr_bars[_ai]["low"]
-                _pc = _atr_bars[_ai - 1]["close"] if _ai > 0 else _atr_bars[_ai]["open"]
-                _tr_vals.append(max(_h - _l, abs(_h - _pc), abs(_l - _pc)))
-            atr_5 = sum(_tr_vals) / len(_tr_vals) if _tr_vals else 0
+            atr_5 = calculate_wilder_atr(analysis_window, period=5)
+            if atr_5 <= 0:
+                continue
             range_high = max(b["high"] for b in analysis_window[-15:])
             range_low = min(b["low"] for b in analysis_window[-15:])
             range_size = range_high - range_low
@@ -1358,11 +1391,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # ── Avg-Volume-Check: min $200K Ø Daily Dollar-Volume ──
                 # V2.8: Heutigen partiellen Bar ausschließen für Volume-Berechnung
-                _today_check = datetime.now().strftime("%Y-%m-%d")
-                _complete_bars = [b for b in all_bars if b.get("date", "") != _today_check]
-                if not _complete_bars:
-                    _complete_bars = all_bars  # Fallback
-                avg_vol_10d = sum(b["volume"] for b in _complete_bars[-10:]) / min(10, len(_complete_bars))
+                _complete_bars = _session_bars
+                avg_vol_10d = historical_volume_baseline(
+                    (b.get("volume") for b in _complete_bars),
+                    lookback=10,
+                    minimum_periods=5,
+                ) or 0.0
                 avg_dollar_vol = avg_vol_10d * all_bars[-1]["close"] if all_bars[-1]["close"] > 0 else 0
                 if avg_dollar_vol < 200_000:
                     no_data_count += 1
@@ -1370,16 +1404,25 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # ── RVOL Anomalie-Filter: >50x = IPO-Tag oder Pump-Scheme ──
                 # Normales RVOL: 0.5-5.0, Breakout: 5-15, >50 = Spam
-                _prev_vol = sum(b["volume"] for b in _complete_bars[-20:-5]) / max(1, min(15, len(_complete_bars) - 5)) if len(_complete_bars) > 5 else 0
-                _recent_vol = sum(b["volume"] for b in _complete_bars[-5:]) / min(5, len(_complete_bars))
-                _scan_rvol = _recent_vol / max(1, _prev_vol) if _prev_vol > 0 else 0
+                _prev_vol = historical_volume_baseline(
+                    (b.get("volume") for b in _complete_bars[:-5]),
+                    lookback=15,
+                    minimum_periods=8,
+                )
+                _recent_vol = historical_volume_baseline(
+                    (b.get("volume") for b in _complete_bars[-5:]),
+                    lookback=5,
+                    minimum_periods=3,
+                )
+                _scan_rvol = _recent_vol / _prev_vol if _recent_vol and _prev_vol else 0
                 if _scan_rvol > 50:
                     no_data_count += 1
                     continue
 
                 # ── SPAC NAV-Detection: Preis $9.50-$10.50 + ATR < 1% = SPAC bei NAV ──
                 _last_price = all_bars[-1]["close"]
-                _atr_pct = sum((b["high"] - b["low"]) / max(0.01, b["close"]) * 100 for b in all_bars[-10:]) / min(10, len(all_bars))
+                _spac_atr = calculate_wilder_atr(_session_bars, period=10)
+                _atr_pct = (_spac_atr / _last_price * 100) if _spac_atr > 0 and _last_price > 0 else 0.0
                 if 9.50 <= _last_price <= 10.50 and _atr_pct < 1.0:
                     no_data_count += 1
                     continue
@@ -1508,15 +1551,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["BI_Grade"] = grade
                 candidate["BI_GradeLabel"] = grade_label
 
-                atr_bars = bars[-6:]  # Need 6 bars for 5 True Range values
-                true_ranges = []
-                for i in range(1, len(atr_bars)):
-                    h = atr_bars[i]["high"]
-                    l = atr_bars[i]["low"]
-                    pc = atr_bars[i-1]["close"]
-                    tr = max(h - l, abs(h - pc), abs(l - pc))
-                    true_ranges.append(tr)
-                atr_5 = sum(true_ranges) / len(true_ranges) if true_ranges else (bars[-1]["high"] - bars[-1]["low"])
+                atr_5 = calculate_wilder_atr(bars, period=5)
+                if atr_5 <= 0:
+                    atr_fail += 1
+                    continue
 
                 if direction == "long":
                     breakout_buffer = max(atr_5 * 0.1, range_size * 0.02)
@@ -1669,7 +1707,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # Avg Vol: Immer auf abgeschlossene Tage basieren (heute raus)
                 _vol_bars = all_bars[:-1] if _last_bar_is_today else all_bars
-                _avg_vol_20 = sum(b["volume"] for b in _vol_bars[-20:]) / min(20, len(_vol_bars)) if _vol_bars else 0
+                _avg_vol_20 = historical_volume_baseline(
+                    [b.get("volume") for b in _vol_bars],
+                    lookback=20,
+                    minimum_periods=10,
+                ) or 0.0
 
                 candidate["Volumen"] = int(_last_vol)
                 candidate["AvgVolumen"] = int(_avg_vol_20)
@@ -2349,7 +2391,7 @@ def _check_clinical_trials(company_name, ticker):
                         # Sponsoren updaten ClinicalTrials.gov oft nicht → 2000d "overdue"
                         _overdue_days = abs(_days_until)
                         if _overdue_days <= 180:
-                            _readout_category = "OVERDUE"       # Echt — Readout steht bevor
+                            _readout_category = "OVERDUE"       # Unbestätigt: Datum liegt in der Vergangenheit
                         elif _overdue_days <= 365:
                             _readout_category = "OVERDUE_STALE" # Fragwürdig — reduzierter Score
                         # >365d: Ignorieren — fast sicher abgeschlossen aber nicht aktualisiert
@@ -2376,9 +2418,8 @@ def _check_clinical_trials(company_name, ticker):
             if _readout_category in ("OVERDUE", "OVERDUE_STALE", "IMMINENT", "UPCOMING"):
                 catalyst_readouts.append(_trial_info)
 
-        # Sortiere Readouts: OVERDUE zuerst, dann IMMINENT, dann UPCOMING
-        _cat_order = {"OVERDUE": 0, "IMMINENT": 1, "OVERDUE_STALE": 2, "UPCOMING": 3}
-        catalyst_readouts.sort(key=lambda x: (_cat_order.get(x["readout_category"], 9), x.get("days_until_readout") or 999))
+        # Handelbare Zukunftstermine zuerst; vergangene Termine nur als Warnkontext.
+        catalyst_readouts.sort(key=_biotech_readout_sort_key)
 
         # Pipeline Score (max 20)
         pipeline_score = 0
@@ -2407,14 +2448,8 @@ def _check_clinical_trials(company_name, ticker):
 
             # Timing-Gewichtung: OVERDUE > IMMINENT > UPCOMING
             # OVERDUE_STALE (180-365d): Nur minimaler Score — fragwürdige Daten
-            if _cat == "OVERDUE":
-                readout_score += 4 * _phase_mult
-            elif _cat == "IMMINENT":
-                readout_score += 3 * _phase_mult
-            elif _cat == "OVERDUE_STALE":
-                readout_score += 0.5 * _phase_mult  # Minimal — wahrscheinlich Datenleiche
-            elif _cat == "UPCOMING":
-                readout_score += 1.5 * _phase_mult
+            # Past completion dates are stale/unconfirmed metadata, not future catalysts.
+            readout_score += _biotech_readout_timing_weight(_cat) * _phase_mult
 
         readout_score = min(15, int(readout_score))
 
@@ -2426,7 +2461,7 @@ def _check_clinical_trials(company_name, ticker):
             _cat = _top.get("readout_category", "")
             _ph = _top.get("phase", "?")
             if _cat == "OVERDUE":
-                _readout_label = f" Readout ÜBERFÄLLIG ({abs(_d)}d) — {_ph}"
+                _readout_label = f" Readout-Datum abgelaufen ({abs(_d)}d) — unbestätigt — {_ph}"
             elif _cat == "OVERDUE_STALE":
                 _readout_label = f" Readout veraltet ({abs(_d)}d) — {_ph}"
             elif _cat == "IMMINENT":
@@ -2493,13 +2528,12 @@ def _biotech_technical_score(poly_key, ticker):
 
         current_price = closes[-1]
         last_vol = volumes[-1]
-        prior_20_volumes = volumes[-21:-1]
-        avg_vol_20 = sum(prior_20_volumes) / len(prior_20_volumes)
-        prior_50_volumes = volumes[-51:-1] if len(volumes) >= 51 else volumes[:-1]
-        avg_vol_50 = sum(prior_50_volumes) / max(1, len(prior_50_volumes))
+        avg_vol_20 = historical_volume_baseline(
+            volumes[:-1], lookback=20, minimum_periods=10
+        )
 
         # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
-        rvol = last_vol / max(1, avg_vol_20)
+        rvol = last_vol / avg_vol_20 if last_vol > 0 and avg_vol_20 else 0.0
         details["RVOL"] = round(rvol, 2)
         # FIX 1: Track RVOL direction for bonus calculation
         details["rvol_up_day"] = closes[-1] > closes[-2] if len(closes) >= 2 else True
@@ -2524,16 +2558,21 @@ def _biotech_technical_score(poly_key, ticker):
 
         # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
         if len(volumes) >= 20:
-            vol_recent = sum(volumes[-5:]) / 5
-            vol_prior = sum(volumes[-20:-5]) / 15
-            vol_trend = vol_recent / max(1, vol_prior)
-            details["vol_trend"] = round(vol_trend, 2)
-            if vol_trend >= 2.0:
-                tech_score += 4
-            elif vol_trend >= 1.5:
-                tech_score += 3
-            elif vol_trend >= 1.2:
-                tech_score += 1
+            recent_values = [v for v in volumes[-5:] if isinstance(v, (int, float)) and v > 0]
+            prior_values = [v for v in volumes[-20:-5] if isinstance(v, (int, float)) and v > 0]
+            if len(recent_values) >= 3 and len(prior_values) >= 8:
+                vol_recent = sum(recent_values) / len(recent_values)
+                vol_prior = sum(prior_values) / len(prior_values)
+                vol_trend = vol_recent / vol_prior
+                details["vol_trend"] = round(vol_trend, 2)
+                if vol_trend >= 2.0:
+                    tech_score += 4
+                elif vol_trend >= 1.5:
+                    tech_score += 3
+                elif vol_trend >= 1.2:
+                    tech_score += 1
+            else:
+                details["vol_trend"] = None
 
         # 3. Price Position — nahe Highs = bullish (max 4 pts)
         high_90d = max(highs)
@@ -2890,7 +2929,13 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
     range_10d = tech_details.get("range_10d%", 0) or 0
     rvol = tech_details.get("RVOL", 0) or 0
     rvol_up_day = tech_details.get("rvol_up_day", True)
-    chart_health = tech_details.get("chart_health", 10) or 10
+    chart_health_raw = tech_details.get("chart_health")
+    try:
+        chart_health = float(chart_health_raw) if chart_health_raw is not None else 10.0
+    except (TypeError, ValueError, OverflowError):
+        chart_health = 10.0
+    if not math.isfinite(chart_health):
+        chart_health = 10.0
     if pos_90d >= 85 and range_10d >= 12:
         sell_news_risk += 18
         risk_flags.append("sell_the_news_risk_extended_chart")
@@ -2931,6 +2976,12 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
     elif halt_risk >= 25:
         trade_mode = "SMALL_SIZE_BINARY_RISK"
         score_adjustment = -5
+    elif chart_health <= 4:
+        # A strong catalyst cannot turn a technically broken chart into an
+        # immediate entry. Keep the idea visible, but require fresh structure
+        # confirmation before it can become an actionable signal.
+        trade_mode = "WAIT_CHART_CONFIRMATION"
+        score_adjustment = -6
     elif edge_score >= 75:
         trade_mode = "PRIORITY_WATCH"
         score_adjustment = 8
@@ -3858,14 +3909,16 @@ def _compute_biotech_technical_from_bars(bars):
     lows = [b["low"] for b in bars]
 
     current_price = closes[-1]
-    avg_vol_20 = sum(volumes[-20:]) / 20
     last_vol = volumes[-1]
+    avg_vol_20 = historical_volume_baseline(
+        volumes[:-1], lookback=20, minimum_periods=10
+    )
 
     tech_score = 0
     details = {}
 
     # 1. Unusual Volume (max 6 pts)
-    rvol = last_vol / max(1, avg_vol_20)
+    rvol = last_vol / avg_vol_20 if last_vol > 0 and avg_vol_20 else 0.0
     details["RVOL"] = round(rvol, 2)
     if rvol >= 3.0:
         tech_score += 6
@@ -3876,16 +3929,21 @@ def _compute_biotech_technical_from_bars(bars):
 
     # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
     if len(volumes) >= 20:
-        vol_recent = sum(volumes[-5:]) / 5
-        vol_prior = sum(volumes[-20:-5]) / 15
-        vol_trend = vol_recent / max(1, vol_prior)
-        details["vol_trend"] = round(vol_trend, 2)
-        if vol_trend >= 2.0:
-            tech_score += 4
-        elif vol_trend >= 1.5:
-            tech_score += 3
-        elif vol_trend >= 1.2:
-            tech_score += 1
+        recent_values = [v for v in volumes[-5:] if isinstance(v, (int, float)) and v > 0]
+        prior_values = [v for v in volumes[-20:-5] if isinstance(v, (int, float)) and v > 0]
+        if len(recent_values) >= 3 and len(prior_values) >= 8:
+            vol_recent = sum(recent_values) / len(recent_values)
+            vol_prior = sum(prior_values) / len(prior_values)
+            vol_trend = vol_recent / vol_prior
+            details["vol_trend"] = round(vol_trend, 2)
+            if vol_trend >= 2.0:
+                tech_score += 4
+            elif vol_trend >= 1.5:
+                tech_score += 3
+            elif vol_trend >= 1.2:
+                tech_score += 1
+        else:
+            details["vol_trend"] = None
 
     # 3. Price Position — nahe Highs = bullish (max 4 pts)
     high_90d = max(highs[-min(90, len(highs)):])

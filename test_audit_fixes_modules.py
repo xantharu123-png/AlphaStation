@@ -153,6 +153,16 @@ def test_s5_short_14d_lists_do_not_trigger_decoupling():
     assert "Correlation" not in joined
 
 
+def test_exhaustion_turnover_proxy_is_not_mislabeled_as_historical_rvol():
+    _, details = scorers.calculate_exhaustion_score(
+        **_exhaustion_kwargs(vol_24h=100_000_000, market_cap=500_000_000)
+    )
+
+    turnover_details = [detail for detail in details if "Turnover" in detail]
+    assert turnover_details
+    assert all("RVOL" not in detail for detail in turnover_details)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # S-6: Commerce fail-closed
 # ═══════════════════════════════════════════════════════════════════════════════

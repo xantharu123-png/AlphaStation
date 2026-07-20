@@ -7826,11 +7826,14 @@ function BacktestTab() {
     const visibleTrades = trades.slice(0, 30);
     const hiddenTradeCount = Math.max(0, trades.length - visibleTrades.length);
     const verdict = results?.verdict || null;
+    const outOfSample = results?.out_of_sample || null;
     const verdictThemes = {
         approved: { border: '#10b981', bg: '#ecfdf5', text: '#065f46' },
         selective: { border: '#3b82f6', bg: '#eff6ff', text: '#1e40af' },
         sample_small: { border: '#f59e0b', bg: '#fffbeb', text: '#92400e' },
         weak: { border: '#f59e0b', bg: '#fffbeb', text: '#92400e' },
+        validation_open: { border: '#f59e0b', bg: '#fffbeb', text: '#92400e' },
+        validation_failed: { border: '#ef4444', bg: '#fef2f2', text: '#991b1b' },
         blocked: { border: '#ef4444', bg: '#fef2f2', text: '#991b1b' },
         no_trades: { border: '#94a3b8', bg: '#f8fafc', text: '#475569' },
     };
@@ -7991,6 +7994,30 @@ function BacktestTab() {
                         </div>
                     )}
 
+                    {outOfSample && (
+                        <div className="card border border-gray-200 p-4 rounded-lg text-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="font-semibold">Chronologischer Holdout</div>
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${outOfSample.status === 'pass' ? 'bg-green-50 text-green-700' : outOfSample.status === 'fail' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'}`}>
+                                    {outOfSample.status === 'pass' ? 'BESTAETIGT' : outOfSample.status === 'fail' ? 'NICHT BESTAETIGT' : 'NOCH ZU KLEIN'}
+                                </span>
+                            </div>
+                            {outOfSample.holdout ? (
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-3 text-xs">
+                                    <div><span className="text-gray-500">Split:</span> {outOfSample.split_date || '-'}</div>
+                                    <div><span className="text-gray-500">Trades:</span> {outOfSample.holdout.total_trades ?? 0}</div>
+                                    <div><span className="text-gray-500">Avg PnL:</span> {formatBtPct(outOfSample.holdout.avg_pnl ?? 0)}</div>
+                                    <div><span className="text-gray-500">PF:</span> {outOfSample.holdout.profit_factor_display || outOfSample.holdout.profit_factor || '-'}</div>
+                                    <div><span className="text-gray-500">Drawdown:</span> {(outOfSample.holdout.max_drawdown ?? 0).toFixed(1)}%</div>
+                                </div>
+                            ) : (
+                                <div className="mt-2 text-xs text-gray-500">
+                                    {outOfSample.total_trades ?? 0} Trades vorhanden; mindestens {outOfSample.minimum_total_trades ?? 30} und ausreichend getrennte Handelstage erforderlich.
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                         <div className="metric-card green">
                             <div className="text-xs font-semibold text-gray-500">Trades</div>
@@ -8044,7 +8071,7 @@ function BacktestTab() {
                                 <div><span className="font-semibold">No Fill:</span> {results.no_fill ?? 0}</div>
                                 <div><span className="font-semibold">Ticker:</span> {results.n_tickers ?? '-'}</div>
                                 <div><span className="font-semibold">Sum PnL:</span> {formatBtPct(results.sum_pnl ?? results.total_return ?? 0)}</div>
-                                <div><span className="font-semibold">Profit Factor:</span> {(results.profit_factor ?? 0).toFixed ? (results.profit_factor ?? 0).toFixed(2) : results.profit_factor}</div>
+                                <div><span className="font-semibold">Profit Factor:</span> {results.profit_factor_display || ((results.profit_factor ?? 0).toFixed ? (results.profit_factor ?? 0).toFixed(2) : results.profit_factor)}</div>
                                 <div><span className="font-semibold">Avg R:</span> {(results.avg_r ?? 0).toFixed ? (results.avg_r ?? 0).toFixed(2) : results.avg_r}</div>
                             </div>
                             {results.note && <div className="mt-2 text-xs text-blue-700">{results.note}</div>}
@@ -8074,7 +8101,7 @@ function BacktestTab() {
                                             <td className="py-2 px-2 text-right">{(stat.win_rate ?? 0).toFixed(1)}%</td>
                                             <td className={`py-2 px-2 text-right ${(stat.avg_pnl ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatBtPct(stat.avg_pnl ?? 0)}</td>
                                             <td className="py-2 px-2 text-right">{(stat.avg_r ?? 0).toFixed(2)}</td>
-                                            <td className="py-2 px-2 text-right">{(stat.profit_factor ?? 0).toFixed ? (stat.profit_factor ?? 0).toFixed(2) : stat.profit_factor}</td>
+                                            <td className="py-2 px-2 text-right">{stat.profit_factor_display || ((stat.profit_factor ?? 0).toFixed ? (stat.profit_factor ?? 0).toFixed(2) : stat.profit_factor)}</td>
                                         </tr>
                                     ))}
                                 </tbody>

@@ -18,6 +18,8 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from modules.trade_levels import trade_geometry
+from modules.vrvp_levels import calculate_wilder_atr
+from modules.volume_metrics import historical_volume_baseline
 
 
 PENNY_MIN_PRICE = 0.20
@@ -221,9 +223,17 @@ def analyze_penny_intraday(
         return result
 
     closes = [item["close"] for item in data]
-    typical_volume = _median((item["volume"] for item in baseline), 1.0)
-    volume_ratio = latest["volume"] / max(typical_volume, 1.0)
-    previous_volume_ratio = previous["volume"] / max(typical_volume, 1.0)
+    typical_volume = historical_volume_baseline(
+        [item["volume"] for item in baseline],
+        lookback=len(baseline),
+        method="median",
+        minimum_periods=10,
+    )
+    if typical_volume is None:
+        result["warnings"] = ["insufficient_5m_volume_baseline"]
+        return result
+    volume_ratio = latest["volume"] / typical_volume
+    previous_volume_ratio = previous["volume"] / typical_volume
     breakout_level = max(item["high"] for item in baseline)
     candle_range = max(latest["high"] - latest["low"], latest["close"] * 0.001)
     close_position = _clamp((latest["close"] - latest["low"]) / candle_range, 0.0, 1.0)
@@ -235,12 +245,7 @@ def analyze_penny_intraday(
     ema9 = _ema(closes, 9)
     ema20 = _ema(closes, 20)
 
-    true_ranges: List[float] = []
-    for idx in range(max(1, len(data) - 13), len(data)):
-        item = data[idx]
-        prev_close = data[idx - 1]["close"]
-        true_ranges.append(max(item["high"] - item["low"], abs(item["high"] - prev_close), abs(item["low"] - prev_close)))
-    atr5 = sum(true_ranges) / len(true_ranges) if true_ranges else latest["close"] * 0.02
+    atr5 = calculate_wilder_atr(data, period=14) or latest["close"] * 0.02
 
     atr_pct = atr5 / latest["close"] * 100.0 if latest["close"] > 0 else 0.0
     spread_pct = max(0.0, _num(spread_bps)) / 100.0
