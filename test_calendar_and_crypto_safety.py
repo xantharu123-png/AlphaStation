@@ -86,6 +86,9 @@ def test_scanner_quality_and_safe_deploy_are_present():
     assert "COMMERCIAL_DEPLOY" in deploy_script
     assert "HEALTH_URL" in deploy_script
     assert "systemctl restart" in deploy_script
+    assert "verify_frontend_delivery" in deploy_script
+    assert "tradingbot-frontend.service" in deploy_script
+    assert 'cmp -s "$APP_DIR/frontend/index.html" "$served_frontend"' in deploy_script
 
 
 def test_gitignore_keeps_generated_runtime_files_out_of_commits():

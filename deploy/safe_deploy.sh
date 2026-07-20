@@ -4,11 +4,21 @@ set -Eeuo pipefail
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 BRANCH="${BRANCH:-main}"
 COMMERCIAL_DEPLOY="${COMMERCIAL_DEPLOY:-auto}"
-# Produktions-Units: tradingbot-api (FastAPI :8000) + tradingbot-bg (bg_service.py).
-# Das Frontend ist statisch und wird von nginx ausgeliefert — es gibt KEINEN
-# tradingbot-frontend-Service. Die alten Unit-Namen (tradingbot = Streamlit,
-# tradingbot-bg) wurden migriert, siehe deploy/install.sh Abschnitt 9.
+# Zielarchitektur: tradingbot-api (FastAPI :8000) + tradingbot-bg
+# (bg_service.py); das statische Frontend wird von nginx ausgeliefert.
+# Solange ein alter tradingbot-frontend-Service aktiv ist, wird er aus
+# Kompatibilitaetsgruenden mitgestartet und seine Auslieferung auf :3000
+# bytegenau gegen die deployte index.html geprueft.
 SERVICES="${SERVICES:-tradingbot-api tradingbot-bg}"
+LEGACY_FRONTEND_ACTIVE=0
+if command -v systemctl >/dev/null 2>&1 \
+  && systemctl is-active --quiet tradingbot-frontend.service 2>/dev/null; then
+  LEGACY_FRONTEND_ACTIVE=1
+  case " $SERVICES " in
+    *" tradingbot-frontend "*) ;;
+    *) SERVICES="$SERVICES tradingbot-frontend" ;;
+  esac
+fi
 REQUESTED_VENV_DIR="${VENV_DIR:-}"
 INSTALL_DEPS="${INSTALL_DEPS:-auto}"
 SERVICE_VENV_DIR="$APP_DIR/venv"
@@ -33,6 +43,9 @@ detect_service_venv() {
     return 1
   fi
   for service in $SERVICES; do
+    if [ "$service" = "tradingbot-frontend" ]; then
+      continue
+    fi
     exec_start="$(systemctl show -p ExecStart --value "$service" 2>/dev/null || true)"
     runtime_path="$(printf '%s\n' "$exec_start" | grep -oE '/[^[:space:];]+/bin/(python[0-9.]*|uvicorn)' | head -n 1 || true)"
     if [ -n "$runtime_path" ]; then
@@ -130,6 +143,25 @@ verify_commercial_edge() {
   fi
   echo "[deploy] Verifying commercial HTTPS edge and closed legacy ports..."
   APP_DIR="$APP_DIR" ENV_FILE="$APP_DIR/.env" bash "$APP_DIR/deploy/verify_commercial_edge.sh"
+}
+
+verify_frontend_delivery() {
+  if [ "$LEGACY_FRONTEND_ACTIVE" != "1" ]; then
+    return 0
+  fi
+  served_frontend="$(mktemp /tmp/alphastation-served-frontend.XXXXXX)"
+  if ! curl -fsS "http://127.0.0.1:3000/" -o "$served_frontend"; then
+    rm -f -- "$served_frontend"
+    echo "[deploy] Legacy frontend on :3000 is not reachable after restart."
+    return 1
+  fi
+  if ! cmp -s "$APP_DIR/frontend/index.html" "$served_frontend"; then
+    rm -f -- "$served_frontend"
+    echo "[deploy] Legacy frontend serves a different index.html than the deployed revision."
+    return 1
+  fi
+  rm -f -- "$served_frontend"
+  echo "[deploy] Frontend delivery on :3000 matches the deployed revision."
 }
 
 sync_service_units() {
@@ -314,6 +346,7 @@ for _ in $(seq 1 20); do
     fi
     echo "[deploy] Health OK"
     cat /tmp/tradingbot-health.json
+    verify_frontend_delivery
     verify_commercial_edge
     trap - ERR
     exit 0

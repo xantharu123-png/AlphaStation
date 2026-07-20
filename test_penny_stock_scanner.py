@@ -633,8 +633,8 @@ def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
         core_limit=2,
         rotation_limit=3,
     )
-    assert [item[1]["ticker"] for item in first] == ["T0", "T1", "T2", "T3", "T4", "ACTIVE"]
-    assert [item[1]["ticker"] for item in second] == ["T0", "T1", "T5", "T6", "T7", "ACTIVE"]
+    assert [item[1]["ticker"] for item in first] == ["ACTIVE", "T0", "T1", "T2", "T3", "T4"]
+    assert [item[1]["ticker"] for item in second] == ["ACTIVE", "T0", "T1", "T5", "T6", "T7"]
     assert stats["rotating_checked"] == 3
 
 

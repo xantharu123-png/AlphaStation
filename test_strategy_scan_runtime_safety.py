@@ -1,5 +1,6 @@
 import inspect
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -75,6 +76,83 @@ def test_successful_scan_refreshes_last_run_and_clears_old_error():
     finally:
         with api._scan_lock:
             api._scan_status.pop(scan_key, None)
+
+
+def test_timed_out_worker_is_never_started_twice():
+    scan_key = "unit_no_overlap"
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    calls = []
+
+    with api._scan_lock:
+        api._scan_status[scan_key] = {
+            "running": False,
+            "last_run": None,
+            "next_run": None,
+        }
+
+    def slow_scan():
+        calls.append(time.time())
+        worker_started.set()
+        release_worker.wait(2.0)
+
+    try:
+        assert api._run_scan_safe(scan_key, slow_scan, timeout_min=0.01) is True
+        assert worker_started.wait(1.0)
+        with api._scan_lock:
+            api._scan_status[scan_key]["_started_at"] = time.time() - 2.0
+
+        assert api._run_scan_safe(scan_key, slow_scan, timeout_min=0.01) is False
+        assert len(calls) == 1
+        with api._scan_lock:
+            assert "kein Parallelstart" in api._scan_status[scan_key]["last_error"]
+    finally:
+        release_worker.set()
+        _wait_for_scan(scan_key)
+        with api._scan_lock:
+            api._scan_status.pop(scan_key, None)
+            api._scan_threads.pop(scan_key, None)
+
+
+def test_cache_health_distinguishes_running_from_stuck(tmp_path, monkeypatch):
+    scan_key = "unit_runtime_health"
+    cache_path = tmp_path / "missing.json"
+    monkeypatch.setitem(api.SCAN_CACHE_MAP, scan_key, str(cache_path))
+    monkeypatch.setitem(api._SCAN_TIMEOUTS, scan_key, 1)
+
+    running = {
+        "running": True,
+        "_started_at": time.time() - 5,
+        "interval_min": 5,
+    }
+    stuck = {
+        "running": True,
+        "_started_at": time.time() - 65,
+        "interval_min": 5,
+    }
+
+    running_health = api._scan_cache_health(scan_key, running)
+    stuck_health = api._scan_cache_health(scan_key, stuck)
+
+    assert running_health["cache_health"] == "running"
+    assert running_health["cache_data_health"] == "missing"
+    assert stuck_health["cache_health"] == "stuck"
+    assert stuck_health["timeout_exceeded"] is True
+
+
+def test_email_pipeline_summary_separates_send_skip_and_error(monkeypatch):
+    monkeypatch.setattr(api, "_EMAIL_SEND_LOG", [])
+
+    api._record_email_event("Stock Signal", "sent")
+    api._record_email_event("Crypto Signal", "skipped", "no_active_setup")
+    api._record_email_event("SMTP", "error", "connection_failed")
+
+    summary = api._email_pipeline_summary()
+
+    assert summary["sent"] == 1
+    assert summary["skipped"] == 1
+    assert summary["errors"] == 1
+    assert summary["last_event"]["reason"] == "connection_failed"
 
 
 def test_scheduled_scan_without_fresh_cache_is_a_failure(tmp_path, monkeypatch):
