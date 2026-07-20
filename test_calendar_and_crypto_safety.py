@@ -89,6 +89,12 @@ def test_scanner_quality_and_safe_deploy_are_present():
     assert "verify_frontend_delivery" in deploy_script
     assert "tradingbot-frontend.service" in deploy_script
     assert 'cmp -s "$APP_DIR/frontend/index.html" "$served_frontend"' in deploy_script
+    assert "configure_api_bind_mode" in deploy_script
+    assert "legacy-direct-frontend.conf" in deploy_script
+    assert 'Environment="API_BIND_HOST=0.0.0.0"' in deploy_script
+    assert "ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000" in deploy_script
+    assert "restart_service_bounded" in deploy_script
+    assert "timeout --signal=TERM --kill-after=5s 45s" in deploy_script
 
 
 def test_gitignore_keeps_generated_runtime_files_out_of_commits():

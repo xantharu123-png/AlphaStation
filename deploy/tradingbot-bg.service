@@ -22,6 +22,7 @@ ExecStart=/home/tradingbot/app/venv/bin/python3 bg_service.py
 
 Restart=always
 RestartSec=5
+TimeoutStopSec=30
 UMask=0077
 
 # Logging

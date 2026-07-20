@@ -1355,8 +1355,13 @@ def test_production_units_use_unprivileged_hardened_services():
         assert "CapabilityBoundingSet=" in unit
         assert "PrivateTmp=true" in unit
         assert "BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp" in unit
+        assert "TimeoutStopSec=30" in unit
     assert 'install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"' in install_script
     assert not (root / "deploy" / "tradingbot.service").exists()
+
+    api_unit = (root / "deploy" / "tradingbot-api.service").read_text(encoding="utf-8")
+    assert 'Environment="API_BIND_HOST=127.0.0.1"' in api_unit
+    assert "--host ${API_BIND_HOST} --port 8000" in api_unit
 
 
 def test_commercial_deploy_fails_closed_on_insecure_edge_or_legacy_frontends():
@@ -1434,7 +1439,20 @@ def test_deploy_synchronizes_hardened_service_units_before_restart():
     restart_pos = deploy.index('echo "[deploy] Restarting services: $SERVICES"')
     assert sync_pos < restart_pos
     assert 'install -m 0644 "$APP_DIR/deploy/$unit" "/etc/systemd/system/$unit"' in deploy
+    assert "configure_api_bind_mode" in deploy
     assert "systemctl daemon-reload" in deploy
+
+
+def test_legacy_direct_frontend_gets_explicit_noncommercial_api_compatibility():
+    root = Path(__file__).parent
+    deploy = (root / "deploy" / "safe_deploy.sh").read_text(encoding="utf-8")
+
+    condition = '[ "$LEGACY_FRONTEND_ACTIVE" = "1" ] && [ "$COMMERCIAL_DEPLOY" != "1" ]'
+    assert condition in deploy
+    assert 'Environment="API_BIND_HOST=0.0.0.0"' in deploy
+    assert "ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000" in deploy
+    assert 'rm -f -- "$API_BIND_OVERRIDE_FILE"' in deploy
+    assert "legacy frontend :3000 -> public API :8000" in deploy
 
 
 def test_direct_runtime_dependencies_are_exactly_pinned():

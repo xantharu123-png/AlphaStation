@@ -11,6 +11,8 @@ COMMERCIAL_DEPLOY="${COMMERCIAL_DEPLOY:-auto}"
 # bytegenau gegen die deployte index.html geprueft.
 SERVICES="${SERVICES:-tradingbot-api tradingbot-bg}"
 LEGACY_FRONTEND_ACTIVE=0
+API_BIND_OVERRIDE_DIR="/etc/systemd/system/tradingbot-api.service.d"
+API_BIND_OVERRIDE_FILE="$API_BIND_OVERRIDE_DIR/legacy-direct-frontend.conf"
 if command -v systemctl >/dev/null 2>&1 \
   && systemctl is-active --quiet tradingbot-frontend.service 2>/dev/null; then
   LEGACY_FRONTEND_ACTIVE=1
@@ -164,13 +166,43 @@ verify_frontend_delivery() {
   echo "[deploy] Frontend delivery on :3000 matches the deployed revision."
 }
 
+configure_api_bind_mode() {
+  if [ "$LEGACY_FRONTEND_ACTIVE" = "1" ] && [ "$COMMERCIAL_DEPLOY" != "1" ]; then
+    install -d -m 0755 "$API_BIND_OVERRIDE_DIR"
+    printf '%s\n' \
+      '[Service]' \
+      'Environment="API_BIND_HOST=0.0.0.0"' \
+      'ExecStart=' \
+      'ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000' \
+      > "$API_BIND_OVERRIDE_FILE"
+    chmod 0644 "$API_BIND_OVERRIDE_FILE"
+    echo "[deploy] Compatibility mode: legacy frontend :3000 -> public API :8000."
+    return 0
+  fi
+
+  rm -f -- "$API_BIND_OVERRIDE_FILE"
+  echo "[deploy] Hardened API bind: localhost :8000 behind nginx."
+}
+
 sync_service_units() {
   for unit in tradingbot-api.service tradingbot-bg.service; do
     if [ -f "$APP_DIR/deploy/$unit" ]; then
       install -m 0644 "$APP_DIR/deploy/$unit" "/etc/systemd/system/$unit"
     fi
   done
+  configure_api_bind_mode
   systemctl daemon-reload
+}
+
+restart_service_bounded() {
+  local service="$1"
+  echo "[deploy] Restarting $service ..."
+  if timeout --signal=TERM --kill-after=5s 45s systemctl restart "$service"; then
+    return 0
+  fi
+  echo "[deploy] Restart of $service exceeded 45s or failed."
+  systemctl status "$service" --no-pager -l || true
+  return 1
 }
 
 prepare_runtime_state() {
@@ -237,7 +269,7 @@ rollback_deployment() {
   fi
   if [ "$rollback_status" -eq 0 ]; then
     for service in $SERVICES; do
-      systemctl restart "$service" || rollback_status=$?
+      restart_service_bounded "$service" || rollback_status=$?
     done
   fi
 
@@ -328,7 +360,7 @@ sync_service_units
 
 echo "[deploy] Restarting services: $SERVICES"
 for service in $SERVICES; do
-  systemctl restart "$service"
+  restart_service_bounded "$service"
 done
 
 echo "[deploy] Waiting for API health..."

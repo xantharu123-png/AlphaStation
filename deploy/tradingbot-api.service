@@ -20,12 +20,14 @@ WorkingDirectory=/home/tradingbot/app
 # beim Boot mit RuntimeError ab, wenn Default-Secrets/Legacy-Keys aktiv sind.
 EnvironmentFile=-/home/tradingbot/app/.env
 Environment="PATH=/home/tradingbot/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="API_BIND_HOST=127.0.0.1"
 
 # Nur an localhost binden — TLS-Terminierung und Frontend-Auslieferung macht nginx.
-ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8000
+ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host ${API_BIND_HOST} --port 8000
 
 Restart=always
 RestartSec=5
+TimeoutStopSec=30
 UMask=0077
 
 # Logging
