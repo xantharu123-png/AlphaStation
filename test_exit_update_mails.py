@@ -58,7 +58,13 @@ def _bars_after(ticker, specs):
     """Daily-Bars an den Folgetagen des Alerts; specs = [(high, low, close), ...]."""
     d0 = datetime.fromisoformat(_signal(ticker)["created_at"]).date()
     return [
-        {"date": (d0 + timedelta(days=i)).isoformat(), "high": h, "low": l, "close": c}
+        {
+            "date": (d0 + timedelta(days=i)).isoformat(),
+            "open": 100.0,
+            "high": h,
+            "low": l,
+            "close": c,
+        }
         for i, (h, l, c) in enumerate(specs, start=1)
     ]
 
@@ -87,7 +93,8 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     tr = transitions[0]
     assert set(tr) == {
         "id", "ticker", "scanner", "direction", "old_status", "new_status",
-        "entry", "stop", "tp1", "tp2", "r_realized", "tp1_hit_this_run", "asset_class",
+        "entry", "entry_fill_price", "stop", "tp1", "tp2", "r_realized",
+        "tp1_hit_this_run", "asset_class",
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"
@@ -96,6 +103,7 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert tr["old_status"] == "OPEN"
     assert tr["new_status"] == "STOP_HIT"
     assert tr["entry"] == pytest.approx(100.0)
+    assert tr["entry_fill_price"] == pytest.approx(100.0)
     assert tr["stop"] == pytest.approx(95.0)
     assert tr["tp1"] == pytest.approx(105.0)
     assert tr["tp2"] == pytest.approx(110.0)

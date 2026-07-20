@@ -698,8 +698,11 @@ def rate_limited_get(url, params=None, timeout=15, calls_per_minute=200, **kwarg
 # ── fetch_daily_candles_crypto (originally line 1358) ──
 def fetch_daily_candles_crypto(coin_id, days=30):
     """
-    Holt Daily Candles für Krypto von CoinGecko mit Cache (5 Min TTL).
-    Konvertiert in gleiches Format wie Polygon: list of dicts mit o, h, l, c, v
+    Build UTC daily candles from CoinGecko intraday market-chart samples.
+
+    CoinGecko's /ohlc endpoint changes its bar size with the requested range.
+    Treating those responses as daily bars corrupts every daily indicator, so
+    only validated intraday samples are aggregated into explicit UTC days.
     """
     import time as _t
 
@@ -711,9 +714,7 @@ def fetch_daily_candles_crypto(coin_id, days=30):
     try:
         from datetime import datetime as _dt
 
-        requested_days = max(1, min(int(days or 30), 365))
-        allowed_ohlc_days = [1, 7, 14, 30, 90, 180, 365]
-        ohlc_days = next((d for d in allowed_ohlc_days if d >= requested_days), 365)
+        requested_days = max(2, min(int(days or 30), 90))
 
         def _fetch_json(url, params):
             resp = None
@@ -738,15 +739,36 @@ def fetch_daily_candles_crypto(coin_id, days=30):
                     return None
             return None
 
-        # OHLC liefert echte Daily/Open-High-Low-Close-Werte. Volumen kommt separat
-        # aus market_chart und wird pro Tag konservativ als letzter 24h-Volume-Snapshot
-        # genutzt, nicht als Summe stündlicher Snapshots.
-        ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-        ohlc_data = _fetch_json(ohlc_url, {"vs_currency": "usd", "days": ohlc_days})
-
         market_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         market_data = _fetch_json(market_url, {"vs_currency": "usd", "days": requested_days})
+        prices = (market_data or {}).get("prices", [])
         volumes = (market_data or {}).get("total_volumes", [])
+
+        valid_price_samples = []
+        for entry in prices or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            try:
+                ts = int(entry[0])
+                price = float(entry[1])
+            except (TypeError, ValueError):
+                continue
+            if ts > 0 and price > 0:
+                valid_price_samples.append((ts, price))
+        valid_price_samples.sort(key=lambda item: item[0])
+        if len(valid_price_samples) < 4:
+            return []
+
+        sample_gaps = [
+            (valid_price_samples[idx][0] - valid_price_samples[idx - 1][0]) / 3_600_000.0
+            for idx in range(1, len(valid_price_samples))
+            if valid_price_samples[idx][0] > valid_price_samples[idx - 1][0]
+        ]
+        median_gap_hours = sorted(sample_gaps)[len(sample_gaps) // 2] if sample_gaps else 999.0
+        # Daily close samples cannot produce real daily highs/lows. Fail closed
+        # rather than labelling a close proxy as an OHLC candle.
+        if median_gap_hours > 6.0:
+            return []
 
         daily_volume = {}
         for entry in volumes or []:
@@ -754,42 +776,34 @@ def fetch_daily_candles_crypto(coin_id, days=30):
                 day_key = _dt.utcfromtimestamp(entry[0] / 1000).strftime("%Y-%m-%d")
                 daily_volume[day_key] = float(entry[1] or 0)
 
-        bars = []
-        if isinstance(ohlc_data, list) and ohlc_data:
-            for c in ohlc_data:
-                if not isinstance(c, (list, tuple)) or len(c) < 5:
-                    continue
-                ts = int(c[0])
-                day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
-                bars.append({
+        daily = {}
+        for ts, price in valid_price_samples:
+            day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+            if day_key not in daily:
+                daily[day_key] = {
                     "t": ts,
-                    "o": float(c[1]),
-                    "h": float(c[2]),
-                    "l": float(c[3]),
-                    "c": float(c[4]),
+                    "o": price,
+                    "h": price,
+                    "l": price,
+                    "c": price,
                     "v": daily_volume.get(day_key, 0),
                     "volume_is_estimate": True,
-                })
-        else:
-            # Fallback: nur wenn OHLC nicht verfügbar ist. Hier weiter synthetische
-            # Kerzen, aber ohne Volumen-Summenfehler.
-            prices = (market_data or {}).get("prices", [])
-            if not prices or len(prices) < 2:
-                return []
-            daily = {}
-            for ts, p in prices:
-                day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
-                if day_key not in daily:
-                    daily[day_key] = {"o": p, "h": p, "l": p, "c": p, "v": daily_volume.get(day_key, 0), "t": ts, "synthetic_ohlc": True}
-                else:
-                    daily[day_key]["h"] = max(daily[day_key]["h"], p)
-                    daily[day_key]["l"] = min(daily[day_key]["l"], p)
-                    daily[day_key]["c"] = p
-            bars = [daily[k] for k in sorted(daily.keys())]
+                    "source": "coingecko_market_chart_aggregated",
+                    "source_timeframe": "1D",
+                    "source_sample_interval_hours": round(median_gap_hours, 3),
+                }
+            else:
+                daily[day_key]["h"] = max(daily[day_key]["h"], price)
+                daily[day_key]["l"] = min(daily[day_key]["l"], price)
+                daily[day_key]["c"] = price
+                daily[day_key]["v"] = daily_volume.get(day_key, daily[day_key]["v"])
+        bars = [daily[key] for key in sorted(daily)]
 
         if requested_days and len(bars) > requested_days + 2:
             bars = bars[-(requested_days + 2):]
 
+        if len(bars) < 2:
+            return []
         _CANDLE_ANALYSIS_CACHE[cache_key] = {"data": bars, "ts": _t.time()}
         return bars
     except Exception:
@@ -1126,7 +1140,7 @@ def get_ticker_news(poly_key, ticker, limit=3):
         url = f"https://api.polygon.io/v2/reference/news"
         _resp = rate_limited_get(url, params={"ticker": ticker, "limit": limit, "apiKey": poly_key}, timeout=5)
         if _resp.status_code != 200:
-            return [], []
+            return []
         resp = _resp.json()
         results = resp.get("results", [])
         
@@ -1301,14 +1315,32 @@ def fetch_grouped_daily(poly_key, date_str):
     """Holt ALLE US-Aktien für einen Tag (Grouped Daily Bars)."""
     url = f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{date_str}"
     params = {"apiKey": poly_key, "adjusted": "true"}
-    try:
-        resp = rate_limited_get(url, params=params, timeout=30)
-        data = resp.json()
-        if data.get("status") in ("OK", "DELAYED") and data.get("results"):
-            return {r["T"]: r for r in data["results"] if r.get("c", 0) > 0}
-        return {}
-    except:
-        return {}
+    for attempt in range(4):
+        try:
+            resp = rate_limited_get(url, params=params, timeout=30)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < 3:
+                    retry_after = float(resp.headers.get("Retry-After") or 0)
+                    time.sleep(max(retry_after, 2 ** attempt))
+                    continue
+                return None
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("status") in ("OK", "DELAYED"):
+                results = data.get("results") or []
+                return {
+                    r["T"]: r
+                    for r in results
+                    if r.get("T") and r.get("c", 0) > 0
+                }
+            return None
+        except (requests.RequestException, ValueError, TypeError):
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+                continue
+            return None
+    return None
 
 
 

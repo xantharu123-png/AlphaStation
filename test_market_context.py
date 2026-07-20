@@ -1,7 +1,13 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-from modules.market_context import analyze_headlines, build_event_risk, build_market_context, missing_headline_risk
+from modules.market_context import (
+    analyze_headlines,
+    build_event_risk,
+    build_market_context,
+    missing_event_risk,
+    missing_headline_risk,
+)
 from modules.trade_health import calculate_trade_health
 
 
@@ -109,6 +115,34 @@ def test_missing_headline_data_is_unknown_and_defensive():
     assert any("Headline-Daten" in warning for warning in context["warnings"])
 
 
+def test_missing_event_data_is_unknown_and_defensive():
+    context = build_market_context(
+        {"fear_score": 78, "vix": {"price": 13}, "breadth": {"ad_ratio": 1.8, "advancing_pct": 62}},
+        {"score": 0, "level": "LOW", "data_status": "ok", "top_headlines": []},
+        missing_event_risk("calendar timeout"),
+    )
+
+    assert context["summary"]["event_level"] == "UNKNOWN"
+    assert context["summary"]["event_status"] == "error"
+    assert context["regime"] != "RISK_ON"
+    assert any("Kalender-/Event-Daten" in warning for warning in context["warnings"])
+
+
+def test_calendar_snapshot_fails_closed_when_calendar_provider_errors(monkeypatch):
+    import api
+
+    def _raise_calendar_error():
+        raise RuntimeError("calendar unavailable")
+
+    monkeypatch.setattr(api, "get_economic_calendar", _raise_calendar_error)
+
+    risk = api._calendar_event_risk_snapshot()
+
+    assert risk["level"] == "UNKNOWN"
+    assert risk["data_status"] == "error"
+    assert risk["score"] == 30
+
+
 def test_today_style_headline_risk_stays_selective_when_market_is_not_panicking():
     now = datetime(2026, 5, 4, 18, 50, tzinfo=timezone.utc)
     headlines = [
@@ -156,9 +190,22 @@ def test_risk_off_light_between_selective_and_defensive():
         {"score": 18, "level": "LOW", "data_status": "ok", "upcoming_events": []},
     )
 
-    assert context["regime"] == "RISK_OFF_LIGHT"
-    assert context["trade_mode"] == "CAUTIOUS"
-    assert context["size_multiplier"] == 0.65
+    # fear_score already aggregates VIX and breadth. They must not be counted
+    # a second time merely because the raw components are also present.
+    assert context["regime"] == "NEUTRAL"
+    assert context["trade_mode"] == "SELECTIVE"
+    assert context["size_multiplier"] == 0.75
+
+
+def test_risk_off_light_uses_vix_and_breadth_when_fear_score_is_missing():
+    context = build_market_context(
+        {"vix": {"price": 29}, "breadth": {"ad_ratio": 0.42, "advancing_pct": 24}},
+        {"score": 80, "level": "EXTREME", "data_status": "ok", "top_headlines": []},
+        {"score": 18, "level": "LOW", "data_status": "ok", "upcoming_events": []},
+    )
+
+    assert context["regime"] in {"RISK_OFF_LIGHT", "RISK_OFF", "PANIC"}
+    assert context["trade_mode"] != "SELECTIVE"
 
 
 def test_near_high_impact_event_sets_event_risk():

@@ -72,8 +72,17 @@ STATUS_FILE = DATA_DIR / "bg_status.json"
 # Modules importieren
 sys.path.insert(0, str(BASE_DIR))
 
-from modules.trade_levels import normalize_alert_trade_levels
+from modules.trade_levels import normalize_alert_trade_levels, trade_plan_quality
 from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
+from modules.email_dedupe import (
+    email_dedupe_active as _shared_email_dedupe_active,
+    email_dedupe_claim as _shared_email_dedupe_claim,
+    email_dedupe_mark as _shared_email_dedupe_mark,
+    email_dedupe_release as _shared_email_dedupe_release,
+    email_dedupe_remaining as _shared_email_dedupe_remaining,
+    load_email_dedupe as _shared_load_email_dedupe,
+    save_email_dedupe as _shared_save_email_dedupe,
+)
 try:
     from modules.auth import get_email_alert_recipients
     HAS_AUTH_ALERT_RECIPIENTS = True
@@ -118,17 +127,21 @@ log = logging.getLogger("bg_service")
 def _atomic_write_json(filepath, data):
     """Atomic JSON write - prevents corruption from concurrent reads."""
     tmp_dir = os.path.dirname(filepath) or "."
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=tmp_dir, delete=False, suffix='.tmp') as f:
-            json.dump(data, f)
             tmp_path = f.name
+            json.dump(data, f)
         os.replace(tmp_path, filepath)
+        tmp_path = None
     except Exception as e:
         log.warning(f"Atomic write failed for {filepath}: {e}")
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 # ── B-06: PID cleanup on exit ──
 atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
@@ -156,14 +169,75 @@ _SCAN_CACHE_MAP = {
 }
 
 def _clear_scan_cache(scanner_name):
-    """Löscht den alten Cache wenn ein neuer Scan startet."""
+    """Preserve the last successful snapshot while a replacement is built.
+
+    Removing a cache at scan start made every long-running or failed scan look
+    like an empty scanner in the UI. Writers replace snapshots atomically (or
+    are verified after returning), so readers can safely keep using the last
+    successful snapshot until a fresh one is published.
+    """
     cache_file = _SCAN_CACHE_MAP.get(scanner_name)
     if cache_file and os.path.exists(cache_file):
-        try:
-            os.unlink(cache_file)
-            log.debug(f"Cache gelöscht bei Scan-Start: {cache_file}")
-        except Exception:
-            pass
+        log.debug(f"Bestehender Cache bleibt bis zum erfolgreichen Scan erhalten: {cache_file}")
+
+
+def _scanner_cache_snapshot(cache_file):
+    """Return (revision, payload) for a readable scanner cache."""
+    if not cache_file or not os.path.exists(cache_file):
+        return None, None
+    try:
+        stat = os.stat(cache_file)
+        with open(cache_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return None, None
+        return (stat.st_mtime_ns, stat.st_size), payload
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None, None
+
+
+def _scanner_progress_payload(progress_file):
+    if not progress_file or not os.path.exists(progress_file):
+        return None
+    try:
+        with open(progress_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _require_final_scanner_publish(
+    scanner_name,
+    cache_file,
+    previous_revision,
+    progress_file,
+    started_at,
+    *,
+    direction=None,
+):
+    """Fail unless a scan published a new final cache and a done progress state."""
+    revision, payload = _scanner_cache_snapshot(cache_file)
+    if revision is None:
+        raise RuntimeError(f"{scanner_name}: kein lesbarer Ergebnis-Cache publiziert")
+    if revision == previous_revision:
+        raise RuntimeError(f"{scanner_name}: Ergebnis-Cache wurde nicht aktualisiert")
+    cache_ts = float(payload.get("timestamp", 0) or 0)
+    if cache_ts < started_at - 1:
+        raise RuntimeError(f"{scanner_name}: publizierter Cache ist nicht frisch")
+    if payload.get("partial") is True:
+        raise RuntimeError(f"{scanner_name}: nur partieller Cache publiziert")
+    if direction and str(payload.get("direction", "")).lower() != str(direction).lower():
+        raise RuntimeError(f"{scanner_name}: Cache-Richtung stimmt nicht")
+
+    progress = _scanner_progress_payload(progress_file)
+    progress_status = str((progress or {}).get("status", "")).lower()
+    progress_ts = float((progress or {}).get("timestamp", 0) or 0)
+    if progress_status != "done" or progress_ts < started_at - 1:
+        raise RuntimeError(
+            f"{scanner_name}: Scan nicht final abgeschlossen (Status {progress_status or 'fehlt'})"
+        )
+    return payload
 
 # ── API Keys aus secrets.toml laden ──
 _EMAIL_CONFIG_KEYS = (
@@ -471,8 +545,19 @@ def _format_alert_plan_html(row):
             '<span style="color:#dc2626;font-weight:bold">Kein gueltiger Trade-Plan</span>'
             f'<br><span style="color:#64748b;font-size:12px">{errors}</span>'
         )
-    rr = levels.get("rr")
-    rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R {rr:.2f}</span>' if isinstance(rr, (int, float)) else ""
+    quality = trade_plan_quality(levels)
+    effective_rr = quality.get("effective_rr")
+    rr1 = quality.get("rr_tp1")
+    rr2 = quality.get("rr_tp2")
+    rr_text = ""
+    if isinstance(effective_rr, (int, float)):
+        rr_text = f'<br><span style="color:#64748b;font-size:12px">R:R eff {effective_rr:.2f}</span>'
+        if isinstance(rr1, (int, float)) and isinstance(rr2, (int, float)):
+            rr_text += f'<br><span style="color:#64748b;font-size:11px">TP1 {rr1:.1f}R / TP2 {rr2:.1f}R</span>'
+    issue_text = ""
+    if quality.get("issues"):
+        issue_label = html.escape(", ".join(str(item) for item in quality["issues"][:3]))
+        issue_text = f'<br><span style="color:#dc2626;font-size:11px;font-weight:bold">Trade-Plan blockiert: {issue_label}</span>'
     level_source_text = _alert_level_source_line(row)
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
@@ -494,6 +579,7 @@ def _format_alert_plan_html(row):
         f'Stop <b style="color:#dc2626">{_format_alert_price(levels.get("stop"))}</b><br>'
         f'TP1/TP2 <b style="color:#059669">{_format_alert_price(levels.get("tp1"))} / {_format_alert_price(levels.get("tp2"))}</b>'
         f'{rr_text}'
+        f'{issue_text}'
         f'{level_source_text}'
         f'{source_text}'
         f'{synthetic_text}'
@@ -509,9 +595,11 @@ def _alert_trade_plan_ok(row, min_rr=1.0):
     # handelbaren nativen Scanner-Level -> nicht mailbar (api: estimated_trade_plan).
     if levels.get("estimated"):
         return False
-    rr = levels.get("rr")
-    # Q3/B4: rr=None heisst unvollstaendige Geometrie -> nicht mailbar (wie api).
-    return isinstance(rr, (int, float)) and rr >= min_rr
+    quality = trade_plan_quality(levels)
+    effective_rr = quality.get("effective_rr")
+    if quality.get("tp1_ok") is False or quality.get("issues"):
+        return False
+    return isinstance(effective_rr, (int, float)) and effective_rr >= min_rr
 
 
 def _alert_dedupe_ttl_seconds(scanner_name):
@@ -552,17 +640,25 @@ def _bg_alert_health_reasons(row, scanner_name):
         reasons.append(f"health_{(decision or 'unknown').lower()}")
     if _safe_float(health.get("health_score"), 0) < _ALERT_MIN_HEALTH_SCORE:
         reasons.append("health_score_below_threshold")
-    return reasons
+    if str(health.get("chase_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
+        reasons.append("health_chase_risk")
+    if str(health.get("fakeout_risk", "") or "").upper() in {"HIGH", "CRITICAL"}:
+        reasons.append("health_fakeout_risk")
+    if str(health.get("liquidity_risk", "") or "").upper() == "CRITICAL":
+        reasons.append("health_liquidity_risk")
+    return list(dict.fromkeys(reasons))
 
 
 def _extract_long_entry_fields(row):
     return {
         "change_pct": _safe_float(row.get("change_pct", row.get("Change_Pct", row.get("Change%"))), None),
+        "gap_pct": _safe_float(row.get("gap_pct", row.get("Gap_Pct", row.get("Gap%"))), None),
         "close_pos": _safe_float(row.get("close_pos", row.get("Close_Position", row.get("Close Position"))), None),
         "open_to_current_pct": _safe_float(row.get("open_to_current_pct", row.get("Open_To_Current_Pct")), None),
         "latest_bar_change_pct": _safe_float(row.get("latest_bar_change_pct"), None),
         "latest_bar_close_pos": _safe_float(row.get("latest_bar_close_pos"), None),
         "extension_atr": _safe_float(row.get("Extension_ATR", row.get("extension_atr")), None),
+        "upper_wick_pct": _safe_float(row.get("Upper_Wick_Pct", row.get("upper_wick_pct")), None),
         "rvol": _safe_float(row.get("rvol", row.get("RVOL")), None),
         "mdr_tag": str(row.get("mdr_tag", "") or "").upper(),
     }
@@ -574,16 +670,12 @@ def _long_continuation_ok(fields):
     latest_close_pos = fields.get("latest_bar_close_pos")
     rvol = fields.get("rvol")
     mdr_tag = fields.get("mdr_tag", "")
-    latest_ok = (
-        latest_change is None
-        or latest_close_pos is None
-        or latest_change >= -0.05
-        or latest_close_pos >= 0.55
-    )
+    latest_available = latest_change is not None and latest_close_pos is not None
+    latest_ok = latest_available and (latest_change >= -0.05 or latest_close_pos >= 0.55)
     volume_ok = rvol is None or rvol >= 1.2
     holding_highs = close_pos is not None and close_pos >= 0.78
     mdr_ok = "MDR" in mdr_tag and "CRASH" not in mdr_tag and close_pos is not None and close_pos >= 0.65
-    return (holding_highs and latest_ok and volume_ok) or mdr_ok
+    return (holding_highs and latest_ok and volume_ok) or (mdr_ok and latest_ok)
 
 
 def _long_entry_rule_reasons(row):
@@ -605,6 +697,7 @@ def _long_entry_rule_reasons(row):
         and latest_change < -0.15
         and latest_close_pos < 0.45
     )
+    latest_missing = latest_change is None or latest_close_pos is None
     intraday_red_fade = open_to_current is not None and open_to_current < -0.25
     not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
     extended = (change is not None and change >= 12) or (extension_atr is not None and extension_atr >= 4.0)
@@ -613,15 +706,87 @@ def _long_entry_rule_reasons(row):
 
     if latest_red_fade:
         reasons.append("latest_5m_red_fade")
+    if latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_trigger")
     if intraday_red_fade:
         reasons.append("current_candle_red_fade")
     if not_holding_highs and (extended or latest_red_fade or intraday_red_fade):
         reasons.append("not_holding_highs_after_up_move")
     if hard_extended and not continuation_ok:
         reasons.append("hard_extended_long_wait_retest")
+    elif extended and latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_retest")
     elif extended and (latest_red_fade or intraday_red_fade or not_holding_highs):
         reasons.append("extended_long_fading_wait_retest")
     return reasons
+
+
+def _stock_swing_rule_reasons(row):
+    """Daily/swing timing gate; intentionally independent of 1m/5m data."""
+    direction = str(row.get("Signal_Direction", row.get("direction", "")) or "").lower()
+    if "short" in direction:
+        return []
+    fields = _extract_long_entry_fields(row)
+    reasons = []
+    change = fields["change_pct"]
+    gap_pct = fields.get("gap_pct")
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    extension_atr = fields["extension_atr"]
+    upper_wick_pct = fields.get("upper_wick_pct")
+    rvol = fields.get("rvol")
+    strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+
+    extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
+    hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
+    soft_extended_without_volume = change is not None and change >= 8.0 and (rvol is None or rvol < 1.5)
+    fading_daily = open_to_current is not None and open_to_current < -0.5
+    not_holding_highs = change is not None and change > 3 and close_pos is not None and close_pos < 0.55
+    is_gap_momentum_long = "gap momentum long" in strategy_name or "gap up" in strategy_name
+    is_momentum_breakout_long = "momentum breakout long" in strategy_name
+    is_meaningful_gap = is_gap_momentum_long and (
+        (gap_pct is not None and gap_pct >= 3.0)
+        or (change is not None and change >= 6.0)
+    )
+    is_momentum_gap_overlap = is_momentum_breakout_long and (
+        (gap_pct is not None and gap_pct >= 3.0)
+        or (change is not None and change >= 7.0 and rvol is not None and rvol >= 2.0)
+    )
+
+    if hard_extended:
+        reasons.append("swing_hard_extended_no_chase")
+    elif extended:
+        reasons.append("swing_extended_wait_retest")
+    elif soft_extended_without_volume:
+        reasons.append("swing_extended_without_volume_wait_retest")
+    if fading_daily:
+        reasons.append("swing_current_candle_fading")
+    if not_holding_highs and (extended or soft_extended_without_volume or fading_daily):
+        reasons.append("swing_not_holding_highs_after_move")
+    if is_meaningful_gap:
+        if open_to_current is not None and open_to_current < 0.25:
+            reasons.append("swing_gap_not_holding_open_wait_retest")
+        if close_pos is not None and close_pos < 0.72:
+            reasons.append("swing_gap_not_holding_upper_range_wait_retest")
+        if upper_wick_pct is not None and upper_wick_pct >= 38:
+            reasons.append("swing_gap_wick_rejection_wait_retest")
+    if is_momentum_gap_overlap:
+        momentum_type = str(row.get("Momentum_Breakout_Type") or row.get("momentum_breakout_type") or "").upper()
+        continuation_status = str(row.get("Breakout_Continuation_Status") or row.get("breakout_continuation_status") or "").upper()
+        continuation_score = _safe_float(row.get("Breakout_Continuation_Score", row.get("breakout_continuation_score")), None)
+        if momentum_type == "TREND_RECLAIM" and change is not None and change >= 6.0:
+            reasons.append("swing_momentum_trend_reclaim_gap_wait_retest")
+        if open_to_current is not None and open_to_current < 0.25:
+            reasons.append("swing_momentum_not_holding_open_wait_retest")
+        if close_pos is not None and close_pos < 0.72:
+            reasons.append("swing_momentum_not_holding_upper_range_wait_retest")
+        if upper_wick_pct is not None and upper_wick_pct >= 34:
+            reasons.append("swing_momentum_wick_rejection_wait_retest")
+        if continuation_status and continuation_status != "CONTINUATION_OK":
+            reasons.append("swing_momentum_breakout_quality_wait_retest")
+        elif continuation_score is not None and continuation_score < 78:
+            reasons.append("swing_momentum_breakout_quality_wait_retest")
+    return list(dict.fromkeys(reasons))
 
 
 def _long_entry_quality(row):
@@ -661,6 +826,7 @@ def _bear_short_rule_reasons(row):
     latest_bar_change = fields["latest_bar_change_pct"]
     latest_bar_close_pos = fields["latest_bar_close_pos"]
     rvol = fields["rvol"]
+    latest_missing = latest_bar_change is None or latest_bar_close_pos is None
 
     if change is None:
         reasons.append("missing_current_drop")
@@ -672,6 +838,8 @@ def _bear_short_rule_reasons(row):
         reasons.append("current_candle_green_reclaim")
     if close_pos is not None and close_pos > 0.45:
         reasons.append("not_closing_near_low")
+    if latest_missing:
+        reasons.append("fresh_5m_state_missing_wait_trigger")
     if (
         latest_bar_change is not None
         and latest_bar_close_pos is not None
@@ -682,6 +850,34 @@ def _bear_short_rule_reasons(row):
     if rvol is not None and rvol < 1.0:
         reasons.append("rvol_below_bear_threshold")
     return reasons
+
+
+def _stock_swing_short_rule_reasons(row):
+    """Daily/swing short gate; prevents chasing a completed daily collapse."""
+    fields = _extract_bear_short_fields(row)
+    reasons = []
+    change = fields["change_pct"]
+    close_pos = fields["close_pos"]
+    open_to_current = fields["open_to_current_pct"]
+    rvol = fields["rvol"]
+
+    if change is None:
+        reasons.append("missing_current_drop")
+    elif change > -2.0:
+        reasons.append("swing_short_not_down_enough")
+    elif change <= -22.0:
+        reasons.append("swing_short_drop_too_extended_no_chase")
+    elif change <= -12.0:
+        reasons.append("swing_short_extended_wait_retest")
+    elif change <= -8.0:
+        reasons.append("swing_short_drop_extended_wait_failed_reclaim")
+    if open_to_current is not None and open_to_current > 0.5:
+        reasons.append("swing_short_current_candle_reclaim")
+    if close_pos is not None and close_pos > 0.55:
+        reasons.append("swing_short_not_closing_weak")
+    if rvol is not None and rvol < 0.7:
+        reasons.append("rvol_below_bear_threshold")
+    return list(dict.fromkeys(reasons))
 
 
 def _bear_entry_quality(row):
@@ -698,11 +894,6 @@ def _bear_entry_quality(row):
 def _bear_crash_alert_ok(row):
     if row.get("alertable_short") is False:
         return False
-    if row.get("short_block_reasons"):
-        return False
-    if row.get("alertable_short") is None and _bear_short_rule_reasons(row):
-        return False
-
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
     close_pos = fields["close_pos"]
@@ -903,56 +1094,38 @@ def _email_has_blocked_etf_content(subject, body_html):
 
 
 def _load_email_dedupe(now=None, max_keep_seconds=7 * 86400):
-    now = now or time.time()
     try:
-        if not os.path.exists(_EMAIL_DEDUPE_FILE):
-            return {}
-        with open(_EMAIL_DEDUPE_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            return {}
-        dedupe = {}
-        for key, ts in raw.items():
-            try:
-                ts_float = float(ts)
-            except (TypeError, ValueError):
-                continue
-            if now - ts_float <= max_keep_seconds:
-                dedupe[str(key)] = ts_float
-        return dedupe
-    except Exception:
+        return _shared_load_email_dedupe(
+            _EMAIL_DEDUPE_FILE,
+            now=now,
+            max_keep_seconds=max_keep_seconds,
+        )
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Datei konnte nicht gelesen werden: {exc}")
         return {}
 
 
 def _save_email_dedupe(dedupe):
-    tmp_path = f"{_EMAIL_DEDUPE_FILE}.{os.getpid()}.tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(dedupe, f)
-        os.replace(tmp_path, _EMAIL_DEDUPE_FILE)
+        _shared_save_email_dedupe(_EMAIL_DEDUPE_FILE, dedupe)
     except Exception as exc:
         log.warning(f"E-Mail-Dedupe-Datei konnte nicht gespeichert werden: {exc}")
-        try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            pass
 
 
 def _email_dedupe_active(key, ttl_seconds, now=None):
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    last = dedupe.get(key)
-    return last is not None and now - last < ttl_seconds
+    try:
+        return _shared_email_dedupe_active(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Status konnte nicht gelesen werden: {exc}")
+        return False
 
 
 def _email_dedupe_remaining(key, ttl_seconds, now=None):
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    last = dedupe.get(key)
-    if last is None:
+    try:
+        return _shared_email_dedupe_remaining(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Restzeit konnte nicht gelesen werden: {exc}")
         return 0
-    return int(max(0, ttl_seconds - (now - last)))
 
 
 def _bearish_stock_alert_key(ticker):
@@ -971,19 +1144,27 @@ def _mark_bearish_stock_alert(ticker, now=None):
 
 
 def _email_dedupe_mark(key, now=None):
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    dedupe[key] = now
-    _save_email_dedupe(dedupe)
+    try:
+        _shared_email_dedupe_mark(_EMAIL_DEDUPE_FILE, key, now=now)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Markierung konnte nicht gespeichert werden: {exc}")
 
 
 def _email_dedupe_claim(key, ttl_seconds, now=None):
     """Return True only once per key+TTL, even after process restarts."""
-    now = now or time.time()
-    if _email_dedupe_active(key, ttl_seconds, now=now):
+    try:
+        return _shared_email_dedupe_claim(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Claim konnte nicht gespeichert werden: {exc}")
         return False
-    _email_dedupe_mark(key, now=now)
-    return True
+
+
+def _email_dedupe_release(key, claimed_at=None):
+    try:
+        return _shared_email_dedupe_release(_EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at)
+    except Exception as exc:
+        log.warning(f"E-Mail-Dedupe-Claim konnte nicht freigegeben werden: {exc}")
+        return False
 
 
 def _cleanup_email_cooldown():
@@ -1528,19 +1709,25 @@ def _run_weekly_report(secrets=None, now_et=None):
                 _weekly_report_warned_missing = True
             return False
         dedupe_key = _weekly_report_dedupe_key(now_et)
-        if _email_dedupe_active(dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC):
+        claim_now = time.time()
+        if not _email_dedupe_claim(dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC, now=claim_now):
             return False
-        summary = load_performance_summary(days=7) or {}
-        subject, body_html = _build_weekly_report_mail(summary, now_et=now_et)
-        sent = _send_email_alert(
-            subject, body_html,
-            secrets if secrets is not None else _load_secrets(),
-            mail_class="info",
-        )
+        try:
+            summary = load_performance_summary(days=7) or {}
+            subject, body_html = _build_weekly_report_mail(summary, now_et=now_et)
+            sent = _send_email_alert(
+                subject, body_html,
+                secrets if secrets is not None else _load_secrets(),
+                mail_class="info",
+            )
+        except Exception:
+            _email_dedupe_release(dedupe_key, claimed_at=claim_now)
+            raise
         if sent:
-            _email_dedupe_mark(dedupe_key)
+            _email_dedupe_mark(dedupe_key, now=claim_now)
             log.info(f"[Wochenreport] 📧 Wochen-Bilanz versendet ({dedupe_key})")
         else:
+            _email_dedupe_release(dedupe_key, claimed_at=claim_now)
             log.warning(f"[Wochenreport] Mail nicht versendet ({dedupe_key}) — "
                         f"Retry beim naechsten Takt im Fenster")
         return bool(sent)
@@ -1570,7 +1757,14 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
     gmail_user = secrets.get("GMAIL_USER", "")
     gmail_pass = secrets.get("GMAIL_APP_PASSWORD", "")
     alert_to = secrets.get("ALERT_EMAIL", gmail_user)  # Default: an sich selbst
-    recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    operator_watch_optin = str(
+        secrets.get(
+            "ALERT_OPERATOR_WATCH_OPTIN",
+            os.environ.get("ALERT_OPERATOR_WATCH_OPTIN", "0"),
+        )
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
     send_to_subscribers = str(secrets.get("ALERT_SEND_TO_SUBSCRIBERS", os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"))).strip().lower() not in {"0", "false", "no", "off"}
     if send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
         try:
@@ -1627,19 +1821,32 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
                 return False
 
 
-def _check_and_alert_scan_results(scanner_name, secrets):
-    """Prüft Scan-Ergebnisse auf Grade S/A und sendet E-Mail Alert"""
-    now = time.time()
+def _alert_cache_path(scanner_name):
+    """Return the scanner-owner cache consumed by the mail worker.
 
-    # BI Scanner Cache lesen
+    The lookup is isolated behind a function so tests and non-Linux runtimes
+    can use a private cache without patching file I/O globally.
+    """
     if scanner_name.startswith("bi_"):
         direction = "long" if "long" in scanner_name else "short"
-        cache_file = f"/tmp/bi_cache_{direction}.json"
-    elif scanner_name == "biotech":
-        cache_file = "/tmp/alpha_biotech_cache.json"
-    elif scanner_name == "orb":
-        cache_file = "/tmp/orb_scan_results.json"
-    else:
+        return f"/tmp/bi_cache_{direction}.json"
+    return {
+        "biotech": "/tmp/alpha_biotech_cache.json",
+        "orb": "/tmp/orb_scan_results.json",
+    }.get(scanner_name)
+
+
+def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
+    """Prüft Scan-Ergebnisse auf Grade S/A und sendet E-Mail Alert"""
+    now = time.time()
+    claimed_alerts = []
+    mail_sent = False
+    default_direction = "long" if scanner_name == "bi_long" else "short" if scanner_name == "bi_short" else ""
+    trade_horizon = str(trade_horizon or "swing").strip().lower()
+    swing_mode = trade_horizon != "intraday"
+
+    cache_file = _alert_cache_path(scanner_name)
+    if not cache_file:
         return
 
     try:
@@ -1717,38 +1924,37 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 continue
             if scanner_name == "bi_short" and ticker:
                 r = dict(r)
-                if "latest_bar_change_pct" not in r:
-                    r.update(_fetch_bear_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
-                r["bear_entry_quality"] = _bear_entry_quality(r)
-                _bear_reasons = _bear_short_rule_reasons(r)
+                if swing_mode:
+                    r["bear_entry_quality"] = "SWING_SETUP"
+                    _bear_reasons = _stock_swing_short_rule_reasons(r)
+                else:
+                    if "latest_bar_change_pct" not in r:
+                        r.update(_fetch_bear_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
+                    r["bear_entry_quality"] = _bear_entry_quality(r)
+                    _bear_reasons = _bear_short_rule_reasons(r)
                 if _bear_reasons:
                     _suppress("short_timing_guard")
                     log.debug(f"BI short alert suppressed by timing guard: {ticker} {_bear_reasons}")
                     continue
             if scanner_name in _LONG_ENTRY_ALERT_SCANNERS and ticker:
                 r = dict(r)
-                if "latest_bar_change_pct" not in r:
-                    r.update(_fetch_long_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
-                r["long_entry_quality"] = _long_entry_quality(r)
-                r["alertable_long"] = not _long_entry_rule_reasons(r)
+                if swing_mode:
+                    r["long_entry_quality"] = "SWING_SETUP"
+                    long_reasons = _stock_swing_rule_reasons(r)
+                else:
+                    if "latest_bar_change_pct" not in r:
+                        r.update(_fetch_long_latest_intraday_state(ticker, secrets.get("POLYGON_KEY", "")))
+                    r["long_entry_quality"] = _long_entry_quality(r)
+                    long_reasons = _long_entry_rule_reasons(r)
+                r["alertable_long"] = not long_reasons
                 if not r["alertable_long"]:
                     _suppress("long_timing_guard")
                     log.debug(f"Long alert suppressed by timing guard: {ticker} {r.get('long_entry_quality')} {r.get('latest_bar_change_pct')}")
                     continue
             # Q3/B4: Trade-Plan-Gates wie api — valid + nicht estimated + rr >= 1.0.
-            levels = _alert_trade_levels(r)
-            if not levels.get("valid"):
-                _suppress("invalid_trade_plan")
-                log.debug(f"Alert suppressed by invalid trade plan: {scanner_name} {ticker} {levels.get('errors')}")
-                continue
-            if levels.get("estimated"):
-                _suppress("estimated_trade_plan")
-                log.debug(f"Alert suppressed by estimated trade plan: {scanner_name} {ticker}")
-                continue
-            rr = levels.get("rr")
-            if not isinstance(rr, (int, float)) or rr < 1.0:
-                _suppress("trade_rr_below_threshold")
-                log.debug(f"Alert suppressed by R:R gate: {scanner_name} {ticker} rr={rr}")
+            if not _alert_trade_plan_ok(r):
+                _suppress("trade_plan_quality_gate")
+                log.debug(f"Alert suppressed by trade-plan quality gate: {scanner_name} {ticker}")
                 continue
             # Q3/B4: Health-Gate (zentral in modules.trade_health) — Stop-Breach,
             # Chase/Entry-Zone, live R:R; mailbar nur TRADEABLE + health_score >= 80.
@@ -1783,12 +1989,13 @@ def _check_and_alert_scan_results(scanner_name, secrets):
                 "grade": grade,
                 "score": score,
                 "price": r.get("Preis", r.get("current", 0)),
-                "direction": r.get("direction", direction if scanner_name.startswith("bi_") else ""),
+                "direction": r.get("direction") or default_direction,
                 "name": r.get("Name", r.get("name", "")),
                 "rvol": rvol_num if rvol_num is not None else 0,
                 "entry_quality": r.get("long_entry_quality", r.get("bear_entry_quality", "")),
                 "trade_plan_html": _format_alert_plan_html(r),
                 "cooldown_key": cooldown_key,
+                "source_row": r,
             })
             alert_source_rows.append(r)
 
@@ -1796,6 +2003,19 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         if suppressed:
             log.info(f"[Alert] {scanner_name}: suppressed={suppressed}")
 
+        if not alerts:
+            return
+
+        claimed_alerts = [
+            alert for alert in alerts
+            if _email_dedupe_claim(
+                alert["cooldown_key"],
+                _alert_dedupe_ttl_seconds(scanner_name),
+                now=now,
+            )
+        ]
+        alerts = claimed_alerts
+        alert_source_rows = [alert["source_row"] for alert in alerts]
         if not alerts:
             return
 
@@ -1862,6 +2082,7 @@ def _check_and_alert_scan_results(scanner_name, secrets):
         except TypeError:
             sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
         if sent:
+            mail_sent = True
             # B2: Cooldown + persistentes Dedupe NUR bei erfolgreichem Versand setzen.
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -1871,8 +2092,14 @@ def _check_and_alert_scan_results(scanner_name, secrets):
             # Signal-Tracking NUR nach erfolgreichem Versand (wirft nie).
             _record_alert_signals_safe(scanner_name, alert_source_rows,
                                        mail_class="trade", channel="email")
+        else:
+            for alert in claimed_alerts:
+                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
 
     except Exception as e:
+        if not mail_sent:
+            for alert in claimed_alerts:
+                _email_dedupe_release(alert.get("cooldown_key", ""), claimed_at=now)
         log.error(f"⚠️ Alert-Check {scanner_name}: {e}")
 
 
@@ -2074,6 +2301,10 @@ def _bg_run_bi_scan(direction, secrets, candidates=None):
 
 def _run_bi_scanner(poly_key, direction="long"):
     """BI Scanner via Polygon Snapshot → _bi_background_scan"""
+    scanner_name = f"bi_{direction}"
+    cache_file = _SCAN_CACHE_MAP[scanner_name]
+    previous_revision, _ = _scanner_cache_snapshot(cache_file)
+    started_at = time.time()
     _clear_scan_cache(f"bi_{direction}")
     label = "BI Long" if direction == "long" else "Bear Short"
     log.info(f"🔮 {label} Scanner...")
@@ -2088,7 +2319,7 @@ def _run_bi_scanner(poly_key, direction="long"):
         if snap.status_code != 200:
             log.error(f"  Polygon HTTP {snap.status_code}")
             _update_status(f"bi_{direction}", "error", f"HTTP {snap.status_code}")
-            return
+            raise RuntimeError(f"Polygon Snapshot HTTP {snap.status_code}")
 
         tickers = snap.json().get("tickers", [])
         log.info(f"  {len(tickers)} Aktien geladen")
@@ -2172,8 +2403,34 @@ def _run_bi_scanner(poly_key, direction="long"):
         log.info(f"  {len(filtered)} Kandidaten nach Filter")
 
         if not filtered:
-            _update_status(f"bi_{direction}", "no_candidates", f"0 Kandidaten von {len(raw)}")
-            return
+            now_ts = time.time()
+            _atomic_write_json(cache_file, {
+                "cached_at": datetime.now().isoformat(),
+                "timestamp": now_ts,
+                "direction": direction,
+                "partial": False,
+                "checked": 0,
+                "total": 0,
+                "detail": f"0 Kandidaten von {len(raw)}",
+                "count": 0,
+                "results": [],
+            })
+            progress_file = f"/tmp/bi_scan_progress_{direction}.json"
+            _atomic_write_json(progress_file, {
+                "status": "done",
+                "direction": direction,
+                "checked": 0,
+                "total": 0,
+                "hits": 0,
+                "detail": f"0 Kandidaten von {len(raw)}",
+                "timestamp": now_ts,
+            })
+            _require_final_scanner_publish(
+                scanner_name, cache_file, previous_revision, progress_file,
+                started_at, direction=direction,
+            )
+            _update_status(scanner_name, "ok", f"0 Kandidaten von {len(raw)}")
+            return []
 
         # 5) Progress-Datei schreiben damit Streamlit-UI den Fortschritt sieht
         progress_file = f"/tmp/bi_scan_progress_{direction}.json"
@@ -2188,11 +2445,22 @@ def _run_bi_scanner(poly_key, direction="long"):
         # _bi_background_scan schreibt Cache + Progress-File selbst.
         _bg_run_bi_scan(direction, {"POLYGON_KEY": poly_key}, candidates=filtered)
 
+        payload = _require_final_scanner_publish(
+            scanner_name,
+            cache_file,
+            previous_revision,
+            f"/tmp/bi_scan_progress_{direction}.json",
+            started_at,
+            direction=direction,
+        )
+
         _update_status(f"bi_{direction}", "ok", f"Scan abgeschlossen")
+        return payload.get("results", [])
 
     except Exception as e:
         log.error(f"❌ {label}: {e}\n{traceback.format_exc()}")
         _update_status(f"bi_{direction}", "error", str(e))
+        raise
 
 
 def _run_bear_scanner(poly_key, secrets):
@@ -2204,6 +2472,9 @@ def _run_bear_scanner(poly_key, secrets):
     import requests as req
     log.info("Bear Scanner (bg_service)...")
     _update_status("bear_scan", "running")
+    crash_dedupe_keys = []
+    crash_summary_key = ""
+    crash_mail_sent = False
 
     try:
         # 1) Polygon Losers Endpoint
@@ -2368,7 +2639,7 @@ def _run_bear_scanner(poly_key, secrets):
             for cs in crash_stocks:
                 ticker = str(cs.get("ticker", "?")).upper()
                 dedupe_key = f"crash_stock_{crash_date}_{ticker}"
-                if not _email_dedupe_active(dedupe_key, _CRASH_ALERT_DEDUPE_SEC):
+                if _email_dedupe_claim(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now=now):
                     fresh_crash_stocks.append(cs)
                     crash_dedupe_keys.append(dedupe_key)
                 else:
@@ -2379,7 +2650,11 @@ def _run_bear_scanner(poly_key, secrets):
 
         if crash_stocks:
             _crash_ck = f"crash_bg_{datetime.now().strftime('%Y%m%d_%H')}"  # Stündlicher Cooldown
-            if _crash_ck not in _EMAIL_COOLDOWN:
+            crash_summary_key = _crash_ck
+            if (
+                _crash_ck not in _EMAIL_COOLDOWN
+                and _email_dedupe_claim(_crash_ck, 3600, now=now)
+            ):
                 _crash_rows = ""
                 for cs in crash_stocks[:8]:
                     _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(cs["grade"], "#666")
@@ -2408,17 +2683,31 @@ def _run_bear_scanner(poly_key, secrets):
                 </body></html>'''
                 sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets, mail_class="trade")
                 if sent:
+                    crash_mail_sent = True
                     _EMAIL_COOLDOWN[_crash_ck] = now
+                    _email_dedupe_mark(_crash_ck, now=now)
                     for dedupe_key in crash_dedupe_keys:
-                        _email_dedupe_mark(dedupe_key)
+                        _email_dedupe_mark(dedupe_key, now=now)
                     for cs in crash_stocks:
                         _mark_bearish_stock_alert(cs.get("ticker", ""), now=now)
                     log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
                     # Signal-Tracking (Pfad dormant): crash_stocks sind Original-Rows.
                     _record_alert_signals_safe("bear_scan", crash_stocks,
                                                mail_class="trade", channel="email")
+                else:
+                    _email_dedupe_release(_crash_ck, claimed_at=now)
+                    for dedupe_key in crash_dedupe_keys:
+                        _email_dedupe_release(dedupe_key, claimed_at=now)
+            else:
+                for dedupe_key in crash_dedupe_keys:
+                    _email_dedupe_release(dedupe_key, claimed_at=now)
 
     except Exception as e:
+        if not crash_mail_sent:
+            if crash_summary_key:
+                _email_dedupe_release(crash_summary_key, claimed_at=locals().get("now"))
+            for dedupe_key in crash_dedupe_keys:
+                _email_dedupe_release(dedupe_key, claimed_at=locals().get("now"))
         log.error(f"Bear Scanner: {e}\n{traceback.format_exc()}")
         _update_status("bear_scan", "error", str(e))
 
@@ -2945,6 +3234,9 @@ def _run_orb_scanner(poly_key):
 
 def _run_biotech_scanner(poly_key):
     """Biotech Scanner — ruft _biotech_background_scan aus modules/scanners.py auf"""
+    cache_file = _SCAN_CACHE_MAP["biotech"]
+    previous_revision, _ = _scanner_cache_snapshot(cache_file)
+    started_at = time.time()
     _clear_scan_cache("biotech")
     log.info("🧬 Biotech Scanner...")
     _update_status("biotech", "running")
@@ -2952,11 +3244,20 @@ def _run_biotech_scanner(poly_key):
     try:
         from modules.scanners import _biotech_background_scan
         _biotech_background_scan(poly_key)
+        payload = _require_final_scanner_publish(
+            "biotech",
+            cache_file,
+            previous_revision,
+            "/tmp/alpha_biotech_progress.json",
+            started_at,
+        )
         _update_status("biotech", "ok", "Scan abgeschlossen")
         log.info("  ✅ Biotech Scan abgeschlossen")
+        return payload.get("results", [])
     except Exception as e:
         _update_status("biotech", "error", str(e))
         log.error(f"  ❌ Biotech Scan Fehler: {e}")
+        raise
 
 
 # ── M-7 Audit-Fix: Stablecoins / Wrapped / LSD / Gold-Token — keine direktionalen Mover ──
@@ -3673,7 +3974,7 @@ def _alert_nls_invalidations(results, secrets):
         if not _email_dedupe_active(signal_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
             continue
         invalidation_key = f"new_listing_invalidated_{raw_symbol}"
-        if _email_dedupe_active(invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
+        if not _email_dedupe_claim(invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
             continue
         display = _display_crypto_contract_symbol(raw_symbol)
         reason = html.escape(str(entry.get("status_reason", "") or "Stop gerissen"))
@@ -3694,13 +3995,19 @@ def _alert_nls_invalidations(results, secrets):
             Update-Mail (einmalig pro Symbol). Kein neues Signal, keine Handelsaufforderung.
         </p>
         </body></html>"""
-        sent = _send_email_alert(
-            f"Signal invalidiert — Stop gerissen: {display}",
-            body_html, secrets, mail_class="info",
-        )
+        try:
+            sent = _send_email_alert(
+                f"Signal invalidiert — Stop gerissen: {display}",
+                body_html, secrets, mail_class="info",
+            )
+        except Exception:
+            _email_dedupe_release(invalidation_key, claimed_at=now)
+            raise
         if sent:
             _email_dedupe_mark(invalidation_key, now=now)
             log.info(f"NLS Invalidierungs-Update gesendet: {display} ({raw_symbol})")
+        else:
+            _email_dedupe_release(invalidation_key, claimed_at=now)
 
 
 def _alert_nls_signals(results, secrets):
@@ -3799,6 +4106,8 @@ def _alert_nls_signals(results, secrets):
             "tp2": _safe_float(sig.get("tp2"), 0),
             "rr_effective": rr_effective,
             "cooldown_key": cooldown_key,
+            "source_row": {**sig, "symbol": raw_symbol, "ticker": symbol,
+                           "exchange": entry.get("exchange", ""), "direction": "short"},
         })
         # Roh-Signal (entry/stop_loss/tp*-Felder) + Symbol-Kontext für den Tracker.
         alert_source_rows.append({**sig, "symbol": raw_symbol, "ticker": symbol,
@@ -3806,6 +4115,15 @@ def _alert_nls_signals(results, secrets):
 
     if not alerts:
         return
+
+    claimed_alerts = []
+    for alert in alerts:
+        if _email_dedupe_claim(alert["cooldown_key"], _EMAIL_COOLDOWN_SEC, now=now):
+            claimed_alerts.append(alert)
+    alerts = claimed_alerts
+    if not alerts:
+        return
+    alert_source_rows = [alert["source_row"] for alert in alerts]
 
     n = len(alerts)
     rows = ""
@@ -3846,13 +4164,21 @@ def _alert_nls_signals(results, secrets):
     </body></html>
     """
 
+    claimed_keys = [alert["cooldown_key"] for alert in alerts]
+
     # telegram_text TypeError-tolerant (B7-Muster, s. _check_and_alert_scan_results).
+    sent = False
     try:
-        sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets,
-                                 mail_class="trade",
-                                 telegram_text=_format_telegram_text(alert_source_rows))
-    except TypeError:
-        sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
+        try:
+            sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets,
+                                     mail_class="trade",
+                                     telegram_text=_format_telegram_text(alert_source_rows))
+        except TypeError:
+            sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
+    except Exception:
+        for claimed_key in claimed_keys:
+            _email_dedupe_release(claimed_key, claimed_at=now)
+        raise
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
@@ -3862,6 +4188,8 @@ def _alert_nls_signals(results, secrets):
         _record_alert_signals_safe("new_listing", alert_source_rows,
                                    mail_class="trade", channel="email")
     else:
+        for claimed_key in claimed_keys:
+            _email_dedupe_release(claimed_key, claimed_at=now)
         log.warning(f"NLS Alert konnte nicht gesendet werden ({', '.join(a['symbol'] for a in alerts)})")
 
 
@@ -3918,23 +4246,39 @@ BG_API_OWNED_OVERLAP = {"crash_monitor", "btc_divergence", "bear_scan", "strateg
 BG_DEFAULT_SCAN_SET = BG_ALL_SCANS - BG_API_OWNED_OVERLAP
 
 
-def _resolve_bg_scan_set(env_value=None):
+def _resolve_bg_scan_set(env_value=None, allow_api_overlap=None):
     """H-9 (pure, testbar): Aktive bg-Scans aus ENV BG_SCAN_SET oder Default-Set.
 
     Returns: (aktive_scans: set, übersprungene_scans: set)
     """
     raw = env_value if env_value is not None else os.environ.get("BG_SCAN_SET", "")
     raw = (raw or "").strip()
+    if raw.lower() == "default":
+        raw = ""
     if raw:
         wanted = {s.strip().lower() for s in raw.split(",") if s.strip()}
         unknown = wanted - BG_ALL_SCANS
         if unknown:
             log.warning(f"BG_SCAN_SET: unbekannte Scans ignoriert: {sorted(unknown)} "
                         f"(gültig: {sorted(BG_ALL_SCANS)})")
-        active = wanted & BG_ALL_SCANS
-        if not active:
+        valid = wanted & BG_ALL_SCANS
+        if not valid:
             log.warning("BG_SCAN_SET ergab leere Scan-Menge — nutze Default-Set")
             active = set(BG_DEFAULT_SCAN_SET)
+        else:
+            active = set(valid)
+            allow_overlap = allow_api_overlap
+            if allow_overlap is None:
+                allow_overlap = str(os.environ.get("ALLOW_DUPLICATE_SCAN_OWNERSHIP", "0")).strip().lower() in {
+                    "1", "true", "yes", "on",
+                }
+            duplicate_scans = active & BG_API_OWNED_OVERLAP
+            if duplicate_scans and not allow_overlap:
+                log.warning(
+                    "BG_SCAN_SET: API-eigene Scanner werden zum Schutz vor Doppel-Laeufen blockiert: "
+                    f"{sorted(duplicate_scans)}"
+                )
+                active -= duplicate_scans
     else:
         active = set(BG_DEFAULT_SCAN_SET)
     return active, BG_ALL_SCANS - active

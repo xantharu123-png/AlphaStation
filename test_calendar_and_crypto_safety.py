@@ -75,7 +75,7 @@ def test_scanner_quality_and_safe_deploy_are_present():
     assert '"why_in"' in api_source
     assert '"exclusion_policy"' in api_source
     assert "RISK_POLICY" in api_source
-    assert '"$PYTHON" -m py_compile' in deploy_script
+    assert '"$PYTHON" -m compileall' in deploy_script
     assert "python3 -m venv" in deploy_script
     assert "detect_service_venv" in deploy_script
     assert 'systemctl show -p ExecStart' in deploy_script

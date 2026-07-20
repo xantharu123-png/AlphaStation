@@ -2,7 +2,7 @@
 
 API (api.py):
 - Tab-Gate 'signal-performance' in _TAB_GATES registriert; Pro-Liste in
-  SCANNER_TABS_BY_PLAN erweitert (Elite/Trial = None = alle Tabs, Basic
+  SCANNER_TABS_BY_PLAN explizit erweitert (Elite/Trial = Kunden-Tabs, Basic
   bleibt gesperrt) — Map-Pin + Source-Pin analog test_audit_fixes_api H-11.
 - days-Clamp 1..365 + Default 30 (auch bei direktem Funktionsaufruf, wo
   FastAPI-Query-Parsing nicht greift).
@@ -53,13 +53,14 @@ def test_tab_gate_registered_for_signal_performance():
     gates = dict(api._TAB_GATES)
     assert gates.get("/api/signal-performance") == "signal-performance"
 
-    # Source-Pin: Pro-Freischaltung lebt in api.py (nicht modules/auth.py)
+    # No runtime mutation: plan access is defined once in modules/auth.py.
     api_src = (ROOT / "api.py").read_text(encoding="utf-8")
-    assert 'SCANNER_TABS_BY_PLAN["pro"].append("signal-performance")' in api_src
+    assert 'SCANNER_TABS_BY_PLAN["pro"].append("signal-performance")' not in api_src
 
     if api.HAS_AUTH:
         assert "signal-performance" in api.SCANNER_TABS_BY_PLAN["pro"]
-        assert api.SCANNER_TABS_BY_PLAN["elite"] is None  # None = alle Tabs
+        assert "signal-performance" in api.SCANNER_TABS_BY_PLAN["elite"]
+        assert "signal-performance" in api.SCANNER_TABS_BY_PLAN["trial"]
         assert "signal-performance" not in api.SCANNER_TABS_BY_PLAN["basic"]
 
 

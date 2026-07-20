@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from modules.penny_stock_scanner import (
@@ -40,8 +41,11 @@ def _bars(now_ts, *, upper_wick=False, stale=False):
         "low": 1.012,
         "close": 1.025 if upper_wick else 1.045,
         "volume": 2_700,
-        "timestamp": (now_ts - 3_600) if stale else (now_ts - 300),
+        "timestamp": now_ts - 300,
     })
+    if stale:
+        for bar in bars:
+            bar["timestamp"] -= 3_600
     return bars
 
 
@@ -138,6 +142,32 @@ def test_stale_breakout_never_becomes_buy_now():
     assert "closed_5m_trigger_stale" in row["hard_blockers"]
 
 
+def test_unfinished_5m_candle_cannot_create_a_breakout_signal():
+    now_ts = time.time()
+    bars = _bars(now_ts)
+    bars[-1].update({
+        "open": 1.008,
+        "high": 1.016,
+        "low": 1.000,
+        "close": 1.010,
+        "volume": 900,
+    })
+    bars.append({
+        "open": 1.010,
+        "high": 1.180,
+        "low": 1.008,
+        "close": 1.170,
+        "volume": 50_000,
+        "timestamp": int((now_ts - 60) * 1000),
+    })
+
+    intraday = analyze_penny_intraday(bars, now_ts=now_ts)
+
+    assert intraday["price"] == 1.010
+    assert intraday["breakout_confirmed"] is False
+    assert intraday["trigger_confirmed"] is False
+
+
 def test_recent_offering_or_reverse_split_news_blocks_buy_mail_state():
     now_ts = time.time()
     risky_details = {
@@ -172,6 +202,34 @@ def test_targets_must_be_distinct_verified_structure_levels():
     )
     assert plan["valid"] is False
     assert "no_distinct_structural_tp2_at_acceptable_reward" in plan["blockers"]
+
+
+def test_live_trade_plan_uses_cost_adjusted_not_gross_reward():
+    now_ts = time.time()
+    intraday = analyze_penny_intraday(_bars(now_ts), now_ts=now_ts)
+    liquid = build_penny_trade_plan(
+        intraday,
+        [],
+        extra_resistances=_targets(),
+        entry_price=1.046,
+        spread_bps=45,
+        slippage_bps=15,
+    )
+    expensive = build_penny_trade_plan(
+        intraday,
+        [],
+        extra_resistances=_targets(),
+        entry_price=1.046,
+        spread_bps=300,
+        slippage_bps=150,
+    )
+
+    assert liquid["valid"] is True
+    assert liquid["rr"] < liquid["gross_rr"]
+    assert liquid["rr_tp1"] < liquid["gross_rr_tp1"]
+    assert liquid["round_trip_cost"] > 0
+    assert expensive["valid"] is False
+    assert "net_effective_rr_below_cost_adjusted_minimum" in expensive["blockers"]
 
 
 def test_active_position_gets_exit_when_vwap_breaks_on_heavy_red_bar():
@@ -311,6 +369,7 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     daily = tmp_path / "daily.json"
     news = tmp_path / "news.json"
     sec = tmp_path / "sec.json"
+    dedupe = tmp_path / "email_dedupe.json"
     sent = []
 
     monkeypatch.setattr(api, "PENNY_STOCKS_CACHE", str(cache))
@@ -319,6 +378,7 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     monkeypatch.setattr(api, "PENNY_STOCKS_DAILY_CACHE", str(daily))
     monkeypatch.setattr(api, "PENNY_STOCKS_NEWS_CACHE", str(news))
     monkeypatch.setattr(api, "PENNY_STOCKS_SEC_CACHE", str(sec))
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(dedupe))
     monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PUMP"}, "test"))
     monkeypatch.setattr(api, "_us_equity_expected_volume_fraction", lambda *args, **kwargs: 1.0)
@@ -327,6 +387,13 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     monkeypatch.setattr(api, "get_ticker_news", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "_penny_fetch_sec_filing_context", lambda *args, **kwargs: {"status": "ok", "risk_flags": []})
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *args, **kwargs: _bars(now_ts))
+    monkeypatch.setattr(api, "_penny_fetch_live_spread", lambda *args, **kwargs: {
+        "bid": 1.044,
+        "ask": 1.046,
+        "spread_bps": 19.1,
+        "spread_known": True,
+        "quote_age_seconds": 1.0,
+    })
     monkeypatch.setattr(api, "_penny_fetch_daily_bars", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "_penny_vrvp_resistances", lambda *args, **kwargs: _targets())
     # Simulate SMTP failure: the scanner-model lifecycle must still persist.
@@ -343,6 +410,7 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     state_payload = api._penny_load_dict(str(state))
     assert state_payload["tickers"]["PUMP"]["active"] is True
     assert state_payload["tickers"]["PUMP"].get("buy_email_sent") is not True
+    assert not api._email_dedupe_active(sent[0]["_dedupe_key"], 6 * 3600, now=now_ts + 1)
 
 
 def test_spread_and_atr_define_real_breakout_clearance():
@@ -532,7 +600,7 @@ def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
 def test_recent_sec_registration_form_is_a_hard_risk_source(monkeypatch):
     import api
 
-    today = time.strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     class Response:
         status_code = 200

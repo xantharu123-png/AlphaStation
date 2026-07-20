@@ -22,7 +22,10 @@ import modules.signal_tracker as st
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _base_row(**overrides):
     """Plausible LONG-Alert-Row: Entry 100, Stop 95 (Risk 5), TP1 105, TP2 110."""
-    row = {"Ticker": "AAPL", "Entry": 100.0, "StopLoss": 95.0, "TP1": 105.0, "TP2": 110.0}
+    row = {
+        "Ticker": "AAPL", "Entry": 100.0, "StopLoss": 95.0,
+        "TP1": 105.0, "TP2": 110.0, "Preis": 100.0,
+    }
     row.update(overrides)
     return row
 
@@ -49,13 +52,24 @@ def _created_date(ticker):
 def _bars_after(ticker, specs):
     """Daily-Bars an den Folgetagen des Alerts (Tag +1, +2, ...).
 
-    specs: Liste von (high, low, close)-Tupeln.
+    specs: Liste von (high, low, close)- oder (open, high, low, close)-Tupeln.
     """
     d0 = _created_date(ticker)
-    return [
-        {"date": (d0 + timedelta(days=i)).isoformat(), "high": h, "low": l, "close": c}
-        for i, (h, l, c) in enumerate(specs, start=1)
-    ]
+    bars = []
+    for i, spec in enumerate(specs, start=1):
+        if len(spec) == 4:
+            open_price, high, low, close = spec
+        else:
+            high, low, close = spec
+            open_price = min(max(100.0, low), high)
+        bars.append({
+            "date": (d0 + timedelta(days=i)).isoformat(),
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+        })
+    return bars
 
 
 def _stock_fetcher(bars_by_ticker):
@@ -109,10 +123,24 @@ def test_record_skips_rows_without_required_fields(tracker):
         {"Ticker": "NOSTOP", "Entry": 100.0},                   # kein Stop
         {"Ticker": "NONUM", "Entry": "n/a", "StopLoss": 95.0},  # Entry nicht numerisch
         _base_row(Ticker="BADGEO", StopLoss=105.0),             # LONG mit Stop > Entry
+        _base_row(Ticker="NOTP1", TP1=None),                    # kein erstes Ziel
+        _base_row(Ticker="NOTP2", TP2=None),                    # kein zweites Ziel
+        _base_row(Ticker="SAMETP", TP2=105.0),                  # TP1 und TP2 identisch
+        _base_row(Ticker="WRONGTP", TP1=99.0, TP2=110.0),       # LONG-Ziel unter Entry
         _base_row(Ticker="OK1"),
     ]
     assert tracker.record_alert_signals("breakout", rows) == 1
     assert [r["ticker"] for r in _db_rows()] == ["OK1"]
+
+
+def test_record_rejects_wrong_short_target_geometry(tracker):
+    rows = [
+        _base_row(Ticker="SHORTOK", direction="SHORT", StopLoss=105.0, TP1=95.0, TP2=90.0),
+        _base_row(Ticker="SHORTUP", direction="SHORT", StopLoss=105.0, TP1=101.0, TP2=90.0),
+        _base_row(Ticker="SHORTREV", direction="SHORT", StopLoss=105.0, TP1=90.0, TP2=95.0),
+    ]
+    assert tracker.record_alert_signals("short_squeeze", rows) == 1
+    assert [r["ticker"] for r in _db_rows()] == ["SHORTOK"]
 
 
 def test_record_tolerant_field_aliases(tracker):
@@ -351,7 +379,7 @@ def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     assert result == {"evaluated": 3, "closed": 2, "errors": 0}
     doge = _signal("DOGE")
     assert doge["status"] == "STOP_HIT"
-    assert doge["r_realized"] == pytest.approx(-1.0)
+    assert doge["r_realized"] == pytest.approx(-1.2)  # Spot-Check bereits durch Stop: echte Slippage
     sol = _signal("SOL")
     assert sol["status"] == "TP2_HIT"
     assert sol["r_realized"] == pytest.approx(2.0)
@@ -376,7 +404,7 @@ def test_performance_summary_math(tracker):
     assert tracker.record_alert_signals("breakout", rows) == 4
     assert tracker.record_alert_signals("bi_scanner", [_base_row(Ticker="OTHER")]) == 1
     bars = {
-        "WIN": _bars_after("WIN", [(111.0, 104.0, 110.0)]),   # TP2 -> +2.0R
+        "WIN": _bars_after("WIN", [(111.0, 99.0, 110.0)]),    # Entry handelbar, TP2 -> +2.0R
         "LOSS": _bars_after("LOSS", [(101.0, 94.0, 95.0)]),   # Stop -> -1.0R
         "RUN": _bars_after("RUN", [(103.0, 99.0, 102.0)]),    # bleibt OPEN
         "PART": _bars_after(                                   # TP1, dann EXPIRED (+0.4R)

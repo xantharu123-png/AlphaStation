@@ -52,6 +52,9 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+from modules.trade_levels import trade_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,7 @@ STATUS_STOP = "STOP_HIT"
 STATUS_TP2 = "TP2_HIT"
 STATUS_EXPIRED = "EXPIRED"
 STATUS_UNTRACKED = "UNTRACKED"
+STATUS_NO_FILL = "NO_FILL"
 #: Virtueller Transitions-Status (NIE in der DB): TP1 wurde in DIESEM
 #: Eval-Lauf erreicht, das Signal bleibt aber OPEN (Teilgewinn, Rest
 #: Freiroll Richtung TP2). Nur fuer result['transitions'] der Funktion
@@ -260,8 +264,15 @@ CREATE TABLE IF NOT EXISTS signals (
     max_adverse_r REAL NOT NULL DEFAULT 0,
     last_eval_at TEXT,
     eval_fail_count INTEGER NOT NULL DEFAULT 0
+    ,entry_filled_at TEXT
+    ,entry_fill_price REAL
 )
 """
+
+_SCHEMA_MIGRATIONS = {
+    "entry_filled_at": "TEXT",
+    "entry_fill_price": "REAL",
+}
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)",
@@ -285,6 +296,12 @@ def _db_connection():
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=15000")
         conn.execute(_SCHEMA)
+        existing_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+        }
+        for column, column_type in _SCHEMA_MIGRATIONS.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {column} {column_type}")
         for statement in _INDEXES:
             conn.execute(statement)
         yield conn
@@ -311,11 +328,10 @@ def record_alert_signals(
     Regeln:
       - Nur mail_class == "trade" wird geloggt (sonst Rueckgabe 0).
       - Felder werden tolerant extrahiert (siehe extract_signal_fields).
-      - Pflichtfelder pro Row: ticker, entry (numerisch), stop (numerisch),
-        direction (Default LONG). Rows ohne Pflichtfelder werden uebersprungen
-        und zaehlen nicht. Zusaetzliche Plausibilitaet: der Stop muss auf der
-        richtigen Seite des Entries liegen (Risiko > 0), sonst waere das
-        Signal spaeter nicht in R bewertbar -> Row wird uebersprungen.
+      - Pflichtfelder pro Row: ticker, entry, stop, tp1 und tp2 (numerisch),
+        direction (Default LONG). Die komplette Trade-Geometrie muss gueltig
+        sein: LONG stop < entry < tp1 < tp2, SHORT spiegelverkehrt.
+        Ungueltige Rows werden nicht in die Erfolgsstatistik aufgenommen.
       - asset_class = 'crypto', wenn scanner_name in CRYPTO_SCANNERS,
         sonst 'stock'.
       - Dedupe: Existiert bereits ein OPEN-Signal mit gleichem
@@ -349,8 +365,14 @@ def record_alert_signals(
                         direction = fields["direction"]
                         if not ticker or entry is None or stop is None:
                             continue
-                        risk = (entry - stop) if direction == "LONG" else (stop - entry)
-                        if risk <= 0:
+                        geometry = trade_geometry(
+                            entry,
+                            stop,
+                            fields["tp1"],
+                            fields["tp2"],
+                            direction,
+                        )
+                        if not geometry.get("valid"):
                             logger.debug(
                                 "record_alert_signals: %s/%s unplausible Geometrie "
                                 "(entry=%s stop=%s %s) — uebersprungen",
@@ -363,19 +385,31 @@ def record_alert_signals(
                         ).fetchone()
                         if exists:
                             continue
+                        fill_at = None
+                        fill_price = None
+                        alert_price = fields["price_at_alert"]
+                        if asset_class == "crypto" and alert_price is not None:
+                            if direction == "LONG" and entry <= alert_price < fields["tp1"]:
+                                fill_at = now_iso
+                                fill_price = float(alert_price)
+                            elif direction == "SHORT" and fields["tp1"] < alert_price <= entry:
+                                fill_at = now_iso
+                                fill_price = float(alert_price)
                         conn.execute(
                             """
                             INSERT INTO signals (
                                 created_at, scanner, ticker, asset_class, direction,
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
-                                rvol, mail_class, channel, status, outcome_detail
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                rvol, mail_class, channel, status, outcome_detail,
+                                entry_filled_at, entry_fill_price
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
                                 float(entry), float(stop), fields["tp1"], fields["tp2"],
                                 fields["price_at_alert"], fields["grade"], fields["score"],
                                 fields["rvol"], "trade", channel_norm, STATUS_OPEN, "",
+                                fill_at, fill_price,
                             ),
                         )
                         inserted += 1
@@ -435,13 +469,13 @@ def _parse_bar_date(value: Any) -> Optional[date]:
 
 def _normalize_daily_bars(
     bars_raw: Any, created_date: date
-) -> List[Tuple[date, float, float, float]]:
+) -> List[Tuple[date, float, float, float, float]]:
     """Bars validieren, auf Folgetage (> Alert-Datum) filtern und sortieren.
 
     Der Alert-Tag selbst wird bewusst NICHT bewertet: seine Daily-Bar enthaelt
     auch die Kursbewegung VOR dem Alert und waere damit nicht aussagekraeftig.
     """
-    bars: List[Tuple[date, float, float, float]] = []
+    bars: List[Tuple[date, float, float, float, float]] = []
     for bar in bars_raw or []:
         if not isinstance(bar, dict):
             continue
@@ -449,11 +483,18 @@ def _normalize_daily_bars(
         high = _to_float(bar.get("high"))
         low = _to_float(bar.get("low"))
         close = _to_float(bar.get("close"))
+        open_price = _to_float(bar.get("open"))
         if bar_date is None or high is None or low is None or close is None:
             continue
         if bar_date <= created_date:
             continue
-        bars.append((bar_date, high, low, close))
+        if open_price is None:
+            # Legacy fetchers did not expose open. Falling back to close keeps
+            # old records trackable, while production fetchers provide OHLC.
+            open_price = close
+        if min(open_price, high, low, close) <= 0 or high < max(open_price, close) or low > min(open_price, close):
+            continue
+        bars.append((bar_date, open_price, high, low, close))
     bars.sort(key=lambda item: item[0])
     return bars
 
@@ -478,7 +519,7 @@ def _evaluate_stock_signal(
     falls TP1 vorher erreicht war).
     """
     created_dt = _parse_utc_datetime(sig.get("created_at")) or now_dt
-    created_date = created_dt.date()
+    created_date = created_dt.astimezone(ZoneInfo("America/New_York")).date()
     bars_raw = fetcher(sig["ticker"], created_date.isoformat())
     if not bars_raw:
         return _register_eval_failure(sig, now_dt), True
@@ -488,8 +529,9 @@ def _evaluate_stock_signal(
     tp1 = float(sig["tp1"]) if sig.get("tp1") is not None else None
     tp2 = float(sig["tp2"]) if sig.get("tp2") is not None else None
     direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
-    risk = (entry - stop) if direction == "LONG" else (stop - entry)
-    if risk <= 0:  # record() verhindert das bereits — reine Defensive.
+    geometry = trade_geometry(entry, stop, tp1, tp2, direction)
+    planned_risk = geometry.get("risk")
+    if not geometry.get("valid") or planned_risk is None:
         return _register_eval_failure(sig, now_dt), True
 
     now_iso = now_dt.isoformat()
@@ -497,22 +539,77 @@ def _evaluate_stock_signal(
     tp1_hit_at = sig.get("tp1_hit_at") or None
     max_fav = float(sig.get("max_favorable_r") or 0.0)
     max_adv = float(sig.get("max_adverse_r") or 0.0)
+    fill_at = sig.get("entry_filled_at") or None
+    fill_price = _to_float(sig.get("entry_fill_price"))
+    fill_date = _parse_bar_date(fill_at) if fill_at else None
+    bars_after_alert = 0
+    holding_bars = 0
 
-    bars_seen = 0
-    for bar_date, high, low, close in _normalize_daily_bars(bars_raw, created_date):
-        bars_seen += 1
+    for bar_date, open_price, high, low, close in _normalize_daily_bars(bars_raw, created_date):
+        bars_after_alert += 1
+        if fill_price is None:
+            if direction == "LONG":
+                if open_price >= tp1:
+                    updates.update({
+                        "status": STATUS_NO_FILL,
+                        "closed_at": now_iso,
+                        "outcome_detail": "entry_gapped_beyond_tp1",
+                    })
+                    break
+                if open_price >= entry:
+                    fill_price = open_price
+                elif low <= entry <= high:
+                    fill_price = entry
+            else:
+                if open_price <= tp1:
+                    updates.update({
+                        "status": STATUS_NO_FILL,
+                        "closed_at": now_iso,
+                        "outcome_detail": "entry_gapped_beyond_tp1",
+                    })
+                    break
+                if open_price <= entry:
+                    fill_price = open_price
+                elif low <= entry <= high:
+                    fill_price = entry
+            if fill_price is None:
+                if bars_after_alert >= STOCK_EXPIRY_BARS:
+                    updates.update({
+                        "status": STATUS_NO_FILL,
+                        "closed_at": now_iso,
+                        "outcome_detail": "entry_not_reached",
+                    })
+                    break
+                continue
+            fill_date = bar_date
+            fill_at = bar_date.isoformat()
+            updates["entry_filled_at"] = fill_at
+            updates["entry_fill_price"] = round(fill_price, 8)
+
+        if fill_date is not None and bar_date < fill_date:
+            continue
+        actual_geometry = trade_geometry(fill_price, stop, tp1, tp2, direction)
+        risk = actual_geometry.get("risk")
+        if not actual_geometry.get("valid") or risk is None:
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": "fill_invalidated_trade_geometry",
+            })
+            break
+        holding_bars += 1
         if direction == "LONG":
             stop_hit = low <= stop
             tp2_hit = tp2 is not None and high >= tp2
             tp1_touch = tp1 is not None and high >= tp1
-            favorable = (high - entry) / risk
-            adverse = (low - entry) / risk
+            favorable = (high - fill_price) / risk
+            adverse = (low - fill_price) / risk
         else:
             stop_hit = high >= stop
             tp2_hit = tp2 is not None and low <= tp2
             tp1_touch = tp1 is not None and low <= tp1
-            favorable = (entry - low) / risk
-            adverse = (entry - high) / risk
+            favorable = (fill_price - low) / risk
+            adverse = (fill_price - high) / risk
         max_fav = max(max_fav, favorable)
         max_adv = min(max_adv, adverse)
         day_iso = bar_date.isoformat()
@@ -521,11 +618,15 @@ def _evaluate_stock_signal(
             # Stop und ein NEUES TP-Level am selben Tag -> Reihenfolge unklar:
             # konservativ den Stop zuerst werten, TP nicht gutschreiben.
             ambiguous = tp2_hit or (tp1_touch and not tp1_hit_at)
+            if direction == "LONG":
+                stop_exit = open_price if open_price < stop else stop
+            else:
+                stop_exit = open_price if open_price > stop else stop
             updates.update({
                 "status": STATUS_STOP,
                 "stop_hit_at": day_iso,
                 "closed_at": now_iso,
-                "r_realized": -1.0,
+                "r_realized": round(_signed_r(stop_exit, fill_price, risk, direction), 4),
                 "outcome_detail": "ambiguous_same_day" if ambiguous else "",
             })
             break
@@ -536,17 +637,17 @@ def _evaluate_stock_signal(
                 "status": STATUS_TP2,
                 "tp2_hit_at": day_iso,
                 "closed_at": now_iso,
-                "r_realized": round(_signed_r(tp2, entry, risk, direction), 4),
+                "r_realized": round(_signed_r(tp2, fill_price, risk, direction), 4),
                 "outcome_detail": "",
             })
             break
         if tp1_touch and not tp1_hit_at:
             tp1_hit_at = day_iso
-        if bars_seen >= STOCK_EXPIRY_BARS:
+        if holding_bars >= STOCK_EXPIRY_BARS:
             updates.update({
                 "status": STATUS_EXPIRED,
                 "closed_at": now_iso,
-                "r_realized": round(_signed_r(close, entry, risk, direction), 4),
+                "r_realized": round(_signed_r(close, fill_price, risk, direction), 4),
                 "outcome_detail": "tp1_then_expired" if tp1_hit_at else "",
             })
             break
@@ -580,20 +681,72 @@ def _evaluate_crypto_signal(
     tp1 = float(sig["tp1"]) if sig.get("tp1") is not None else None
     tp2 = float(sig["tp2"]) if sig.get("tp2") is not None else None
     direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
-    risk = (entry - stop) if direction == "LONG" else (stop - entry)
-    if risk <= 0:  # record() verhindert das bereits — reine Defensive.
+    geometry = trade_geometry(entry, stop, tp1, tp2, direction)
+    if not geometry.get("valid"):
         return _register_eval_failure(sig, now_dt), True
 
     now_iso = now_dt.isoformat()
-    r_now = _signed_r(price, entry, risk, direction)
+    created_dt = _parse_utc_datetime(sig.get("created_at"))
+    expired = created_dt is not None and now_dt >= created_dt + timedelta(hours=CRYPTO_EXPIRY_HOURS)
+    fill_at = sig.get("entry_filled_at") or None
+    fill_price = _to_float(sig.get("entry_fill_price"))
+    alert_price = _to_float(sig.get("price_at_alert"))
+    updates: Dict[str, Any] = {"last_eval_at": now_iso}
+
+    if fill_price is None:
+        crossed_from_valid_side = (
+            alert_price is not None
+            and ((direction == "LONG" and alert_price < entry) or (direction == "SHORT" and alert_price > entry))
+        )
+        if direction == "LONG" and price >= entry:
+            if price >= tp1 and not crossed_from_valid_side:
+                updates.update({
+                    "status": STATUS_NO_FILL,
+                    "closed_at": now_iso,
+                    "outcome_detail": "entry_observed_after_tp1",
+                })
+                return updates, False
+            fill_price = entry if crossed_from_valid_side else price
+        elif direction == "SHORT" and price <= entry:
+            if price <= tp1 and not crossed_from_valid_side:
+                updates.update({
+                    "status": STATUS_NO_FILL,
+                    "closed_at": now_iso,
+                    "outcome_detail": "entry_observed_after_tp1",
+                })
+                return updates, False
+            fill_price = entry if crossed_from_valid_side else price
+        elif expired:
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": "entry_not_reached",
+            })
+            return updates, False
+        else:
+            return updates, False
+        fill_at = now_iso
+        updates["entry_filled_at"] = fill_at
+        updates["entry_fill_price"] = round(fill_price, 8)
+
+    actual_geometry = trade_geometry(fill_price, stop, tp1, tp2, direction)
+    risk = actual_geometry.get("risk")
+    if not actual_geometry.get("valid") or risk is None:
+        updates.update({
+            "status": STATUS_NO_FILL,
+            "closed_at": now_iso,
+            "outcome_detail": "fill_invalidated_trade_geometry",
+        })
+        return updates, False
+
+    r_now = _signed_r(price, fill_price, risk, direction)
     max_fav = max(float(sig.get("max_favorable_r") or 0.0), r_now)
     max_adv = min(float(sig.get("max_adverse_r") or 0.0), r_now)
     tp1_hit_at = sig.get("tp1_hit_at") or None
-    updates: Dict[str, Any] = {
-        "last_eval_at": now_iso,
+    updates.update({
         "max_favorable_r": round(max_fav, 4),
         "max_adverse_r": round(max_adv, 4),
-    }
+    })
 
     if direction == "LONG":
         stop_hit = price <= stop
@@ -609,7 +762,7 @@ def _evaluate_crypto_signal(
             "status": STATUS_STOP,
             "stop_hit_at": now_iso,
             "closed_at": now_iso,
-            "r_realized": -1.0,
+            "r_realized": round(r_now, 4),
             "outcome_detail": "",
         })
     elif tp2_hit:
@@ -619,14 +772,13 @@ def _evaluate_crypto_signal(
             "status": STATUS_TP2,
             "tp2_hit_at": now_iso,
             "closed_at": now_iso,
-            "r_realized": round(_signed_r(tp2, entry, risk, direction), 4),
+            "r_realized": round(_signed_r(tp2, fill_price, risk, direction), 4),
             "outcome_detail": "",
         })
     else:
         if tp1_touch and not tp1_hit_at:
             tp1_hit_at = now_iso
-        created_dt = _parse_utc_datetime(sig.get("created_at"))
-        if created_dt is not None and now_dt >= created_dt + timedelta(hours=CRYPTO_EXPIRY_HOURS):
+        if expired:
             updates.update({
                 "status": STATUS_EXPIRED,
                 "closed_at": now_iso,
@@ -690,6 +842,7 @@ def _transition_record(
         "old_status": str(sig.get("status") or STATUS_OPEN),
         "new_status": new_status,
         "entry": _to_float(sig.get("entry")),
+        "entry_fill_price": _to_float(updates.get("entry_fill_price", sig.get("entry_fill_price"))),
         "stop": _to_float(sig.get("stop")),
         "tp1": _to_float(sig.get("tp1")),
         "tp2": _to_float(sig.get("tp2")),
@@ -811,7 +964,9 @@ def evaluate_open_signals(
 
 
 # ── Performance-Summary ──────────────────────────────────────────────────────
-_METRIC_KEYS = ("signals", "open", "tp1_hit", "tp2_hit", "stop_hit", "expired", "untracked")
+_METRIC_KEYS = (
+    "signals", "open", "tp1_hit", "tp2_hit", "stop_hit", "expired", "no_fill", "untracked"
+)
 
 
 def _empty_bucket() -> Dict[str, Any]:
@@ -829,16 +984,17 @@ def _classify_row(row: Dict[str, Any]) -> str:
         return "stop_hit"
     if status == STATUS_UNTRACKED:
         return "untracked"
+    if status == STATUS_NO_FILL:
+        return "no_fill"
     if status == STATUS_EXPIRED:
-        # TP1 erreicht und dann ausgelaufen = Teilgewinner ('tp1_hit'),
-        # ausgelaufen ohne jedes TP = 'expired'.
-        return "tp1_hit" if row.get("tp1_hit_at") else "expired"
+        realized = _to_float(row.get("r_realized"))
+        return "tp1_hit" if row.get("tp1_hit_at") and realized is not None and realized > 0 else "expired"
     return "open"
 
 
 def _finalize_bucket(bucket: Dict[str, Any], r_values: List[float], window_days: int) -> None:
-    wins = bucket["tp1_hit"] + bucket["tp2_hit"]
-    decided = wins + bucket["stop_hit"]
+    wins = sum(1 for value in r_values if value > 0)
+    decided = len(r_values)
     bucket["win_rate_pct"] = round(100.0 * wins / decided, 1) if decided else None
     bucket["avg_r"] = round(sum(r_values) / len(r_values), 3) if r_values else None
     bucket["sum_r"] = round(sum(r_values), 3) if r_values else 0.0
@@ -916,6 +1072,8 @@ def load_performance_summary(days: int = 90) -> dict:
                 "status": row.get("status"),
                 "outcome_detail": row.get("outcome_detail") or "",
                 "entry": row.get("entry"),
+                "entry_filled_at": row.get("entry_filled_at"),
+                "entry_fill_price": row.get("entry_fill_price"),
                 "stop": row.get("stop"),
                 "tp1": row.get("tp1"),
                 "tp2": row.get("tp2"),

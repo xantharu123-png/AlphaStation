@@ -7,6 +7,7 @@ scanner code can use the same Entry/Stop/TP math without drifting apart.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -59,9 +60,9 @@ def infer_trade_direction(row: Dict[str, Any]) -> Optional[str]:
         setup.get("direction"),
         setup.get("trade_action"),
     )).upper()
-    if "SHORT" in text or text == "SELL":
+    if "SHORT" in text or re.search(r"\bSELL\b", text):
         return "SHORT"
-    if "LONG" in text or "BUY" in text:
+    if "LONG" in text or re.search(r"\bBUY\b", text):
         return "LONG"
     return None
 
@@ -75,23 +76,43 @@ def trade_geometry(
 ) -> Dict[str, Any]:
     """Validate signed trade geometry and calculate blended R:R.
 
-    LONG: stop < entry < tp1 <= tp2
-    SHORT: stop > entry > tp1 >= tp2
+    LONG: stop < entry < tp1 < tp2
+    SHORT: stop > entry > tp1 > tp2
     """
+    entry = safe_float(entry, None)
+    stop = safe_float(stop, None)
+    tp1 = safe_float(tp1, None)
+    tp2 = safe_float(tp2, None)
+    direction = str(direction or "").strip().upper() or None
+
     errors: List[str] = []
     warnings: List[str] = []
 
-    if not entry or not stop or not tp1 or not tp2:
+    if entry is None or stop is None or tp1 is None or tp2 is None:
         missing = []
-        if not entry:
+        if entry is None:
             missing.append("entry")
-        if not stop:
+        if stop is None:
             missing.append("stop")
-        if not tp1:
+        if tp1 is None:
             missing.append("tp1")
-        if not tp2:
+        if tp2 is None:
             missing.append("tp2")
         return {"valid": False, "rr": None, "risk": None, "direction": direction, "errors": [f"missing_{','.join(missing)}"], "warnings": warnings}
+
+    non_positive = [
+        name for name, value in (("entry", entry), ("stop", stop), ("tp1", tp1), ("tp2", tp2))
+        if value <= 0
+    ]
+    if non_positive:
+        return {
+            "valid": False,
+            "rr": None,
+            "risk": None,
+            "direction": direction,
+            "errors": [f"non_positive_{','.join(non_positive)}"],
+            "warnings": warnings,
+        }
 
     if direction not in ("LONG", "SHORT"):
         if stop < entry:
@@ -113,7 +134,7 @@ def trade_geometry(
         if tp2 <= entry:
             errors.append("invalid_long_tp2")
         if tp2 <= tp1:
-            warnings.append("tp2_not_above_tp1")
+            errors.append("tp2_not_above_tp1")
         risk = entry - stop
         reward1 = tp1 - entry
         reward2 = tp2 - entry
@@ -125,7 +146,7 @@ def trade_geometry(
         if tp2 >= entry:
             errors.append("invalid_short_tp2")
         if tp2 >= tp1:
-            warnings.append("tp2_not_below_tp1")
+            errors.append("tp2_not_below_tp1")
         risk = stop - entry
         reward1 = entry - tp1
         reward2 = entry - tp2
@@ -156,6 +177,73 @@ def trade_geometry(
         "direction": direction,
         "errors": errors,
         "warnings": warnings,
+    }
+
+
+def trade_plan_quality(
+    levels: Dict[str, Any],
+    *,
+    min_primary_tp_rr: float = 1.5,
+    min_tp_gap_r: float = 0.5,
+    min_tp_gap_pct: float = 0.006,
+    runner_rr_cap: float = 5.0,
+    max_runner_to_tp1_ratio: float = 3.5,
+) -> Dict[str, Any]:
+    """Validate target usefulness without letting a distant TP2 hide a weak TP1.
+
+    ``trade_geometry`` answers whether the levels are ordered correctly. This
+    function answers whether the ordered targets form a usable trade plan.
+    API and background mail workers intentionally share this implementation.
+    """
+    rr = safe_float(levels.get("rr"), None)
+    rr_tp1 = safe_float(levels.get("rr_tp1"), None)
+    rr_tp2 = safe_float(levels.get("rr_tp2"), None)
+    entry = safe_float(levels.get("entry"), None)
+    risk = safe_float(levels.get("risk"), None)
+    reward1 = safe_float(levels.get("reward1"), None)
+    reward2 = safe_float(levels.get("reward2"), None)
+    errors = {str(item) for item in (levels.get("errors") or [])}
+    issues: List[str] = []
+
+    if rr_tp1 is None or rr_tp2 is None:
+        return {
+            "effective_rr": rr,
+            "rr_tp1": rr_tp1,
+            "rr_tp2": rr_tp2,
+            "runner_skew": False,
+            "tp1_ok": False,
+            "issues": ["missing_target_rr"],
+        }
+
+    if rr_tp1 < min_primary_tp_rr:
+        issues.append("tp1_rr_below_primary_threshold")
+    if errors.intersection({"tp2_not_above_tp1", "tp2_not_below_tp1"}):
+        issues.append("tp2_not_beyond_tp1")
+
+    if entry and risk and reward1 is not None and reward2 is not None:
+        min_tp_gap = max(risk * min_tp_gap_r, entry * min_tp_gap_pct)
+        if reward2 <= reward1:
+            issues.append("tp2_not_beyond_tp1")
+        elif (reward2 - reward1) < min_tp_gap:
+            issues.append("targets_too_close")
+
+    if rr_tp2 < max(2.0, rr_tp1 + min_tp_gap_r):
+        issues.append("targets_too_close")
+    if rr_tp2 > runner_rr_cap and rr_tp1 < 2.0:
+        issues.append("runner_rr_overdominates_tp1")
+    if rr_tp1 > 0 and rr_tp2 / rr_tp1 > max_runner_to_tp1_ratio and rr_tp1 < 2.0:
+        issues.append("runner_rr_overdominates_tp1")
+
+    capped_tp2 = min(rr_tp2, runner_rr_cap)
+    effective_rr = round((rr_tp1 + capped_tp2) / 2.0, 2)
+    runner_skew = rr_tp2 > runner_rr_cap and rr_tp2 >= max(rr_tp1 * 2.25, rr_tp1 + 4.0)
+    return {
+        "effective_rr": effective_rr,
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "runner_skew": runner_skew,
+        "tp1_ok": rr_tp1 >= min_primary_tp_rr,
+        "issues": list(dict.fromkeys(issues)),
     }
 
 

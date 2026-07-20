@@ -9,6 +9,7 @@ Enthält:
 - SMC: Volume Imbalances, Order Blocks, Liquidity Levels
 - Wolfe Waves, Chart Patterns (Double Top/Bottom, H&S, etc.)
 """
+import logging
 import math
 import time
 import requests
@@ -20,7 +21,11 @@ from modules.indicators import (
     calculate_vwap, calculate_atr_from_ohlc
 )
 from modules.data_fetchers import rate_limited_get
+from modules.trade_levels import trade_geometry
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
+
+
+log = logging.getLogger(__name__)
 
 
 
@@ -44,6 +49,9 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
     details = []
     score = 0
     is_crypto = market_type == "Krypto"
+    pole_ok = False
+    consolidation_ok = False
+    retracement_ok = False
     
     if pattern_type == "bull":
         # Kriterium 1: Vorheriger Aufwärtstrend
@@ -60,18 +68,22 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             else:                          # Small/Micro Cap
                 strong_thresh, mod_thresh = 2.5, 1.0
             if vortag_chg >= strong_thresh:
+                pole_ok = True
                 score += 25
                 details.append(f" Starker 6d-Trend: {vortag_chg:+.1f}%/Tag (≈{vortag_chg*6:+.0f}%/Wo)")
             elif vortag_chg >= mod_thresh:
+                pole_ok = True
                 score += 15
                 details.append(f" Moderater 6d-Trend: {vortag_chg:+.1f}%/Tag")
             else:
                 details.append(f" Kein Aufwärtstrend: {vortag_chg:+.1f}%/Tag avg")
         else:
             if 4.0 <= vortag_chg <= 30.0:
+                pole_ok = True
                 score += 25
                 details.append(f" Starke Fahnenstange: {vortag_chg:+.1f}%")
             elif 2.5 <= vortag_chg < 4.0:
+                pole_ok = True
                 score += 15
                 details.append(f" Moderate Fahnenstange: {vortag_chg:+.1f}%")
             else:
@@ -81,9 +93,11 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         consol_tight = 3.0 if is_crypto else 2.0
         consol_wide = 5.0 if is_crypto else 4.0
         if -consol_tight <= change_today <= consol_tight:
+            consolidation_ok = True
             score += 20
             details.append(f" Konsolidierung: {change_today:+.1f}%")
         elif -consol_wide <= change_today <= consol_wide:
+            consolidation_ok = True
             score += 10
             details.append(f" Leichte Konsolidierung: {change_today:+.1f}%")
         else:
@@ -121,12 +135,15 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             retracement_pct = (retracement / flagpole * 100) if flagpole > 0 else 0
             
             if retracement_pct <= 38.2:
+                retracement_ok = True
                 score += 30
                 details.append(f" Flaches Retracement: {retracement_pct:.1f}% (ideal)")
             elif retracement_pct <= 50.0:
+                retracement_ok = True
                 score += 20
                 details.append(f" Gesundes Retracement: {retracement_pct:.1f}%")
             elif retracement_pct <= 61.8:
+                retracement_ok = True
                 score += 10
                 details.append(f" Tiefes Retracement: {retracement_pct:.1f}%")
             else:
@@ -134,7 +151,7 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         
         # V69: Threshold von 50 auf 40 gesenkt — moderate Flags sollen auch angezeigt
         # werden, FlagScore zeigt die Qualität (je höher desto besser)
-        is_valid = score >= 40
+        is_valid = score >= 40 and pole_ok and consolidation_ok and retracement_ok
 
     else:  # Bear Flag
         # V69.1 AUDIT FIX: Market-Cap-abhängige Schwellen (analog Bull Flag)
@@ -149,18 +166,22 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             else:
                 strong_thresh, mod_thresh = -2.5, -1.0
             if vortag_chg <= strong_thresh:
+                pole_ok = True
                 score += 25
                 details.append(f" Starker Abwärtstrend: {vortag_chg:+.1f}%/Tag (≈{vortag_chg*6:+.0f}%/Wo)")
             elif vortag_chg <= mod_thresh:
+                pole_ok = True
                 score += 15
                 details.append(f" Moderater Abwärtstrend: {vortag_chg:+.1f}%/Tag")
             else:
                 details.append(f" Kein Abwärtstrend: {vortag_chg:+.1f}%/Tag avg")
         else:
             if -30.0 <= vortag_chg < -4.0:
+                pole_ok = True
                 score += 25
                 details.append(f" Starke Fahnenstange (Short): {vortag_chg:+.1f}%")
             elif -4.0 <= vortag_chg <= -2.5:
+                pole_ok = True
                 score += 15
                 details.append(f" Moderate Fahnenstange: {vortag_chg:+.1f}%")
             else:
@@ -169,9 +190,11 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
         consol_tight = 3.0 if is_crypto else 2.0
         consol_wide = 5.0 if is_crypto else 4.0
         if -consol_tight <= change_today <= consol_tight:
+            consolidation_ok = True
             score += 20
             details.append(f" Konsolidierung: {change_today:+.1f}%")
         elif -consol_wide <= change_today <= consol_wide:
+            consolidation_ok = True
             score += 10
             details.append(f" Leichte Konsolidierung: {change_today:+.1f}%")
         else:
@@ -204,19 +227,22 @@ def validate_flag_pattern(vortag_chg, change_today, rvol, price, prev_close, hig
             retracement_pct = (retracement / flagpole * 100) if flagpole > 0 else 0
             
             if retracement_pct <= 38.2:
+                retracement_ok = True
                 score += 30
                 details.append(f" Flacher Bounce: {retracement_pct:.1f}% (ideal)")
             elif retracement_pct <= 50.0:
+                retracement_ok = True
                 score += 20
                 details.append(f" Gesunder Bounce: {retracement_pct:.1f}%")
             elif retracement_pct <= 61.8:
+                retracement_ok = True
                 score += 10
                 details.append(f" Starker Bounce: {retracement_pct:.1f}%")
             else:
                 details.append(f" Zu starker Bounce: {retracement_pct:.1f}%")
         
         # V69: Threshold von 50 auf 40 gesenkt (analog Bull Flag)
-        is_valid = score >= 40
+        is_valid = score >= 40 and pole_ok and consolidation_ok and retracement_ok
 
     return is_valid, score, details
 
@@ -682,6 +708,8 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 
                 # C) Flag-Enge (max 20)
                 flag_tightness = (flag_range / pole_range * 100) if pole_range > 0 else 100
+                if flag_tightness > 70:
+                    continue
                 if flag_tightness <= 30:
                     _score += 20
                     _details.append(f" Sehr enge Flag: {flag_tightness:.0f}% der Pole-Range")
@@ -770,15 +798,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
      BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
-    Maximum: 183 Punkte (N-Fix BI-Audit 2026-06-10; RSI/Stoch zaehlen als EIN
-    Momentum-Block mit max()) — GEWICHTET nach Trader-Wisdom:
+    Maximum: 173 Punkte fuer Aktien, 168 fuer Krypto. Doppelte oder nicht
+    messbare Proxies werden nicht als unabhaengige Evidenz gezaehlt.
 
     crypto_mode=True: Volume-Signale (2,3,8,16,19) werden durch Spread-basierte
     Preis-Proxies ersetzt, da CoinGecko kein historisches Volume liefert.
 
     BOOSTED (Smart Money / Momentum — diese Signale unterscheiden echte Breakouts):
       OBV Divergenz (13), ADX Turning (14), Inst. Accumulation (14),
-      Relative Strength (14), Order Blocks (14), Liquidity Pools (14)
+      OBV/ADX, Inst. Accumulation, Order Blocks und Liquidity Pools
 
     CUT (Dead Stock Indicators — hohe Scores bei toten Aktien):
       ATR Squeeze (6), Vol Dry-Up (5), Range Duration (5),
@@ -800,7 +828,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         (is_valid, score, max_score, details, direction_confidence, grade)
     """
     if not bars or len(bars) < 15:
-        return False, 0, 183, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
+        max_score = 168 if crypto_mode else 173
+        return False, 0, max_score, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)
@@ -1323,39 +1352,61 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         details.append(f" Higher Lows/Lower Highs: Zu kurze Range ({range_days} Tage < 6)")
 
     # ===================================================================
-    # SIGNAL 11: RELATIVE STAERKE vs MARKT — max 14 Punkte [BOOSTED]
-    # Resilience = Minervini RS-Rating Proxy (Key SEPA Criterion)
+    # SIGNAL 11: DIRECTIONAL PERSISTENCE — max 8 Punkte
+    # Kein Marktvergleich: misst nur die Stabilitaet der juengsten Bewegung.
     # ===================================================================
-    # Statt SPY-Vergleich: Prüfe ob Aktie sich in Range haelt trotz Volatilitaet
     if n >= 10:
-        negative_days = sum(1 for i in range(1, n) if closes[i] < closes[i-1])
-        recovery_days = 0
-        for i in range(2, n):
-            if closes[i-1] < closes[i-2] and closes[i] > closes[i-1]:
-                recovery_days += 1
+        persistence_closes = closes[-10:]
+        sign = 1.0 if direction == "long" else -1.0
+        directional_return = (
+            (persistence_closes[-1] / max(1e-9, persistence_closes[0]) - 1.0)
+            * 100.0 * sign
+        )
+        directional_days = sum(
+            1
+            for i in range(1, len(persistence_closes))
+            if (persistence_closes[i] - persistence_closes[i - 1]) * sign > 0
+        ) / max(1, len(persistence_closes) - 1)
 
-        # V68: Resilience auf [0, 1] begrenzen — verhindert Inflation bei wenigen Down-Days
-        # V3.2: 0 Down-Days = perfekte Resilience (1.0), nicht 0%
-        # Eine Aktie die 30 Tage nur steigt ist maximal resilient
-        if negative_days == 0:
-            resilience = 1.0
-        else:
-            resilience = min(1.0, recovery_days / negative_days)
+        adverse_excursion = 0.0
+        reference = persistence_closes[0]
+        for value in persistence_closes[1:]:
+            if direction == "long":
+                reference = max(reference, value)
+                adverse_excursion = max(
+                    adverse_excursion,
+                    (reference - value) / max(1e-9, reference) * 100.0,
+                )
+            else:
+                reference = min(reference, value)
+                adverse_excursion = max(
+                    adverse_excursion,
+                    (value - reference) / max(1e-9, reference) * 100.0,
+                )
 
-        if direction == "long" and resilience > 0.7:
-            score += 14; sm_fires += 1; sm_hits += 1
-            details.append(f" Hohe Resilience: {resilience:.0%} Recovery nach Dips [Minervini RS!]")
-        elif direction == "long" and resilience > 0.5:
-            score += 7; sm_hits += 1
-            details.append(f" Gute Resilience: {resilience:.0%}")
-        elif direction == "short" and resilience < 0.3:
-            score += 14; sm_fires += 1; sm_hits += 1
-            details.append(f" Schwache Resilience: {resilience:.0%} = Verkaufsdruck")
-        elif direction == "short" and resilience < 0.5:
-            score += 7; sm_hits += 1
-            details.append(f" Maessige Resilience: {resilience:.0%}")
+        min_return = 3.0 if crypto_mode else 2.0
+        max_adverse = 10.0 if crypto_mode else 8.0
+        if (
+            directional_return >= min_return
+            and directional_days >= 0.67
+            and adverse_excursion <= max_adverse
+        ):
+            score += 8
+            details.append(
+                f" Directional Persistence stark: {directional_return:+.1f}%, "
+                f"{directional_days:.0%} Richtungstage, Gegenlauf {adverse_excursion:.1f}%"
+            )
+        elif directional_return > 0 and directional_days >= 0.55:
+            score += 4
+            details.append(
+                f" Directional Persistence moderat: {directional_return:+.1f}%, "
+                f"{directional_days:.0%} Richtungstage"
+            )
         else:
-            details.append(f" Resilience neutral: {resilience:.0%}")
+            details.append(
+                f" Directional Persistence schwach: {directional_return:+.1f}%, "
+                f"{directional_days:.0%} Richtungstage"
+            )
 
     # ===================================================================
     # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 6 Punkte [CUT]
@@ -1531,34 +1582,59 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         details.append(" Order Block Check uebersprungen")
 
     # ===================================================================
-    # SIGNAL 16: VOLUME IMBALANCE / FVG PROXIMITY — max 10 Punkte
-    # FVG ueber Preis = Magnet fuer Long, unter Preis = Magnet fuer Short
+    # SIGNAL 16: FVG SUPPORT / RESISTANCE PROXIMITY — max 6 Punkte
+    # Nur unfilled Zonen auf der strukturell richtigen Seite des Preises.
     # ===================================================================
     try:
         vi_data = detect_volume_imbalances(bars, max_zones=20)
         if direction == "long" and vi_data.get("unfilled_bull"):
-            # Unfilled Bullish FVG über aktuellem Preis = Preis wird hingezogen
-            # V68: Direkt zone_low verwenden (detect_volume_imbalances gibt immer zone_low zurück)
-            above_fvgs = [z for z in vi_data["unfilled_bull"] if z.get("zone_low", current_price) > current_price]
-            if above_fvgs:
-                score += 10
-                details.append(f" {len(above_fvgs)} unfilled FVGs ueber Preis = Breakout-Magneten")
-            elif vi_data["unfilled_bull"]:
-                score += 4
-                details.append(f" Bullish FVGs vorhanden ({len(vi_data['unfilled_bull'])}x)")
+            supports = [
+                z for z in vi_data["unfilled_bull"]
+                if float(z.get("zone_high", 0) or 0) <= current_price
+            ]
+            if supports:
+                nearest = min(
+                    supports,
+                    key=lambda z: current_price - float(z.get("zone_high", 0) or 0),
+                )
+                distance = (
+                    (current_price - float(nearest.get("zone_high", 0) or 0))
+                    / max(1e-9, current_price) * 100.0
+                )
+                if distance <= 3.0:
+                    score += 6
+                    details.append(f" Bullish FVG-Support {distance:.1f}% unter Preis")
+                elif distance <= 6.0:
+                    score += 3
+                    details.append(f" Bullish FVG-Support {distance:.1f}% unter Preis")
+                else:
+                    details.append(f" Bullish FVG-Support zu weit entfernt: {distance:.1f}%")
             else:
-                details.append(f" Keine bullischen FVGs")
+                details.append(" Kein unfilled Bullish-FVG-Support unter Preis")
         elif direction == "short" and vi_data.get("unfilled_bear"):
-            # V68: Direkt zone_high verwenden (keine fragilen Fallback-Chains)
-            below_fvgs = [z for z in vi_data["unfilled_bear"] if z.get("zone_high", current_price) < current_price]
-            if below_fvgs:
-                score += 10
-                details.append(f" {len(below_fvgs)} unfilled FVGs unter Preis = Breakdown-Magneten")
-            elif vi_data["unfilled_bear"]:
-                score += 4
-                details.append(f" Bearish FVGs vorhanden ({len(vi_data['unfilled_bear'])}x)")
+            resistances = [
+                z for z in vi_data["unfilled_bear"]
+                if float(z.get("zone_low", 0) or 0) >= current_price
+            ]
+            if resistances:
+                nearest = min(
+                    resistances,
+                    key=lambda z: float(z.get("zone_low", 0) or 0) - current_price,
+                )
+                distance = (
+                    (float(nearest.get("zone_low", 0) or 0) - current_price)
+                    / max(1e-9, current_price) * 100.0
+                )
+                if distance <= 3.0:
+                    score += 6
+                    details.append(f" Bearish FVG-Resistance {distance:.1f}% ueber Preis")
+                elif distance <= 6.0:
+                    score += 3
+                    details.append(f" Bearish FVG-Resistance {distance:.1f}% ueber Preis")
+                else:
+                    details.append(f" Bearish FVG-Resistance zu weit entfernt: {distance:.1f}%")
             else:
-                details.append(f" Keine baerischen FVGs")
+                details.append(" Keine unfilled Bearish-FVG-Resistance ueber Preis")
         else:
             details.append(f" Keine relevanten FVGs")
     except Exception:
@@ -1770,8 +1846,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # SIGNAL 20: CANDLE BODY COMPRESSION — max 5 Punkte [CUT]
     # Body-Ratio sinkt = Doji-Cluster, ABER auch bei Aktien ohne Interesse!
+    # Crypto wird bereits in Signal 2 ueber Body-Kompression bewertet.
     # ===================================================================
-    if n >= 10:
+    if n >= 10 and not crypto_mode:
         # Vergleiche Body/Range Ratio: letzte 5 vs vorherige 10
         def _body_ratio(b):
             rng = b["high"] - b["low"]
@@ -1847,7 +1924,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     # FINAL SCORE + RICHTUNGS-KONFIDENZ + GRADE + SMART MONEY SUB-SCORE
     # ===================================================================
-    # N-FIX (BI-Audit 2026-06-10): Korrekte Summe der Signal-Maxima = 183.
+    # Summe der erreichbaren, nicht duplizierten Signal-Maxima.
     # Der alte Kommentar (188) zaehlte RSI(5) UND max(RSI 5, Stoch 10) DOPPELT —
     # nach FIX 4 zaehlt der Momentum-Block nur EINMAL mit max() = 10.
     # Aufschluesselung (nach FIX 1 + FIX 4 + K-2):
@@ -1861,18 +1938,18 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     #   S8  Inst-Accumulation      7   (FIX 1: 14 -> 7)
     #   S9+S14 Momentum max(5,10) 10   (FIX 4: RSI/Stoch dedupliziert)
     #   S10 Higher Lows           10
-    #   S11 Resilience            14
+    #   S11 Direction Persistence  8
     #   S12 StdDev-Kompression     6
     #   S13 MACD-Histogramm       10   (K-2: via Serie wieder erreichbar)
     #   S15 Order Blocks          14
-    #   S16 FVG                   10
+    #   S16 FVG Support/Resistance 6
     #   S17 Liquidity             14
     #   S18 Fib-Confluence        10
     #   S19 Volume-Void           10
     #   S20 Body-Kompression       5
-    #   Summe                    183
-    # direction_confidence kann damit 100% erreichen (vorher Deckel ~92%).
-    max_score = 183
+    #   Summe Aktien             173
+    #   Summe Krypto             168 (S20 wird nicht doppelt gewertet)
+    max_score = 168 if crypto_mode else 173
 
     # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
     # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
@@ -1881,7 +1958,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     direction_confidence = round((score / max_score) * 100) if max_score > 0 else 0
 
     # Smart Money Sub-Score: Inline-Counter sm_fires/sm_hits werden direkt
-    # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,11,15,17)
+    # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,15,17)
     # V3: Bei zu wenig Volume (avg <100K) sind SM-Signale Rauschen → auf 0 setzen
     # Score bleibt erhalten (Signale sind trotzdem mathematisch korrekt),
     # aber sm_fires/sm_hits = 0 → kein Grade A/B möglich für illiquide Aktien
@@ -2377,6 +2454,10 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                     tp3 = C
                     direction = "SHORT"
 
+                geometry = trade_geometry(entry, stop_loss, tp1, tp2, direction)
+                if not geometry["valid"]:
+                    continue
+
                 # ── DISTANZ-CHECK: Wie weit ist Entry vom aktuellen Preis? ──
                 current = prices[-1]["close"]
                 entry_distance_pct = abs(entry - current) / current * 100 if current > 0 else 0
@@ -2455,7 +2536,7 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                         "tp1": round(tp1, 2),
                         "tp2": round(tp2, 2),
                         "tp3": round(tp3, 2),
-                        "risk_reward": round(abs(tp2 - entry) / abs(entry - stop_loss), 2) if abs(entry - stop_loss) > 0 else 0
+                        "risk_reward": geometry["rr_tp2"]
                     },
                     "pivot_indices": [p['index'] for p in potential_xabcd],
                     "dates": {
@@ -2839,19 +2920,19 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                         
                         tp1 = range_high + range_width * 0.75
                         tp2 = range_high + range_width * 1.5
-                        rr = abs(tp1 - entry) / abs(entry - stop) if abs(entry - stop) > 0 else 0
-                        
-                        results.append({
-                            "type": "Accumulation", "direction": "LONG",
-                            "phase": phase, "phase_short": phase_short,
-                            "score": min(score, 100), "events": events, "event_bars": event_bars,
-                            "range_high": round(range_high, 2), "range_low": round(range_low, 2),
-                            "range_start_ts": raw_bars[sc_idx]["t"],
-                            "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
-                            "entry": round(entry, 2), "stop": round(stop, 2),
-                            "tp1": round(tp1, 2), "tp2": round(tp2, 2),
-                            "rr": round(rr, 2), "current_price": round(current_price, 2),
-                        })
+                        geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
+                        if geometry["valid"]:
+                            results.append({
+                                "type": "Accumulation", "direction": "LONG",
+                                "phase": phase, "phase_short": phase_short,
+                                "score": min(score, 100), "events": events, "event_bars": event_bars,
+                                "range_high": round(range_high, 2), "range_low": round(range_low, 2),
+                                "range_start_ts": raw_bars[sc_idx]["t"],
+                                "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
+                                "entry": round(entry, 2), "stop": round(stop, 2),
+                                "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+                                "rr": geometry["rr_tp1"], "current_price": round(current_price, 2),
+                            })
         
         # ================================================================
         # DISTRIBUTION: Suche BC (Buying Climax)
@@ -3015,19 +3096,19 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
                         
                         tp1 = range_low - range_width * 0.75
                         tp2 = range_low - range_width * 1.5
-                        rr = abs(entry - tp1) / abs(stop - entry) if abs(stop - entry) > 0 else 0
-                        
-                        results.append({
-                            "type": "Distribution", "direction": "SHORT",
-                            "phase": phase, "phase_short": phase_short,
-                            "score": min(score, 100), "events": events, "event_bars": event_bars,
-                            "range_high": round(range_high, 2), "range_low": round(range_low, 2),
-                            "range_start_ts": raw_bars[bc_idx]["t"],
-                            "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
-                            "entry": round(entry, 2), "stop": round(stop, 2),
-                            "tp1": round(tp1, 2), "tp2": round(tp2, 2),
-                            "rr": round(rr, 2), "current_price": round(current_price, 2),
-                        })
+                        geometry = trade_geometry(entry, stop, tp1, tp2, "SHORT")
+                        if geometry["valid"]:
+                            results.append({
+                                "type": "Distribution", "direction": "SHORT",
+                                "phase": phase, "phase_short": phase_short,
+                                "score": min(score, 100), "events": events, "event_bars": event_bars,
+                                "range_high": round(range_high, 2), "range_low": round(range_low, 2),
+                                "range_start_ts": raw_bars[bc_idx]["t"],
+                                "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
+                                "entry": round(entry, 2), "stop": round(stop, 2),
+                                "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+                                "rr": geometry["rr_tp1"], "current_price": round(current_price, 2),
+                            })
         
         if not results:
             return None
@@ -4004,17 +4085,21 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                                     score += 5  # Volume nimmt zu vs P5
                         
                         # Stop = P5 - 1.5x ATR (realistischer als Overshoot-basiert)
-                        stop_price = p5["price"] - atr * 1.5
-                        risk = abs(p5["price"] - stop_price)
-                        
                         # Entry = P5 Preis (Pattern zeigt die Zone, Trader wartet auf Bestätigung)
                         # Wir kennzeichnen es als "Entry Zone" nicht exakten Preis
                         entry_price = p5["price"]
+                        stop_price = entry_price - atr * 1.5
+                        risk = entry_price - stop_price
                         
                         # Confirmation Level = Linie 1→3 (Close darüber = Bestätigung)
                         confirmation_level = line_13_at_5
                         
-                        reward = abs(target - entry_price)
+                        reward = target - entry_price
+                        # A bullish Wolfe projection below the entry is not a
+                        # profit target. Never turn wrong-side geometry into a
+                        # positive R:R with abs().
+                        if risk <= 0 or reward <= 0:
+                            continue
                         rr_ratio = reward / risk if risk > 0 else 0
                         
                         if rr_ratio >= 3.0:
@@ -4190,13 +4275,16 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                                     score += 5
                         
                         # Stop = P5 + 1.5x ATR (realistisch)
-                        stop_price = p5["price"] + atr * 1.5
-                        risk = abs(stop_price - p5["price"])
-                        
                         entry_price = p5["price"]
+                        stop_price = entry_price + atr * 1.5
+                        risk = stop_price - entry_price
                         confirmation_level = line_13_at_5  # Close darunter = Bestätigung
-                        
-                        reward = abs(entry_price - target)
+
+                        reward = entry_price - target
+                        # A bearish Wolfe projection above the entry is not a
+                        # short target and must not earn a positive R:R score.
+                        if risk <= 0 or reward <= 0:
+                            continue
                         rr_ratio = reward / risk if risk > 0 else 0
                         
                         if rr_ratio >= 3.0:
@@ -4685,8 +4773,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 # ASCENDING TRIANGLE: Flat resistance + rising support
                 if high_range < 0.02 and low_trend > 0.02:
                     resistance = sum(recent_highs) / len(recent_highs)
-                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
-                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
+                    recent_high_indices = [point["index"] for point in swing_highs[-len(recent_highs):]]
+                    recent_low_indices = [point["index"] for point in swing_lows[-len(recent_lows):]]
                     patterns.append({
                         "pattern": "Ascending Triangle",
                         "emoji": "⬆",
@@ -4701,8 +4789,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 # DESCENDING TRIANGLE: Falling resistance + flat support
                 elif low_range < 0.02 and high_trend < -0.02:
                     support = sum(recent_lows) / len(recent_lows)
-                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
-                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
+                    recent_high_indices = [point["index"] for point in swing_highs[-len(recent_highs):]]
+                    recent_low_indices = [point["index"] for point in swing_lows[-len(recent_lows):]]
                     patterns.append({
                         "pattern": "Descending Triangle",
                         "emoji": "⬇",
@@ -4720,8 +4808,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                     range_pct = (recent_highs[-1] - recent_lows[-1]) / apex_price * 100
 
                     if range_pct < 5:
-                        recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
-                        recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
+                        recent_high_indices = [point["index"] for point in swing_highs[-len(recent_highs):]]
+                        recent_low_indices = [point["index"] for point in swing_lows[-len(recent_lows):]]
                         patterns.append({
                             "pattern": "Symmetrical Triangle",
                             "emoji": "",
@@ -4813,52 +4901,78 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
         
         # === CUP & HANDLE ===
         if len(closes) >= 30:
-            cup_end = int(len(closes) * 0.7)
-            cup_data = closes[:cup_end]
-            
-            if len(cup_data) >= 15:
-                cup_left = cup_data[:len(cup_data)//3]
-                cup_bottom = cup_data[len(cup_data)//3:2*len(cup_data)//3]
-                cup_right = cup_data[2*len(cup_data)//3:]
-                
-                left_avg = sum(cup_left) / len(cup_left)
-                bottom_avg = sum(cup_bottom) / len(cup_bottom)
-                right_avg = sum(cup_right) / len(cup_right)
-                
-                if left_avg > bottom_avg and right_avg > bottom_avg:
-                    cup_depth = (left_avg - bottom_avg) / left_avg
-                    
-                    if 0.10 < cup_depth < 0.40:
-                        handle_data = closes[cup_end:]
-                        handle_range = (max(handle_data) - min(handle_data)) / max(handle_data) if max(handle_data) > 0 else 1
-                        
-                        if handle_range < cup_depth * 0.5:
-                            cup_lip = max(left_avg, right_avg)
-                            
-                            if current_price > cup_lip * 0.95:
-                                cup_left_idx = int(len(cup_data) // 6)
-                                cup_bottom_idx = int(len(cup_data) // 2)
-                                cup_right_idx = int(2 * len(cup_data) // 3)
-                                # AUDIT N-3 (C&H-Audit 2026-06-10): Chart-Heuristik
-                                # klar vom strikten Scanner-Detektor abgrenzen und
-                                # "Breakout" erst ab Preis >= Lip behaupten (vorher
-                                # schon ab 0.95x — Chart widersprach dem Scanner).
-                                _ch_broke_out = current_price >= cup_lip
-                                patterns.append({
-                                    "pattern": "Cup & Handle (Chart-Heuristik)",
-                                    "emoji": "⬆",
-                                    "type": "bullish",
-                                    "cup_depth": f"{cup_depth*100:.1f}%",
-                                    "breakout_level": round(cup_lip, 2),
-                                    "target": round(cup_lip * (1 + cup_depth), 2),
-                                    "confidence": "High" if _ch_broke_out else "Medium",
-                                    "description": (
-                                        f"Cup & Handle - Breakout @ ${cup_lip:.2f}. Target: ${cup_lip * (1 + cup_depth):.2f}"
-                                        if _ch_broke_out
-                                        else f"Cup & Handle formiert sich - Pivot @ ${cup_lip:.2f} noch nicht ausgebrochen. Target: ${cup_lip * (1 + cup_depth):.2f}"
-                                    ),
-                                    "draw_points": [{"index": 0, "price": left_avg}, {"index": cup_left_idx, "price": left_avg}, {"index": cup_bottom_idx, "price": bottom_avg}, {"index": cup_right_idx, "price": right_avg}, {"index": cup_end, "price": cup_lip}]
-                                })
+            n_ch = len(closes)
+            left_search_end = max(6, int(n_ch * 0.40))
+            left_idx = max(range(left_search_end), key=lambda i: highs[i])
+            bottom_start = left_idx + 2
+            right_limit = n_ch - 3
+
+            if bottom_start + 4 < right_limit:
+                bottom_idx = min(
+                    range(bottom_start, right_limit - 2),
+                    key=lambda i: lows[i],
+                )
+                right_start = bottom_idx + 2
+                if right_start < right_limit:
+                    right_idx = max(
+                        range(right_start, right_limit),
+                        key=lambda i: highs[i],
+                    )
+                    handle_start = right_idx + 1
+                    handle_lows = lows[handle_start:]
+                    handle_highs = highs[handle_start:]
+
+                    left_rim = highs[left_idx]
+                    right_rim = highs[right_idx]
+                    rim_mean = (left_rim + right_rim) / 2.0
+                    cup_low = lows[bottom_idx]
+                    cup_height = rim_mean - cup_low
+                    cup_depth = cup_height / max(1e-9, rim_mean)
+                    rim_price_symmetry = abs(left_rim - right_rim) / max(1e-9, rim_mean)
+                    left_span = bottom_idx - left_idx
+                    right_span = right_idx - bottom_idx
+                    time_symmetry = max(left_span, right_span) / max(1, min(left_span, right_span))
+
+                    if handle_lows and handle_highs and 0.10 < cup_depth < 0.40:
+                        handle_low = min(handle_lows)
+                        handle_high = max(handle_highs)
+                        handle_depth = (right_rim - handle_low) / max(1e-9, cup_height)
+                        handle_range = (handle_high - handle_low) / max(1e-9, rim_mean)
+                        handle_above_mid = handle_low > cup_low + cup_height * 0.50
+                        cup_lip = max(left_rim, right_rim)
+                        near_pivot = cup_lip * 0.95 <= current_price <= cup_lip * 1.15
+
+                        if (
+                            rim_price_symmetry <= 0.08
+                            and time_symmetry <= 2.5
+                            and 0 <= handle_depth <= 0.50
+                            and handle_range <= cup_depth * 0.50
+                            and handle_above_mid
+                            and near_pivot
+                        ):
+                            broke_out = current_price >= cup_lip
+                            target = cup_lip + cup_height
+                            patterns.append({
+                                "pattern": "Cup & Handle",
+                                "emoji": "⬆",
+                                "type": "bullish",
+                                "cup_depth": f"{cup_depth*100:.1f}%",
+                                "breakout_level": round(cup_lip, 4),
+                                "target": round(target, 4),
+                                "confidence": "High" if broke_out else "Medium",
+                                "description": (
+                                    f"Cup & Handle - Breakout @ ${cup_lip:.4f}. Target: ${target:.4f}"
+                                    if broke_out
+                                    else f"Cup & Handle formiert sich - Pivot @ ${cup_lip:.4f} noch nicht ausgebrochen. Target: ${target:.4f}"
+                                ),
+                                "draw_points": [
+                                    {"index": left_idx, "price": left_rim},
+                                    {"index": bottom_idx, "price": cup_low},
+                                    {"index": right_idx, "price": right_rim},
+                                    {"index": handle_start, "price": handle_highs[0]},
+                                    {"index": n_ch - 1, "price": current_price},
+                                ],
+                            })
         
         # === WEDGES ===
         if len(swing_highs) >= 3 and len(swing_lows) >= 3:
@@ -4878,8 +4992,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 
                 # RISING WEDGE (bearish)
                 if high_slope > 0 and low_slope > 0 and are_converging and low_slope > high_slope:
-                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
-                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
+                    recent_high_indices = [point["index"] for point in swing_highs[-len(recent_highs):]]
+                    recent_low_indices = [point["index"] for point in swing_lows[-len(recent_lows):]]
                     patterns.append({
                         "pattern": "Rising Wedge",
                         "emoji": "⬇",
@@ -4892,8 +5006,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                 
                 # FALLING WEDGE (bullish)
                 elif high_slope < 0 and low_slope < 0 and are_converging and high_slope > low_slope:
-                    recent_high_indices = [swing_highs[-4+i]["index"] for i in range(len(recent_highs))]
-                    recent_low_indices = [swing_lows[-4+i]["index"] for i in range(len(recent_lows))]
+                    recent_high_indices = [point["index"] for point in swing_highs[-len(recent_highs):]]
+                    recent_low_indices = [point["index"] for point in swing_lows[-len(recent_lows):]]
                     patterns.append({
                         "pattern": "Falling Wedge",
                         "emoji": "⬆",

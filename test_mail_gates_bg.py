@@ -11,11 +11,8 @@ from pathlib import Path
 import bg_service
 
 
-BI_LONG_CACHE = "/tmp/bi_cache_long.json"
-
-
-def _write_bi_cache(rows):
-    with open(BI_LONG_CACHE, "w", encoding="utf-8") as f:
+def _write_bi_cache(path, rows):
+    with path.open("w", encoding="utf-8") as f:
         json.dump({"results": rows, "cached_at": time.time()}, f)
 
 
@@ -42,7 +39,9 @@ def _base_row(ticker="GOOD", **overrides):
 
 def _setup(monkeypatch, tmp_path, rows):
     """Gemeinsames Test-Setup: Caches/Dedupe isolieren, Versand aufzeichnen."""
-    _write_bi_cache(rows)
+    cache_file = tmp_path / "bi_cache_long.json"
+    _write_bi_cache(cache_file, rows)
+    monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(cache_file))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
     # Startup-Delay umgehen (Prozess "laeuft schon lange")
@@ -102,6 +101,91 @@ def test_q3_clean_row_is_mailed_exactly_once(monkeypatch, tmp_path):
     assert len(sent) == 1
     assert "GOOD" in sent[0]["body"]
     assert sent[0]["mail_class"] == "trade"
+
+
+def test_swing_owner_mail_does_not_require_intraday_5m_state(monkeypatch, tmp_path):
+    """BI/Biotech owner scans are swing scans unless intraday is explicit."""
+    row = _base_row("SWNG")
+    row.pop("latest_bar_change_pct")
+    row.pop("latest_bar_close_pos")
+    sent = _setup(monkeypatch, tmp_path, [row])
+
+    bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
+
+    assert len(sent) == 1
+    assert "SWNG" in sent[0]["body"]
+    assert "SWING_SETUP" in sent[0]["body"]
+
+
+def test_intraday_owner_mail_requires_fresh_5m_state(monkeypatch, tmp_path):
+    row = _base_row("MISS")
+    row.pop("latest_bar_change_pct")
+    row.pop("latest_bar_close_pos")
+    sent = _setup(monkeypatch, tmp_path, [row])
+
+    bg_service._check_and_alert_scan_results(
+        "bi_long", {"POLYGON_KEY": ""}, trade_horizon="intraday"
+    )
+
+    assert sent == []
+
+
+def test_trade_plan_gate_blocks_weak_tp1_hidden_by_distant_tp2(monkeypatch, tmp_path):
+    sent = _setup(
+        monkeypatch,
+        tmp_path,
+        [_base_row("RUNR", Entry=10.0, StopLoss=9.5, TP1=10.3, TP2=14.0)],
+    )
+
+    bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
+
+    assert sent == []
+
+
+def test_trade_plan_gate_blocks_targets_that_are_too_close(monkeypatch, tmp_path):
+    sent = _setup(
+        monkeypatch,
+        tmp_path,
+        [_base_row("CLSE", Entry=10.0, StopLoss=9.5, TP1=10.8, TP2=10.9)],
+    )
+
+    bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
+
+    assert sent == []
+
+
+def test_health_gate_blocks_high_execution_risks(monkeypatch):
+    cases = (
+        {"chase_risk": "HIGH", "fakeout_risk": "LOW", "liquidity_risk": "LOW"},
+        {"chase_risk": "LOW", "fakeout_risk": "CRITICAL", "liquidity_risk": "LOW"},
+        {"chase_risk": "LOW", "fakeout_risk": "LOW", "liquidity_risk": "CRITICAL"},
+    )
+    for risks in cases:
+        monkeypatch.setattr(
+            bg_service,
+            "calculate_trade_health",
+            lambda *_args, _risks=risks, **_kwargs: {
+                "decision": "TRADEABLE",
+                "health_score": 95,
+                **_risks,
+            },
+        )
+        assert bg_service._bg_alert_health_reasons(_base_row(), "bi_long")
+
+
+def test_active_crash_is_not_blocked_by_regular_short_no_chase_rule():
+    row = {
+        "change_pct": -15.0,
+        "close_pos": 0.1,
+        "open_to_current_pct": -8.0,
+        "latest_bar_change_pct": -1.0,
+        "latest_bar_close_pos": 0.1,
+        "RVOL": 3.0,
+        "alertable_short": True,
+    }
+
+    assert "drop_too_extended_no_chase" in bg_service._bear_short_rule_reasons(row)
+    assert bg_service._bear_crash_alert_ok(row) is True
 
 
 def test_q3_mixed_rows_only_clean_one_in_body(monkeypatch, tmp_path):
@@ -240,4 +324,28 @@ def test_startup_delay_blocks_mail_after_restart(monkeypatch):
     ok = bg_service._send_email_alert(
         "Test", "<b>x</b>", {"GMAIL_USER": "a@b.c", "GMAIL_APP_PASSWORD": "x"}
     )
+    assert ok is False
+
+
+def test_watch_mail_does_not_fall_back_to_operator_without_opt_in(monkeypatch):
+    monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)
+    monkeypatch.setattr(bg_service, "HAS_AUTH_ALERT_RECIPIENTS", False)
+
+    class _Boom:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("SMTP must not be reached without watch opt-in")
+
+    monkeypatch.setattr(bg_service.smtplib, "SMTP_SSL", _Boom)
+
+    ok = bg_service._send_email_alert(
+        "Retest watch",
+        "<p>x</p>",
+        {
+            "GMAIL_USER": "operator@example.com",
+            "GMAIL_APP_PASSWORD": "pw",
+            "ALERT_EMAIL": "operator@example.com",
+        },
+        mail_class="watch",
+    )
+
     assert ok is False

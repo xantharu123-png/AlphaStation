@@ -469,22 +469,20 @@ def calculate_vwap(ohlcv_data):
 
         current_vwap = vwap_values[-1] if vwap_values else typical_prices[-1]
 
-        # M-VWAP AUDIT FIX:
-        # 1. Baender VOLUMENGEWICHTET (TradingView-Style):
-        #    var = SUM(vol_i * (tp_i - vwap_i)^2) / SUM(vol_i)  statt ungewichtet.
-        # 2. Kein round(..., 2) mehr: Sub-Cent-Preise (z.B. 0.0005) wurden sonst
-        #    auf 0.0 gerundet -> VWAP/Baender unbrauchbar. Volle Praezision.
-        if len(vwap_values) == len(typical_prices):
-            deviations = [typical_prices[i] - vwap_values[i] for i in range(len(vwap_values))]
-        else:
-            deviations = [tp - current_vwap for tp in typical_prices]
+        # Volume-weighted population variance around the final/session VWAP.
+        # Measuring every bar against its own cumulative VWAP systematically
+        # understates dispersion and produces bands that are too tight.
         total_volume = sum(volumes)
         if total_volume > 0:
-            variance = sum(
-                volumes[i] * deviations[i] ** 2 for i in range(len(deviations))
+            weighted_second_moment = sum(
+                volumes[i] * typical_prices[i] ** 2 for i in range(len(typical_prices))
             ) / total_volume
+            variance = max(0.0, weighted_second_moment - current_vwap ** 2)
         else:
-            # Fallback ohne Volumendaten: ungewichtete Varianz
+            # Without usable volume, use an ordinary population variance
+            # around the arithmetic mean instead of manufacturing precision.
+            mean_price = sum(typical_prices) / len(typical_prices)
+            deviations = [tp - mean_price for tp in typical_prices]
             variance = sum(d ** 2 for d in deviations) / len(deviations) if deviations else 0
         std_dev = variance ** 0.5
 

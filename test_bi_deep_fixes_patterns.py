@@ -8,7 +8,7 @@ Regressions-Tests fuer die BI-Scanner-Tiefen-Fixes (BI-Audit 2026-06-10):
        OB-/Liq-"vorhanden"-hits nur mit 3%-Naehe-Bedingung
   M-3  Distribution-Malus Long: Lower-Highs (3-Bar) >= 65% + Down-Vol > 1.2x Up-Vol
        => score -= 10 (nur Long; Akkumulation unberuehrt)
-  N    max_score = 183 (RSI/Stoch-max()-Dedupe korrekt gezaehlt), confidence <= 100%
+  N    max_score = 173 (Doppelzaehlungen entfernt), confidence <= 100%
 
 Synthetische, deterministische Serien — kein Netz, keine API.
 """
@@ -340,16 +340,16 @@ def test_m3_short_direction_no_malus():
 # N: max_score-Arithmetik
 # ====================================================================
 
-def test_n_max_score_pinned_183():
-    """max_score == 183 (Komponenten-Summe mit RSI/Stoch-max()-Dedupe), auch im
+def test_n_max_score_pinned_173():
+    """max_score == 173 (bereinigte Komponenten-Summe), auch im
     Early-Return; direction_confidence konsistent und <= 100%."""
     bars = gen_textbook_accumulation(seed=11)[-30:]
     iv, sc, mx, det, conf, gr, fires, hits = analyze_breakout_imminent(bars, direction="long")
-    assert mx == 183, f"max_score muss 183 sein, ist {mx}"
-    assert conf == round(sc / 183 * 100), f"confidence inkonsistent: {conf} vs score {sc}"
+    assert mx == 173, f"max_score muss 173 sein, ist {mx}"
+    assert conf == round(sc / 173 * 100), f"confidence inkonsistent: {conf} vs score {sc}"
     assert 0 <= conf <= 100, f"confidence ausserhalb [0,100]: {conf}"
     early = analyze_breakout_imminent(bars[:5], direction="long")
-    assert early[2] == 183, f"Early-Return max_score muss 183 sein, ist {early[2]}"
+    assert early[2] == 173, f"Early-Return max_score muss 173 sein, ist {early[2]}"
     # Score-Cap: score darf max_score nie ueberschreiten -> confidence <= 100 strukturell
     for seed in range(10):
         b2 = gen_textbook_accumulation(seed=seed, range_pct=3.0, dryup=0.3,

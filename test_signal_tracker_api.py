@@ -245,6 +245,7 @@ def _setup_real_send(monkeypatch):
         "GMAIL_USER": "op@x.com",
         "GMAIL_APP_PASSWORD": "pw",
         "ALERT_EMAIL": "op@x.com",
+        "ALERT_OPERATOR_WATCH_OPTIN": "1",
     })
     monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
 

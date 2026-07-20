@@ -22,6 +22,7 @@ ExecStart=/home/tradingbot/app/venv/bin/python3 bg_service.py
 
 Restart=always
 RestartSec=5
+UMask=0077
 
 # Logging
 StandardOutput=journal
@@ -35,20 +36,20 @@ LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=full
 ReadWritePaths=/home/tradingbot/app
-# ProtectHome NICHT setzen — die App liegt unter /home/tradingbot/app.
-# PrivateTmp MUSS false bleiben und identisch zu tradingbot-api.service sein:
-# bg_service.py SCHREIBT die Scan-Caches nach /tmp (z.B. /tmp/bi_cache_long.json,
-# /tmp/alpha_biotech_cache.json, /tmp/orb_scan_results.json,
-# /tmp/coingecko_markets_cache.json), api.py LIEST sie von dort. Beide Prozesse
-# muessen dasselbe /tmp sehen. (Alternative waere JoinsNamespaceOf= mit
-# PrivateTmp=true — bewusst nicht gewaehlt, PrivateTmp=false auf beiden Seiten
-# ist einfacher und robuster gegenueber Restart-Reihenfolgen.)
-PrivateTmp=false
+# ProtectHome NICHT setzen - die App liegt unter /home/tradingbot/app.
+# Identischer Bind-Mount wie beim API-Dienst: gemeinsamer Scanner-Cache, aber
+# kein Zugriff auf das globale Server-/tmp.
+PrivateTmp=true
+BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

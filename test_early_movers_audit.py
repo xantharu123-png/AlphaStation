@@ -451,6 +451,34 @@ def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
     assert row["trade_health"]["metrics"]["entry"] == row["entry"]
 
 
+def test_confirmed_early_mover_long_now_remains_visible():
+    row = {
+        "Symbol": "READY",
+        "trade_action": "LONG_NOW",
+        "trade_signal": "JETZT_TRADEN",
+        "trade_decision": "TRADEABLE",
+        "signal_quality": "tradeable",
+        "setup_score": 90,
+        "entry_score": 92,
+        "execution_quality_score": 92,
+        "grade": "S",
+        "risk_level": "LOW",
+        "live_rr_ratio": 2.2,
+        "distance_to_entry_r": 0.05,
+        "btc_context": {
+            "allows_long": True,
+            "tailwind": True,
+            "btc_24h": 0.2,
+            "btc_7d": 1.0,
+            "alpha_24h": 1.0,
+            "data_status": "ok",
+        },
+        "risk_flags": [],
+    }
+
+    assert api._early_mover_visible_candidate(row) is True
+
+
 def test_early_mover_intraday_trigger_checks_more_than_top_30(monkeypatch):
     coins = [_btc()]
     for idx in range(45):
@@ -619,7 +647,7 @@ def test_early_mover_adaptive_trigger_uses_only_5m(monkeypatch):
     assert calls == ["5m"]
     assert result["adaptive_checks"][0]["timeframe"] == "5m"
     assert result["adaptive_checks"][0]["ok"] is False
-    assert result["adaptive_checks"][0]["reason"] == "no_fresh_5m_trigger"
+    assert result["adaptive_checks"][0]["reason"] == "price_below_entry_tolerance"
 
 
 def test_early_mover_1m_retest_is_disabled():

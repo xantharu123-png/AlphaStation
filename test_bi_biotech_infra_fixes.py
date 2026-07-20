@@ -18,6 +18,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 # Session-unabhaengig: Repo-Root (Verzeichnis dieser Datei) in sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -35,8 +37,10 @@ BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 
 def _bg_setup(monkeypatch, tmp_path, cache_file, payload):
     """bg-Mail-Test-Setup: Cache schreiben, Dedupe isolieren, Versand aufzeichnen."""
-    with open(cache_file, "w", encoding="utf-8") as f:
+    isolated_cache = tmp_path / Path(cache_file).name
+    with isolated_cache.open("w", encoding="utf-8") as f:
         json.dump(payload, f)
+    monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(isolated_cache))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600, raising=False)
@@ -156,6 +160,137 @@ def test_k1_importerror_fallback_is_gone():
     assert not hasattr(bg_service, "_run_bi_analysis_direct")
     assert hasattr(bg_service, "_bg_run_bi_scan")
     assert "_bi_background_scan" in src, "K-1: echte Scan-Verdrahtung fehlt"
+
+
+def test_bg_keeps_last_good_cache_visible_during_replacement(monkeypatch, tmp_path):
+    cache = tmp_path / "bi.json"
+    cache.write_text(json.dumps({"timestamp": time.time(), "results": [{"ticker": "OLD"}]}))
+    monkeypatch.setitem(bg_service._SCAN_CACHE_MAP, "bi_long", str(cache))
+
+    bg_service._clear_scan_cache("bi_long")
+
+    assert cache.exists()
+    assert json.loads(cache.read_text())["results"][0]["ticker"] == "OLD"
+
+
+def test_bi_partial_cache_never_replaces_last_final(monkeypatch, tmp_path):
+    final_path = tmp_path / "bi_long.json"
+    final_path.write_text(json.dumps({"results": [{"ticker": "OLD"}]}), encoding="utf-8")
+    monkeypatch.setattr(scanners_mod, "_BI_CACHE_FILE", str(tmp_path / "bi_{direction}.json"))
+
+    scanners_mod._bi_cache_save(
+        [{"ticker": "PARTIAL"}], direction="long", partial=True, checked=5, total=10
+    )
+    assert json.loads(final_path.read_text(encoding="utf-8"))["results"][0]["ticker"] == "OLD"
+    partial_path = Path(f"{final_path}.partial")
+    assert json.loads(partial_path.read_text(encoding="utf-8"))["partial"] is True
+
+    scanners_mod._bi_cache_save(
+        [{"ticker": "FINAL"}], direction="long", partial=False, checked=10, total=10
+    )
+    final_payload = json.loads(final_path.read_text(encoding="utf-8"))
+    assert final_payload["results"][0]["ticker"] == "FINAL"
+    assert final_payload["partial"] is False
+    assert not partial_path.exists()
+
+
+def test_biotech_partial_cache_never_replaces_last_final(monkeypatch, tmp_path):
+    final_path = tmp_path / "biotech.json"
+    final_path.write_text(json.dumps({"results": [{"ticker": "OLD"}]}), encoding="utf-8")
+    monkeypatch.setattr(scanners_mod, "_biotech_cache_file", lambda: str(final_path))
+
+    scanners_mod._biotech_cache_save(
+        [{"ticker": "PARTIAL"}], partial=True, checked=2, total=8
+    )
+    assert json.loads(final_path.read_text(encoding="utf-8"))["results"][0]["ticker"] == "OLD"
+    partial_path = Path(f"{final_path}.partial")
+    assert json.loads(partial_path.read_text(encoding="utf-8"))["partial"] is True
+
+    scanners_mod._biotech_cache_save(
+        [{"ticker": "FINAL"}], partial=False, checked=8, total=8
+    )
+    final_payload = json.loads(final_path.read_text(encoding="utf-8"))
+    assert final_payload["results"][0]["ticker"] == "FINAL"
+    assert final_payload["partial"] is False
+    assert not partial_path.exists()
+
+
+def test_systemic_candidate_failures_abort_scanner_publish():
+    with pytest.raises(RuntimeError, match="systemischer Analysefehler"):
+        scanners_mod._raise_on_systemic_analysis_failures("BI long", 20, 18)
+
+    scanners_mod._raise_on_systemic_analysis_failures("BI long", 20, 15)
+
+
+def test_bg_final_publish_contract_rejects_partial_and_accepts_done(tmp_path):
+    cache = tmp_path / "bi.json"
+    progress = tmp_path / "progress.json"
+    started_at = time.time()
+    cache.write_text(json.dumps({
+        "timestamp": started_at,
+        "direction": "long",
+        "partial": True,
+        "results": [{"ticker": "PARTIAL"}],
+    }))
+    progress.write_text(json.dumps({"timestamp": started_at, "status": "running"}))
+
+    try:
+        bg_service._require_final_scanner_publish(
+            "bi_long", str(cache), None, str(progress), started_at, direction="long"
+        )
+    except RuntimeError as exc:
+        assert "partieller" in str(exc)
+    else:
+        raise AssertionError("Partieller BI-Cache wurde als final akzeptiert")
+
+    cache.write_text(json.dumps({
+        "timestamp": time.time(),
+        "direction": "long",
+        "partial": False,
+        "results": [],
+    }))
+    progress.write_text(json.dumps({"timestamp": time.time(), "status": "done"}))
+    payload = bg_service._require_final_scanner_publish(
+        "bi_long", str(cache), None, str(progress), started_at, direction="long"
+    )
+    assert payload["results"] == []
+
+
+def test_api_final_publish_contract_rejects_partial_bi_cache(monkeypatch, tmp_path):
+    cache = tmp_path / "bi.json"
+    progress = tmp_path / "progress.json"
+    cache.write_text(json.dumps({
+        "timestamp": time.time(),
+        "direction": "long",
+        "partial": True,
+        "results": [{"ticker": "PARTIAL"}],
+    }))
+    progress.write_text(json.dumps({"timestamp": time.time(), "status": "running"}))
+    monkeypatch.setitem(api.SCAN_CACHE_MAP, "bi_long", str(cache))
+    monkeypatch.setitem(api._SCAN_PROGRESS_MAP, "bi_long", str(progress))
+
+    try:
+        api._require_fresh_scan_cache("bi_long", None)
+    except RuntimeError as exc:
+        assert "partial" in str(exc)
+    else:
+        raise AssertionError("API akzeptierte einen partiellen BI-Cache")
+
+
+def test_api_final_publish_contract_rejects_stopped_biotech(monkeypatch, tmp_path):
+    cache = tmp_path / "biotech.json"
+    progress = tmp_path / "progress.json"
+    cache.write_text(json.dumps({"timestamp": time.time(), "results": []}))
+    progress.write_text(json.dumps({"timestamp": time.time(), "status": "stopped"}))
+    monkeypatch.setitem(api.SCAN_CACHE_MAP, "biotech", str(cache))
+    monkeypatch.setitem(api._SCAN_PROGRESS_MAP, "biotech", str(progress))
+
+    try:
+        api._require_fresh_scan_cache("biotech", None)
+    except RuntimeError as exc:
+        assert "stopped" in str(exc)
+    else:
+        raise AssertionError("Gestoppter Biotech-Scan wurde als final akzeptiert")
 
 
 def test_k1_mail_footer_uses_v33_grade_ladder():

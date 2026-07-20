@@ -13,9 +13,16 @@ local_frontend.png
 tmp_*.html
 .codex_tmp_html_checks/
 .pytest_tmp/
+.pytest_tmp_local/
+.codex_pytest_*/
+tmp/
+tmp_mail_*.json
+tmp_mail_*.csv
+tmp_polygon_mail_bt/
 data_cache/auth/
 data_cache/nls_cache_*.json
 data_cache/*.log
 data_cache/signal_tracker.sqlite*
+data_cache/.fuse_hidden*
 backup_pre_sanierung_*.tar.gz
 *.bust

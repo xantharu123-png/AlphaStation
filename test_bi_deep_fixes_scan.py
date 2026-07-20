@@ -270,6 +270,27 @@ def test_h2_short_tp_formula_guarantees_geometry(monkeypatch):
     assert saved["results"] == []
 
 
+def test_autotrader_long_geometry_is_signed_and_rejects_inverted_levels():
+    valid = scanners._autotrader_long_geometry(100.0, 95.0, 107.5, 112.5)
+    assert valid["valid"] is True
+    assert valid["risk"] == 5.0
+    assert valid["rr"] == 2.0
+
+    inverted = scanners._autotrader_long_geometry(100.0, 105.0, 95.0, 90.0)
+    assert inverted["valid"] is False
+    assert "invalid_long_stop" in inverted["errors"]
+    assert "invalid_long_tp1" in inverted["errors"]
+
+
+def test_autotrader_scan_uses_signed_geometry_not_absolute_distance():
+    import inspect
+
+    source = inspect.getsource(scanners.autotrader_scan_once)
+    assert "_autotrader_long_geometry" in source
+    assert "abs(entry_price - stop_price)" not in source
+    assert "abs(tp1_price - entry_price)" not in source
+
+
 def test_h2_geometry_mini_fuzz_500_both_directions(monkeypatch):
     """500 zufaellige Serien je Richtung durch den echten Scan-Pfad:
     JEDE bewertete Level-Geometrie (auch verworfene) ist konsistent geloggt,

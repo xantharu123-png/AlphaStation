@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
+from modules.trade_levels import trade_geometry
+
 
 PREFERRED_MIN_RR = 1.5
 HARD_MIN_RR = 1.0
@@ -153,28 +155,6 @@ def _live_rr(
     tp2: Optional[float],
     direction: str,
 ) -> Optional[float]:
-    provided = _to_float(
-        _first(
-            row,
-            [
-                "live_rr_ratio",
-                "live_rr",
-                "risk_reward_live",
-            ],
-        )
-    )
-    fallback = _to_float(
-        _first(
-            row,
-            [
-                "risk_reward",
-                "RiskReward",
-                "rr_effective",
-                "rr_ratio",
-                "rr1",
-            ],
-        )
-    )
     # S-2 Audit-Fix: Wenn der Stop bereits gerissen ist, darf das Clamping
     # (max(current, entry) bzw. min(current, entry)) den Breach nicht maskieren.
     # Ein gerissener Stop bedeutet: kein lebendes Setup mehr -> Live R:R = 0.0.
@@ -183,24 +163,21 @@ def _live_rr(
             return 0.0
         if direction == "SHORT" and current >= stop:
             return 0.0
-    if current is None or entry is None or stop is None or tp1 is None:
-        return provided if provided is not None else fallback
-    if direction == "LONG":
-        live_entry = max(current, entry)
-        live_risk = live_entry - stop
-        rewards = [tp1 - live_entry]
-        if tp2 is not None:
-            rewards.append(tp2 - live_entry)
-    else:
-        live_entry = min(current, entry)
-        live_risk = stop - live_entry
-        rewards = [live_entry - tp1]
-        if tp2 is not None:
-            rewards.append(live_entry - tp2)
-    if live_risk <= 0:
-        return provided if provided is not None else fallback
-    reward = sum(rewards) / len(rewards)
-    return round(max(0.0, reward) / live_risk, 2)
+    levels_complete = all(value is not None for value in (entry, stop, tp1, tp2))
+    if not levels_complete:
+        # A stored scanner R:R is a plan metric, not a live execution metric.
+        # Missing levels must therefore fail closed instead of reusing stale R:R.
+        return None
+
+    # Complete plans always use the shared signed geometry. A stale supplied
+    # R:R must never make duplicate or wrong-side targets look tradeable.
+    live_entry = entry
+    if current is not None:
+        live_entry = max(current, entry) if direction == "LONG" else min(current, entry)
+    geometry = trade_geometry(live_entry, stop, tp1, tp2, direction)
+    if not geometry.get("valid"):
+        return 0.0
+    return geometry.get("rr")
 
 
 def _risk_band(score: int) -> str:
@@ -298,10 +275,34 @@ def calculate_trade_health(
     tp1 = _to_float(_first(row, ["tp1", "TP1", "target1", "target", "Target"]))
     tp2 = _to_float(_first(row, ["tp2", "TP2", "target2"]))
     direction = _direction(row, entry, stop)
-    risk = _risk(entry, stop, direction)
+    geometry = trade_geometry(entry, stop, tp1, tp2, direction)
+    levels_complete = all(value is not None for value in (entry, stop, tp1, tp2))
+    geometry_valid = bool(geometry.get("valid"))
+    risk = geometry.get("risk") if geometry_valid else _risk(entry, stop, direction)
+    planned_rr = _to_float(_first(row, ["risk_reward", "RiskReward", "rr_effective", "rr_ratio", "rr1"]))
+    atr_value = _to_float(_first(row, ["atr", "ATR", "atr_14", "atr14"]))
+    spread_pct = _to_float(_first(row, ["spread_pct", "spread_percent"]))
     distance_r = _distance_to_entry_r(row, current, entry, risk, direction)
     live_rr = _live_rr(row, current, entry, stop, tp1, tp2, direction)
     tp1_missed, tp2_missed = _target_missed(row, current, direction, tp1, tp2)
+
+    if levels_complete and not geometry_valid:
+        exclusion_reasons.append("invalid_trade_geometry")
+        warnings.append("Entry/Stop/TP-Geometrie ist ungueltig - Setup nicht handeln")
+    elif entry is not None and stop is not None and risk is None:
+        exclusion_reasons.append("invalid_stop_geometry")
+        warnings.append("Stop liegt auf der falschen Seite des Entries - Setup nicht handeln")
+
+    min_stop_distance: Optional[float] = None
+    if entry is not None and entry > 0 and risk is not None and risk > 0:
+        spread_distance = entry * max(0.0, spread_pct or 0.0) / 100.0
+        atr_distance = max(0.0, atr_value or 0.0) * 0.25
+        min_stop_distance = max(entry * 0.001, spread_distance, atr_distance)
+        if risk < min_stop_distance:
+            exclusion_reasons.append("stop_distance_below_noise_floor")
+            warnings.append(
+                f"Stop-Abstand {risk:.6g} liegt unter Markt-/ATR-Rauschen {min_stop_distance:.6g}"
+            )
 
     # ── S-2 Audit-Fix: Stop-Breach-Erkennung ──
     # LONG: current <= stop (exakt am Stop zaehlt als Breach) -> Setup invalidiert.
@@ -372,7 +373,14 @@ def calculate_trade_health(
             )
 
     if live_rr is not None:
-        if live_rr < HARD_MIN_RR:
+        if live_rr > 30:
+            entry_score -= 25
+            exclusion_reasons.append("implausible_live_rr")
+            warnings.append(f"Live R:R {live_rr:.1f} ist geometrisch unplausibel - Levels pruefen")
+        elif live_rr > 15:
+            entry_score -= 12
+            warnings.append(f"Live R:R {live_rr:.1f} ungewoehnlich hoch - Stop/Targets pruefen")
+        elif live_rr < HARD_MIN_RR:
             entry_score -= 32
             tactical_reasons.append(f"Live R:R nur {live_rr:.2f}")
         elif live_rr < PREFERRED_MIN_RR:
@@ -484,7 +492,6 @@ def calculate_trade_health(
         fakeout_score -= 10
         warnings.append("Negative Flags vorhanden")
 
-    spread_pct = _to_float(_first(row, ["spread_pct", "spread_percent"]))
     dollar_volume = _to_float(_first(row, ["dollar_volume", "dollar_vol", "DollarVolume"]))
     volume = _to_float(_first(row, ["volume", "Volumen"]))
     price = current or entry
@@ -512,10 +519,11 @@ def calculate_trade_health(
         liquidity_score -= 8
         warnings.append("Sub-Dollar-Ticker - Manipulations-/Spread-Risiko")
 
-    has_levels = entry is not None and stop is not None
+    has_levels = geometry_valid
     if not has_levels:
         entry_score = min(entry_score, 78)
-        warnings.append("Keine vollstaendigen Entry/Stop-Level - erst Trigger abwarten")
+        if not levels_complete:
+            warnings.append("Keine vollstaendigen Entry/Stop/TP-Level - erst Trigger abwarten")
 
     context_summary = {}
     if market_context:
@@ -641,6 +649,8 @@ def calculate_trade_health(
         "liquidity_risk": liquidity_risk,
         "liquidity_score": liquidity_score,
         "direction": direction,
+        "trade_geometry_valid": geometry_valid,
+        "trade_geometry_errors": geometry.get("errors", []),
         "warnings": list(dict.fromkeys(warnings + tactical_reasons))[:8],
         "positives": positives,
         "exclusion_reasons": list(dict.fromkeys(exclusion_reasons))[:6],
@@ -663,6 +673,8 @@ def calculate_trade_health(
             "risk": risk,
             "distance_to_entry_r": distance_r,
             "live_rr": live_rr,
+            "planned_rr": planned_rr,
+            "min_stop_distance": round(min_stop_distance, 8) if min_stop_distance is not None else None,
             "rvol": rvol,
             "close_pos": close_pos,
             "spread_pct": spread_pct,

@@ -31,6 +31,7 @@ import html
 import uuid
 import tempfile  # AUDIT H-10: atomare Cache-Writes
 import traceback
+import ipaddress
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
@@ -38,8 +39,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header
+from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,11 +52,13 @@ try:
     from modules.auth import (
         register_user, login_user, verify_token, get_user_plan,
         get_user_limits, check_tab_access, check_feature,
-        create_checkout_session, create_billing_portal,
+        create_checkout_session, create_billing_portal, get_checkout_eligibility,
         handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
         get_email_alert_recipients, get_user_alert_settings,
         update_user_alert_settings, auth_security_status,
-        _load_users, _save_users,
+        change_password, create_password_reset_request,
+        confirm_password_reset, revoke_token,
+        _load_users, _save_users, _update_user_atomic, _delete_user,
         ADMIN_EMAILS, AUTH_DB_PATH,
     )
     HAS_AUTH = True
@@ -94,14 +98,28 @@ from modules.data_fetchers import (
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
-from modules.trade_levels import normalize_alert_trade_levels
-from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
+from modules.trade_levels import normalize_alert_trade_levels, trade_geometry, trade_plan_quality
+from modules.email_dedupe import (
+    email_dedupe_active as _shared_email_dedupe_active,
+    email_dedupe_claim as _shared_email_dedupe_claim,
+    email_dedupe_mark as _shared_email_dedupe_mark,
+    email_dedupe_release as _shared_email_dedupe_release,
+    email_dedupe_remaining as _shared_email_dedupe_remaining,
+    load_email_dedupe as _shared_load_email_dedupe,
+    save_email_dedupe as _shared_save_email_dedupe,
+)
+from modules.vrvp_levels import (
+    apply_vrvp_to_trade_setup,
+    build_vrvp_structure,
+    calculate_wilder_atr,
+)
 from modules.penny_stock_scanner import (
     PENNY_EXECUTION_MAX_SPREAD_BPS,
     PENNY_MIN_PRICE,
     PENNY_MAX_PRICE,
     PENNY_MIN_TRADE_SCORE,
     PENNY_TRIGGER_MAX_AGE_SECONDS,
+    analyze_penny_intraday,
     evaluate_penny_candidate,
     evaluate_penny_signal_outcome,
     score_broad_penny_candidate,
@@ -147,7 +165,13 @@ except ImportError:
     calculate_stock_setup_score = None
 
 from modules.trade_health import calculate_trade_health
-from modules.market_context import analyze_headlines, build_event_risk, build_market_context, missing_headline_risk
+from modules.market_context import (
+    analyze_headlines,
+    build_event_risk,
+    build_market_context,
+    missing_event_risk,
+    missing_headline_risk,
+)
 
 # Import pattern detection
 try:
@@ -177,6 +201,7 @@ try:
         fetch_cryptocom_orderbook,
         run_new_listing_scanner,
         seed_instrument_cache,
+        fetch_mexc_contract_sizes,
     )
     HAS_NEW_LISTING_SCANNER = True
 except ImportError:
@@ -601,6 +626,14 @@ def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str
     return f"/tmp/strategy_{safe_name}_cache.json"
 
 
+def _strategy_scan_status_key(strategy_name: str, market_type: str = "stocks") -> str:
+    """Return the scheduler key used by manual generic strategy scans."""
+    safe_name = re.sub(r"[^a-z0-9_]+", "_", str(strategy_name or "").lower().replace(" ", "_"))
+    safe_name = re.sub(r"_+", "_", safe_name).strip("_") or "strategy"
+    prefix = "crypto_strat" if str(market_type or "stocks").lower() == "crypto" else "strat"
+    return f"{prefix}_{safe_name}"
+
+
 def _looks_like_non_stock_etp_symbol(ticker: str) -> Optional[str]:
     """Last-ditch symbol guard; primary stock filtering is by reference asset type."""
     tk = str(ticker or "").upper().strip()
@@ -953,6 +986,40 @@ def _load_secrets():
     return secrets
 
 _SECRETS = _load_secrets()
+
+
+def _config_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = _SECRETS.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_public_https_origin(value: Any) -> Optional[str]:
+    """Return a production-safe HTTPS origin or None for placeholders/raw IPs."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    hostname = str(parsed.hostname or "").strip().lower()
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
+        return None
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        return None
+    if hostname == "localhost" or hostname.endswith((".localhost", ".example", ".invalid", ".test")):
+        return None
+    try:
+        ipaddress.ip_address(hostname)
+        return None
+    except ValueError:
+        pass
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"https://{hostname}{port}"
+
+
 PUBLIC_APP_URL = (
     os.environ.get("PUBLIC_APP_URL")
     or os.environ.get("APP_BASE_URL")
@@ -960,11 +1027,38 @@ PUBLIC_APP_URL = (
     or _SECRETS.get("APP_BASE_URL")
     or "http://178.104.69.209:3000"
 ).rstrip("/")
-COMMERCE_ENFORCE_AUTH = str(
-    os.environ.get("COMMERCE_ENFORCE_AUTH")
-    or _SECRETS.get("COMMERCE_ENFORCE_AUTH")
-    or "0"
-).strip().lower() in {"1", "true", "yes", "on"}
+COMMERCE_ENFORCE_AUTH = _config_flag("COMMERCE_ENFORCE_AUTH")
+COMMERCIAL_STRICT_MODE = _config_flag("COMMERCIAL_STRICT_MODE")
+# Coupon grants currently span the auth database and a separate admin JSON
+# store. Keep that non-transactional feature off by default in paid mode.
+COUPONS_ENABLED = _config_flag(
+    "ENABLE_COUPONS", default=not COMMERCIAL_STRICT_MODE
+)
+LEGAL_REVIEW_APPROVED = _config_flag("LEGAL_REVIEW_APPROVED")
+DATA_LICENSE_APPROVED = _config_flag("DATA_LICENSE_APPROVED")
+TAX_SETUP_APPROVED = _config_flag("TAX_SETUP_APPROVED")
+HISTORICAL_SECRETS_ROTATED = _config_flag("HISTORICAL_SECRETS_ROTATED")
+SOURCE_REPOSITORY_ACCESS_REVIEWED = _config_flag(
+    "SOURCE_REPOSITORY_ACCESS_REVIEWED"
+)
+LEGAL_ENTITY_NAME = str(
+    os.environ.get("LEGAL_ENTITY_NAME") or _SECRETS.get("LEGAL_ENTITY_NAME") or ""
+).strip()
+LEGAL_OPERATOR_NAME = str(
+    os.environ.get("LEGAL_OPERATOR_NAME") or _SECRETS.get("LEGAL_OPERATOR_NAME") or ""
+).strip()
+LEGAL_POSTAL_ADDRESS = str(
+    os.environ.get("LEGAL_POSTAL_ADDRESS") or _SECRETS.get("LEGAL_POSTAL_ADDRESS") or ""
+).strip()
+LEGAL_CONTACT_EMAIL = str(
+    os.environ.get("LEGAL_CONTACT_EMAIL") or _SECRETS.get("LEGAL_CONTACT_EMAIL") or ""
+).strip()
+LEGAL_TERMS_VERSION = str(
+    os.environ.get("LEGAL_TERMS_VERSION") or _SECRETS.get("LEGAL_TERMS_VERSION") or ""
+).strip()
+LEGAL_PRIVACY_VERSION = str(
+    os.environ.get("LEGAL_PRIVACY_VERSION") or _SECRETS.get("LEGAL_PRIVACY_VERSION") or ""
+).strip()
 ALERT_SEND_TO_SUBSCRIBERS = str(
     os.environ.get("ALERT_SEND_TO_SUBSCRIBERS")
     or _SECRETS.get("ALERT_SEND_TO_SUBSCRIBERS")
@@ -999,7 +1093,10 @@ _EMAIL_COOLDOWN = {}
 # auf einzelne Keys ist in CPython atomar).
 _EMAIL_COOLDOWN_LOCK = threading.Lock()
 _EMAIL_COOLDOWN_SEC = 3600 * 8  # V2.6: 8h pro Ticker
-_EMAIL_DEDUPE_FILE = "/tmp/alphastation_email_dedupe.json"
+_EMAIL_DEDUPE_FILE = os.getenv("EMAIL_DEDUPE_FILE") or os.path.join(
+    tempfile.gettempdir(),
+    "alphastation_email_dedupe.json",
+)
 _CRASH_ALERT_DEDUPE_SEC = 36 * 3600
 # AUDIT M-Bear-SendLog-Race (2026-06-10): Tages-Summaries (crash_summary_/bear_summary_)
 # werden persistent dedupet, damit ein Restart keine zweite Tagesmail ausloest.
@@ -1257,6 +1354,18 @@ def _us_equity_expected_volume_fraction(now_utc: Optional[datetime] = None) -> f
     return 1.0
 
 
+def _project_us_equity_rvol(raw_rvol: Any, now_utc: Optional[datetime] = None) -> float:
+    """Project partial-session US volume to a full-session RVOL pace."""
+    try:
+        value = max(0.0, float(raw_rvol or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    expected_fraction = _us_equity_expected_volume_fraction(now_utc)
+    if expected_fraction >= 1.0:
+        return value
+    return value / max(expected_fraction, 0.01)
+
+
 def _normalize_trade_horizon_value(value: Any) -> str:
     raw = str(value or "swing").strip().lower().replace("-", "_")
     aliases = {
@@ -1486,24 +1595,14 @@ def _format_alert_suppression_summary(
 
 
 def _load_email_dedupe(now: Optional[float] = None, max_keep_seconds: int = 7 * 86400) -> Dict[str, float]:
-    now = now or time.time()
     try:
-        if not os.path.exists(_EMAIL_DEDUPE_FILE):
-            return {}
-        with open(_EMAIL_DEDUPE_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            return {}
-        dedupe: Dict[str, float] = {}
-        for key, ts in raw.items():
-            try:
-                ts_float = float(ts)
-            except (TypeError, ValueError):
-                continue
-            if now - ts_float <= max_keep_seconds:
-                dedupe[str(key)] = ts_float
-        return dedupe
-    except Exception:
+        return _shared_load_email_dedupe(
+            _EMAIL_DEDUPE_FILE,
+            now=now,
+            max_keep_seconds=max_keep_seconds,
+        )
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Datei konnte nicht gelesen werden: {exc}")
         return {}
 
 
@@ -1555,34 +1654,26 @@ def _email_dedupe_status(now: Optional[float] = None) -> Dict[str, Any]:
 
 
 def _save_email_dedupe(dedupe: Dict[str, float]) -> None:
-    tmp_path = f"{_EMAIL_DEDUPE_FILE}.{os.getpid()}.tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(dedupe, f)
-        os.replace(tmp_path, _EMAIL_DEDUPE_FILE)
+        _shared_save_email_dedupe(_EMAIL_DEDUPE_FILE, dedupe)
     except Exception as exc:
         print(f"[Alert] Dedupe-Datei konnte nicht gespeichert werden: {exc}")
-        try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            pass
 
 
 def _email_dedupe_active(key: str, ttl_seconds: int, now: Optional[float] = None) -> bool:
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    last = dedupe.get(key)
-    return last is not None and now - last < ttl_seconds
+    try:
+        return _shared_email_dedupe_active(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Status konnte nicht gelesen werden: {exc}")
+        return False
 
 
 def _email_dedupe_remaining(key: str, ttl_seconds: int, now: Optional[float] = None) -> int:
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    last = dedupe.get(key)
-    if last is None:
+    try:
+        return _shared_email_dedupe_remaining(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Restzeit konnte nicht gelesen werden: {exc}")
         return 0
-    return int(max(0, ttl_seconds - (now - last)))
 
 
 def _bearish_stock_alert_key(ticker: str) -> str:
@@ -1601,19 +1692,28 @@ def _mark_bearish_stock_alert(ticker: str, now: Optional[float] = None) -> None:
 
 
 def _email_dedupe_mark(key: str, now: Optional[float] = None) -> None:
-    now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
-    dedupe[key] = now
-    _save_email_dedupe(dedupe)
+    try:
+        _shared_email_dedupe_mark(_EMAIL_DEDUPE_FILE, key, now=now)
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Markierung konnte nicht gespeichert werden: {exc}")
 
 
 def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None) -> bool:
     """Return True only once per key+TTL, even after process restarts."""
-    now = now or time.time()
-    if _email_dedupe_active(key, ttl_seconds, now=now):
+    try:
+        return _shared_email_dedupe_claim(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+    except Exception as exc:
+        # Fail closed: a broken dedupe store must not create a mail storm.
+        print(f"[Alert] Dedupe-Claim konnte nicht gespeichert werden: {exc}")
         return False
-    _email_dedupe_mark(key, now=now)
-    return True
+
+
+def _email_dedupe_release(key: str, claimed_at: Optional[float] = None) -> bool:
+    try:
+        return _shared_email_dedupe_release(_EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at)
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Claim konnte nicht freigegeben werden: {exc}")
+        return False
 
 
 def _email_has_blocked_etf_content(subject: str, body_html: str) -> bool:
@@ -1862,6 +1962,12 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     distance_to_entry_r = _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")))
     btc_24h = _alert_float(btc_context.get("btc_24h"), 0) or 0
     btc_7d = _alert_float(btc_context.get("btc_7d"), 0) or 0
+    btc_status = str(btc_context.get("data_status") or btc_context.get("status") or "ok").lower()
+    btc_context_known = bool(
+        btc_context
+        and ("btc_24h" in btc_context or "btc_7d" in btc_context)
+        and btc_status not in {"error", "unknown", "missing", "stale"}
+    )
     alpha_24h = _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0
     change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
     return {
@@ -1876,7 +1982,8 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "execution_trigger_ok": _alert_bool(row.get("execution_trigger_ok", False)),
         "partial_data": _alert_bool(row.get("partial_data", row.get("data_partial", False))),
         "data_warning": row.get("data_warning"),
-        "btc_tailwind": _alert_bool(btc_context.get("tailwind"), True),
+        "btc_tailwind": bool(btc_context_known and _alert_bool(btc_context.get("tailwind"), False)),
+        "btc_context_known": btc_context_known,
         "btc_24h": btc_24h,
         "btc_7d": btc_7d,
         "btc_hard_headwind": bool(btc_24h <= -3.0 or btc_7d <= -7.0),
@@ -1889,6 +1996,8 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _early_mover_btc_allows_long(fields: Dict[str, Any]) -> bool:
     """BTC may be neutral/choppy, but not in a hard dump unless the setup is only watched."""
+    if not fields.get("btc_context_known"):
+        return False
     if fields.get("btc_hard_headwind"):
         return False
     if fields.get("btc_tailwind"):
@@ -2058,53 +2167,14 @@ def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
     """Return alert-facing R:R quality without letting a far runner dominate."""
-    rr = _alert_float(levels.get("rr"), None)
-    rr_tp1 = _alert_float(levels.get("rr_tp1"), None)
-    rr_tp2 = _alert_float(levels.get("rr_tp2"), None)
-    entry = _alert_float(levels.get("entry"), None)
-    risk = _alert_float(levels.get("risk"), None)
-    reward1 = _alert_float(levels.get("reward1"), None)
-    reward2 = _alert_float(levels.get("reward2"), None)
-    warnings = {str(item) for item in (levels.get("warnings") or [])}
-    issues: List[str] = []
-
-    if rr_tp1 is None or rr_tp2 is None:
-        return {
-            "effective_rr": rr,
-            "rr_tp1": rr_tp1,
-            "rr_tp2": rr_tp2,
-            "runner_skew": False,
-            "tp1_ok": rr_tp1 is None or rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
-            "issues": issues,
-        }
-    if rr_tp1 < _ALERT_MIN_PRIMARY_TP_RR:
-        issues.append("tp1_rr_below_primary_threshold")
-    if warnings.intersection({"tp2_not_above_tp1", "tp2_not_below_tp1"}):
-        issues.append("tp2_not_beyond_tp1")
-    if entry and risk and reward1 is not None and reward2 is not None:
-        min_tp_gap = max(risk * _ALERT_MIN_TP_GAP_R, entry * _ALERT_MIN_TP_GAP_PCT)
-        if reward2 <= reward1:
-            issues.append("tp2_not_beyond_tp1")
-        elif (reward2 - reward1) < min_tp_gap:
-            issues.append("targets_too_close")
-    if rr_tp2 < max(2.0, rr_tp1 + _ALERT_MIN_TP_GAP_R):
-        issues.append("targets_too_close")
-    if rr_tp2 > _ALERT_RUNNER_RR_CAP and rr_tp1 < 2.0:
-        issues.append("runner_rr_overdominates_tp1")
-    if rr_tp1 > 0 and rr_tp2 / rr_tp1 > _ALERT_MAX_RUNNER_TO_TP1_RATIO and rr_tp1 < 2.0:
-        issues.append("runner_rr_overdominates_tp1")
-
-    capped_tp2 = min(rr_tp2, _ALERT_RUNNER_RR_CAP)
-    effective_rr = round((rr_tp1 + capped_tp2) / 2.0, 2)
-    runner_skew = rr_tp2 > _ALERT_RUNNER_RR_CAP and rr_tp2 >= max(rr_tp1 * 2.25, rr_tp1 + 4.0)
-    return {
-        "effective_rr": effective_rr,
-        "rr_tp1": rr_tp1,
-        "rr_tp2": rr_tp2,
-        "runner_skew": runner_skew,
-        "tp1_ok": rr_tp1 >= _ALERT_MIN_PRIMARY_TP_RR,
-        "issues": list(dict.fromkeys(issues)),
-    }
+    return trade_plan_quality(
+        levels,
+        min_primary_tp_rr=_ALERT_MIN_PRIMARY_TP_RR,
+        min_tp_gap_r=_ALERT_MIN_TP_GAP_R,
+        min_tp_gap_pct=_ALERT_MIN_TP_GAP_PCT,
+        runner_rr_cap=_ALERT_RUNNER_RR_CAP,
+        max_runner_to_tp1_ratio=_ALERT_MAX_RUNNER_TO_TP1_RATIO,
+    )
 
 
 def _alert_move_warning_line(row: Dict[str, Any], levels: Dict[str, Any]) -> str:
@@ -2207,7 +2277,7 @@ def _biotech_binary_event_days(row: Dict[str, Any]) -> Optional[float]:
         return None
     for key in ("days_until", "Days_Until", "Catalyst_Days", "catalyst_days", "days_until_readout"):
         val = _alert_float(row.get(key), None)
-        if val is not None:
+        if val is not None and val >= 0:
             return val
     best = None
     for list_key in ("Readout_Details", "readout_details", "BPIQ_Catalysts", "bpiq_catalysts"):
@@ -2962,8 +3032,26 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         tp1 = _alert_float(row.get("tp1") or setup_obj.get("tp1"))
         entry = _alert_float(row.get("entry") or setup_obj.get("entry"))
         stop = _alert_float(row.get("stop_loss") or row.get("stop") or setup_obj.get("stop_loss") or setup_obj.get("stop"))
-        risk = abs(entry - stop) if entry is not None and stop is not None and entry != stop else None
+        risk = (entry - stop) if entry is not None and stop is not None else None
+        if risk is not None and risk <= 0:
+            return {
+                "ok": False,
+                "reason": "invalid_long_stop_geometry",
+                "timeframe": timeframe,
+                "execution_score": 0,
+            }
         distance_r = ((last_close - entry) / risk) if entry is not None and risk and risk > 0 else None
+
+        if stop is not None and last_close <= stop:
+            return {
+                "ok": False,
+                "reason": "long_stop_breached_intraday",
+                "timeframe": timeframe,
+                "execution_score": 0,
+                "last_close": round(last_close, 10),
+                "stop": round(stop, 10),
+                "execution_data_age_seconds": freshness.get("age_seconds"),
+            }
 
         if tp1 is not None and last_close >= tp1:
             return {
@@ -3001,7 +3089,7 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             and last_close > vwap
             and close_pos >= 0.62
             and vol_ratio >= breakout_vol
-            and (distance_r is None or distance_r <= 0.55)
+            and (distance_r is None or -0.10 <= distance_r <= 0.55)
         )
 
         matched = []
@@ -3039,14 +3127,12 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
         if distance_r is not None:
             if -0.10 <= distance_r <= 0.25:
                 score += 18
-            elif distance_r <= 0.50:
+            elif 0.25 < distance_r <= 0.50:
                 score += 10
-            elif distance_r <= 0.75:
+            elif 0.50 < distance_r <= 0.75:
                 score += 2
             else:
                 score -= 28
-            if distance_r < -0.25:
-                score -= 18
         elif matched:
             score += 8
 
@@ -3134,9 +3220,14 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             pre_reasons.append("pre_breakout_structure_incomplete")
 
         threshold = _early_mover_execution_threshold(matched, profile)
-        ok = bool(matched and score >= threshold)
+        entry_distance_valid = bool(distance_r is None or -0.10 <= distance_r <= 0.75)
+        ok = bool(matched and score >= threshold and entry_distance_valid)
         if ok:
             reason = f"adaptive_{timeframe}_{matched[0]}"
+        elif distance_r is not None and distance_r < -0.10:
+            reason = "price_below_entry_tolerance"
+        elif distance_r is not None and distance_r > 0.75:
+            reason = "entry_already_extended"
         elif chase_candle:
             reason = f"single_{timeframe}_candle_chase"
         elif not matched:
@@ -3880,7 +3971,7 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
     if entry is None or stop is None or entry <= 0 or stop <= 0 or stop >= entry:
         return
 
-    risk = max(entry - stop, entry * 0.01)
+    risk = entry - stop
     setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
     target_req = setup.get("target_min_pct_required") if isinstance(setup.get("target_min_pct_required"), dict) else {}
     min_tp1_pct = (_alert_float(target_req.get("tp1"), 5.5) or 5.5) / 100
@@ -3943,16 +4034,26 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
 
     new_tp1 = _alert_float(row.get("tp1"), tp1) or tp1
     new_tp2 = _alert_float(row.get("tp2"), tp2) or tp2
-    rr_tp1 = round((new_tp1 - entry) / risk, 2)
-    rr_tp2 = round((new_tp2 - entry) / risk, 2)
-    live_entry = max(_alert_float(row.get("Price"), entry) or entry, entry)
-    live_risk = max(live_entry - stop, risk)
-    live_reward = ((new_tp1 - live_entry) + (new_tp2 - live_entry)) / 2
+    geometry = trade_geometry(entry, stop, new_tp1, new_tp2, "LONG")
+    if not geometry.get("valid"):
+        flags = row.get("risk_flags") if isinstance(row.get("risk_flags"), list) else []
+        row["risk_flags"] = list(dict.fromkeys([*flags, "invalid_trade_geometry", "weak_structural_targets"]))
+        row["target_quality"] = "WEAK_STRUCTURAL_TARGETS"
+        return
+
+    rr_tp1 = geometry["rr_tp1"]
+    rr_tp2 = geometry["rr_tp2"]
+    live_entry = _alert_float(
+        row.get("execution_price", row.get("current_price", row.get("Price"))),
+        entry,
+    ) or entry
+    live_geometry = trade_geometry(live_entry, stop, new_tp1, new_tp2, "LONG")
+    live_rr = live_geometry.get("rr") if live_geometry.get("valid") else 0
     row.update({
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
-        "risk_reward": round((rr_tp1 + rr_tp2) / 2, 2),
-        "live_rr_ratio": round(max(0.0, live_reward) / live_risk, 2) if live_risk > 0 else 0,
+        "risk_reward": geometry["rr"],
+        "live_rr_ratio": live_rr,
         "target_quality": "STRUCTURAL_VRVP",
         "vrvp_levels": vrvp,
     })
@@ -4018,16 +4119,18 @@ def _early_mover_target_plan_issues(row: Dict[str, Any]) -> List[str]:
 
     if entry is None or stop is None or tp1 is None or tp2 is None or entry <= 0:
         return ["invalid_target_plan"]
-    risk = max(entry - stop, entry * 0.01)
-    if stop >= entry or tp1 <= entry:
-        issues.append("invalid_target_plan")
-    min_tp2_gap = max(entry * 0.024, risk * 0.55)
-    if tp2 <= tp1:
+    if math.isclose(tp1, tp2, rel_tol=1e-9, abs_tol=max(entry * 1e-9, 1e-12)):
         issues.append("duplicate_targets")
-    elif (tp2 - tp1) < min_tp2_gap:
+    geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
+    if not geometry.get("valid"):
+        issues.append("invalid_target_plan")
+        return list(dict.fromkeys(issues))
+    risk = geometry["risk"]
+    min_tp2_gap = max(entry * 0.024, risk * 0.55)
+    if (tp2 - tp1) < min_tp2_gap:
         issues.append("targets_too_close")
-    rr1 = (tp1 - entry) / risk if risk > 0 else 0
-    rr2 = (tp2 - entry) / risk if risk > 0 else 0
+    rr1 = geometry["rr_tp1"]
+    rr2 = geometry["rr_tp2"]
     if rr1 < 1.5 or rr2 < max(2.05, rr1 + 0.55):
         issues.append("targets_too_close")
     if target_quality.startswith("WEAK"):
@@ -4138,12 +4241,16 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     matched = set((trigger_check or {}).get("matched") or []) if isinstance(trigger_check, dict) else set()
     retest_execution_ok = action != "WAIT_FOR_RETEST" or "retest_hold" in matched
     if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason and retest_execution_ok:
+        confirmed_retest = bool(action == "WAIT_FOR_RETEST" and "retest_hold" in matched)
+        row["trade_action"] = "LONG_TRIGGER"
         row["trade_signal"] = "JETZT_TRADEN"
         score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
         tf_txt = str(trigger_check.get("timeframe") or "adaptive") if isinstance(trigger_check, dict) else "adaptive"
         row["signal_label"] = f"Jetzt traden: {tf_txt} Execution-Trigger bestaetigt ({trigger_reason or 'ok'}{score_txt})"
         row["signal_quality"] = "tradeable"
         row["entry_status"] = "JETZT_TRADEN"
+        row["retest_confirmed"] = confirmed_retest
+        row["entry_confirmation_type"] = "RETEST_CONFIRMED" if confirmed_retest else "EXECUTION_TRIGGER_CONFIRMED"
         row["alertable_crypto"] = True
     elif action == "WAIT_FOR_RETEST" and trigger_ok and not retest_execution_ok:
         row["trade_signal"] = "WARTEN"
@@ -4441,7 +4548,12 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     median_vol = _median_float([b.get("volume", 0) for b in prev], max(last.get("volume", 1), 1))
     vol_ratio = last.get("volume", 0) / max(median_vol, 1)
     close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
-    risk = abs(entry - stop) if stop is not None else max(entry * 0.02, 0.01)
+    if stop is not None:
+        risk = (stop - entry) if direction == "SHORT" else (entry - stop)
+        if risk <= 0:
+            return {"triggered": False, "reason": "invalid_stock_stop_geometry"}
+    else:
+        risk = max(entry * 0.02, 0.01)
     distance_r = abs(last_close - entry) / max(risk, 1e-9)
 
     if direction == "SHORT":
@@ -4527,6 +4639,15 @@ def _process_trade_reminders_once() -> None:
         for reminder in reminders:
             if reminder.get("status") != "active":
                 continue
+            owner_email = str(reminder.get("owner_email") or "").strip().lower()
+            if not owner_email or "@" not in owner_email:
+                # Legacy reminders had no owner and could leak across accounts.
+                # Cancel them instead of guessing a recipient.
+                reminder["status"] = "cancelled"
+                reminder["updated_at"] = _reminder_iso(now)
+                reminder["cancellation_reason"] = "missing_owner_email"
+                changed = True
+                continue
             if now >= float(reminder.get("expires_at", 0) or 0):
                 reminder["status"] = "expired"
                 reminder["updated_at"] = _reminder_iso(now)
@@ -4556,12 +4677,17 @@ def _process_trade_reminders_once() -> None:
                         tp1=result.get("tp1"),
                         tp2=result.get("tp2"),
                     )]
-                    _reminder_sent = _send_email_alert(
+                    users = (_load_users() or {}).get("users", {}) if HAS_AUTH else {}
+                    owner = users.get(owner_email, {}) if isinstance(users, dict) else {}
+                    alert_email = str(owner.get("alert_email") or owner_email).strip().lower()
+                    email_enabled = owner.get("email_alerts_enabled", True) is not False
+                    _reminder_sent = bool(email_enabled and "@" in alert_email) and _send_email_alert(
                         f"Reminder: {reminder.get('ticker', '').upper()} Trigger bereit",
                         _format_reminder_email(reminder, result),
                         bypass_startup_cooldown=True,
                         trade_horizon="swing",  # AUDIT H-3: explizit (Reminder = Swing-Kontext)
                         mail_class="trade",  # AUDIT H-2: Trigger bereit = handelbar
+                        recipient_emails=[alert_email],
                         telegram_text=_safe_format_telegram_rows(_reminder_signal_rows),
                     )
                     if _reminder_sent:
@@ -4699,12 +4825,27 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Watch-Digest-Cooldown: {_EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC // 3600}h. Nur Kandidaten, deren Grade/Score/RVOL/Plan passen und die ausschliesslich wegen Wait-/Retest-/Frische-Gates nicht JETZT handelbar sind.</p>
     </body></html>'''
-    sent = _send_email_alert(
-        f"Crypto Retest-Zonen ({len(items)} Kandidaten)",
-        body,
-        trade_horizon="swing",
-        mail_class="watch",
-    )
+    if not _email_dedupe_claim(
+        _EARLY_MOVER_WATCH_DIGEST_KEY,
+        _EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC,
+        now=now,
+    ):
+        _record_email_event(
+            "Crypto Early Mover WATCH Digest",
+            "skipped",
+            f"watch_digest_claimed_by_parallel_sender:candidates={len(watch_rows)}",
+        )
+        return False
+    try:
+        sent = _send_email_alert(
+            f"Crypto Retest-Zonen ({len(items)} Kandidaten)",
+            body,
+            trade_horizon="swing",
+            mail_class="watch",
+        )
+    except Exception:
+        _email_dedupe_release(_EARLY_MOVER_WATCH_DIGEST_KEY, claimed_at=now)
+        raise
     if sent:
         _email_dedupe_mark(_EARLY_MOVER_WATCH_DIGEST_KEY, now=now)
         for item in items:
@@ -4712,6 +4853,8 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
             if key:
                 _EMAIL_COOLDOWN[key] = now
                 _email_dedupe_mark(key, now=now)
+    else:
+        _email_dedupe_release(_EARLY_MOVER_WATCH_DIGEST_KEY, claimed_at=now)
     return bool(sent)
 
 
@@ -4872,7 +5015,23 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows))  # AUDIT H-3 / H-2
+    if not _email_dedupe_claim(
+        _EARLY_MOVER_DIGEST_KEY,
+        _EARLY_MOVER_DIGEST_DEDUPE_SEC,
+        now=now,
+    ):
+        _record_email_event(
+            "Crypto Early Mover LONG Alert",
+            "skipped",
+            f"digest_claimed_by_parallel_sender:candidates={len(candidates)}",
+        )
+        _send_early_mover_watch_alerts(watch_rows, now=now)
+        return False
+    try:
+        sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows))  # AUDIT H-3 / H-2
+    except Exception:
+        _email_dedupe_release(_EARLY_MOVER_DIGEST_KEY, claimed_at=now)
+        raise
     if sent:
         _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
         for item in email_rows:
@@ -4880,6 +5039,8 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             _email_dedupe_mark(item["key"], now=now)
         # Signal-Tracking: nur die tatsaechlich gemailten 🚨-Rows (Watch-Mail loggt nicht).
         _safe_record_alert_signals("early_movers", email_rows)
+    else:
+        _email_dedupe_release(_EARLY_MOVER_DIGEST_KEY, claimed_at=now)
     _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
     return bool(sent)
 
@@ -5278,6 +5439,7 @@ def _extract_bear_short_fields(row: Dict[str, Any]) -> Dict[str, Optional[float]
         "open_to_current_pct": _alert_float(_alert_get_any(row, "open_to_current_pct", "Open_To_Current_Pct", "intraday_change_pct")),
         "latest_bar_change_pct": _alert_float(row.get("latest_bar_change_pct")),
         "latest_bar_close_pos": _alert_float(row.get("latest_bar_close_pos")),
+        "latest_bar_age_seconds": _alert_float(row.get("latest_bar_age_seconds")),
         "rvol": _alert_float(row.get("rvol", row.get("RVOL"))),
         "score": _alert_float(row.get("score", row.get("Score"))),
     }
@@ -5292,6 +5454,7 @@ def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
     open_to_current = fields["open_to_current_pct"]
     latest_bar_change = fields["latest_bar_change_pct"]
     latest_bar_close_pos = fields["latest_bar_close_pos"]
+    latest_bar_age_seconds = fields["latest_bar_age_seconds"]
     rvol = fields["rvol"]
     latest_missing = latest_bar_change is None or latest_bar_close_pos is None
 
@@ -5308,6 +5471,11 @@ def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("not_closing_near_low")
     if latest_missing:
         reasons.append("fresh_5m_state_missing_wait_trigger")
+    intraday_state_status = str(row.get("intraday_state_status") or "").lower()
+    if intraday_state_status and intraday_state_status != "fresh":
+        reasons.append(f"fresh_5m_state_{intraday_state_status}")
+    elif latest_bar_age_seconds is not None and latest_bar_age_seconds > 15 * 60:
+        reasons.append("fresh_5m_state_stale")
     if (
         latest_bar_change is not None
         and latest_bar_close_pos is not None
@@ -5429,30 +5597,38 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
     }
 
 
-def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Optional[float]]:
+def _fetch_bear_latest_intraday_state(ticker: str) -> Dict[str, Any]:
     """Fetch the latest 5m candle so Bear mails do not chase into a live bounce."""
     if not ticker or not POLYGON_KEY:
         return {}
     try:
         bars = _fetch_recent_stock_5m_bars(ticker, limit=24)
         if not bars:
-            return {}
+            return {"intraday_state_status": "missing"}
         bar = bars[-1]
         open_ = bar.get("open", 0) or 0
         high = bar.get("high", 0) or 0
         low = bar.get("low", 0) or 0
         close = bar.get("close", 0) or 0
         if not open_ or not close:
-            return {}
+            return {"intraday_state_status": "invalid"}
+        bar_open_ts = _candle_epoch_seconds(bar)
+        if bar_open_ts is None:
+            return {"intraday_state_status": "timestamp_missing"}
+        bar_age_seconds = max(0.0, time.time() - (bar_open_ts + 5 * 60))
+        state_status = "fresh" if bar_age_seconds <= 15 * 60 else "stale"
         change_pct = ((close - open_) / open_) * 100
         close_pos = ((close - low) / (high - low)) if high > low else 0.5
         return {
             "latest_bar_change_pct": round(change_pct, 2),
             "latest_bar_close_pos": round(close_pos, 3),
             "latest_bar_timestamp": bar.get("timestamp"),
+            "latest_bar_age_seconds": round(bar_age_seconds, 1),
+            "intraday_state_status": state_status,
         }
-    except Exception:
-        return {}
+    except Exception as exc:
+        print(f"[Bear] 5m state error {ticker}: {exc}")
+        return {"intraday_state_status": "error"}
 
 
 def _build_bear_structure_trade_setup(
@@ -5544,8 +5720,9 @@ def _build_bear_structure_trade_setup(
         tp2 = max(0.01, tp1 - max(risk, day_range * 0.50))
         tp2_source = "measured_move_fallback"
 
-    rr_tp1 = (entry - tp1) / risk if risk > 0 else 0
-    rr_tp2 = (entry - tp2) / risk if risk > 0 else 0
+    geometry = trade_geometry(entry, stop, tp1, tp2, "SHORT")
+    if not geometry.get("valid"):
+        return None
     return {
         "Entry": _round_trade_price(entry),
         "StopLoss": _round_trade_price(stop),
@@ -5555,11 +5732,11 @@ def _build_bear_structure_trade_setup(
         "stop_loss": _round_trade_price(stop),
         "tp1": _round_trade_price(tp1),
         "tp2": _round_trade_price(tp2),
-        "Risk": _round_trade_price(risk),
-        "risk": _round_trade_price(risk),
-        "rr": round((rr_tp1 + rr_tp2) / 2, 2),
-        "rr_tp1": round(rr_tp1, 2),
-        "rr_tp2": round(rr_tp2, 2),
+        "Risk": _round_trade_price(geometry["risk"]),
+        "risk": _round_trade_price(geometry["risk"]),
+        "rr": geometry["rr"],
+        "rr_tp1": geometry["rr_tp1"],
+        "rr_tp2": geometry["rr_tp2"],
         "level_model": "bear_structure_first_v1",
         "trade_setup_source": "native_bear_structure",
         "stop_source": stop_source,
@@ -5596,7 +5773,11 @@ def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strateg
         enriched.setdefault("swing_timeframe", "daily_swing")
         return enriched
 
-    if enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None:
+    if (
+        enriched.get("latest_bar_change_pct") is None
+        or enriched.get("latest_bar_close_pos") is None
+        or not enriched.get("intraday_state_status")
+    ):
         enriched.update(_fetch_long_latest_intraday_state(ticker))
 
     if _stock_alert_is_short_context(scanner_name, enriched, strategy_name):
@@ -6386,14 +6567,22 @@ def _send_email_alert(
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
         _record_email_event(subject, "skipped", "missing_gmail_config")
         return False
+    operator_watch_optin = str(
+        _SECRETS.get(
+            "ALERT_OPERATOR_WATCH_OPTIN",
+            os.environ.get("ALERT_OPERATOR_WATCH_OPTIN", "0"),
+        )
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if recipient_emails is not None:
         recipients = [addr.strip().lower() for addr in recipient_emails if str(addr).strip()]
     else:
-        recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+        operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+        recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
     if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
-            # AUDIT H-3: watch-Mails nur an Abonnenten mit watch_mail_optin;
-            # der Betreiber (ALERT_EMAIL/GMAIL_USER oben) bekommt alle Klassen.
+            # Watch-Mails gehen nur an explizit angemeldete Empfaenger. Das gilt
+            # auch fuer den Betreiber-Fallback, damit Watchlists nie ungefragt
+            # den Trade-Posteingang fluten.
             recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon, mail_class=mail_class))
         except Exception as exc:
             print(f"[Alert] Subscriber recipients skipped: {exc}")
@@ -6407,7 +6596,8 @@ def _send_email_alert(
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = f"Alpha Station Alert <{gmail_user}>"
-            msg["To"] = ", ".join(recipients)
+            # Never disclose subscriber addresses to other recipients.
+            msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
             msg["Subject"] = subject
             plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
             msg.attach(MIMEText(plain, "plain", "utf-8"))
@@ -6506,6 +6696,8 @@ def _cluster_warning_html(rows) -> str:
 def _check_and_alert(scanner_name, cache_file):
     """Prüft Scan-Ergebnisse auf Grade S/A/B und sendet Alert."""
     now = time.time()
+    claimed_alerts: List[Dict[str, Any]] = []
+    mail_sent = False
     try:
         if not os.path.exists(cache_file):
             print(f"[Alert] {scanner_name}: Cache-Datei nicht vorhanden: {cache_file}")
@@ -6580,6 +6772,17 @@ def _check_and_alert(scanner_name, cache_file):
                     f"no_alertable_stock_setups:{_format_alert_suppression_summary(suppressed, grade_counts)}",
                 )
             return
+        claimed_alerts = [
+            alert for alert in alerts
+            if _email_dedupe_claim(
+                alert["cooldown_key"],
+                _alert_dedupe_ttl_seconds(scanner_name),
+                now=now,
+            )
+        ]
+        alerts = claimed_alerts
+        if not alerts:
+            return
         labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
         label = labels.get(scanner_name, scanner_name)
@@ -6615,13 +6818,20 @@ def _check_and_alert(scanner_name, cache_file):
         _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"]) for a in alerts]
         sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
         if sent:
+            mail_sent = True
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
             _safe_record_alert_signals(scanner_name, _signal_rows)
+        else:
+            for alert in claimed_alerts:
+                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
     except Exception as e:
+        if not mail_sent:
+            for alert in claimed_alerts:
+                _email_dedupe_release(alert.get("cooldown_key", ""), claimed_at=now)
         import traceback
         print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
 
@@ -6778,8 +6988,24 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             )
         return
 
+    total_alerts = len(alerts)
+    email_alerts = [
+        alert for alert in alerts[:_ALERT_EMAIL_MAX_ROWS]
+        if _email_dedupe_claim(
+            alert["cooldown_key"],
+            _alert_dedupe_ttl_seconds(scanner_key),
+            now=now,
+        )
+    ]
+    if not email_alerts:
+        _record_email_event(
+            f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+            "skipped",
+            "all_strategy_rows_claimed_by_parallel_sender",
+        )
+        return
+
     rows = ""
-    email_alerts = alerts[:_ALERT_EMAIL_MAX_ROWS]
     for a in email_alerts:
         timing_label = html.escape(_format_alert_timing_label(a.get("entry_quality"), market_type))
         rows += (
@@ -6806,7 +7032,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if market_type == "stocks"
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
-    count_text = f"{len(email_alerts)} von {len(alerts)}" if len(alerts) > len(email_alerts) else str(len(alerts))
+    count_text = f"{len(email_alerts)} von {total_alerts}" if total_alerts > len(email_alerts) else str(len(email_alerts))
     # AUDIT K-2b: Daily-Close-Bestaetigung klar labeln (Betreff + Body-Hinweis).
     _dailyclose_subject_suffix = ""
     _dailyclose_hint = ""
@@ -6840,13 +7066,21 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
-    sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
+    try:
+        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
+    except Exception:
+        for alert in email_alerts:
+            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+        raise
     if sent:
         for alert in email_alerts:
             if alert.get("cooldown_key"):
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
         _safe_record_alert_signals(scanner_key, _signal_rows)
+    else:
+        for alert in email_alerts:
+            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -7067,7 +7301,15 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Dump-Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
-    return _send_email_alert(f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN", body, trade_horizon="swing", mail_class="watch")  # AUDIT H-3 / H-2 (Beobachtung, kein Einstiegssignal)
+    sent = _send_email_alert(
+        f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN",
+        body,
+        trade_horizon="swing",
+        mail_class="watch",
+    )  # AUDIT H-3 / H-2 (Beobachtung, kein Einstiegssignal)
+    if not sent:
+        _email_dedupe_release(dedupe_key, claimed_at=now)
+    return bool(sent)
 
 
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
@@ -7125,8 +7367,24 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         _send_new_listing_watch_email(payload if isinstance(payload, dict) else {}, suppressed=suppressed, now=now)
         return
 
+    email_alerts = [
+        alert for alert in alerts[:10]
+        if _email_dedupe_claim(
+            alert["cooldown_key"],
+            _alert_dedupe_ttl_seconds("new_listing"),
+            now=now,
+        )
+    ]
+    if not email_alerts:
+        _record_email_event(
+            "Pump & Dump SHORT Alert",
+            "skipped",
+            "all_short_rows_claimed_by_parallel_sender",
+        )
+        return
+
     rows = ""
-    for a in alerts[:10]:
+    for a in email_alerts:
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["symbol"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["exchange"]}</td>'
@@ -7140,7 +7398,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(email_alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
@@ -7150,13 +7408,20 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
-    sent = _send_email_alert(f"Pump & Dump: {len(alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(alerts[:10]))  # AUDIT H-3 / H-2
+    try:
+        sent = _send_email_alert(f"Pump & Dump: {len(email_alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_alerts))  # AUDIT H-3 / H-2
+    except Exception:
+        for alert in email_alerts:
+            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+        raise
     if sent:
-        for alert in alerts:
+        for alert in email_alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
             _email_dedupe_mark(alert["cooldown_key"], now=now)
-        # Signal-Tracking: nur die Rows, die wirklich in der Mail standen ([:10]).
-        _safe_record_alert_signals("new_listing", alerts[:10])
+        _safe_record_alert_signals("new_listing", email_alerts)
+    else:
+        for alert in email_alerts:
+            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -7224,6 +7489,8 @@ class ScanResultsResponse(BaseModel):
     diagnostics: Optional[Dict[str, Any]] = None
     warnings: Optional[List[str]] = None
     exclusion_policy: Optional[List[str]] = None
+    scan_running: Optional[bool] = None
+    scan_error: Optional[str] = None
 
 
 # ── Utility Functions ──
@@ -7560,7 +7827,9 @@ def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
     if risk is None and entry is not None:
         stop = _alert_float(levels.get("stop"), None)
         if stop is not None:
-            risk = abs(entry - stop)
+            risk = entry - stop if direction == "LONG" else stop - entry
+            if risk <= 0:
+                risk = None
     distance_r = _alert_float(barrier.get("distance_r"), None)
     if distance_r is None and risk is not None and risk > 0:
         distance_r = abs(barrier_price - reference) / risk
@@ -7678,95 +7947,248 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
     return barrier
 
 
-def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) -> None:
-    """Make the central Trade Health decision the final user-facing state.
+def _normalize_trade_decision(value: Any) -> str:
+    """Map legacy scanner wording to the canonical execution state."""
+    token = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if not token:
+        return ""
+    if token in {"NO_TRADE", "NICHT_TRADEN", "BLOCKED", "BLOCK", "NO_LONG_CHASE"}:
+        return "NO_TRADE"
+    # Confirmation markers are evidence used by the explicit execution flags,
+    # not requests to wait. They must be handled before substring rules such as
+    # RETEST/TRIGGER, otherwise TRIGGER_OK becomes WAIT_FOR_TRIGGER.
+    if (
+        token in {
+            "TRIGGER_OK", "ENTRY_TRIGGER_OK", "RETEST_OK", "RETEST_CONFIRMED",
+            "BREAKOUT_CONFIRMED", "RECLAIM_CONFIRMED", "EXECUTION_CONFIRMED",
+        }
+        or token.endswith("_TRIGGER_OK")
+        or token.endswith("_RETEST_OK")
+    ):
+        return ""
+    if "RETEST" in token:
+        return "WAIT_FOR_RETEST"
+    if "CONTINUATION" in token:
+        return "WAIT_FOR_CONTINUATION"
+    # LONG_TRIGGER/SHORT_TRIGGER describe a setup type, not a wait state.
+    # Whether that setup is executable is decided from the explicit exchange
+    # confirmation flags in _canonical_trade_decision().
+    if token in {"LONG_TRIGGER", "SHORT_TRIGGER"}:
+        return ""
+    if token in {"EXPLOSION_ARMED", "PRE_BREAKOUT_ARMED"} or "TRIGGER" in token or "BREAK_RECLAIM" in token:
+        return "WAIT_FOR_TRIGGER"
+    if token in {"WATCH", "WATCH_ONLY", "BEOBACHTEN", "KANDIDAT", "CANDIDATE_REVIEW", "CANDIDATE"}:
+        return "WATCH_ONLY"
+    if token in {
+        "TRADEABLE", "TRADE_NOW", "JETZT_TRADEN", "JETZT_KAUFEN",
+        "LONG_NOW", "SHORT_NOW", "JETZT_LONG", "JETZT_SHORT",
+    }:
+        return "TRADEABLE"
+    if token.startswith("WAIT") or token == "WARTEN":
+        return "WAIT_FOR_TRIGGER"
+    return ""
 
-    Scanner-specific logic may mark a setup as JETZT_TRADEN before the global
-    health pass recalculates chase/fakeout/entry risk from current price.
-    The UI must never show "JETZT TRADEN" when Trade Health says wait/no-trade.
-    """
+
+def _canonical_trade_decision(item: Dict[str, Any], scanner_name: str) -> tuple[str, str, str]:
+    """Resolve all scanner layers conservatively into one execution decision."""
+    health = item.get("trade_health") if isinstance(item.get("trade_health"), dict) else {}
+    scanner_raw = str(item.get("scanner_decision") or "").upper()
+    scanner_map = {
+        "TRADE_NOW": "TRADEABLE",
+        "WAIT_RETEST": "WAIT_FOR_RETEST",
+        "WAIT_TRIGGER": "WAIT_FOR_TRIGGER",
+        "WATCH": "WATCH_ONLY",
+        "NO_TRADE": "NO_TRADE",
+    }
+    sources = [
+        (
+            _normalize_trade_decision(item.get("trade_decision")),
+            str(item.get("trade_decision_label") or ""),
+            "trade_decision",
+        ),
+        (
+            _normalize_trade_decision(health.get("decision")),
+            str(health.get("decision_label") or ""),
+            "trade_health",
+        ),
+        (
+            scanner_map.get(scanner_raw, ""),
+            str(item.get("scanner_decision_label") or ""),
+            "scanner",
+        ),
+    ]
+    for key in ("trade_action", "entry_status", "trade_signal"):
+        sources.append((_normalize_trade_decision(item.get(key)), "", key))
+
+    def first_source(decisions: set[str]) -> tuple[str, str]:
+        for state, state_label, source in sources:
+            if state in decisions:
+                return state_label, source
+        return "", ""
+
+    label, source = first_source({"NO_TRADE"})
+    if source:
+        return "NO_TRADE", label or "Nicht traden", source
+
+    if item.get("barrier_gate_active"):
+        return (
+            "WAIT_FOR_TRIGGER",
+            str(item.get("trade_decision_label") or "Struktur-Level erst brechen/reclaimen"),
+            "barrier_gate",
+        )
+
+    # Explicit final decisions outrank legacy trigger/alert flags. Otherwise a
+    # stale alertable_crypto=True can turn a deliberate WAIT back into active
+    # intent and subsequently into NO_TRADE because an execution plan is absent.
+    wait_states = {"WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER", "WAIT_FOR_CONTINUATION"}
+    for state, state_label, state_source in sources[:2]:
+        if state in wait_states:
+            return state, state_label or "Auf Bestaetigung warten", state_source
+
+    signal = str(item.get("trade_signal") or "").upper()
+    action = str(item.get("trade_action") or "").upper()
+    confirmation_type = str(item.get("entry_confirmation_type") or "").upper()
+    execution_confirmed = bool(
+        item.get("execution_trigger_ok")
+        or item.get("crypto_entry_ok")
+        or item.get("alertable_crypto")
+        or item.get("retest_confirmed")
+        or confirmation_type in {"RETEST_CONFIRMED", "EXECUTION_TRIGGER_CONFIRMED", "BREAKOUT_CONFIRMED"}
+    ) and bool(
+        signal == "JETZT_TRADEN"
+        or action in {"LONG_TRIGGER", "SHORT_TRIGGER", "LONG_NOW", "SHORT_NOW", "TRADE_NOW", "JETZT_LONG", "JETZT_SHORT", "JETZT_KAUFEN"}
+        or scanner_raw == "TRADE_NOW"
+    )
+
+    # A specific scanner timing state is more useful than a generic watch state.
+    scanner_wait = scanner_map.get(scanner_raw, "")
+    if not execution_confirmed and scanner_wait in {"WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER", "WAIT_FOR_CONTINUATION"}:
+        return (
+            scanner_wait,
+            str(item.get("scanner_decision_label") or "Auf Bestaetigung warten"),
+            "scanner",
+        )
+    for wait_state in ("WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER", "WAIT_FOR_CONTINUATION") if not execution_confirmed else ():
+        label, source = first_source({wait_state})
+        if source:
+            return wait_state, label or "Auf Bestaetigung warten", source
+
+    label, source = first_source({"WATCH_ONLY"})
+    if source and not execution_confirmed:
+        return "WATCH_ONLY", label or "Kandidat pruefen", source
+
+    active_intent = bool(
+        execution_confirmed
+        or scanner_raw == "TRADE_NOW"
+        or signal == "JETZT_TRADEN"
+        or action in {"LONG_NOW", "SHORT_NOW", "TRADE_NOW", "JETZT_LONG", "JETZT_SHORT", "JETZT_KAUFEN"}
+        or (
+            action in {"LONG_TRIGGER", "SHORT_TRIGGER"}
+            and bool(item.get("execution_trigger_ok") or item.get("crypto_entry_ok") or item.get("alertable_crypto"))
+        )
+    )
+    if not active_intent:
+        return "WATCH_ONLY", "Kein aktiver Entry-Trigger", "missing_active_intent"
+
+    if bool(item.get("partial_data") or item.get("data_partial")):
+        return "NO_TRADE", "Daten unvollstaendig", "partial_data"
+
+    if scanner_name in _ALERT_TRADE_PLAN_GUARD_SCANNERS:
+        levels = _alert_trade_levels(item)
+        if not levels.get("valid"):
+            return "NO_TRADE", "Trade-Plan ungueltig", "trade_plan"
+        if levels.get("estimated"):
+            return "NO_TRADE", "Nur geschaetzte Trade-Level", "trade_plan"
+        if not _alert_trade_plan_ok(item):
+            return "NO_TRADE", "Trade-Ziele oder R:R ungueltig", "trade_plan"
+
+    return "TRADEABLE", "Jetzt traden", "all_gates"
+
+
+def _apply_trade_health_final_signal(item: Dict[str, Any], scanner_name: str) -> None:
+    """Synchronize the final execution state across API, UI and alert fields."""
     if scanner_name not in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         return
-    health = item.get("trade_health") if isinstance(item.get("trade_health"), dict) else {}
-    decision = str(item.get("trade_decision") or health.get("decision") or "").upper()
-    if not decision or decision == "TRADEABLE":
-        return
 
-    label = health.get("decision_label") or item.get("trade_decision_label") or decision
+    health = item.get("trade_health") if isinstance(item.get("trade_health"), dict) else {}
+    decision, label, source = _canonical_trade_decision(item, scanner_name)
     flags = item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else []
     reasons = item.get("risk_reasons") if isinstance(item.get("risk_reasons"), list) else []
-    scanner_decision = str(item.get("scanner_decision") or "").upper()
-    if scanner_decision == "NO_TRADE" and decision in {
-        "WAIT_FOR_RETEST",
-        "WAIT_FOR_TRIGGER",
-        "WAIT_FOR_CONTINUATION",
-        "WATCH_ONLY",
-    }:
-        decision = "NO_TRADE"
-        label = item.get("scanner_decision_label") or "Nicht traden"
+
     item["trade_decision"] = decision
     item["trade_decision_label"] = label
+    item["trade_decision_source"] = source
 
-    if decision == "NO_TRADE":
+    if health:
+        health.setdefault("raw_decision", health.get("decision"))
+        health.setdefault("raw_decision_label", health.get("decision_label"))
+        health["decision"] = decision
+        health["decision_label"] = label
+        health["execution_decision"] = decision
+        health["execution_decision_source"] = source
+
+    if decision == "TRADEABLE":
+        direction = str(_alert_trade_levels(item).get("direction") or _infer_alert_direction(item) or "").upper()
+        item["trade_signal"] = "JETZT_TRADEN"
+        item["entry_status"] = "JETZT_TRADEN"
+        item["trade_action"] = "SHORT_NOW" if direction == "SHORT" else "LONG_NOW"
+        item["signal_quality"] = "tradeable"
+        item["signal_label"] = "Jetzt traden"
+    elif decision == "NO_TRADE":
         item["trade_signal"] = "NICHT_TRADEN"
         item["entry_status"] = "NO_TRADE"
         item["trade_action"] = "NO_TRADE"
-        item["signal_quality"] = "no_trade_health"
+        item["signal_quality"] = "no_trade"
         item["signal_label"] = f"Nicht traden: {label}"
-        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            item["alertable_crypto"] = False
-            item["execution_trigger_ok"] = False
         flags.append("trade_health_no_trade")
-        reasons.append("Trade Health blockt dieses Setup")
+        reasons.append(label)
     elif decision == "WAIT_FOR_RETEST":
         item["trade_signal"] = "WARTEN"
         item["entry_status"] = "WAIT_FOR_RETEST"
         item["trade_action"] = "WAIT_FOR_RETEST"
         item["signal_quality"] = "wait_retest"
         item["signal_label"] = f"Warten: {label}"
-        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            item["alertable_crypto"] = False
         flags.append("trade_health_wait_for_retest")
-    elif decision == "WAIT_FOR_TRIGGER":
-        item["trade_signal"] = "WARTEN"
-        item["entry_status"] = "WAIT_FOR_TRIGGER"
-        item["trade_action"] = "WAIT_FOR_TRIGGER"
-        item["signal_quality"] = "wait_trigger"
-        item["signal_label"] = f"Warten: {label}"
-        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            item["alertable_crypto"] = False
-        flags.append("trade_health_wait_for_trigger")
     elif decision == "WAIT_FOR_CONTINUATION":
         item["trade_signal"] = "WARTEN"
         item["entry_status"] = "WAIT_FOR_CONTINUATION"
         item["trade_action"] = "WAIT_FOR_CONTINUATION"
         item["signal_quality"] = "wait_continuation"
         item["signal_label"] = f"Warten: {label}"
-        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            item["alertable_crypto"] = False
         flags.append("trade_health_wait_for_continuation")
-    elif decision == "WATCH_ONLY":
+    elif decision == "WAIT_FOR_TRIGGER":
+        item["trade_signal"] = "WARTEN"
+        item["entry_status"] = "WAIT_FOR_TRIGGER"
+        item["trade_action"] = "WAIT_FOR_TRIGGER"
+        item["signal_quality"] = "wait_trigger"
+        item["signal_label"] = f"Warten: {label}"
+        flags.append("trade_health_wait_for_trigger")
+    else:
         item["trade_signal"] = "BEOBACHTEN"
-        item["entry_status"] = "BEOBACHTEN"
-        item["trade_action"] = "BEOBACHTEN"
+        item["entry_status"] = "WATCH_ONLY"
+        item["trade_action"] = "WATCH_ONLY"
         item["signal_quality"] = "observe"
         item["signal_label"] = f"Beobachten: {label}"
-        if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            item["alertable_crypto"] = False
         flags.append("trade_health_watch_only")
+
+    if decision != "TRADEABLE" and scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
+        item["alertable_crypto"] = False
+        item["execution_trigger_ok"] = False
 
     item["risk_flags"] = list(dict.fromkeys(flags))
     if reasons:
         item["risk_reasons"] = list(dict.fromkeys(reasons))
+
     setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
     if setup is not None:
-        setup["trade_decision"] = item.get("trade_decision")
-        setup["trade_decision_label"] = item.get("trade_decision_label")
-        setup["trade_action"] = item.get("trade_action")
-        setup["entry_status"] = item.get("entry_status")
-        setup["signal_label"] = item.get("signal_label")
+        for key in (
+            "trade_decision", "trade_decision_label", "trade_decision_source",
+            "trade_signal", "trade_action", "entry_status", "signal_quality", "signal_label",
+        ):
+            setup[key] = item.get(key)
         if scanner_name in _CRYPTO_SIGNAL_ONLY_SCANNERS:
-            setup["alertable_crypto"] = False
+            setup["alertable_crypto"] = bool(item.get("alertable_crypto"))
+            setup["execution_trigger_ok"] = bool(item.get("execution_trigger_ok"))
 
 
 def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -8046,7 +8468,6 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         warnings.extend(health.get("warnings") or [])
         exclusion_reasons = health.get("exclusion_reasons") or []
         _apply_scanner_result_trade_state(item, scanner_name)
-        _apply_trade_health_final_signal(item, scanner_name)
         if item.get("scanner_decision_label"):
             why.append(f"Scanner-Aktion: {item.get('scanner_decision_label')} ({item.get('trade_score')}/100)")
         if item.get("scanner_suppression_reasons"):
@@ -8062,6 +8483,9 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             if item.get("barrier_gate_active"):
                 warnings.append(f"{barrier_msg} - erst Break/Reclaim bestaetigen")
                 exclusion_reasons = list(dict.fromkeys([*exclusion_reasons, "near_structural_barrier"]))
+        # Barrier and scanner timing are inputs to one canonical final state.
+        # Running this last prevents API, sidebar and mail from disagreeing.
+        _apply_trade_health_final_signal(item, scanner_name)
 
         item["_quality"] = {
             "why_in": why or ["Scanner-Regeln erfuellt, aber keine Detailgruende geliefert"],
@@ -8102,7 +8526,7 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
 
     if decision == "NO_TRADE":
         return False
-    if action not in ("LONG_TRIGGER", "WAIT_FOR_RETEST"):
+    if action not in ("LONG_NOW", "LONG_TRIGGER", "WAIT_FOR_RETEST"):
         return False
     if setup_score < _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE and grade not in _ALERT_TOP_GRADES and explosion_score < _ALERT_MIN_SCORE:
         return False
@@ -8152,7 +8576,7 @@ def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
     signal = str(row.get("trade_signal", "") or "").upper()
     action = str(row.get("trade_action", "") or "").upper()
     signal_rank = 0 if signal == "JETZT_TRADEN" else 1 if signal == "EXPLOSION_ARMED" or row.get("pre_breakout_armed") else 2
-    action_rank = 0 if action == "LONG_TRIGGER" else 1 if action == "WAIT_FOR_RETEST" else 3
+    action_rank = 0 if action == "LONG_NOW" else 1 if action == "LONG_TRIGGER" else 2 if action == "WAIT_FOR_RETEST" else 3
     return (
         signal_rank,
         action_rank,
@@ -8425,7 +8849,18 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
         score = _alert_float(row.get("score"), 0) or 0
         health_score = _alert_float(row.get("trade_health_score") or health.get("health_score"), 0) or 0
         live_rr = _alert_float(row.get("live_rr_ratio") or health.get("metrics", {}).get("live_rr"), 0) or 0
-        distance_r = _alert_float(row.get("distance_to_entry_r") or health.get("metrics", {}).get("distance_to_entry_r"), 999) or 999
+        row_distance_r = _alert_float(row.get("distance_to_entry_r"), None)
+        health_distance_r = _alert_float(
+            health.get("metrics", {}).get("distance_to_entry_r"),
+            None,
+        )
+        distance_r = (
+            row_distance_r
+            if row_distance_r is not None
+            else health_distance_r
+            if health_distance_r is not None
+            else 999
+        )
         return (decision_rank, entry_rank, late_rank, -health_score, -score, -live_rr, distance_r)
 
     decorated = _decorate_scan_results(results, "orb", cache_age_seconds)
@@ -8577,6 +9012,7 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+            raise
 
 
 def _serialize_json(obj):
@@ -8793,9 +9229,18 @@ def _attach_starter_entry_plan(
     if starter_tp2 <= starter_tp1:
         starter_tp2 = starter_tp1 + max(starter_risk * 1.5, atr_value, main_entry * 0.02)
 
-    starter_rr_tp1 = (starter_tp1 - current) / starter_risk if starter_risk > 0 else 0
-    starter_rr_tp2 = (starter_tp2 - current) / starter_risk if starter_risk > 0 else 0
-    if starter_rr_tp1 < 1.15:
+    rounded_entry = _round_trade_price(current)
+    rounded_stop = _round_trade_price(starter_stop)
+    rounded_tp1 = _round_trade_price(starter_tp1)
+    rounded_tp2 = _round_trade_price(starter_tp2)
+    starter_geometry = trade_geometry(
+        rounded_entry,
+        rounded_stop,
+        rounded_tp1,
+        rounded_tp2,
+        "LONG",
+    )
+    if not starter_geometry.get("valid") or starter_geometry["rr_tp1"] < 1.15:
         return setup
 
     conditions = [
@@ -8809,16 +9254,16 @@ def _attach_starter_entry_plan(
     starter_plan = {
         "type": "ANTICIPATION_STARTER",
         "status": "ANTICIPATION",
-        "entry": _round_trade_price(current),
-        "stop": _round_trade_price(starter_stop),
-        "tp1": _round_trade_price(starter_tp1),
-        "tp2": _round_trade_price(starter_tp2),
+        "entry": rounded_entry,
+        "stop": rounded_stop,
+        "tp1": rounded_tp1,
+        "tp2": rounded_tp2,
         "main_entry": _round_trade_price(main_entry),
         "add_entry": _round_trade_price(main_entry),
-        "rr_tp1": round(starter_rr_tp1, 2),
-        "rr_tp2": round(starter_rr_tp2, 2),
-        "rr": round((starter_rr_tp1 + starter_rr_tp2) / 2, 2),
-        "risk": _round_trade_price(starter_risk),
+        "rr_tp1": starter_geometry["rr_tp1"],
+        "rr_tp2": starter_geometry["rr_tp2"],
+        "rr": starter_geometry["rr"],
+        "risk": _round_trade_price(starter_geometry["risk"]),
         "position_hint": "small_starter",
         "stop_source": f"{stop_base_label} invalidation",
         "tp1_source": "main breakout entry",
@@ -8956,7 +9401,8 @@ def _turtle_score_cap(score: float, change_pct: Any, rvol: Any, breakout_pct: An
     capped = float(score or 0)
     flags: List[str] = []
     change = _alert_float(change_pct, 0.0) or 0.0
-    rel_vol = _alert_float(rvol, 1.0) or 1.0
+    parsed_rvol = _alert_float(rvol, None)
+    rel_vol = parsed_rvol if parsed_rvol is not None else 1.0
     breakout = _alert_float(breakout_pct, 0.0) or 0.0
 
     if rel_vol < 1.0:
@@ -9177,11 +9623,13 @@ def _build_structured_trade_setup(
             tp2 = max(0.01, tp1 - max(risk, atr_value, entry * 0.03))
             tp2_source = "measured move fallback"
 
-    reward1 = abs(tp1 - entry)
-    reward2 = abs(tp2 - entry)
-    rr_tp1 = reward1 / risk if risk > 0 else 0
-    rr_tp2 = reward2 / risk if risk > 0 else 0
-    blended_rr = (rr_tp1 + rr_tp2) / 2 if rr_tp2 > 0 else rr_tp1
+    geometry = trade_geometry(entry, stop, tp1, tp2, side)
+    if not geometry.get("valid"):
+        return None
+    risk = float(geometry["risk"])
+    rr_tp1 = float(geometry["rr_tp1"])
+    rr_tp2 = float(geometry["rr_tp2"])
+    blended_rr = float(geometry["rr"])
 
     if range_pos is not None:
         try:
@@ -10599,10 +11047,13 @@ def _detect_cup_handle_breakout(
 
             tp1 = entry + depth_abs * 0.50
             tp2 = entry + depth_abs * 1.00
-            risk = entry - stop
-            blended_reward = ((tp1 - entry) * 0.5) + ((tp2 - entry) * 0.5)
-            rr = blended_reward / risk if risk > 0 else 0
-            live_rr = (((tp1 - price) * 0.5) + ((tp2 - price) * 0.5)) / (price - stop) if price > stop else 0
+            geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
+            if not geometry.get("valid"):
+                continue
+            risk = float(geometry["risk"])
+            rr = float(geometry["rr"])
+            live_geometry = trade_geometry(price, stop, tp1, tp2, "LONG")
+            live_rr = float(live_geometry["rr"]) if live_geometry.get("valid") else 0.0
             if rr < 1.8 or live_rr < 1.4:
                 continue
 
@@ -10992,17 +11443,21 @@ def _apply_special_strategy_post_filter(
 
 def _bi_background_scan_wrapper(direction: str) -> None:
     """Wrapper to run _bi_background_scan in background without candidates pre-load."""
+    scan_name = f"bi_{direction}"
+    cache = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
+    previous_revision = _scan_cache_revision(cache)
     try:
         print(f"[BI {direction}] Starting scan...")
         _bi_background_scan(POLYGON_KEY, direction=direction, candidates=None)
+        _require_fresh_scan_cache(scan_name, previous_revision)
         print(f"[BI {direction}] Scan completed")
         # Email Alert bei Grade S/A
-        cache = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
-        _check_and_alert(f"bi_{direction}", cache)
+        _check_and_alert(scan_name, cache)
     except Exception as e:
         print(f"BI background scan error ({direction}): {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
@@ -11054,6 +11509,7 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
         ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
         if ticker:
             daily_bars = _fetch_strategy_daily_history(ticker, 90, history_cache)
+            vrvp_atr = calculate_wilder_atr(daily_bars, period=14, lookback=90) or atr
             vrvp = build_vrvp_structure(
                 daily_bars,
                 price,
@@ -11068,7 +11524,7 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
                 vrvp,
                 direction="LONG",
                 asset_type="stock_swing",
-                atr=atr,
+                atr=vrvp_atr,
             )
 
         row["direction"] = "LONG"
@@ -11100,9 +11556,11 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
 
 def _biotech_scan_wrapper() -> None:
     """Wrapper to run biotech background scan in background."""
+    previous_revision = _scan_cache_revision(BIOTECH_CACHE)
     try:
         print("[Biotech] Starting scan... (this takes 5-15 minutes)")
         _biotech_background_scan(POLYGON_KEY)
+        _require_fresh_scan_cache("biotech", previous_revision)
         print("[Biotech] Scan completed")
         enrichment = _enrich_biotech_alert_trade_levels()
         if enrichment.get("changed"):
@@ -11113,6 +11571,7 @@ def _biotech_scan_wrapper() -> None:
         print(f"Biotech background scan error: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[Dict[str, Any]]:
@@ -11127,7 +11586,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         filters = strat.get("filters", {})
         change_min, change_max = filters.get("Change %", (-999, 999))
         price_min, price_max = filters.get("Preis", (0, 999999))
-        turnover_min, turnover_max = filters.get("Turnover Intensity", filters.get("RVOL", (0, 999)))
+        rvol_min, rvol_max = filters.get("Turnover Intensity", filters.get("RVOL", (0, 999)))
         close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
         gap_min, gap_max = filters.get("Gap %", (-999, 999))
         vortag_min, vortag_max = filters.get("Vortag %", (-999, 999))
@@ -11595,12 +12054,16 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 min_bars=30,
                                 lookback=90,
                             )
+                            _vrvp_atr = (
+                                calculate_wilder_atr(daily_bars, period=14, lookback=90)
+                                or float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0))
+                            )
                             _trade_setup = apply_vrvp_to_trade_setup(
                                 _trade_setup,
                                 _vrvp,
                                 direction=_setup_direction,
                                 asset_type="stock_swing",
-                                atr=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                                atr=_vrvp_atr,
                             )
                             strategy_row.update({
                                 "Entry": _trade_setup["entry"],
@@ -11657,7 +12120,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         print(f"[Strategy Scan] Fehler: {e}")
         import traceback
         traceback.print_exc()
-        return []
+        raise
 
 
 def _stock_strategy_alert_sweep_wrapper() -> None:
@@ -11695,6 +12158,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
         print(f"[Strategy Sweep] Fehler: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
@@ -11708,7 +12172,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         filters = strat.get("filters", {})
         change_min, change_max = filters.get("Change %", (-999, 999))
         price_min, price_max = filters.get("Preis", (0, 999999999))
-        rvol_min, rvol_max = filters.get("RVOL", (0, 999))
+        turnover_min, turnover_max = filters.get("Turnover Intensity", filters.get("RVOL", (0, 999)))
         close_pos_min, close_pos_max = filters.get("Close Position", (0, 1))
         mcap_min, mcap_max = filters.get("MarketCap", (0, 10**15))
         trend_min, trend_max = filters.get("Vortag %", (-999, 999))
@@ -11867,6 +12331,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         print(f"[Crypto Strategy] Fehler: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 TURTLE_CACHE = "/tmp/turtle_scan_cache.json"
@@ -12032,7 +12497,8 @@ def _turtle_scan_wrapper() -> None:
 
                 # Volume Confirmation (0-25)
                 avg_vol_20 = sum(volumes[max(0, i - 20):i]) / min(20, max(1, i))
-                rvol = volumes[i] / avg_vol_20 if avg_vol_20 > 0 else 1.0
+                rvol_raw = volumes[i] / avg_vol_20 if avg_vol_20 > 0 else 0.0
+                rvol = _project_us_equity_rvol(rvol_raw)
                 if rvol >= 2.5:
                     score += 25
                 elif rvol >= 1.5:
@@ -12063,19 +12529,23 @@ def _turtle_scan_wrapper() -> None:
                 else:
                     score += 3
 
-                # Entry-Qualität (0-15): Frischer Breakout = bester Entry
-                # Je NÄHER am Breakout-Level, desto besser das R/R-Potenzial
-                if risk_per_share > 0:
-                    # Wie weit über Entry sind wir schon? (0% = perfekt, >10% = zu spät)
-                    overshoot = (current_close - entry_price) / entry_price * 100
-                    if overshoot < 1.0:
-                        score += 15  # Ideal: Gerade erst durchgebrochen
-                    elif overshoot < 3.0:
-                        score += 12  # Noch gut
-                    elif overshoot < 5.0:
-                        score += 7   # Moderat überschossen
-                    else:
-                        score += 2   # Zu weit — Entry riskant
+                # Candle-Akzeptanz (0-15), unabhaengig vom bereits oben
+                # bewerteten Breakout-Abstand.
+                current_open = float(bars[i].get("o", current_close) or current_close)
+                current_high = float(bars[i].get("h", current_close) or current_close)
+                current_low = float(bars[i].get("l", current_close) or current_close)
+                current_range = max(current_high - current_low, 1e-9)
+                close_position = max(0.0, min(1.0, (current_close - current_low) / current_range))
+                held_breakout = current_low <= dc_high_20 * 1.01 and current_close > dc_high_20
+                bullish_body = current_close >= current_open
+                if held_breakout and bullish_body and close_position >= 0.70:
+                    score += 15
+                elif bullish_body and close_position >= 0.60:
+                    score += 11
+                elif close_position >= 0.45:
+                    score += 6
+                else:
+                    score += 2
 
                 raw_score = min(100, score)
                 score, turtle_quality_flags = _turtle_score_cap(raw_score, change_pct, rvol, breakout_pct)
@@ -12088,6 +12558,8 @@ def _turtle_scan_wrapper() -> None:
                     "DC_High_20": round(dc_high_20, 2),
                     "DC_Low_10": round(dc_low_10, 2),
                     "Breakout_Pct": round(breakout_pct, 2),
+                    "Breakout_Close_Position": round(close_position, 3),
+                    "Breakout_Level_Held": held_breakout,
                     "ATR": round(atr, 2),
                     "ATR_Pct": round(atr / current_close * 100, 2),
                     "Entry": round(entry_price, 2),
@@ -12102,6 +12574,8 @@ def _turtle_scan_wrapper() -> None:
                     "Exit_Level": round(exit_level, 2),
                     "Risk": round(risk_per_share, 2),
                     "RVOL": round(rvol, 2),
+                    "RVOL_Raw": round(rvol_raw, 2),
+                    "RVOL_Basis": "intraday_pace" if _us_equity_expected_volume_fraction() < 1.0 else "full_session",
                     "Volume": volume,
                     "Dollar_Volume": round(volume * current_close),
                     "raw_score": round(raw_score, 2),
@@ -12148,6 +12622,7 @@ def _turtle_scan_wrapper() -> None:
         print(f"[Turtle] Scanner Fehler: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 def _bear_scan_wrapper() -> None:
@@ -12209,13 +12684,14 @@ def _bear_scan_wrapper() -> None:
 
                 # Determine leverage from name
                 leverage = 1.0
-                if "3x" in desc.upper():
+                desc_lower = desc.lower()
+                if "3x" in desc_lower:
                     leverage = 3.0
-                elif "2x" in desc.upper():
+                elif "2x" in desc_lower:
                     leverage = 2.0
-                elif "1.5x" in desc.upper():
+                elif "1.5x" in desc_lower:
                     leverage = 1.5
-                elif "1x" not in desc.upper():  # Default to 1x if no leverage specified
+                elif "1x" not in desc_lower:  # Default to 1x if no leverage specified
                     # Check if it's inverse (has decay risk)
                     if "short" in desc.lower() or "inverse" in desc.lower():
                         leverage = 1.0
@@ -12373,7 +12849,8 @@ def _bear_scan_wrapper() -> None:
                                         ma50_dist = 0
 
                                     avg_vol = sum(b.get("v", 0) for b in bars[1:21]) / min(20, len(bars) - 1)
-                                    rvol = round(vol / avg_vol, 2) if avg_vol > 0 else 0
+                                    rvol_raw = (vol / avg_vol) if avg_vol > 0 else 0.0
+                                    rvol = round(_project_us_equity_rvol(rvol_raw), 2)
                                     lows_20 = [b.get("l", b.get("c", 0)) for b in bars[1:21] if b.get("l", b.get("c", 0)) > 0]
                                     lows_60 = [b.get("l", b.get("c", 0)) for b in bars[1:60] if b.get("l", b.get("c", 0)) > 0]
                                     low_20d = min(lows_20) if lows_20 else None
@@ -12512,12 +12989,16 @@ def _bear_scan_wrapper() -> None:
                                 min_bars=30,
                                 lookback=60,
                             )
+                            bear_atr = (
+                                calculate_wilder_atr(history_bars, period=14, lookback=60)
+                                or max(day_high - day_low, price * 0.025)
+                            )
                             trade_setup = apply_vrvp_to_trade_setup(
                                 trade_setup,
                                 bear_vrvp,
                                 direction="SHORT",
                                 asset_type="stock_swing",
-                                atr=max(day_high - day_low, price * 0.025),
+                                atr=bear_atr,
                             )
                             trade_setup["trade_setup_source"] = "native_bear_vrvp_structure" if trade_setup.get("vrvp_applied") else trade_setup.get("trade_setup_source", "native_bear_structure")
                             bear_row.update(trade_setup)
@@ -12543,6 +13024,7 @@ def _bear_scan_wrapper() -> None:
         except Exception as e:
             print(f"Breakdown stocks error: {e}")
             result.setdefault("diagnostics", {})["breakdown_error"] = str(e)
+            raise RuntimeError(f"Breakdown stock scan failed: {e}") from e
 
         # Save the latest scan snapshot, including diagnostics when no stock passes filters.
         result.setdefault("diagnostics", {})["breakdown_count"] = len(result.get("breakdown_stocks", []))
@@ -12592,10 +13074,11 @@ def _bear_scan_wrapper() -> None:
                 _crash_date = datetime.now().strftime('%Y%m%d')
                 _fresh_crash_stocks = []
                 _crash_dedupe_keys = []
-                for _cs in _crash_stocks:
+                _crash_claim_now = time.time()
+                for _cs in _crash_stocks[:5]:
                     _ticker = str(_cs.get("ticker", "?")).upper()
                     _dedupe_key = f"crash_stock_{_crash_date}_{_ticker}"
-                    if not _email_dedupe_active(_dedupe_key, _CRASH_ALERT_DEDUPE_SEC):
+                    if _email_dedupe_claim(_dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now=_crash_claim_now):
                         _fresh_crash_stocks.append(_cs)
                         _crash_dedupe_keys.append(_dedupe_key)
                     else:
@@ -12608,6 +13091,8 @@ def _bear_scan_wrapper() -> None:
             _stock_bear_mail_allowed = bool(_stock_bear_mail_status.get("allowed"))
             _stock_bear_mail_reason = str(_stock_bear_mail_status.get("reason") or "US market closed")
             if _crash_stocks and not _stock_bear_mail_allowed:
+                for _dedupe_key in _crash_dedupe_keys:
+                    _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
                 _record_email_event(
                     "Crash Alert",
                     "skipped",
@@ -12618,7 +13103,7 @@ def _bear_scan_wrapper() -> None:
                 _crash_ck = f"crash_summary_{datetime.now().strftime('%Y%m%d')}"
                 # AUDIT M-Bear-SendLog-Race: Tages-Summary auch persistent dedupen
                 # (Restart-sicher), nicht nur In-Memory-Cooldown.
-                if _crash_ck not in _EMAIL_COOLDOWN and not _email_dedupe_active(_crash_ck, _DAILY_SUMMARY_DEDUPE_SEC):
+                if _crash_ck not in _EMAIL_COOLDOWN and _email_dedupe_claim(_crash_ck, _DAILY_SUMMARY_DEDUPE_SEC, now=_crash_claim_now):
                     _crash_rows = ""
                     for _cs in _crash_stocks[:5]:  # Max 5 in einer Mail
                         _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(_cs.get("grade", ""), "#666")
@@ -12647,13 +13132,19 @@ def _bear_scan_wrapper() -> None:
                     # AUDIT M-Bear-SendLog-Race: direkter Rueckgabewert statt
                     # _EMAIL_SEND_LOG[-1] (Race: parallele Sender koennen den
                     # letzten Log-Eintrag ueberschreiben). AUDIT H-3: swing.
-                    _crash_sent = _send_email_alert(
-                        f"CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
-                        _crash_body,
-                        trade_horizon="swing",
-                        mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
-                        telegram_text=_safe_format_telegram_rows(_crash_stocks[:5]),
-                    )
+                    try:
+                        _crash_sent = _send_email_alert(
+                            f"CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
+                            _crash_body,
+                            trade_horizon="swing",
+                            mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
+                            telegram_text=_safe_format_telegram_rows(_crash_stocks),
+                        )
+                    except Exception:
+                        _email_dedupe_release(_crash_ck, claimed_at=_crash_claim_now)
+                        for _dedupe_key in _crash_dedupe_keys:
+                            _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
+                        raise
                     if _crash_sent:
                         with _EMAIL_COOLDOWN_LOCK:
                             _EMAIL_COOLDOWN[_crash_ck] = time.time()
@@ -12663,8 +13154,15 @@ def _bear_scan_wrapper() -> None:
                         for _cs in _crash_stocks:
                             _mark_bearish_stock_alert(_cs.get("ticker", ""), now=time.time())
                         # Signal-Tracking: nur die Rows in der Mail ([:5]).
-                        _safe_record_alert_signals("crash", _crash_stocks[:5])
+                        _safe_record_alert_signals("crash", _crash_stocks)
                         print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
+                    else:
+                        _email_dedupe_release(_crash_ck, claimed_at=_crash_claim_now)
+                        for _dedupe_key in _crash_dedupe_keys:
+                            _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
+                else:
+                    for _dedupe_key in _crash_dedupe_keys:
+                        _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
             elif result.get("breakdown_stocks"):
                 _record_email_event(
                     "Crash Alert",
@@ -12713,7 +13211,8 @@ def _bear_scan_wrapper() -> None:
                 _bear_ck = f"bear_summary_{datetime.now().strftime('%Y%m%d')}"
                 # AUDIT M-Bear-SendLog-Race: persistenter Tages-Dedupe zusaetzlich
                 # zum In-Memory-Cooldown (Restart-sicher).
-                if _bear_ck not in _EMAIL_COOLDOWN and not _email_dedupe_active(_bear_ck, _DAILY_SUMMARY_DEDUPE_SEC):
+                _bear_claim_now = time.time()
+                if _bear_ck not in _EMAIL_COOLDOWN and _email_dedupe_claim(_bear_ck, _DAILY_SUMMARY_DEDUPE_SEC, now=_bear_claim_now):
                     _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
@@ -12739,13 +13238,17 @@ def _bear_scan_wrapper() -> None:
                     </body></html>'''
                     # AUDIT M-Bear-SendLog-Race: direkter Rueckgabewert statt
                     # _EMAIL_SEND_LOG[-1]. AUDIT H-3: swing-Horizon explizit.
-                    _bear_sent = _send_email_alert(
-                        f"Bear Alert: {_total_signals} Aktien-Shorts",
-                        _bear_body,
-                        trade_horizon="swing",
-                        mail_class="trade",  # AUDIT H-2
-                        telegram_text=_safe_format_telegram_rows(_bear_alert_rows),
-                    )
+                    try:
+                        _bear_sent = _send_email_alert(
+                            f"Bear Alert: {_total_signals} Aktien-Shorts",
+                            _bear_body,
+                            trade_horizon="swing",
+                            mail_class="trade",  # AUDIT H-2
+                            telegram_text=_safe_format_telegram_rows(_bear_alert_rows),
+                        )
+                    except Exception:
+                        _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
+                        raise
                     if _bear_sent:
                         with _EMAIL_COOLDOWN_LOCK:
                             _EMAIL_COOLDOWN[_bear_ck] = time.time()
@@ -12753,6 +13256,8 @@ def _bear_scan_wrapper() -> None:
                         for _ticker in _bear_summary_tickers:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
                         _safe_record_alert_signals("bear", _bear_alert_rows)
+                    else:
+                        _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
             elif result.get("breakdown_stocks"):
                 _record_email_event(
                     "Bear Scanner Alert",
@@ -12766,6 +13271,7 @@ def _bear_scan_wrapper() -> None:
         print(f"Bear scanner error: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 # ── Background Scheduler ──
@@ -12824,13 +13330,15 @@ _cache_lock = threading.Lock()
 def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, Any]:
     """Expose whether a scanner cache is fresh enough for the UI."""
     cache_path = SCAN_CACHE_MAP.get(scan_name)
+    runtime_error = scan_state.get("last_error")
     if not cache_path:
         return {
             "cache_file": None,
             "cache_exists": False,
             "cache_age_seconds": None,
             "cache_stale": None,
-            "cache_health": "not_tracked",
+            "cache_health": "error" if runtime_error else "not_tracked",
+            "scan_error": runtime_error,
         }
 
     cache_file = os.path.basename(cache_path)
@@ -12840,7 +13348,8 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
             "cache_exists": False,
             "cache_age_seconds": None,
             "cache_stale": True,
-            "cache_health": "missing",
+            "cache_health": "error" if runtime_error else "missing",
+            "scan_error": runtime_error,
         }
 
     try:
@@ -12853,7 +13362,8 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
             "cache_exists": True,
             "cache_age_seconds": age_seconds,
             "cache_stale": stale,
-            "cache_health": "stale" if stale else "ok",
+            "cache_health": "error" if runtime_error else ("stale" if stale else "ok"),
+            "scan_error": runtime_error,
         }
     except Exception as exc:
         return {
@@ -12864,6 +13374,77 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
             "cache_health": "error",
             "cache_error": str(exc),
         }
+
+
+def _scan_cache_revision(cache_path: Optional[str]) -> Optional[tuple[int, int]]:
+    """Return a stable cache revision, or None when no readable cache exists."""
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    try:
+        stat = os.stat(cache_path)
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return None
+        return stat.st_mtime_ns, stat.st_size
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+_SCAN_PROGRESS_MAP = {
+    "bi_long": "/tmp/bi_scan_progress_long.json",
+    "bi_short": "/tmp/bi_scan_progress_short.json",
+    "biotech": "/tmp/alpha_biotech_progress.json",
+}
+
+
+def _scan_cache_payload(cache_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return None
+        return payload
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _scan_progress_payload(scan_name: str) -> Optional[Dict[str, Any]]:
+    progress_path = _SCAN_PROGRESS_MAP.get(scan_name)
+    if not progress_path or not os.path.exists(progress_path):
+        return None
+    try:
+        with open(progress_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _require_fresh_scan_cache(scan_name: str, previous_revision: Optional[tuple[int, int]]) -> None:
+    """A successful scheduled scan must publish a new, readable snapshot."""
+    cache_path = SCAN_CACHE_MAP.get(scan_name)
+    if not cache_path:
+        return
+    current_revision = _scan_cache_revision(cache_path)
+    if current_revision is None:
+        raise RuntimeError(f"{scan_name} did not publish a readable cache")
+    if current_revision == previous_revision:
+        raise RuntimeError(f"{scan_name} finished without publishing a fresh cache")
+    if scan_name in _SCAN_PROGRESS_MAP:
+        payload = _scan_cache_payload(cache_path)
+        if payload is None:
+            raise RuntimeError(f"{scan_name} published an invalid cache payload")
+        if payload.get("partial") is True:
+            raise RuntimeError(f"{scan_name} published only a partial cache")
+        progress = _scan_progress_payload(scan_name)
+        progress_status = str((progress or {}).get("status", "")).lower()
+        if progress_status != "done":
+            raise RuntimeError(
+                f"{scan_name} did not finish cleanly (progress {progress_status or 'missing'})"
+            )
 
 # Initialize last_run from cache files on startup (survives restarts)
 def _init_scan_status_from_cache():
@@ -12908,19 +13489,28 @@ def _run_scan_safe(name, func, timeout_min=None):
             if started and (time.time() - started) > timeout_min * 60:
                 print(f"[Scheduler] {name} WATCHDOG: still running after {timeout_min}min — force-resetting")
                 _scan_status[name]["running"] = False
+                _scan_status[name]["last_error"] = f"Scan-Timeout nach {timeout_min} Minuten"
             else:
                 print(f"[Scheduler] {name} already running — skipping")
                 return
         _scan_status[name]["running"] = True
         _scan_status[name]["_started_at"] = time.time()
+        _scan_status[name]["last_attempt_at"] = datetime.now().isoformat()
+        _scan_status[name].pop("last_error", None)
 
     def _worker():
         start_t = time.time()
+        succeeded = False
+        error_text = None
+        previous_cache_revision = _scan_cache_revision(SCAN_CACHE_MAP.get(name))
         try:
             func()
+            _require_fresh_scan_cache(name, previous_cache_revision)
+            succeeded = True
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} DONE in {elapsed}s")
         except Exception as e:
+            error_text = f"{type(e).__name__}: {e}"
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} ERROR after {elapsed}s: {e}")
             import traceback
@@ -12929,8 +13519,12 @@ def _run_scan_safe(name, func, timeout_min=None):
             with _scan_lock:
                 _scan_status[name]["running"] = False
                 _scan_status[name]["_started_at"] = None
-                # last_run IMMER aktualisieren (auch bei Fehler) — sonst zeigt UI ewig alten Wert
-                _scan_status[name]["last_run"] = datetime.now().isoformat()
+                # Nur ein erfolgreicher Lauf darf Cache-/Scheduler-Frische signalisieren.
+                if succeeded:
+                    _scan_status[name]["last_run"] = datetime.now().isoformat()
+                    _scan_status[name].pop("last_error", None)
+                else:
+                    _scan_status[name]["last_error"] = error_text or "Unbekannter Scan-Fehler"
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -12954,7 +13548,7 @@ _BG_OWNED_SCANNERS = frozenset({"bi_long", "bi_short", "biotech"})
 def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = None) -> bool:
     """True, wenn der api-SCHEDULER diesen Scanner ueberspringen soll (pure, testbar).
 
-    Default (API_SCAN_SKIP_BG_OWNED unset oder "1"): die 4 bg-owned Scanner
+    Default (API_SCAN_SKIP_BG_OWNED unset oder "1"): die 3 bg-owned Scanner
     werden geskippt; "0" = altes Verhalten (api scannt mit).
     Scanner ausserhalb von _BG_OWNED_SCANNERS werden NIE geskippt.
     """
@@ -13161,21 +13755,36 @@ app = FastAPI(
     description="REST API for trading scanner modules",
     version=API_VERSION,
     lifespan=lifespan,
+    docs_url=None if COMMERCIAL_STRICT_MODE else "/docs",
+    redoc_url=None if COMMERCIAL_STRICT_MODE else "/redoc",
+    openapi_url=None if COMMERCIAL_STRICT_MODE else "/openapi.json",
 )
 
-_cors_origins = {
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "http://178.104.69.209:3000",
-    "http://178.104.69.209",
-}
-if PUBLIC_APP_URL:
-    _cors_origins.add(PUBLIC_APP_URL)
+if COMMERCIAL_STRICT_MODE:
+    _cors_origins = set()
+    _public_origin = _validated_public_https_origin(PUBLIC_APP_URL)
+    if _public_origin:
+        _cors_origins.add(_public_origin)
+else:
+    _cors_origins = {
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://178.104.69.209:3000",
+        "http://178.104.69.209",
+    }
+    if PUBLIC_APP_URL:
+        _cors_origins.add(PUBLIC_APP_URL)
 for _origin in str(os.environ.get("CORS_ORIGINS", "") or _SECRETS.get("CORS_ORIGINS", "")).split(","):
     _origin = _origin.strip().rstrip("/")
-    if _origin:
+    if not _origin:
+        continue
+    if COMMERCIAL_STRICT_MODE:
+        _valid_origin = _validated_public_https_origin(_origin)
+        if _valid_origin:
+            _cors_origins.add(_valid_origin)
+    else:
         _cors_origins.add(_origin)
 
 # CORS middleware for React frontend
@@ -13195,13 +13804,16 @@ if os.path.isdir(_VENDOR_DIR):
 
 _PUBLIC_API_PATHS = {
     "/api/health",
-    "/api/system-health",
-    "/api/commercial-readiness",
+    "/api/legal-info",
     "/api/auth/register",
     "/api/auth/login",
     "/api/auth/plans",
+    "/api/auth/password-reset/request",
+    "/api/auth/password-reset/confirm",
     "/api/stripe/webhook",
 }
+_LOOPBACK_OR_ADMIN_API_PATHS = {"/api/commercial-readiness"}
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _FEATURE_GATES = [
     ("/api/ai-analysis", "has_ai_analysis"),
     ("/api/orb", "has_orb_scanner"),
@@ -13209,6 +13821,7 @@ _FEATURE_GATES = [
     ("/api/backtest", "has_backtest"),
 ]
 _TAB_GATES = [
+    ("/api/trade-reminders", "chart-analyse"),
     ("/api/autotrader", "autotrader"),
     ("/api/biotech", "biotech"),
     ("/api/btc-divergenz", "btc-divergenz"),
@@ -13244,13 +13857,57 @@ _TAB_GATES = [
     ("/api/signal-performance", "signal-performance"),
 ]
 
-# Tab-Freischaltung "signal-performance" fuer Pro: Elite/Trial haben in
-# SCANNER_TABS_BY_PLAN None (= alle Tabs) und sind damit automatisch drin,
-# Basic/Expired bleiben gesperrt. Die Pro-Liste wird HIER erweitert statt in
-# modules/auth.py (fremde Datei-Ownership); get_user_limits() liest dieselbe
-# Liste, das Frontend sieht den Tab fuer Pro also auch in allowed_tabs.
-if HAS_AUTH and isinstance(SCANNER_TABS_BY_PLAN.get("pro"), list) and "signal-performance" not in SCANNER_TABS_BY_PLAN["pro"]:
-    SCANNER_TABS_BY_PLAN["pro"].append("signal-performance")
+_MANUAL_SCAN_PATHS = {
+    "/api/scan",
+    "/api/bi-scan",
+    "/api/bear-scan",
+    "/api/biotech-scan",
+    "/api/early-movers-scan",
+    "/api/crypto-explosion-scan",
+    "/api/crash-monitor-scan",
+    "/api/btc-divergenz-scan",
+    "/api/money-flow-scan",
+    "/api/new-listing-scan",
+    "/api/crypto-trade-signals-scan",
+    "/api/penny-stocks-scan",
+    "/api/volume-spikes-scan",
+    "/api/orb-scan",
+    "/api/market-context-scan",
+    "/api/run-backtest",
+}
+_MANUAL_SCAN_LAST_STARTED: Dict[Tuple[str, str], float] = {}
+_MANUAL_SCAN_THROTTLE_LOCK = threading.Lock()
+
+
+def _manual_scan_throttle_claim(
+    email: str,
+    path: str,
+    plan: str,
+    now: Optional[float] = None,
+) -> Tuple[int, int]:
+    """Atomically claim a manual heavy-scan slot.
+
+    Returns ``(retry_after_seconds, interval_seconds)``. Each scanner path has
+    its own slot, so a customer can inspect different scanners without waiting,
+    while repeated clicks cannot multiply provider load and API costs.
+    """
+    now_ts = float(time.time() if now is None else now)
+    plan_features = PLANS.get(str(plan or "expired"), PLANS.get("expired", {}))
+    interval_min = max(1, int(plan_features.get("scan_interval_min", 30) or 30))
+    interval_seconds = interval_min * 60
+    key = (str(email or "").strip().lower(), str(path or "").strip())
+    with _MANUAL_SCAN_THROTTLE_LOCK:
+        previous = float(_MANUAL_SCAN_LAST_STARTED.get(key, 0.0) or 0.0)
+        remaining = max(0, int(math.ceil(interval_seconds - (now_ts - previous))))
+        if remaining > 0:
+            return remaining, interval_seconds
+        _MANUAL_SCAN_LAST_STARTED[key] = now_ts
+        if len(_MANUAL_SCAN_LAST_STARTED) > 5000:
+            cutoff = now_ts - 86400
+            stale_keys = [item for item, ts in _MANUAL_SCAN_LAST_STARTED.items() if ts < cutoff]
+            for stale_key in stale_keys:
+                _MANUAL_SCAN_LAST_STARTED.pop(stale_key, None)
+    return 0, interval_seconds
 
 
 def _token_from_authorization(authorization: Optional[str]) -> Optional[str]:
@@ -13260,6 +13917,82 @@ def _token_from_authorization(authorization: Optional[str]) -> Optional[str]:
     if authorization.lower().startswith("bearer "):
         return authorization.split(" ", 1)[1].strip()
     return authorization
+
+
+_AUTH_SESSION_COOKIE = "as_session"
+try:
+    _AUTH_SESSION_MAX_AGE_SECONDS = max(
+        300,
+        int(os.environ.get("AUTH_SESSION_MAX_AGE_SECONDS", "86400") or 86400),
+    )
+except (TypeError, ValueError):
+    _AUTH_SESSION_MAX_AGE_SECONDS = 86400
+
+
+def _auth_cookie_secure() -> bool:
+    """Secure cookies are mandatory for the commercial HTTPS deployment."""
+    return bool(COMMERCIAL_STRICT_MODE or _validated_public_https_origin(PUBLIC_APP_URL))
+
+
+def _set_auth_session_cookie(response: Optional[Response], token: Optional[str]) -> None:
+    if response is None or not token:
+        return
+    response.set_cookie(
+        key=_AUTH_SESSION_COOKIE,
+        value=str(token),
+        max_age=_AUTH_SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_auth_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_auth_session_cookie(response: Optional[Response]) -> None:
+    if response is None:
+        return
+    response.delete_cookie(
+        key=_AUTH_SESSION_COOKIE,
+        httponly=True,
+        secure=_auth_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def _promote_auth_cookie_to_bearer(request: Request) -> None:
+    """Feed the HttpOnly browser session into the existing audited Bearer path.
+
+    Explicit Authorization headers retain priority for API clients. Browser
+    endpoints and middleware therefore share one verification/gating path.
+    """
+    if request.headers.get("authorization"):
+        return
+    token = str(request.cookies.get(_AUTH_SESSION_COOKIE) or "").strip()
+    if not token:
+        return
+    headers = list(request.scope.get("headers") or [])
+    headers.append((b"authorization", f"Bearer {token}".encode("latin-1")))
+    request.scope["headers"] = headers
+    if hasattr(request, "_headers"):
+        delattr(request, "_headers")
+
+
+def _authenticated_request_identity(authorization: Optional[str]) -> Tuple[str, bool]:
+    """Return the authenticated account email and admin flag.
+
+    The commerce middleware validates requests in production, but endpoint-level
+    identity is still required for user-owned resources such as reminders.
+    Keeping this check here also makes direct function calls fail closed.
+    """
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _token_from_authorization(authorization)
+    payload = verify_token(token) if token else None
+    email = str((payload or {}).get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Valid login required")
+    return email, email in ADMIN_EMAILS
 
 
 def _commerce_gate_denial(path: str, token: str, payload: Dict[str, Any]) -> Optional[JSONResponse]:
@@ -13284,9 +14017,23 @@ def _commerce_gate_denial(path: str, token: str, payload: Dict[str, Any]) -> Opt
 @app.middleware("http")
 async def commerce_auth_gate(request: Request, call_next):
     """Optional production gate: set COMMERCE_ENFORCE_AUTH=1 to protect API data server-side."""
+    _promote_auth_cookie_to_bearer(request)
     if request.method == "OPTIONS":
         return await call_next(request)
     path = request.url.path
+    if path in _LOOPBACK_OR_ADMIN_API_PATHS:
+        client_host = str(request.client.host if request.client else "").strip().lower()
+        if client_host in _LOOPBACK_HOSTS:
+            return await call_next(request)
+        if not HAS_AUTH:
+            return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
+        token = _token_from_authorization(request.headers.get("authorization"))
+        payload = verify_token(token) if token else None
+        if not payload:
+            return JSONResponse(status_code=401, content={"detail": "Admin login required"})
+        if str(payload.get("email", "")).strip().lower() not in ADMIN_EMAILS:
+            return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+        return await call_next(request)
     if not COMMERCE_ENFORCE_AUTH or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
         return await call_next(request)
     # AUDIT H-11 Default-Deny: Die fruehere Blanket-Ausnahme fuer /api/auth/*
@@ -13306,7 +14053,48 @@ async def commerce_auth_gate(request: Request, call_next):
     denial = _commerce_gate_denial(path, token, payload)
     if denial:
         return denial
+    if request.method == "POST" and path in _MANUAL_SCAN_PATHS:
+        email = str(payload.get("email") or "").strip().lower()
+        if email not in ADMIN_EMAILS:
+            plan = get_user_plan(token)
+            retry_after, interval_seconds = _manual_scan_throttle_claim(email, path, plan)
+            if retry_after > 0:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "detail": "Scan cooldown active",
+                        "retry_after_seconds": retry_after,
+                        "scan_interval_seconds": interval_seconds,
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_response_headers(request: Request, call_next):
+    """Apply browser hardening to normal and rejected API responses."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=(self)",
+    )
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
+        "form-action 'self' https://checkout.stripe.com; upgrade-insecure-requests",
+    )
+    if COMMERCIAL_STRICT_MODE:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 # ── Serve Frontend (index.html) ──
@@ -13341,11 +14129,28 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     name: str = ""
+    accept_terms: bool = False
+    terms_version: str = ""
+    privacy_version: str = ""
 
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    new_password: str
 
 
 class CheckoutRequest(BaseModel):
@@ -13409,6 +14214,22 @@ _LOGIN_THROTTLE_MAX_FAILURES = 5
 _LOGIN_THROTTLE_WINDOW_SEC = 600
 _LOGIN_FAILED_ATTEMPTS: Dict[str, List[float]] = {}
 
+# Die nginx-Grenze schuetzt den Produktions-vHost; diese zweite, groessere
+# Stunden-Grenze gilt auch bei direktem API-Zugriff und verhindert Account-Spam.
+_REGISTER_THROTTLE_LOCK = threading.Lock()
+_REGISTER_THROTTLE_MAX_ATTEMPTS = 10
+_REGISTER_THROTTLE_WINDOW_SEC = 3600
+_REGISTER_ATTEMPTS: Dict[str, List[float]] = {}
+
+# Password-reset requests can otherwise be abused to flood a customer's inbox.
+# The response remains generic regardless of account existence or throttling.
+_RESET_THROTTLE_LOCK = threading.Lock()
+_RESET_THROTTLE_MAX_ATTEMPTS = 3
+_RESET_THROTTLE_MAX_IP_ATTEMPTS = 10
+_RESET_THROTTLE_WINDOW_SEC = 3600
+_RESET_ATTEMPTS: Dict[str, List[float]] = {}
+_RESET_IP_ATTEMPTS: Dict[str, List[float]] = {}
+
 
 def _login_throttle_key(email: str, client_ip: str) -> str:
     return f"{str(email or '').strip().lower()}|{str(client_ip or 'unknown')}"
@@ -13450,19 +14271,158 @@ def _login_throttle_reset(email: str, client_ip: str) -> None:
         _LOGIN_FAILED_ATTEMPTS.pop(_login_throttle_key(email, client_ip), None)
 
 
+def _register_throttle_retry_after(client_ip: str, now: Optional[float] = None) -> int:
+    """Sekunden bis zur naechsten erlaubten Registrierung (0 = erlaubt)."""
+    ts = time.time() if now is None else now
+    key = str(client_ip or "unknown").strip().lower()
+    with _REGISTER_THROTTLE_LOCK:
+        attempts = [
+            value for value in _REGISTER_ATTEMPTS.get(key, [])
+            if ts - value < _REGISTER_THROTTLE_WINDOW_SEC
+        ]
+        if attempts:
+            _REGISTER_ATTEMPTS[key] = attempts
+        else:
+            _REGISTER_ATTEMPTS.pop(key, None)
+        if len(attempts) >= _REGISTER_THROTTLE_MAX_ATTEMPTS:
+            return max(1, int(_REGISTER_THROTTLE_WINDOW_SEC - (ts - attempts[0])) + 1)
+    return 0
+
+
+def _register_throttle_record_attempt(client_ip: str, now: Optional[float] = None) -> None:
+    ts = time.time() if now is None else now
+    key = str(client_ip or "unknown").strip().lower()
+    with _REGISTER_THROTTLE_LOCK:
+        attempts = [
+            value for value in _REGISTER_ATTEMPTS.get(key, [])
+            if ts - value < _REGISTER_THROTTLE_WINDOW_SEC
+        ]
+        attempts.append(ts)
+        _REGISTER_ATTEMPTS[key] = attempts
+        if len(_REGISTER_ATTEMPTS) > 5000:
+            for stale_key in [
+                item_key for item_key, values in _REGISTER_ATTEMPTS.items()
+                if not values or ts - values[-1] >= _REGISTER_THROTTLE_WINDOW_SEC
+            ]:
+                _REGISTER_ATTEMPTS.pop(stale_key, None)
+
+
+def _password_reset_throttle_allows(
+    email: str, client_ip: str, now: Optional[float] = None
+) -> bool:
+    """Record a reset request and return whether a reset may be generated."""
+    ts = time.time() if now is None else now
+    normalized_ip = str(client_ip or "unknown").strip().lower()
+    key = f"{str(email or '').strip().lower()}|{normalized_ip}"
+    with _RESET_THROTTLE_LOCK:
+        attempts = [
+            value for value in _RESET_ATTEMPTS.get(key, [])
+            if ts - value < _RESET_THROTTLE_WINDOW_SEC
+        ]
+        ip_attempts = [
+            value for value in _RESET_IP_ATTEMPTS.get(normalized_ip, [])
+            if ts - value < _RESET_THROTTLE_WINDOW_SEC
+        ]
+        allowed = (
+            len(attempts) < _RESET_THROTTLE_MAX_ATTEMPTS
+            and len(ip_attempts) < _RESET_THROTTLE_MAX_IP_ATTEMPTS
+        )
+        attempts.append(ts)
+        ip_attempts.append(ts)
+        _RESET_ATTEMPTS[key] = attempts
+        _RESET_IP_ATTEMPTS[normalized_ip] = ip_attempts
+        if len(_RESET_ATTEMPTS) > 5000:
+            for stale_key in [
+                item_key for item_key, values in _RESET_ATTEMPTS.items()
+                if not values or ts - values[-1] >= _RESET_THROTTLE_WINDOW_SEC
+            ]:
+                _RESET_ATTEMPTS.pop(stale_key, None)
+        if len(_RESET_IP_ATTEMPTS) > 5000:
+            for stale_key in [
+                item_key for item_key, values in _RESET_IP_ATTEMPTS.items()
+                if not values or ts - values[-1] >= _RESET_THROTTLE_WINDOW_SEC
+            ]:
+                _RESET_IP_ATTEMPTS.pop(stale_key, None)
+        return allowed
+
+
+def _send_password_reset_email(email: str, reset_token: str) -> bool:
+    """Deliver a trusted-origin, one-time password reset link."""
+    public_origin = _validated_public_https_origin(PUBLIC_APP_URL)
+    if not public_origin:
+        print("[Auth] Password reset mail skipped: PUBLIC_APP_URL is not trusted HTTPS")
+        return False
+    reset_url = f"{public_origin}/?reset_token={reset_token}"
+    safe_url = html.escape(reset_url, quote=True)
+    body = f"""
+    <h2>Passwort zuruecksetzen</h2>
+    <p>Fuer deinen Alpha-Station-Account wurde ein neues Passwort angefordert.</p>
+    <p><a href="{safe_url}" style="display:inline-block;padding:12px 18px;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">Neues Passwort setzen</a></p>
+    <p>Der Link ist nur kurze Zeit und genau einmal gueltig. Falls du das nicht warst, kannst du diese Mail ignorieren.</p>
+    """
+    return bool(
+        _send_email_alert(
+            "Passwort zuruecksetzen",
+            body,
+            bypass_startup_cooldown=True,
+            recipient_emails=[email],
+            mail_class="info",
+        )
+    )
+
+
 @app.post("/api/auth/register")
-async def api_register(req_body: RegisterRequest):
+async def api_register(
+    req_body: RegisterRequest,
+    request: Request = None,
+    response: Response = None,
+):
     """Register a new user account."""
     if not HAS_AUTH:
         raise HTTPException(status_code=503, detail="Auth system not available")
-    result = register_user(req_body.email, req_body.password, req_body.name)
+    client_ip = request.client.host if request and request.client else "unknown"
+    retry_after = _register_throttle_retry_after(client_ip)
+    if retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Zu viele Registrierungsversuche. Bitte spaeter erneut versuchen.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _register_throttle_record_attempt(client_ip)
+    if COMMERCIAL_STRICT_MODE:
+        if not req_body.accept_terms:
+            raise HTTPException(status_code=400, detail="AGB und Datenschutz muessen aktiv akzeptiert werden")
+        if (
+            req_body.terms_version != LEGAL_TERMS_VERSION
+            or req_body.privacy_version != LEGAL_PRIVACY_VERSION
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Rechtstexte wurden aktualisiert. Bitte neu laden und erneut zustimmen.",
+            )
+    result = register_user(
+        req_body.email,
+        req_body.password,
+        req_body.name,
+        legal_consent={
+            "accepted": bool(req_body.accept_terms),
+            "accepted_at": datetime.now(timezone.utc).isoformat() if req_body.accept_terms else None,
+            "terms_version": req_body.terms_version or None,
+            "privacy_version": req_body.privacy_version or None,
+        },
+    )
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    _set_auth_session_cookie(response, result.get("token"))
     return result
 
 
 @app.post("/api/auth/login")
-async def api_login(req_body: LoginRequest, request: Request):
+async def api_login(
+    req_body: LoginRequest,
+    request: Request,
+    response: Response = None,
+):
     """Login with email + password. Returns JWT token."""
     if not HAS_AUTH:
         raise HTTPException(status_code=503, detail="Auth system not available")
@@ -13480,7 +14440,85 @@ async def api_login(req_body: LoginRequest, request: Request):
         _login_throttle_record_failure(req_body.email, client_ip)
         raise HTTPException(status_code=401, detail=result["message"])
     _login_throttle_reset(req_body.email, client_ip)
+    _set_auth_session_cookie(response, result.get("token"))
     return result
+
+
+@app.post("/api/auth/password-reset/request")
+async def api_password_reset_request(
+    req_body: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+):
+    """Request a reset without revealing whether an account exists."""
+    generic = {
+        "success": True,
+        "message": "Falls der Account existiert, wurde eine Reset-Mail versendet",
+    }
+    if not HAS_AUTH:
+        return generic
+    client_ip = request.client.host if request and request.client else "unknown"
+    if not _password_reset_throttle_allows(req_body.email, client_ip):
+        return generic
+    try:
+        reset = create_password_reset_request(req_body.email)
+        delivery_email = str(reset.get("delivery_email") or "").strip().lower()
+        reset_token_value = str(reset.get("reset_token") or "").strip()
+        if delivery_email and reset_token_value:
+            background_tasks.add_task(
+                _send_password_reset_email, delivery_email, reset_token_value
+            )
+    except Exception as exc:
+        print(f"[Auth] Password reset request failed: {exc}")
+    return generic
+
+
+@app.post("/api/auth/password-reset/confirm")
+async def api_password_reset_confirm(req_body: PasswordResetConfirmRequest):
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    result = confirm_password_reset(req_body.token, req_body.new_password)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("message", "Reset-Link ist ungueltig oder abgelaufen"),
+        )
+    return result
+
+
+@app.post("/api/auth/change-password")
+async def api_change_password(
+    req_body: ChangePasswordRequest,
+    authorization: str = Header(None),
+    response: Response = None,
+):
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    result = change_password(token, req_body.current_password, req_body.new_password)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("message", "Passwort konnte nicht geaendert werden"),
+        )
+    _set_auth_session_cookie(response, result.get("token"))
+    return result
+
+
+@app.post("/api/auth/logout")
+async def api_logout(
+    authorization: str = Header(None),
+    response: Response = None,
+):
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if token:
+        revoke_token(token)
+    _clear_auth_session_cookie(response)
+    return {"success": True, "message": "Sitzung beendet"}
 
 
 @app.get("/api/auth/me")
@@ -13560,23 +14598,147 @@ async def api_commercial_readiness():
     auth_status = auth_security_status() if HAS_AUTH else {"critical": ["Auth system not available"], "warnings": []}
     critical = list(auth_status.get("critical", []))
     warnings = list(auth_status.get("warnings", []))
-    if not PUBLIC_APP_URL.startswith("https://"):
-        critical.append("PUBLIC_APP_URL is not HTTPS; paid launch needs a TLS-protected domain")
+
+    public_origin = _validated_public_https_origin(PUBLIC_APP_URL)
+    if not public_origin:
+        critical.append("PUBLIC_APP_URL must be a real HTTPS domain, not localhost, a raw IP or a placeholder")
+    if not COMMERCIAL_STRICT_MODE:
+        critical.append("COMMERCIAL_STRICT_MODE is disabled; production CORS and launch gates are not enforced")
+    invalid_cors_origins = sorted(
+        origin for origin in _cors_origins if _validated_public_https_origin(origin) is None
+    )
+    if COMMERCIAL_STRICT_MODE and invalid_cors_origins:
+        critical.append("Production CORS contains insecure or invalid origins")
+    if COMMERCIAL_STRICT_MODE and public_origin and public_origin not in _cors_origins:
+        critical.append("PUBLIC_APP_URL is not present in the production CORS allowlist")
     if not COMMERCE_ENFORCE_AUTH:
         critical.append("COMMERCE_ENFORCE_AUTH is disabled; API data is not server-side paywalled")
-    if not auth_status.get("stripe_secret_configured"):
-        critical.append("STRIPE_SECRET_KEY is missing; subscriptions cannot be sold")
-    if not auth_status.get("stripe_webhook_configured"):
-        critical.append("STRIPE_WEBHOOK_SECRET is missing; subscription status will not stay in sync")
-    if auth_status.get("stripe_key_mode") == "test":
-        critical.append("Stripe is using test keys; switch to live keys before selling subscriptions")
-    if auth_status.get("stripe_default_price_ids"):
-        warnings.append("Stripe price IDs still match repository defaults; verify live Stripe products before launch")
+    # Stripe configuration is validated centrally by auth_security_status().
+    # Repeating the same blockers here with different wording made the launch
+    # report look like multiple independent failures.
     if not ALERT_SEND_TO_SUBSCRIBERS:
-        warnings.append("ALERT_SEND_TO_SUBSCRIBERS disabled; paid users will not receive platform alerts")
-    warnings.append("Legal/data-license review is not machine-verifiable: confirm terms, privacy, risk disclaimer, refund/cancel policy and market-data redistribution rights before public launch")
-    # AUDIT M-Kalender-2027 (c): Kalender-Abdeckung sichtbar machen, damit
-    # Ops VOR Jahreswechsel sieht, wann die Feiertagsdaten auslaufen.
+        critical.append("ALERT_SEND_TO_SUBSCRIBERS is disabled; paid users would not receive platform alerts")
+    if COMMERCIAL_STRICT_MODE and COUPONS_ENABLED:
+        critical.append(
+            "Coupons are enabled but coupon usage and account access are not stored in one transaction; "
+            "set ENABLE_COUPONS=0 for launch"
+        )
+
+    customer_plan_ids = ("trial", "basic", "pro", "elite")
+    forbidden_customer_tabs = {"admin", "autotrader"}
+    customer_tab_policy: Dict[str, Any] = {}
+    for plan_id in customer_plan_ids:
+        configured_tabs = SCANNER_TABS_BY_PLAN.get(plan_id)
+        exposed_forbidden = sorted(
+            forbidden_customer_tabs & set(configured_tabs or [])
+        )
+        customer_tab_policy[plan_id] = {
+            "explicit": configured_tabs is not None,
+            "tab_count": len(configured_tabs or []),
+            "forbidden_tabs": exposed_forbidden,
+        }
+        if configured_tabs is None:
+            critical.append(
+                f"Customer plan {plan_id} uses default-allow tab access; configure an explicit tab list"
+            )
+        if exposed_forbidden:
+            critical.append(
+                f"Customer plan {plan_id} exposes privileged tabs: {', '.join(exposed_forbidden)}"
+            )
+        plan_features = PLANS.get(plan_id, {})
+        if bool(plan_features.get("has_backtest")) != ("backtest" in (configured_tabs or [])):
+            critical.append(
+                f"Customer plan {plan_id} backtest feature and tab access disagree"
+            )
+        if bool(plan_features.get("has_orb_scanner")) != ("orb" in (configured_tabs or [])):
+            critical.append(
+                f"Customer plan {plan_id} ORB feature and tab access disagree"
+            )
+
+    attestations = {
+        "legal_review_approved": LEGAL_REVIEW_APPROVED,
+        "data_license_approved": DATA_LICENSE_APPROVED,
+        "tax_setup_approved": TAX_SETUP_APPROVED,
+        "historical_secrets_rotated": HISTORICAL_SECRETS_ROTATED,
+        "source_repository_access_reviewed": SOURCE_REPOSITORY_ACCESS_REVIEWED,
+    }
+    if not LEGAL_REVIEW_APPROVED:
+        critical.append("Legal review is not attested: terms, privacy, risk disclaimer and cancellation/refund policy")
+    if not DATA_LICENSE_APPROVED:
+        critical.append("Market-data redistribution and commercial API licenses are not attested")
+    if not TAX_SETUP_APPROVED:
+        critical.append("Tax/VAT and invoicing setup is not attested")
+    if not HISTORICAL_SECRETS_ROTATED:
+        critical.append(
+            "Historical credentials are not attested as rotated; revoke and replace every key exposed in repository history"
+        )
+    if not SOURCE_REPOSITORY_ACCESS_REVIEWED:
+        critical.append(
+            "Source repository visibility, collaborators and access tokens are not attested as reviewed"
+        )
+
+    legal_publication = {
+        "entity_name_configured": bool(LEGAL_ENTITY_NAME),
+        "operator_name_configured": bool(LEGAL_OPERATOR_NAME),
+        "postal_address_configured": bool(LEGAL_POSTAL_ADDRESS),
+        "contact_email_configured": bool(LEGAL_CONTACT_EMAIL),
+        "terms_version": LEGAL_TERMS_VERSION or None,
+        "privacy_version": LEGAL_PRIVACY_VERSION or None,
+    }
+    placeholder_markers = {"todo", "tbd", "placeholder", "your company", "your address"}
+    if not LEGAL_ENTITY_NAME or LEGAL_ENTITY_NAME.strip().lower() in placeholder_markers:
+        critical.append("LEGAL_ENTITY_NAME is missing or a placeholder")
+    if not LEGAL_POSTAL_ADDRESS or LEGAL_POSTAL_ADDRESS.strip().lower() in placeholder_markers:
+        critical.append("LEGAL_POSTAL_ADDRESS is required for the public legal notice")
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", LEGAL_CONTACT_EMAIL):
+        critical.append("LEGAL_CONTACT_EMAIL is missing or invalid")
+    for label, value in (
+        ("LEGAL_TERMS_VERSION", LEGAL_TERMS_VERSION),
+        ("LEGAL_PRIVACY_VERSION", LEGAL_PRIVACY_VERSION),
+    ):
+        try:
+            version_date = datetime.fromisoformat(value).date()
+            if version_date > datetime.now(timezone.utc).date():
+                raise ValueError("future version")
+        except (TypeError, ValueError):
+            critical.append(f"{label} must be a valid, non-future ISO date (YYYY-MM-DD)")
+
+    # Exactly one scheduler must own every heavy scanner. Duplicate ownership
+    # causes duplicate API load/mails; missing ownership silently stops scans.
+    bg_all_scans = {
+        "bi_long", "bi_short", "biotech", "crash_monitor", "strategies",
+        "bear_scan", "btc_divergence", "new_listing", "orb",
+    }
+    api_owned_scans = {"crash_monitor", "strategies", "bear_scan", "btc_divergence", "new_listing", "orb"}
+    bg_default_scans = {"bi_long", "bi_short", "biotech"}
+    bg_raw = str(os.environ.get("BG_SCAN_SET", "") or "").strip().lower()
+    requested_bg_scans = set()
+    if not bg_raw or bg_raw == "default":
+        bg_active_scans = set(bg_default_scans)
+    else:
+        requested_bg_scans = {part.strip() for part in bg_raw.split(",") if part.strip()} & bg_all_scans
+        bg_active_scans = set(requested_bg_scans or bg_default_scans)
+        if not _alert_bool(os.environ.get("ALLOW_DUPLICATE_SCAN_OWNERSHIP", "0"), False):
+            bg_active_scans -= api_owned_scans
+    invalid_bg_overlap = sorted(requested_bg_scans & api_owned_scans)
+    if invalid_bg_overlap:
+        critical.append(
+            "BG_SCAN_SET requests API-owned scanners: " + ", ".join(invalid_bg_overlap)
+        )
+    api_active_bi_scans = {
+        name for name in bg_default_scans if not _api_scheduler_should_skip(name)
+    }
+    duplicate_bi_owners = sorted(bg_active_scans & api_active_bi_scans)
+    missing_bi_owners = sorted(bg_default_scans - (bg_active_scans | api_active_bi_scans))
+    if duplicate_bi_owners:
+        critical.append(
+            "Duplicate API/background ownership for scanners: " + ", ".join(duplicate_bi_owners)
+        )
+    if missing_bi_owners:
+        critical.append(
+            "No scheduler owns required scanners: " + ", ".join(missing_bi_owners)
+        )
+
     calendar_coverage_by_exchange = {
         str(ex.get("code") or "?"): _exchange_calendar_coverage_until(ex)
         for ex in EXCHANGE_CALENDARS_2026
@@ -13593,26 +14755,79 @@ async def api_commercial_readiness():
             _signal_tracker_status["signals_recorded"] = int(get_signal_count())
         except Exception as _sig_cnt_err:
             _signal_tracker_status["available"] = False
-            warnings.append(f"signal_tracker get_signal_count failed: {_sig_cnt_err}")
-    _this_year_end = f"{datetime.now().year}-12-31"
-    if calendar_coverage_until is None or calendar_coverage_until <= _this_year_end:
-        warnings.append(
-            f"Boersenkalender-Abdeckung endet {calendar_coverage_until or 'unbekannt'} - "
-            "Feiertage/Half-Days fuer Folgejahr nachpflegen (EXCHANGE_CALENDARS_2026)"
+            critical.append(f"Signal tracker is not operational: {_sig_cnt_err}")
+    if not _signal_tracker_status["available"]:
+        critical.append("Signal tracker is unavailable; commercial performance audit is incomplete")
+
+    required_calendar_until = (datetime.now(timezone.utc).date() + timedelta(days=180)).isoformat()
+    if calendar_coverage_until is None or calendar_coverage_until < required_calendar_until:
+        critical.append(
+            f"Exchange calendar coverage ends {calendar_coverage_until or 'unknown'}; "
+            f"commercial launch requires verified coverage through at least {required_calendar_until}"
         )
+
+    system_health = _build_system_health()
+    api_keys = system_health.get("api_keys_configured") or {}
+    if not api_keys.get("market_data"):
+        critical.append("Market data access is not configured")
+    if not api_keys.get("catalyst_data"):
+        critical.append("Catalyst data access is not configured; the advertised biotech scanner is incomplete")
+    if not api_keys.get("ai_assistant"):
+        critical.append("AI assistant access is not configured")
+    if not (system_health.get("email_alerts") or {}).get("configured"):
+        critical.append("Email delivery is not configured")
+    if not (system_health.get("scheduler") or {}).get("running"):
+        critical.append("Background scheduler is not running")
+    stale_scanners = list((system_health.get("scheduler") or {}).get("stale_or_missing_scans") or [])
+    if stale_scanners:
+        warnings.append("Scanner caches need attention: " + ", ".join(stale_scanners))
+
+    critical = list(dict.fromkeys(str(item) for item in critical if item))
+    critical_set = set(critical)
+    warnings = [
+        item
+        for item in dict.fromkeys(str(item) for item in warnings if item)
+        if item not in critical_set
+    ]
     return {
         "status": "blocked" if critical else ("warning" if warnings else "ready"),
         "commercial_ready": not critical,
-        "public_app_url": PUBLIC_APP_URL,
+        "public_app_origin": public_origin,
         "commerce_enforce_auth": COMMERCE_ENFORCE_AUTH,
+        "commercial_strict_mode": COMMERCIAL_STRICT_MODE,
+        "cors_origins": sorted(_cors_origins),
+        "invalid_cors_origins": invalid_cors_origins,
         "alert_send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
+        "coupons": {
+            "enabled": COUPONS_ENABLED,
+            "transactional": False,
+            "commercial_safe": not COUPONS_ENABLED,
+        },
+        "customer_tab_policy": customer_tab_policy,
+        "scan_ownership": {
+            "background": sorted(bg_active_scans),
+            "api_bi": sorted(api_active_bi_scans),
+            "invalid_bg_overlap": invalid_bg_overlap,
+            "duplicate_bi_owners": duplicate_bi_owners,
+            "missing_bi_owners": missing_bi_owners,
+        },
+        "attestations": attestations,
+        "legal_publication": legal_publication,
         "auth": auth_status,
         "calendar_coverage_until": calendar_coverage_until,
+        "required_calendar_coverage_until": required_calendar_until,
         "calendar_coverage_by_exchange": calendar_coverage_by_exchange,
         "signal_tracker": _signal_tracker_status,
+        "system_health": {
+            "status": system_health.get("status"),
+            "api_keys_configured": api_keys,
+            "email_configured": bool((system_health.get("email_alerts") or {}).get("configured")),
+            "scheduler_running": bool((system_health.get("scheduler") or {}).get("running")),
+            "stale_or_missing_scans": stale_scanners,
+        },
         "critical": critical,
         "warnings": warnings,
-        "note": "Commercial readiness here covers technical gating/security only; legal, tax and data-license review still need human/legal approval.",
+        "note": "Human approvals remain external; this endpoint only records explicit attestations and technical readiness.",
     }
 
 
@@ -13660,16 +14875,67 @@ def api_signal_performance(
 @app.get("/api/auth/plans")
 async def api_get_plans():
     """Get available plans and pricing."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    public_features = {
+        "basic": [
+            "5 Scanner-Bereiche",
+            "Scan alle 30 Minuten",
+            "30 Ticker-Details pro Stunde",
+            "Aktien-Long/Short, BI und Crash Monitor",
+        ],
+        "pro": [
+            "Alle Pro-Scanner inkl. Biotech und Krypto",
+            "Scanintervall ab 5 Minuten",
+            "Volle Sidebar-Chartanalyse",
+            "E-Mail-Alerts bei qualifizierten Signalen",
+            "Trade-Setups mit Entry, Stop und Zielen",
+            "Unbegrenzte Ticker-Details",
+            "KI-Analyse bis 20 Aufrufe pro Tag",
+        ],
+        "elite": [
+            "Alles aus Pro",
+            "ORB Scanner",
+            "Backtesting",
+            "API-Zugang",
+            "KI-Analyse mit hohem Nutzungslimit",
+            "Priority Support",
+        ],
+    }
+    plans = []
+    for plan_id in ("basic", "pro", "elite"):
+        plan = PLANS[plan_id]
+        plans.append(
+            {
+                "id": plan_id,
+                "name": plan["name"],
+                "price": plan["price"],
+                "interval": "month",
+                "features": public_features[plan_id],
+                "popular": plan_id == "pro",
+                "cta": f"{plan['name']} starten",
+            }
+        )
+    return {"plans": plans}
+
+
+@app.get("/api/legal-info")
+async def api_legal_info():
+    """Return only the public operator details shown in legal notices."""
     return {
-        "plans": [
-            {"id": "basic", "name": "Basic", "price": 29, "interval": "month",
-             "features": ["4 Scanner Tabs", "Scan alle 30min", "30 Ticker-Details/Stunde"]},
-            {"id": "pro", "name": "Pro", "price": 79, "interval": "month",
-             "features": ["Alle Scanner", "Echtzeit Scans", "Volle Sidebar-Analyse", "Email Alerts", "Trade Setups"],
-             "popular": True},
-            {"id": "elite", "name": "Elite", "price": 149, "interval": "month",
-             "features": ["Alles aus Pro", "ORB Scanner", "Backtesting", "API Access", "Priority Support"]},
-        ]
+        "entity_name": LEGAL_ENTITY_NAME,
+        "operator_name": LEGAL_OPERATOR_NAME,
+        "postal_address": LEGAL_POSTAL_ADDRESS,
+        "contact_email": LEGAL_CONTACT_EMAIL,
+        "terms_version": LEGAL_TERMS_VERSION,
+        "privacy_version": LEGAL_PRIVACY_VERSION,
+        "configured": bool(
+            LEGAL_ENTITY_NAME
+            and LEGAL_POSTAL_ADDRESS
+            and LEGAL_CONTACT_EMAIL
+            and LEGAL_TERMS_VERSION
+            and LEGAL_PRIVACY_VERSION
+        ),
     }
 
 
@@ -13685,12 +14951,22 @@ async def api_create_checkout(req_body: CheckoutRequest, authorization: str = He
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+    plan = str(req_body.plan or "").strip().lower()
+    if plan not in {"trial", "basic", "pro", "elite"}:
+        raise HTTPException(status_code=400, detail="Unknown subscription plan")
     email = payload.get("email")
+    eligibility = get_checkout_eligibility(email, plan)
+    if not eligibility.get("allowed"):
+        status_code = 404 if eligibility.get("code") == "account_not_found" else 409
+        raise HTTPException(
+            status_code=status_code,
+            detail=eligibility.get("message") or "Checkout nicht erlaubt",
+        )
     base_url = PUBLIC_APP_URL
     checkout_url = create_checkout_session(
         email=email,
-        plan=req_body.plan,
-        success_url=f"{base_url}?checkout=success&plan={req_body.plan}",
+        plan=plan,
+        success_url=f"{base_url}?checkout=success&plan={plan}",
         cancel_url=f"{base_url}?checkout=cancel",
     )
     if not checkout_url:
@@ -13711,8 +14987,7 @@ async def api_billing_portal(req_body: BillingPortalRequest, authorization: str 
         raise HTTPException(status_code=401, detail="Invalid token")
 
     email = payload.get("email")
-    return_url = req_body.return_url or PUBLIC_APP_URL
-    portal_url = create_billing_portal(email, return_url)
+    portal_url = create_billing_portal(email, PUBLIC_APP_URL)
     if not portal_url:
         raise HTTPException(status_code=500, detail="Could not create billing portal")
     return {"url": portal_url}
@@ -13740,7 +15015,7 @@ def get_health():
         status="healthy",
         version=API_VERSION,
         timestamp=datetime.now().isoformat(),
-        api_keys_configured={
+        api_keys_configured={} if COMMERCIAL_STRICT_MODE else {
             "market_data": bool(POLYGON_KEY),
             "catalyst_data": bool(BPIQ_API_KEY),
             "ai_assistant": bool(ANTHROPIC_API_KEY),
@@ -13767,6 +15042,7 @@ def _build_system_health() -> Dict[str, Any]:
             scan_health[name] = {
                 "running": status.get("running", False),
                 "last_run": status.get("last_run"),
+                "last_attempt_at": status.get("last_attempt_at"),
                 "next_run": status.get("next_run"),
                 "interval_min": status.get("interval_min"),
                 **cache,
@@ -13810,7 +15086,7 @@ def _build_system_health() -> Dict[str, Any]:
             "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators", "ISM PMI"],
             "exchange_calendars": ["NYSE/Nasdaq", "LSE", "Xetra/Frankfurt", "Tokyo", "Hong Kong"],
             "estimated_event_families": ["Earnings Season", "Initial Jobless Claims"],
-            "quality": "official_core_macro_plus_2026_exchange_hours_marked_estimates_remaining",
+            "quality": "official_core_macro_2026_plus_verified_exchange_hours_2026_2027_marked_estimates_remaining",
         },
         "risk_policy": RISK_POLICY,
         "market_context": _get_market_context_snapshot().get("summary"),
@@ -13826,8 +15102,9 @@ def get_system_health():
 
 
 @app.get("/api/email-alert-status")
-def get_email_alert_status():
+def get_email_alert_status(authorization: Optional[str] = Header(None)):
     """Safe email-alert diagnostics without exposing credentials."""
+    _require_admin(authorization)
     return {
         "status": "ok",
         "email_alerts": _email_alert_status(),
@@ -13849,8 +15126,9 @@ def get_email_alert_status():
 
 
 @app.get("/api/email-alert-audit")
-def get_email_alert_audit():
+def get_email_alert_audit(authorization: Optional[str] = Header(None)):
     """Show which scanner results are currently email-alert eligible."""
+    _require_admin(authorization)
     cache_targets = {
         "bi_long": BI_CACHE_LONG,
         "bi_short": BI_CACHE_SHORT,
@@ -13899,10 +15177,19 @@ def get_email_alert_audit():
 
 
 @app.get("/api/trade-reminders")
-def get_trade_reminders(status: Optional[str] = Query(None, description="Filter: active, triggered, expired, cancelled")):
+def get_trade_reminders(
+    status: Optional[str] = Query(None, description="Filter: active, triggered, expired, cancelled"),
+    authorization: Optional[str] = Header(None),
+):
     """List trade reminders for browser polling and UI status."""
+    owner_email, is_admin = _authenticated_request_identity(authorization)
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
+    if not is_admin:
+        reminders = [
+            reminder for reminder in reminders
+            if str(reminder.get("owner_email") or "").strip().lower() == owner_email
+        ]
     if status:
         wanted = status.lower()
         reminders = [r for r in reminders if str(r.get("status", "")).lower() == wanted]
@@ -13940,8 +15227,12 @@ def get_trade_reminders(status: Optional[str] = Query(None, description="Filter:
 
 
 @app.post("/api/trade-reminders")
-def create_trade_reminder(request: TradeReminderRequest):
+def create_trade_reminder(
+    request: TradeReminderRequest,
+    authorization: Optional[str] = Header(None),
+):
     """Create a temporary monitor for a ticker/coin trigger or retest."""
+    owner_email, _ = _authenticated_request_identity(authorization)
     ticker = str(request.ticker or "").upper().strip()
     if not ticker:
         raise HTTPException(status_code=400, detail="Ticker fehlt")
@@ -13953,6 +15244,7 @@ def create_trade_reminder(request: TradeReminderRequest):
     row = request.row if isinstance(request.row, dict) else {}
     reminder = {
         "id": uuid.uuid4().hex[:12],
+        "owner_email": owner_email,
         "ticker": ticker.replace("USDT", "") if request.asset_type.lower() == "crypto" else ticker,
         "asset_type": str(request.asset_type or "crypto").lower(),
         "scanner": str(request.scanner or "early_movers"),
@@ -13973,6 +15265,7 @@ def create_trade_reminder(request: TradeReminderRequest):
         for old in reminders:
             if (
                 old.get("status") == "active"
+                and str(old.get("owner_email") or "").strip().lower() == owner_email
                 and str(old.get("ticker", "")).upper() == reminder["ticker"]
                 and str(old.get("condition", "")) == reminder["condition"]
             ):
@@ -13988,13 +15281,22 @@ def create_trade_reminder(request: TradeReminderRequest):
 
 
 @app.delete("/api/trade-reminders/{reminder_id}")
-def cancel_trade_reminder(reminder_id: str):
+def cancel_trade_reminder(
+    reminder_id: str,
+    authorization: Optional[str] = Header(None),
+):
     """Cancel a reminder."""
+    owner_email, is_admin = _authenticated_request_identity(authorization)
     changed = False
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
         for r in reminders:
-            if r.get("id") == reminder_id and r.get("status") == "active":
+            reminder_owner = str(r.get("owner_email") or "").strip().lower()
+            if (
+                r.get("id") == reminder_id
+                and r.get("status") == "active"
+                and (is_admin or reminder_owner == owner_email)
+            ):
                 r["status"] = "cancelled"
                 r["updated_at"] = _reminder_iso()
                 changed = True
@@ -14012,8 +15314,9 @@ def get_risk_policy():
 
 
 @app.get("/api/catalyst-data-status")
-def get_catalyst_data_status():
+def get_catalyst_data_status(authorization: Optional[str] = Header(None)):
     """Admin check whether the configured premium catalyst feed is reachable."""
+    _require_admin(authorization)
     key = os.environ.get("BPIQ_API_KEY") or _SECRETS.get("BPIQ_API_KEY", "")
     payload = {
         "status": "ok",
@@ -14059,12 +15362,6 @@ def get_biotech_catalyst_watchlist(
     """Supplemental premium catalyst watchlist for the Biotech scanner UI."""
     watchlist = get_bpiq_catalyst_watchlist(limit=limit, window_days=window_days)
     return watchlist
-
-
-@app.get("/api/debug-keys")
-def debug_keys():
-    """Disabled: never expose provider/key diagnostics in a sellable build."""
-    return {"status": "disabled", "message": "Key diagnostics are disabled in this build."}
 
 
 @app.post("/api/test-email")
@@ -14129,6 +15426,7 @@ def get_scan_status():
             scans_copy[name] = {
                 "running": status["running"],
                 "last_run": status["last_run"],
+                "last_attempt_at": status.get("last_attempt_at"),
                 "next_run": status["next_run"],
                 "interval_min": status["interval_min"],
                 **cache_health,
@@ -15583,7 +16881,7 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
     if request.market_type == "crypto":
         _strat_name = resolved_strategy
-        _safe_key = f"crypto_strat_{_strat_name.lower().replace(' ', '_')}"
+        _safe_key = _strategy_scan_status_key(_strat_name, "crypto")
         if _safe_key not in _scan_status:
             with _scan_lock:
                 _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
@@ -15690,7 +16988,7 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         # Nutzt Polygon Snapshot + Filter aus strategies.py
         _strat_name = resolved_strategy
         # V2.2: Separate scan-locks pro Strategie statt ein einziger "strategy_scan"
-        _safe_key = f"strat_{_strat_name.lower().replace(' ', '_')}"
+        _safe_key = _strategy_scan_status_key(_strat_name, "stocks")
         if _safe_key not in _scan_status:
             with _scan_lock:
                 _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
@@ -15850,6 +17148,16 @@ def get_scan_results(
     if stale_strategy_cache:
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
 
+    scan_state: Dict[str, Any] = {}
+    if strategy and resolved_strategy and scanner_name in {"strategy_scan", "crypto_strategy"}:
+        status_market = "crypto" if scanner_name == "crypto_strategy" else "stocks"
+        status_key = _strategy_scan_status_key(resolved_strategy, status_market)
+        with _scan_lock:
+            scan_state = dict(_scan_status.get(status_key, {}))
+    scan_error = scan_state.get("last_error")
+    if scan_error:
+        warnings.insert(0, f"Letzter Scan fehlgeschlagen: {scan_error}")
+
     return ScanResultsResponse(
         status="success",
         count=len(results),
@@ -15861,6 +17169,8 @@ def get_scan_results(
         diagnostics=diagnostics,
         warnings=warnings,
         exclusion_policy=quality["exclusion_policy"],
+        scan_running=bool(scan_state.get("running")) if scan_state else None,
+        scan_error=scan_error,
     )
 
 
@@ -16376,7 +17686,7 @@ def _build_early_mover_long_setup(
         stop = setup_entry * (1 - risk_pct)
         stop_source = "volatility_fallback"
 
-    risk = max(setup_entry - stop, setup_entry * 0.01)
+    risk = setup_entry - stop
 
     target_candidates = []
     if high_24h > setup_entry:
@@ -16436,12 +17746,22 @@ def _build_early_mover_long_setup(
             entry_status = "WAIT_FOR_RETEST"
             entry_quality = "TARGETS_TIGHT"
 
-    rr_tp1 = round((tp1 - setup_entry) / risk, 2) if risk > 0 else 0
-    rr_tp2 = round((tp2 - setup_entry) / risk, 2) if risk > 0 else 0
+    geometry = trade_geometry(setup_entry, stop, tp1, tp2, "LONG")
+    if not geometry.get("valid"):
+        return {
+            "direction": "LONG",
+            "trade_action": "NO_TRADE",
+            "entry_status": "INVALID_LEVELS",
+            "entry_quality": "INVALID",
+            "warnings": [f"Ungueltige Trade-Level: {geometry.get('reason', 'unknown')}"] ,
+            "risk_flags": ["invalid_trade_geometry"],
+        }
+    risk = float(geometry["risk"])
+    rr_tp1 = round(float(geometry["rr_tp1"]), 2)
+    rr_tp2 = round(float(geometry["rr_tp2"]), 2)
     live_entry = max(price, setup_entry)
-    live_risk = max(live_entry - stop, risk)
-    live_reward = ((tp1 - live_entry) + (tp2 - live_entry)) / 2
-    live_rr = round(max(0.0, live_reward) / live_risk, 2) if live_risk > 0 else 0
+    live_geometry = trade_geometry(live_entry, stop, tp1, tp2, "LONG")
+    live_rr = round(float(live_geometry["rr"]), 2) if live_geometry.get("valid") else 0
     distance_to_entry_r = round((price - setup_entry) / risk, 2) if risk > 0 else 0
     late_to_tp1 = price >= tp1
 
@@ -16650,6 +17970,7 @@ def fetch_mexc_funding_oi():
         if not data.get("success") or not data.get("data"):
             return {}
 
+        contract_sizes = fetch_mexc_contract_sizes() if HAS_NEW_LISTING_SCANNER else {}
         result = {}
         for t in data.get("data", []):
             symbol = t.get("symbol", "")
@@ -16657,20 +17978,23 @@ def fetch_mexc_funding_oi():
                 continue
             base = symbol.replace("_USDT", "")
             hold_vol = float(t.get("holdVol") or 0)
-            volume24 = float(t.get("volume24") or 0)
+            amount24 = float(t.get("amount24") or 0)
             fr = float(t.get("fundingRate") or 0)
             last_price = float(t.get("lastPrice") or t.get("last") or 0)
-            oi_usdt = hold_vol * last_price if last_price > 0 else hold_vol
-            vol_usdt = volume24 * last_price if last_price > 0 else volume24
+            contract_size = float(contract_sizes.get(symbol) or 0)
+            oi_usdt = hold_vol * contract_size * last_price if contract_size > 0 and last_price > 0 else 0.0
+            vol_usdt = amount24
             oi_ratio = (oi_usdt / vol_usdt) if vol_usdt > 0 else 0
             result[base] = {
                 "contract_symbol": symbol,
                 "chart_exchange": "mexc",
                 "funding_rate": fr,
                 "hold_vol": hold_vol,
+                "contract_size": contract_size or None,
                 "volume24": vol_usdt,
                 "oi_usdt": oi_usdt,
                 "oi_ratio": round(oi_ratio, 2),
+                "oi_data_status": "ok" if contract_size > 0 else "missing_contract_size",
             }
         return result
     except Exception:
@@ -16854,6 +18178,11 @@ def _classify_phase(change_24h, change_7d, vol_mcap_pct, btc_24h=0):
     # vm/30 normalisiert (Scanner filtert auf vm>30, also norm_vol >= 1)
     norm_vol = max(1, vm / 30)
     intensity = abs(c24) / norm_vol
+
+    # A falling coin is not accumulation. Keep it out of the long-only phase
+    # model until price and relative strength have actually stabilised.
+    if c24 <= -3 or (c24 < 0 and c7d <= -7) or (c24 <= -1.5 and alpha <= -2):
+        return 0, "Weak/Downtrend", "#64748b"
 
     # ═══ Phase 3: Überhitzt — NICHT kaufen, Korrektur kommt ═══
     # Absolut: ≥12% in 24h = klar gepumpt, egal was Volume sagt
@@ -17110,7 +18439,7 @@ def fetch_early_movers(_prefetched_perps=None):
                     sweep_score -= 12
 
                 entry = dict(base_entry)
-                entry["MarketSweepScore"] = max(5, min(82, int(sweep_score)))
+                entry["MarketSweepScore"] = max(5, min(80, int(sweep_score)))
                 entry["Signal"] = "Market Sweep - 5m execution scan"
                 market_sweep.append(entry)
 
@@ -17498,7 +18827,12 @@ def fetch_early_movers(_prefetched_perps=None):
             liquidity = _early_mover_static_liquidity(entry)
 
             # Phase-Multiplier: Phase 3 = deutliche Strafe, Phase 1 = leichter Boost
-            if phase == 1:
+            if phase == 0:
+                score = min(100, int(raw_score * 0.45))
+                risk_level = "HIGH"
+                risk_color = "#ef4444"
+                risk_reasons.append("Preis-/Relative-Staerke ist fallend; kein Long-Aufbau")
+            elif phase == 1:
                 score = min(100, int(raw_score * 1.05))  # +5% — konservativ
             elif phase == 3:
                 score = min(100, int(raw_score * 0.6))   # -40% — überhitzt = NICHT kaufen
@@ -17529,7 +18863,9 @@ def fetch_early_movers(_prefetched_perps=None):
                 if risk_level == "LOW":
                     risk_level = "MEDIUM"
                     risk_color = "#f59e0b"
-            if phase == 1:
+            if phase == 0:
+                signal_text = "KEIN LONG-SETUP: Abwaertstrend/relative Schwaeche"
+            elif phase == 1:
                 if score >= 70:
                     signal_text = "BEOBACHTEN: Smart-Money-Akkumulation - Entry erst mit Execution-Trigger/Retest"
                 elif score >= 40:
@@ -17618,6 +18954,25 @@ def fetch_early_movers(_prefetched_perps=None):
         grade, grade_label = _grade_for_score(final_score)
         entry["grade"] = grade
         entry["grade_label"] = grade_label
+        if int(entry.get("phase") or 0) == 0:
+            entry.update({
+                "direction": "LONG",
+                "setup_score": final_score,
+                "entry": None,
+                "stop_loss": None,
+                "stop": None,
+                "tp1": None,
+                "tp2": None,
+                "entry_status": "NICHT_TRADEN",
+                "trade_action": "NO_TRADE",
+                "trade_signal": "NICHT_TRADEN",
+                "signal_quality": "no_trade_downtrend",
+                "signal_label": "Nicht traden: fallender Coin ist keine Accumulation",
+                "execution_trigger_ok": False,
+                "alertable_crypto": False,
+                "trade_setup": {},
+            })
+            continue
         setup = _build_early_mover_long_setup(entry, entry.get("phase") or 1, final_score, btc_24h, btc_7d)
         setup_warnings = setup.get("warnings") or []
         setup_flags = list(setup.get("risk_flags") or [])
@@ -17751,16 +19106,6 @@ def fetch_early_movers(_prefetched_perps=None):
         ),
     )
     unified = sorted(
-        all_unified,
-        key=lambda x: (
-            0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
-            -int(x.get("entry_score") or 0),
-            1 if x["phase"] in (2, 3) else 2,
-            -int(x.get("setup_score") or x.get("score") or 0),
-        ),
-    )[:MAX_DISPLAY]
-
-    unified = sorted(
         unified,
         key=lambda x: (
             0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
@@ -17848,6 +19193,8 @@ def _early_movers_wrapper() -> None:
         _send_early_mover_long_alerts(result)
     except Exception as e:
         print(f"[Early Movers] Error: {e}")
+        traceback.print_exc()
+        raise
 
 
 @app.post("/api/early-movers-scan")
@@ -17866,6 +19213,7 @@ def get_early_movers():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_early_mover_results(results, cache_age)
+    _downgrade_expired_crypto_triggers(_flatten_early_mover_rows(decorated), cache_age)
     quality = _scan_quality_payload("early_movers", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
@@ -18181,26 +19529,40 @@ def _ce_green_streak(bars: List[Dict[str, Any]]) -> Tuple[int, float]:
     return streak, move
 
 
-_CE_BTC_CONTEXT_CACHE = {"ts": 0.0, "btc_24h": 0.0}
+_CE_BTC_CONTEXT_CACHE = {"ts": 0.0, "btc_24h": None, "known": False, "data_status": "missing"}
 
 
 def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[str, Any]:
+    known = False
+    status = "error"
+    error = None
     try:
-        if time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 120:
+        if time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 120 and _CE_BTC_CONTEXT_CACHE.get("known"):
             btc_change = _ce_float(_CE_BTC_CONTEXT_CACHE.get("btc_24h"))
+            known = True
+            status = "ok"
         else:
             markets = _fetch_coingecko_markets(pages=1)
             btc = next((c for c in markets if str(c.get("symbol", "")).upper() == "BTC"), None)
+            if not btc or btc.get("price_change_percentage_24h") is None:
+                raise ValueError("BTC market context missing")
             btc_change = _ce_float((btc or {}).get("price_change_percentage_24h"))
-            _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": btc_change})
-    except Exception:
+            known = True
+            status = "ok"
+            _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": btc_change, "known": True, "data_status": "ok"})
+    except Exception as exc:
         btc_change = 0.0
-    alpha = coin_change_24h - btc_change
+        error = str(exc)[:120]
+        _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": None, "known": False, "data_status": "error"})
+    alpha = coin_change_24h - btc_change if known else 0.0
     return {
         "btc_24h": round(btc_change, 2),
         "coin_24h": round(coin_change_24h, 2),
         "alpha_24h": round(alpha, 2),
-        "tailwind": btc_change >= -1.25 or alpha >= 4.0,
+        "tailwind": bool(known and (btc_change >= -1.25 or alpha >= 4.0)),
+        "known": known,
+        "data_status": status,
+        "error": error,
     }
 
 
@@ -18284,11 +19646,16 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         and compression_score >= 14
         and not too_late_reasons
     )
+    btc_context = _get_crypto_btc_context(_ce_base_from_contract(row.get("contract", "")), change24)
+    if not btc_context.get("known"):
+        # Unknown market regime may be shown as a candidate, but can never
+        # become an executable long signal.
+        armed_ok = bool(armed_ok or trigger_ok)
+        trigger_ok = False
     if not trigger_ok and not armed_ok:
         return None
 
     trigger_score = (28 if trigger_ok else 12) + min(18, max(0, vol_ratio - 1.0) * 7) + (8 if close_pos >= 0.75 else 4 if close_pos >= 0.6 else 0)
-    btc_context = _get_crypto_btc_context(_ce_base_from_contract(row.get("contract", "")), change24)
     btc_penalty = 0 if btc_context.get("tailwind") else 7
     funding_penalty = 8 if funding_pct >= 0.08 else 4 if funding_pct >= 0.04 else 0
     late_penalty = min(26, len(too_late_reasons) * 10)
@@ -18329,17 +19696,19 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "tp2_source": "measured move structure",
         "stop_source": "nearest support/VRVP invalidation",
     }
-    setup = apply_vrvp_to_trade_setup(setup, vrvp, direction="LONG", asset_type="crypto", atr=atr5)
+    vrvp_atr = calculate_wilder_atr(bars4h[-60:] or bars15[-96:], period=14) or atr5
+    setup = apply_vrvp_to_trade_setup(setup, vrvp, direction="LONG", asset_type="crypto", atr=vrvp_atr)
     entry = _ce_float(setup.get("entry"))
     stop = _ce_float(setup.get("stop"))
     tp1 = _ce_float(setup.get("tp1"))
     tp2 = _ce_float(setup.get("tp2"))
-    risk = entry - stop
-    if risk <= 0 or tp1 <= entry or tp2 <= tp1:
+    geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
+    if not geometry.get("valid"):
         return None
-    rr_tp1 = (tp1 - entry) / risk
-    rr_tp2 = (tp2 - entry) / risk
-    rr = (rr_tp1 + rr_tp2) / 2
+    risk = float(geometry["risk"])
+    rr_tp1 = float(geometry["rr_tp1"])
+    rr_tp2 = float(geometry["rr_tp2"])
+    rr = float(geometry["rr"])
     if rr < 1.45:
         return None
 
@@ -18355,6 +19724,9 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     if not btc_context.get("tailwind"):
         risk_level = "MEDIUM"
         risk_reasons.append("BTC not supportive")
+    if not btc_context.get("known"):
+        risk_level = "HIGH"
+        risk_reasons.append("BTC context missing; execution is fail-closed")
     if funding_pct >= 0.08:
         risk_level = "HIGH"
         risk_reasons.append("funding crowded")
@@ -18483,6 +19855,7 @@ def _crypto_explosion_wrapper() -> None:
     except Exception as exc:
         print(f"[Crypto Explosion] Error: {exc}")
         traceback.print_exc()
+        raise
 
 
 def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Optional[int]) -> List[Dict[str, Any]]:
@@ -18522,8 +19895,8 @@ def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Op
             row["execution_trigger_ok"] = False
             row["alertable_crypto"] = False
             row["trigger_expired"] = True
-            row["phase"] = 1
-            row["phase_label"] = "Trigger expired; wait for fresh 5m breakout"
+            row["trigger_state"] = "EXPIRED"
+            row["trigger_state_label"] = "Trigger expired; wait for fresh 5m breakout"
     return rows
 
 
@@ -18774,6 +20147,8 @@ def _btc_divergenz_wrapper() -> None:
         save_cache_file(BTC_DIVERGENZ_CACHE, _build_crypto_btc_divergence_results())
     except Exception as e:
         print(f"BTC divergenz error: {e}")
+        traceback.print_exc()
+        raise
 
 
 @app.post("/api/btc-divergenz-scan")
@@ -19186,6 +20561,8 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
             continue
         subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
         sent = _send_email_alert(subject, body, recipient_emails=recipients, trade_horizon="swing", mail_class="info")  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
+        if not sent:
+            _email_dedupe_release(dedupe_key, claimed_at=now)
         sent_any = bool(sent) or sent_any
 
     if not had_recipients:
@@ -19270,6 +20647,8 @@ def _money_flow_wrapper() -> None:
         _send_narrative_pulse_email(narrative_payload)
     except Exception as e:
         print(f"Money flow error: {e}")
+        traceback.print_exc()
+        raise
 
 
 @app.post("/api/money-flow-scan")
@@ -19715,18 +21094,21 @@ def _decorate_new_listing_display_results(
 def _new_listing_wrapper() -> None:
     """Run the full Pump & Dump scanner pipeline and cache flat UI results."""
     if not HAS_NEW_LISTING_SCANNER:
-        print("[New Listing] Module not available")
-        return
+        raise RuntimeError("New listing scanner module not available")
 
     try:
         seed_instrument_cache()
         payload = run_new_listing_scanner()
-        _send_new_listing_pipeline_alerts(payload if isinstance(payload, dict) else {})
         results = _flatten_new_listing_pipeline_results(payload if isinstance(payload, dict) else {})
         save_cache_file(NEW_LISTING_CACHE, results)
+        # Publish first, alert second: a mail must never describe a result that
+        # failed to become the scanner's readable source of truth.
+        _send_new_listing_pipeline_alerts(payload if isinstance(payload, dict) else {})
         print(f"[New Listing] Full pipeline processed {len(results)} UI rows")
     except Exception as e:
         print(f"New listing wrapper error: {e}")
+        traceback.print_exc()
+        raise
 
 
 @app.post("/api/new-listing-scan")
@@ -20064,6 +21446,7 @@ def _crypto_trade_signals_wrapper(refresh_sources: bool = True) -> None:
     except Exception as exc:
         print(f"[Crypto Signals] Error: {exc}")
         traceback.print_exc()
+        raise
 
 
 @app.post("/api/crypto-trade-signals-scan")
@@ -20116,6 +21499,7 @@ def _penny_save_dict(path: str, payload: Dict[str, Any]) -> None:
         tmp_path = None
     except Exception as exc:
         print(f"[Penny] cache write error {path}: {exc}")
+        raise
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -20195,6 +21579,29 @@ def _penny_normalize_snapshot(raw: Dict[str, Any], volume_fraction: float) -> Op
     }
 
 
+def _penny_expected_volume_fraction(now_utc: Optional[datetime] = None) -> float:
+    """Return a conservative penny-stock volume projection fraction.
+
+    Polygon's day-volume snapshot can already contain pre-market prints while
+    the generic U-curve models regular-session volume. During the first 15
+    minutes that mismatch can manufacture enormous projected RVOL, so no
+    projection is allowed until a meaningful cash-session sample exists.
+    """
+    current = now_utc or datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_et = current.astimezone(ZoneInfo("America/New_York"))
+        minutes_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+        if now_et.weekday() < 5 and 0 < minutes_open < 15:
+            return 1.0
+    except Exception:
+        return 1.0
+    return _us_equity_expected_volume_fraction(current)
+
+
 def _penny_fetch_live_spread(ticker: str) -> Optional[Dict[str, Any]]:
     """Fallback quote check only for otherwise valid 5m trigger candidates."""
     try:
@@ -20233,6 +21640,89 @@ def _penny_fetch_live_spread(ticker: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         print(f"[Penny] quote fallback error {ticker}: {exc}")
         return None
+
+
+def _penny_revalidate_buy_candidate(
+    row: Dict[str, Any],
+    *,
+    now_ts: Optional[float] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Fail closed unless a penny entry is still executable immediately.
+
+    A full-universe penny scan can take minutes. The setup that was valid near
+    the start must therefore be checked again against a fresh closed 5-minute
+    candle and a current quote immediately before state publication/email.
+    """
+    symbol = str(row.get("ticker") or "").upper().strip()
+    now_value = float(now_ts if now_ts is not None else time.time())
+    if not symbol:
+        return None, "missing_symbol"
+
+    quote = _penny_fetch_live_spread(symbol)
+    if not quote:
+        return None, "live_quote_missing_or_stale"
+    spread_bps_value = _alert_float(quote.get("spread_bps"))
+    if spread_bps_value is None or spread_bps_value < 0:
+        return None, "live_spread_missing_or_invalid"
+    spread_bps = spread_bps_value
+    if spread_bps > PENNY_EXECUTION_MAX_SPREAD_BPS:
+        return None, "live_spread_too_wide"
+
+    bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=72)
+    intraday = analyze_penny_intraday(bars_5m, spread_bps=spread_bps, now_ts=now_value)
+    if not intraday.get("trigger_confirmed") or not intraday.get("fresh"):
+        return None, "fresh_closed_5m_trigger_missing"
+    signal_age_value = _alert_float(intraday.get("age_seconds"))
+    if signal_age_value is None or signal_age_value < 0:
+        return None, "closed_5m_trigger_age_missing_or_invalid"
+    signal_age = signal_age_value
+    if signal_age > PENNY_TRIGGER_MAX_AGE_SECONDS:
+        return None, "closed_5m_trigger_stale"
+
+    setup = dict(row.get("trade_setup") or {})
+    planned_entry = _alert_float(setup.get("entry"), 0.0) or 0.0
+    stop = _alert_float(setup.get("stop_loss") or setup.get("stop"), 0.0) or 0.0
+    tp1 = _alert_float(setup.get("tp1"), 0.0) or 0.0
+    tp2 = _alert_float(setup.get("tp2"), 0.0) or 0.0
+    live_entry = _alert_float(quote.get("ask"), 0.0) or 0.0
+    if not (0 < stop < live_entry < tp1 < tp2):
+        return None, "live_trade_geometry_invalid"
+
+    planned_risk = planned_entry - stop
+    if planned_entry <= stop or planned_risk <= 0:
+        return None, "planned_risk_invalid"
+    entry_drift_r = (live_entry - planned_entry) / planned_risk
+    if entry_drift_r > 0.35:
+        return None, "live_entry_chased"
+
+    geometry = trade_geometry(live_entry, stop, tp1, tp2, "LONG")
+    if not geometry.get("valid"):
+        return None, "live_trade_geometry_invalid"
+    live_rr = _alert_float(geometry.get("rr"), 0.0) or 0.0
+    if live_rr < 1.5:
+        return None, "live_rr_below_1_5"
+
+    setup.update({
+        "entry": live_entry,
+        "rr": round(live_rr, 2),
+        "entry_price_source": "live_ask_revalidated",
+    })
+    validated = dict(row)
+    validated.update({
+        "price": live_entry,
+        "live_entry_price": live_entry,
+        "spread_bps": round(spread_bps, 1),
+        "spread_known": True,
+        "quote_age_seconds": quote.get("quote_age_seconds"),
+        "trigger_type": intraday.get("trigger_type"),
+        "trigger_timestamp": intraday.get("trigger_timestamp"),
+        "signal_age_seconds": int(signal_age),
+        "entry_drift_r": round(entry_drift_r, 2),
+        "trade_setup": setup,
+        "entry": live_entry,
+        "rr": round(live_rr, 2),
+    })
+    return validated, "ok"
 
 
 def _penny_fetch_daily_bars(ticker: str) -> List[Dict[str, Any]]:
@@ -20647,7 +22137,7 @@ def _penny_stock_scanner_wrapper() -> None:
         snapshots_raw = response.json().get("tickers", []) or []
         diagnostics["snapshot_total"] = len(snapshots_raw)
         common_universe, universe_source = _load_common_stock_universe()
-        volume_fraction = _us_equity_expected_volume_fraction(datetime.now(timezone.utc))
+        volume_fraction = _penny_expected_volume_fraction(datetime.now(timezone.utc))
         market_session = _stock_trade_email_status()
         diagnostics["market_session"] = market_session
         state_payload = _penny_load_dict(PENNY_STOCKS_STATE)
@@ -20717,28 +22207,29 @@ def _penny_stock_scanner_wrapper() -> None:
             _scan_status["penny_stocks"]["progress"] = {"checked": 0, "total": len(selected), "hits": 0, "detail": "5m/1D/VRVP-Pruefung"}
 
         for index, (_, snapshot, broad) in enumerate(selected, start=1):
+            candidate_now_ts = time.time()
             symbol = snapshot["ticker"]
             ref_entry = reference_cache.get(symbol) if isinstance(reference_cache.get(symbol), dict) else {}
-            if now_ts - _alert_float(ref_entry.get("cached_at"), 0.0) > 24 * 3600:
+            if candidate_now_ts - _alert_float(ref_entry.get("cached_at"), 0.0) > 24 * 3600:
                 details = get_ticker_details(POLYGON_KEY, symbol)
-                reference_cache[symbol] = {"cached_at": now_ts, "data": details}
+                reference_cache[symbol] = {"cached_at": candidate_now_ts, "data": details}
             else:
                 details = ref_entry.get("data") if isinstance(ref_entry.get("data"), dict) else {}
 
             news_entry = news_cache.get(symbol) if isinstance(news_cache.get(symbol), dict) else {}
-            if now_ts - _alert_float(news_entry.get("cached_at"), 0.0) > 30 * 60:
+            if candidate_now_ts - _alert_float(news_entry.get("cached_at"), 0.0) > 30 * 60:
                 raw_news = get_ticker_news(POLYGON_KEY, symbol, limit=8)
                 if isinstance(raw_news, tuple):
                     raw_news = raw_news[0]
                 news_context = _penny_news_context(raw_news)
-                news_cache[symbol] = {"cached_at": now_ts, "context": news_context}
+                news_cache[symbol] = {"cached_at": candidate_now_ts, "context": news_context}
             else:
                 news_context = news_entry.get("context") if isinstance(news_entry.get("context"), dict) else {}
 
             sec_entry = sec_cache.get(symbol) if isinstance(sec_cache.get(symbol), dict) else {}
             cached_sec_context = sec_entry.get("context") if isinstance(sec_entry.get("context"), dict) else {}
             sec_ttl = 6 * 3600 if str(cached_sec_context.get("status") or "").lower() == "ok" else 10 * 60
-            sec_cache_stale = now_ts - _alert_float(sec_entry.get("cached_at"), 0.0) > sec_ttl
+            sec_cache_stale = candidate_now_ts - _alert_float(sec_entry.get("cached_at"), 0.0) > sec_ttl
             if not sec_cache_stale:
                 sec_context = cached_sec_context
             else:
@@ -20754,9 +22245,9 @@ def _penny_stock_scanner_wrapper() -> None:
             }
 
             daily_entry = daily_cache.get(symbol) if isinstance(daily_cache.get(symbol), dict) else {}
-            if now_ts - _alert_float(daily_entry.get("cached_at"), 0.0) > 2 * 3600:
+            if candidate_now_ts - _alert_float(daily_entry.get("cached_at"), 0.0) > 2 * 3600:
                 daily_bars = _penny_fetch_daily_bars(symbol)
-                daily_cache[symbol] = {"cached_at": now_ts, "bars": daily_bars}
+                daily_cache[symbol] = {"cached_at": candidate_now_ts, "bars": daily_bars}
             else:
                 daily_bars = daily_entry.get("bars") if isinstance(daily_entry.get("bars"), list) else []
 
@@ -20773,7 +22264,7 @@ def _penny_stock_scanner_wrapper() -> None:
                 extra_resistances=profile_levels,
                 previous_active=bool(previous.get("active")),
                 previous_position=previous,
-                now_ts=now_ts,
+                now_ts=candidate_now_ts,
             )
             needs_sec_check = bool(
                 previous.get("active")
@@ -20785,7 +22276,7 @@ def _penny_stock_scanner_wrapper() -> None:
             )
             if sec_cache_stale and needs_sec_check:
                 sec_context = _penny_fetch_sec_filing_context(details.get("cik"))
-                sec_cache[symbol] = {"cached_at": now_ts, "context": sec_context}
+                sec_cache[symbol] = {"cached_at": candidate_now_ts, "context": sec_context}
                 details["sec_filing_context"] = sec_context
                 row = evaluate_penny_candidate(
                     snapshot,
@@ -20795,7 +22286,7 @@ def _penny_stock_scanner_wrapper() -> None:
                     extra_resistances=profile_levels,
                     previous_active=bool(previous.get("active")),
                     previous_position=previous,
-                    now_ts=now_ts,
+                    now_ts=candidate_now_ts,
                 )
             if (
                 not snapshot.get("spread_known")
@@ -20818,7 +22309,7 @@ def _penny_stock_scanner_wrapper() -> None:
                         extra_resistances=profile_levels,
                         previous_active=bool(previous.get("active")),
                         previous_position=previous,
-                        now_ts=now_ts,
+                        now_ts=candidate_now_ts,
                     )
             row["market_session"] = market_session
             if row.get("trade_action") == "JETZT_KAUFEN" and not market_session.get("allowed"):
@@ -20844,7 +22335,7 @@ def _penny_stock_scanner_wrapper() -> None:
             trigger_id = str(row.get("trigger_timestamp") or "unknown")
             state_update = {
                 **previous,
-                "last_seen": now_ts,
+                "last_seen": candidate_now_ts,
                 "last_action": row.get("trade_action"),
                 "last_trigger": trigger_id,
                 "pump_potential_score": row.get("pump_potential_score"),
@@ -20859,34 +22350,27 @@ def _penny_stock_scanner_wrapper() -> None:
                 },
             }
             if row.get("trade_action") == "JETZT_KAUFEN":
-                # This is a scanner-model position, never a broker fill. Its
-                # lifecycle must not depend on whether SMTP happens to work.
+                # A full-universe scan can take several minutes. Do not open
+                # the scanner-model position until the quote and the latest
+                # completed 5m trigger have been revalidated after the loop.
                 setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
                 state_update.update({
-                    "active": True,
-                    "position_state_source": "scanner_model_not_broker",
-                    "buy_entry": row.get("entry"),
-                    "buy_at": now_ts,
-                    "stop_loss": setup.get("stop_loss"),
-                    "tp1": setup.get("tp1"),
-                    "tp2": setup.get("tp2"),
-                    "trade_setup": setup,
-                    "signal_trigger": trigger_id,
-                    "buy_email_sent": False,
+                    "pending_revalidation": True,
+                    "active": bool(previous.get("active")),
                 })
                 dedupe_key = f"penny_buy:{symbol}:{trigger_id}"
-                if previous.get("last_buy_trigger") != trigger_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=now_ts):
+                if previous.get("last_buy_trigger") != trigger_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=candidate_now_ts):
                     row["_dedupe_key"] = dedupe_key
                     buy_candidates.append(row)
             elif row.get("trade_action") == "JETZT_VERKAUFEN" and previous.get("active"):
                 state_update.update({
                     "active": False,
-                    "exit_at": now_ts,
+                    "exit_at": candidate_now_ts,
                     "exit_trigger": trigger_id,
                     "exit_email_sent": False,
                 })
                 dedupe_key = f"penny_exit:{symbol}:{trigger_id}"
-                if previous.get("last_exit_trigger") != trigger_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=now_ts):
+                if previous.get("last_exit_trigger") != trigger_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=candidate_now_ts):
                     row["_dedupe_key"] = dedupe_key
                     exit_candidates.append(row)
 
@@ -20903,6 +22387,67 @@ def _penny_stock_scanner_wrapper() -> None:
                     "hits": len(rows),
                     "detail": f"{symbol}: 5m/1D/VRVP",
                 }
+
+        # Revalidate every potential buy at the end of the scan. This is the
+        # authoritative execution gate; stale rows are downgraded in-place so
+        # cache, state and email can never disagree about tradeability.
+        revalidated_buy_candidates: List[Dict[str, Any]] = []
+        revalidation_blocked: Dict[str, int] = {}
+        for candidate in buy_candidates:
+            validated, reason = _penny_revalidate_buy_candidate(candidate, now_ts=time.time())
+            symbol = str(candidate.get("ticker") or "").upper()
+            state = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
+            state.pop("pending_revalidation", None)
+            if validated is None:
+                revalidation_blocked[reason] = revalidation_blocked.get(reason, 0) + 1
+                blockers = list(dict.fromkeys([*(candidate.get("hard_blockers") or []), reason]))
+                candidate.update({
+                    "trade_action": "TRIGGER_WARTEN",
+                    "trade_signal": "TRIGGER_WARTEN",
+                    "signal_label": "Live-Revalidierung fehlgeschlagen - neuen 5m Trigger abwarten",
+                    "execution_trigger_ok": False,
+                    "hard_blockers": blockers,
+                })
+                if isinstance(candidate.get("trade_setup"), dict):
+                    candidate["trade_setup"].update({
+                        "trade_action": "TRIGGER_WARTEN",
+                        "action_label": "Live-Revalidierung fehlgeschlagen",
+                    })
+                state.update({"active": False, "last_action": "TRIGGER_WARTEN"})
+                ticker_state[symbol] = state
+                continue
+
+            candidate.clear()
+            candidate.update(validated)
+            trigger_id = str(candidate.get("trigger_timestamp") or "unknown")
+            dedupe_key = f"penny_buy:{symbol}:{trigger_id}"
+            if state.get("last_buy_trigger") == trigger_id or _email_dedupe_active(dedupe_key, 6 * 3600, now=time.time()):
+                state.update({"active": False, "last_action": "TRIGGER_WARTEN"})
+                ticker_state[symbol] = state
+                continue
+            setup = candidate.get("trade_setup") if isinstance(candidate.get("trade_setup"), dict) else {}
+            state.update({
+                "active": True,
+                "position_state_source": "scanner_model_not_broker",
+                "buy_entry": candidate.get("entry"),
+                "buy_at": time.time(),
+                "stop_loss": setup.get("stop_loss"),
+                "tp1": setup.get("tp1"),
+                "tp2": setup.get("tp2"),
+                "trade_setup": setup,
+                "signal_trigger": trigger_id,
+                "last_trigger": trigger_id,
+                "last_action": "JETZT_KAUFEN",
+                "last_seen": time.time(),
+                "buy_email_sent": False,
+            })
+            candidate["_dedupe_key"] = dedupe_key
+            ticker_state[symbol] = state
+            revalidated_buy_candidates.append(candidate)
+        buy_candidates = revalidated_buy_candidates
+        diagnostics["buy_revalidation_blocked"] = revalidation_blocked
+        diagnostics["buy_revalidated"] = len(buy_candidates)
+        now_ts = time.time()
 
         action_rank = {
             "JETZT_VERKAUFEN": 0,
@@ -20922,23 +22467,6 @@ def _penny_stock_scanner_wrapper() -> None:
             -_alert_float(row.get("entry_quality_score"), 0.0),
         ))
         exit_candidates.sort(key=lambda row: -_alert_float(row.get("dump_risk_score"), 0.0))
-        if buy_candidates:
-            _safe_record_alert_signals("penny_stocks", buy_candidates[:5])
-        if _penny_buy_email(buy_candidates):
-            for row in buy_candidates[:5]:
-                symbol = row["ticker"]
-                trigger_id = str(row.get("trigger_timestamp") or "unknown")
-                ticker_state[symbol]["last_buy_trigger"] = trigger_id
-                ticker_state[symbol]["buy_email_sent"] = True
-                _email_dedupe_mark(str(row.get("_dedupe_key")), now=now_ts)
-
-        if _penny_exit_email(exit_candidates):
-            for row in exit_candidates[:5]:
-                symbol = row["ticker"]
-                trigger_id = str(row.get("trigger_timestamp") or "unknown")
-                ticker_state[symbol]["last_exit_trigger"] = trigger_id
-                ticker_state[symbol]["exit_email_sent"] = True
-                _email_dedupe_mark(str(row.get("_dedupe_key")), now=now_ts)
 
         # Keep state bounded while preserving active positions.
         ticker_state = {
@@ -20983,6 +22511,63 @@ def _penny_stock_scanner_wrapper() -> None:
         _penny_save_dict(PENNY_STOCKS_DAILY_CACHE, daily_cache)
         _penny_save_dict(PENNY_STOCKS_NEWS_CACHE, news_cache)
         _penny_save_dict(PENNY_STOCKS_SEC_CACHE, sec_cache)
+
+        # External side effects only happen after every operational source of
+        # truth has been published successfully.
+        state_changed_after_mail = False
+        side_effect_now = time.time()
+        claimed_buy_candidates = [
+            row for row in buy_candidates[:5]
+            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
+        ]
+        try:
+            buy_mail_sent = _penny_buy_email(claimed_buy_candidates)
+        except Exception:
+            for row in claimed_buy_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+            raise
+        if buy_mail_sent:
+            _safe_record_alert_signals("penny_stocks", claimed_buy_candidates)
+            for row in claimed_buy_candidates:
+                symbol = row["ticker"]
+                trigger_id = str(row.get("trigger_timestamp") or "unknown")
+                ticker_state[symbol]["last_buy_trigger"] = trigger_id
+                ticker_state[symbol]["buy_email_sent"] = True
+                _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_buy_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+
+        side_effect_now = time.time()
+        claimed_exit_candidates = [
+            row for row in exit_candidates[:5]
+            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
+        ]
+        try:
+            exit_mail_sent = _penny_exit_email(claimed_exit_candidates)
+        except Exception:
+            for row in claimed_exit_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+            raise
+        if exit_mail_sent:
+            for row in claimed_exit_candidates:
+                symbol = row["ticker"]
+                trigger_id = str(row.get("trigger_timestamp") or "unknown")
+                ticker_state[symbol]["last_exit_trigger"] = trigger_id
+                ticker_state[symbol]["exit_email_sent"] = True
+                _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_exit_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+
+        if state_changed_after_mail:
+            _penny_save_dict(PENNY_STOCKS_STATE, {
+                "updated_at": now_ts,
+                "rotation_cursor": next_rotation_cursor,
+                "tickers": ticker_state,
+            })
         with _scan_lock:
             _scan_status.get("penny_stocks", {}).pop("last_error", None)
         print(
@@ -21243,6 +22828,8 @@ def _volume_spikes_wrapper() -> None:
         save_cache_file(VOLUME_SPIKES_CACHE, spikes[:50])  # Keep top 50
     except Exception as e:
         print(f"Volume spikes error: {e}")
+        traceback.print_exc()
+        raise
 
 
 @app.post("/api/volume-spikes-scan")
@@ -21491,7 +23078,12 @@ def _orb_scanner_wrapper() -> None:
                 if not bars or len(bars) < 2:
                     _dbg["no_bars"] += 1
                     continue
-                bars = [b for b in bars if b.get("t", 0) >= market_open_ms]
+                now_ms = int(now_et.timestamp() * 1000)
+                bars = [
+                    b for b in bars
+                    if b.get("t", 0) >= market_open_ms
+                    and b.get("t", 0) + 5 * 60 * 1000 <= now_ms
+                ]
                 if len(bars) < 2:
                     _dbg["no_rth"] += 1
                     continue
@@ -21527,13 +23119,14 @@ def _orb_scanner_wrapper() -> None:
                 # ── OR Volume (für Volume-Confirmation) ──
                 or_avg_vol = sum(b.get("v", 0) for b in or_bars) / len(or_bars) if or_bars else 0
 
-                current_price = bars[-1].get("c", 0)
+                signal_price = float(bars[-1].get("c", 0) or 0)
+                current_price = float(cand.get("current", 0) or signal_price)
                 post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
                 latest_bar = bars[-1] if bars else {}
-                latest_open = float(latest_bar.get("o", current_price) or current_price or 0)
-                latest_high = float(latest_bar.get("h", current_price) or current_price or 0)
-                latest_low = float(latest_bar.get("l", current_price) or current_price or 0)
-                latest_close = float(latest_bar.get("c", current_price) or current_price or 0)
+                latest_open = float(latest_bar.get("o", signal_price) or signal_price or 0)
+                latest_high = float(latest_bar.get("h", signal_price) or signal_price or 0)
+                latest_low = float(latest_bar.get("l", signal_price) or signal_price or 0)
+                latest_close = float(latest_bar.get("c", signal_price) or signal_price or 0)
                 latest_range = max(latest_high - latest_low, 1e-9)
                 latest_close_pos = max(0.0, min(1.0, (latest_close - latest_low) / latest_range))
                 latest_body_top = max(latest_open, latest_close)
@@ -21562,10 +23155,10 @@ def _orb_scanner_wrapper() -> None:
                 recent_below = sum(1 for b in recent_post_or if b.get("c", 0) < or_low)
 
                 # ── Schritt 1: Aktueller Preis bestimmt Richtung ──
-                if current_price > or_high:
+                if signal_price > or_high:
                     breakout_dir = "LONG"
                     breakout_state = "active_breakout"
-                elif current_price < or_low:
+                elif signal_price < or_low:
                     breakout_dir = "SHORT"
                     breakout_state = "active_breakout"
 
@@ -21584,31 +23177,54 @@ def _orb_scanner_wrapper() -> None:
                     if or_avg_vol > 0 and breakout_bar_vol >= or_avg_vol * 0.8:
                         breakout_confirmed = True
 
-                # ── Schritt 3: Failed Breakout — Preis DEUTLICH zurück in OR ──
+                # Failed breakouts are reversal setups only after a completed
+                # candle is back through the OR midpoint. Their stop is behind
+                # the failed excursion, not the opposite side of an arbitrary R.
                 if not breakout_dir and (bars_above >= 1 or bars_below >= 1):
-                    # Es GAB einen Ausbruch, aber Preis ist zurück in OR
-                    if bars_above >= 1 and current_price < or_mid:
-                        failed_breakouts.append({
-                            **cand,
-                            "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                            "or_size_pct": round(or_size_pct, 2),
-                            "vwap": round(vwap, 2), "direction": "FAILED_LONG→SHORT",
-                            "current_price": round(current_price, 2),
-                            "entry": round(or_low - or_size * 0.05, 2),
-                            "stop": round(or_high + or_size * 0.15, 2),
-                            "target": round(or_low - or_size * 0.8, 2),
-                        })
-                    elif bars_below >= 1 and current_price > or_mid:
-                        failed_breakouts.append({
-                            **cand,
-                            "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                            "or_size_pct": round(or_size_pct, 2),
-                            "vwap": round(vwap, 2), "direction": "FAILED_SHORT→LONG",
-                            "current_price": round(current_price, 2),
-                            "entry": round(or_high + or_size * 0.05, 2),
-                            "stop": round(or_low - or_size * 0.15, 2),
-                            "target": round(or_high + or_size * 0.8, 2),
-                        })
+                    failed_direction = None
+                    failed_entry = signal_price
+                    failed_stop = failed_tp1 = failed_tp2 = None
+                    if bars_above >= 1 and signal_price < or_mid:
+                        failed_direction = "SHORT"
+                        excursion_high = max(
+                            (float(b.get("h", or_high) or or_high) for b in post_or if b.get("c", 0) > or_high),
+                            default=or_high,
+                        )
+                        failed_stop = max(or_high + or_size * 0.05, excursion_high + or_size * 0.02)
+                        failed_tp1 = or_low
+                        failed_tp2 = max(0.01, or_low - or_size * 0.75)
+                    elif bars_below >= 1 and signal_price > or_mid:
+                        failed_direction = "LONG"
+                        excursion_low = min(
+                            (float(b.get("l", or_low) or or_low) for b in post_or if b.get("c", 0) < or_low),
+                            default=or_low,
+                        )
+                        failed_stop = min(or_low - or_size * 0.05, excursion_low - or_size * 0.02)
+                        failed_tp1 = or_high
+                        failed_tp2 = or_high + or_size * 0.75
+
+                    if failed_direction and failed_stop is not None:
+                        failed_geometry = trade_geometry(
+                            failed_entry, failed_stop, failed_tp1, failed_tp2, failed_direction
+                        )
+                        if failed_geometry.get("valid") and float(failed_geometry.get("rr", 0)) >= 1.25:
+                            failed_breakouts.append({
+                                **cand,
+                                "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                                "or_size_pct": round(or_size_pct, 2),
+                                "vwap": round(vwap, 2),
+                                "direction": f"FAILED_{'LONG→SHORT' if failed_direction == 'SHORT' else 'SHORT→LONG'}",
+                                "current_price": round(current_price, 2),
+                                "signal_price": round(signal_price, 2),
+                                "entry": round(failed_entry, 2),
+                                "stop": round(failed_stop, 2),
+                                "target": round(failed_tp1, 2),
+                                "target1": round(failed_tp1, 2),
+                                "target2": round(failed_tp2, 2),
+                                "rr_ratio": round(float(failed_geometry["rr"]), 2),
+                                "rr_model": "50/50 TP1/TP2",
+                                "bar_state": "completed_5m_reversal",
+                            })
 
                 if not breakout_dir:
                     if bars_above >= 1 or bars_below >= 1:
@@ -21653,9 +23269,10 @@ def _orb_scanner_wrapper() -> None:
                     breakout_dir,
                     timeframe="5m",
                     num_bins=18,
-                    min_bars=12,
+                    min_bars=20,
                     lookback=78,
                 )
+                orb_atr = calculate_wilder_atr(bars, period=14, lookback=78) or or_size
                 _orb_setup = apply_vrvp_to_trade_setup(
                     {
                         "entry": entry,
@@ -21671,32 +23288,27 @@ def _orb_scanner_wrapper() -> None:
                     _orb_vrvp,
                     direction=breakout_dir,
                     asset_type="stock_intraday_orb",
-                    atr=or_size,
+                    atr=orb_atr,
                 )
                 entry = _orb_setup.get("entry", entry)
                 stop = _orb_setup.get("stop", stop)
                 target1 = _orb_setup.get("target1", _orb_setup.get("tp1", target1))
                 target2 = _orb_setup.get("target2", _orb_setup.get("tp2", target2))
+                geometry = trade_geometry(entry, stop, target1, target2, breakout_dir)
+                if not geometry.get("valid"):
+                    continue
+                risk = float(geometry["risk"])
+                rr_ratio = round(float(geometry["rr"]), 2)
                 if breakout_dir == "LONG":
-                    risk = entry - stop
-                    reward_blended = 0.5 * (target1 - entry) + 0.5 * (target2 - entry)
-                    distance_to_entry_r = (current_price - entry) / risk if risk > 0 else 0
+                    distance_to_entry_r = (current_price - entry) / risk
                     late_to_tp1 = current_price >= target1
-                else:
-                    risk = stop - entry
-                    reward_blended = 0.5 * (entry - target1) + 0.5 * (entry - target2)
-                    distance_to_entry_r = (entry - current_price) / risk if risk > 0 else 0
-                    late_to_tp1 = current_price <= target1
-                rr_ratio = round(reward_blended / risk, 2) if risk > 0 else 0
-                if breakout_dir == "LONG":
                     live_entry = max(float(current_price), float(entry))
-                    live_risk = live_entry - stop
-                    live_reward_blended = 0.5 * (target1 - live_entry) + 0.5 * (target2 - live_entry)
                 else:
+                    distance_to_entry_r = (entry - current_price) / risk
+                    late_to_tp1 = current_price <= target1
                     live_entry = min(float(current_price), float(entry))
-                    live_risk = stop - live_entry
-                    live_reward_blended = 0.5 * (live_entry - target1) + 0.5 * (live_entry - target2)
-                live_rr_ratio = round(max(0, live_reward_blended) / live_risk, 2) if live_risk > 0 else 0
+                live_geometry = trade_geometry(live_entry, stop, target1, target2, breakout_dir)
+                live_rr_ratio = round(float(live_geometry["rr"]), 2) if live_geometry.get("valid") else 0
                 rr_for_score = min(rr_ratio, live_rr_ratio) if live_rr_ratio > 0 else 0
 
                 if late_to_tp1 or distance_to_entry_r >= 1.0 or live_rr_ratio < 1.0:
@@ -21863,6 +23475,9 @@ def _orb_scanner_wrapper() -> None:
                     "late_session": is_late_orb_session,
                     "session_quality": session_quality,
                     "current_price": round(current_price, 2),
+                    "signal_price": round(signal_price, 2),
+                    "signal_bar_timestamp": latest_bar.get("t"),
+                    "bar_state": "completed_5m",
                     "close_pos": round(latest_close_pos, 3),
                     "upper_wick_pct": round(latest_upper_wick_pct, 1),
                     "lower_wick_pct": round(latest_lower_wick_pct, 1),
@@ -21924,13 +23539,18 @@ def _orb_scanner_wrapper() -> None:
         _orb_alert_cooldown_keys: List[str] = []
         for _b in alert_breakouts:
             _state = _classify_alert_candidate("orb", _b, _alert_now)
-            if _state["alertable_now"]:
-                # AUDIT H-2 (2026-06-10): Cooldown NICHT mehr vor dem Versand
-                # setzen — sonst unterdrueckt ein fehlgeschlagener Versand den
-                # Re-Alert fuer die volle TTL. Keys merken, nach Erfolg markieren.
+            _cooldown_key = str(_state.get("cooldown_key") or "")
+            if (
+                _state["alertable_now"]
+                and _cooldown_key
+                and _email_dedupe_claim(
+                    _cooldown_key,
+                    _alert_dedupe_ttl_seconds("orb"),
+                    now=_alert_now,
+                )
+            ):
                 _fresh_alert_breakouts.append(_b)
-                if _state.get("cooldown_key"):
-                    _orb_alert_cooldown_keys.append(_state["cooldown_key"])
+                _orb_alert_cooldown_keys.append(_cooldown_key)
         alert_breakouts = _fresh_alert_breakouts
         if alert_breakouts:
             rows = ""
@@ -21961,13 +23581,18 @@ def _orb_scanner_wrapper() -> None:
             <p style="color:#999;font-size:11px;margin-top:15px">ORB V2 — Volume Confirmed | VWAP Aligned | R:R optimiert</p>
             </body></html>'''
             # AUDIT H-3: ORB ist intraday-only — Empfaenger-Routing "intraday".
-            _orb_sent = _send_email_alert(
-                f"{len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)",
-                body,
-                trade_horizon="intraday",
-                mail_class="trade",  # AUDIT H-2
-                telegram_text=_safe_format_telegram_rows(alert_breakouts),
-            )
+            try:
+                _orb_sent = _send_email_alert(
+                    f"{len(alert_breakouts)} ORB Breakouts (Grade {alert_breakouts[0]['grade']}+)",
+                    body,
+                    trade_horizon="intraday",
+                    mail_class="trade",  # AUDIT H-2
+                    telegram_text=_safe_format_telegram_rows(alert_breakouts),
+                )
+            except Exception:
+                for _ck in _orb_alert_cooldown_keys:
+                    _email_dedupe_release(_ck, claimed_at=_alert_now)
+                raise
             # AUDIT H-2: Cooldown + persistentes Dedupe erst NACH erfolgreichem
             # Versand setzen (Muster wie _check_and_alert); persistenter Dedupe
             # verhindert Doppel-Mails nach Prozess-Restart.
@@ -21978,11 +23603,15 @@ def _orb_scanner_wrapper() -> None:
                 for _ck in _orb_alert_cooldown_keys:
                     _email_dedupe_mark(_ck, now=_alert_now)
                 _safe_record_alert_signals("orb", alert_breakouts)
+            else:
+                for _ck in _orb_alert_cooldown_keys:
+                    _email_dedupe_release(_ck, claimed_at=_alert_now)
 
     except Exception as e:
         print(f"[ORB] Fehler: {e}")
         import traceback
         traceback.print_exc()
+        raise
 
 
 @app.post("/api/orb-scan")
@@ -22093,7 +23722,7 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
         if avg_5d >= 3:
             factors["5D Strength"] = 100
         elif avg_5d >= 1:
-            factors["5D Strength"] = 70 + avg_5d / 3 * 30
+            factors["5D Strength"] = 70 + (avg_5d - 1) / 2 * 30
         elif avg_5d >= 0:
             factors["5D Strength"] = 50 + avg_5d * 20
         elif avg_5d >= -2:
@@ -22416,6 +24045,7 @@ def _crash_monitor_wrapper() -> None:
             "fear_score": 0,
             "fear_level": "ERROR",
         }])
+        raise
 
 
 # ── Kalender (Economic Calendar) ──
@@ -22536,10 +24166,20 @@ EXCHANGE_CALENDARS_2026 = [
             "2026-08-31": "Summer Bank Holiday",
             "2026-12-25": "Christmas Day",
             "2026-12-28": "Boxing Day substitute",
+            "2027-01-01": "New Year's Day",
+            "2027-03-26": "Good Friday",
+            "2027-03-29": "Easter Monday",
+            "2027-05-03": "Early May Bank Holiday",
+            "2027-05-31": "Spring Bank Holiday",
+            "2027-08-30": "Summer Bank Holiday",
+            "2027-12-27": "Christmas Day substitute",
+            "2027-12-28": "Boxing Day substitute",
         },
         "early_closes": {
             "2026-12-24": {"name": "Christmas Eve early close", "close": "12:30"},
             "2026-12-31": {"name": "New Year's Eve early close", "close": "12:30"},
+            "2027-12-24": {"name": "Christmas Eve early close", "close": "12:30"},
+            "2027-12-31": {"name": "New Year's Eve early close", "close": "12:30"},
         },
     },
     {
@@ -22561,6 +24201,14 @@ EXCHANGE_CALENDARS_2026 = [
             "2026-12-24": "Heiligabend",
             "2026-12-25": "1. Weihnachtstag",
             "2026-12-31": "Silvester",
+            "2027-01-01": "Neujahr",
+            "2027-03-26": "Karfreitag",
+            "2027-03-29": "Ostermontag",
+            "2027-05-01": "Tag der Arbeit",
+            "2027-12-24": "Heiligabend",
+            "2027-12-25": "1. Weihnachtstag",
+            "2027-12-26": "2. Weihnachtstag",
+            "2027-12-31": "Silvester",
         },
         "early_closes": {},
     },
@@ -22597,6 +24245,26 @@ EXCHANGE_CALENDARS_2026 = [
             "2026-11-03": "Culture Day",
             "2026-11-23": "Labor Thanksgiving Day",
             "2026-12-31": "Market Holiday",
+            "2027-01-01": "New Year's Day",
+            "2027-01-02": "Market Holiday",
+            "2027-01-03": "Market Holiday",
+            "2027-01-11": "Coming of Age Day",
+            "2027-02-11": "National Foundation Day",
+            "2027-02-23": "Emperor's Birthday",
+            "2027-03-21": "Vernal Equinox",
+            "2027-03-22": "Vernal Equinox observed",
+            "2027-04-29": "Showa Day",
+            "2027-05-03": "Constitution Memorial Day",
+            "2027-05-04": "Greenery Day",
+            "2027-05-05": "Children's Day",
+            "2027-07-19": "Marine Day",
+            "2027-08-11": "Mountain Day",
+            "2027-09-20": "Respect for the Aged Day",
+            "2027-09-23": "Autumnal Equinox",
+            "2027-10-11": "Sports Day",
+            "2027-11-03": "Culture Day",
+            "2027-11-23": "Labor Thanksgiving Day",
+            "2027-12-31": "Market Holiday",
         },
         "early_closes": {},
     },
@@ -22626,8 +24294,25 @@ EXCHANGE_CALENDARS_2026 = [
             "2026-10-01": "National Day",
             "2026-10-19": "The day following Chung Yeung Festival",
             "2026-12-25": "Christmas Day",
+            "2027-01-01": "The first day of January",
+            "2027-02-08": "The third day of Lunar New Year",
+            "2027-02-09": "The fourth day of Lunar New Year",
+            "2027-03-26": "Good Friday",
+            "2027-03-29": "Easter Monday",
+            "2027-04-05": "Ching Ming Festival",
+            "2027-05-13": "The Birthday of the Buddha",
+            "2027-06-09": "Tuen Ng Festival",
+            "2027-07-01": "HKSAR Establishment Day",
+            "2027-09-16": "The day following the Chinese Mid-Autumn Festival",
+            "2027-10-01": "National Day",
+            "2027-10-08": "Chung Yeung Festival",
+            "2027-12-27": "The first weekday after Christmas Day",
         },
-        "early_closes": {},
+        "early_closes": {
+            "2027-02-05": {"name": "Lunar New Year's Eve half day", "close": "12:00"},
+            "2027-12-24": {"name": "Christmas Eve half day", "close": "12:00"},
+            "2027-12-31": {"name": "New Year's Eve half day", "close": "12:00"},
+        },
     },
 ]
 
@@ -22692,7 +24377,7 @@ def _warn_unknown_calendar_year(exchange: Dict[str, Any], year: int) -> None:
     print(
         f"[Kalender] WARNUNG: Keine Feiertagsdaten fuer {code} {year} — "
         "Fallback auf reine Wochenend-Logik (Feiertage/Half-Days unbekannt). "
-        "Kalender in EXCHANGE_CALENDARS_2026 nachpflegen!"
+        "Kalenderdaten in EXCHANGE_CALENDARS_2026 nachpflegen!"
     )
 
 
@@ -23114,9 +24799,10 @@ def _calendar_event_risk_snapshot() -> Dict[str, Any]:
         calendar = get_economic_calendar()
         if isinstance(calendar, dict) and calendar.get("status") == "success":
             return build_event_risk(calendar.get("events", []))
+        status = calendar.get("status") if isinstance(calendar, dict) else type(calendar).__name__
+        return missing_event_risk(f"Economic calendar returned invalid status: {status}")
     except Exception as exc:
-        return {"score": 0, "level": "LOW", "upcoming_events": [], "error": str(exc)}
-    return {"score": 0, "level": "LOW", "upcoming_events": []}
+        return missing_event_risk(str(exc))
 
 
 def _load_crash_context_snapshot() -> Dict[str, Any]:
@@ -23672,23 +25358,91 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
 
 
 def _normalize_crypto_bars(raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    bars = []
+    by_date: Dict[str, Dict[str, Any]] = {}
     for bar in raw_bars or []:
-        o = _bt_float(bar.get("o"))
-        h = _bt_float(bar.get("h"))
-        l = _bt_float(bar.get("l"))
-        c = _bt_float(bar.get("c"))
+        o = _bt_float(bar.get("open", bar.get("o")))
+        h = _bt_float(bar.get("high", bar.get("h")))
+        l = _bt_float(bar.get("low", bar.get("l")))
+        c = _bt_float(bar.get("close", bar.get("c")))
         if min(o, h, l, c) <= 0:
             continue
-        bars.append({
-            "date": _bt_bar_date(bar),
+        raw_date = bar.get("date") or bar.get("time")
+        date_key = str(raw_date)[:10] if raw_date else ""
+        if not date_key:
+            raw_ts = bar.get("timestamp", bar.get("t"))
+            try:
+                timestamp = float(raw_ts)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000.0
+                date_key = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OSError, OverflowError):
+                date_key = ""
+        try:
+            datetime.strptime(date_key, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            continue
+        if h < max(o, c) or l > min(o, c) or h < l:
+            continue
+        normalized = {
+            "date": date_key,
             "open": o,
             "high": h,
             "low": l,
             "close": c,
-            "volume": _bt_float(bar.get("v")),
-        })
-    return bars
+            "volume": _bt_float(bar.get("volume", bar.get("v"))),
+        }
+        # A duplicate UTC date is not a valid daily series. Keeping the last
+        # exchange row is deterministic and the cadence validator below will
+        # still reject mixed intraday data.
+        by_date[date_key] = normalized
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def _validated_exchange_daily_crypto_bars(
+    coin: Dict[str, Any],
+    days: int,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Load real exchange 1D candles and reject symbol/cadence mismatches."""
+    if not HAS_NEW_LISTING_SCANNER:
+        return [], None
+    symbol = re.sub(r"[^A-Z0-9]", "", str(coin.get("symbol") or "").upper())
+    if not symbol:
+        return [], None
+    contract = symbol if symbol.endswith("USDT") else f"{symbol}USDT"
+    count = min(500, max(60, int(days or 90) + 5))
+    reference_price = _bt_float(coin.get("current_price"), 0.0)
+
+    for exchange in ("binance", "bybit", "bitget", "mexc"):
+        try:
+            raw_bars = _fetch_exchange_candles_any(
+                contract,
+                exchange,
+                timeframe="1d",
+                count=count,
+            )
+        except Exception:
+            raw_bars = []
+        bars = _normalize_crypto_bars(raw_bars)
+        if bars and bars[-1]["date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+            bars = bars[:-1]
+        if len(bars) < 45:
+            continue
+
+        ordinals = [datetime.strptime(bar["date"], "%Y-%m-%d").date().toordinal() for bar in bars]
+        gaps = [right - left for left, right in zip(ordinals, ordinals[1:])]
+        median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 999
+        if median_gap != 1 or any(gap <= 0 for gap in gaps):
+            continue
+
+        latest_close = _bt_float(bars[-1].get("close"), 0.0)
+        if reference_price > 0 and latest_close > 0:
+            price_gap = abs(latest_close - reference_price) / reference_price
+            if price_gap > 0.35:
+                continue
+        for bar in bars:
+            bar["bar_source"] = f"{exchange}_perpetual_1d"
+        return bars[-min(len(bars), int(days or len(bars))):], exchange
+    return [], None
 
 
 def _bt_atr(bars: List[Dict[str, Any]], idx: int, period: int = 14) -> float:
@@ -23720,15 +25474,10 @@ def _simulate_crypto_trade(
     side = direction.lower()
     if side not in ("long", "short"):
         return None
-    risk = abs(entry - stop)
-    if risk <= 0:
+    geometry = trade_geometry(entry, stop, tp1, tp2, side.upper())
+    if not geometry["valid"]:
         return None
-    if side == "long" and not (stop < entry < tp1 < tp2):
-        return None
-    if side == "short" and (tp1 <= 0 or tp2 <= 0):
-        return None
-    if side == "short" and not (tp2 < tp1 < entry < stop):
-        return None
+    risk = float(geometry["risk"])
 
     current_stop = stop
     tp1_hit = False
@@ -23741,7 +25490,8 @@ def _simulate_crypto_trade(
         bar = bars[idx]
         if side == "long":
             if bar["low"] <= current_stop:
-                exit_price = current_stop
+                runner_exit = bar["open"] if bar["open"] < current_stop else current_stop
+                exit_price = (tp1 + runner_exit) / 2.0 if tp1_hit else runner_exit
                 exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
                 exit_date = bar["date"]
                 break
@@ -23756,7 +25506,8 @@ def _simulate_crypto_trade(
                 current_stop = max(current_stop, entry + risk * 0.25)
         else:
             if bar["high"] >= current_stop:
-                exit_price = current_stop
+                runner_exit = bar["open"] if bar["open"] > current_stop else current_stop
+                exit_price = (tp1 + runner_exit) / 2.0 if tp1_hit else runner_exit
                 exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
                 exit_date = bar["date"]
                 break
@@ -23794,6 +25545,7 @@ def _simulate_crypto_trade(
         "exit_price": exit_price,
         "outcome": exit_reason,
         "tp1_hit": tp1_hit,
+        "target_model": "50_50_tp1_tp2",
         "pnl_pct": round(pnl_pct, 2),
         "r_multiple": round(pnl_pct / (risk / entry * 100), 2) if risk > 0 else 0,
         "is_winner": pnl_pct > 0,
@@ -23866,12 +25618,15 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
             done_items=coin_idx - 1,
             current_item=symbol or coin_id,
         )
-        bars = _normalize_crypto_bars(fetch_daily_candles_crypto(coin_id, days=days))
+        bars, bar_exchange = _validated_exchange_daily_crypto_bars(coin, days=days)
         if len(bars) < 45:
             continue
         cooldown_until = -999
 
-        for idx in range(30, len(bars) - 1):
+        # A confirmation close may only be traded at the following open. Two
+        # future bars are therefore required; using confirmation-bar data for
+        # an entry at that same bar's open would be look-ahead bias.
+        for idx in range(30, len(bars) - 2):
             if idx <= cooldown_until:
                 continue
             close = bars[idx]["close"]
@@ -23897,9 +25652,10 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                     continue
                 if change_3d > 28 or change_7d > 75:
                     continue
-                entry_idx = idx + 1
                 signal_bar = bars[idx]
-                next_bar = bars[entry_idx]
+                confirmation_bar = bars[idx + 1]
+                entry_idx = idx + 2
+                entry_bar = bars[entry_idx]
                 range20_high = max(b["high"] for b in bars[idx - 20:idx + 1])
                 range20_low = min(b["low"] for b in bars[idx - 20:idx + 1])
                 range20 = max(range20_high - range20_low, close * 0.02)
@@ -23910,11 +25666,12 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                     continue
                 if close_pos20 > 0.92 and change_3d > 18:
                     continue
-                entry = next_bar["open"]
+                confirmation_close = confirmation_bar["close"]
                 pre_risk = max(atr * 1.45, close * 0.05)
-                if entry > close + pre_risk * 0.65 or entry < close - pre_risk * 0.75:
+                if confirmation_bar["close"] < confirmation_bar["open"] and confirmation_close < close:
                     continue
-                if next_bar["close"] < next_bar["open"] and next_bar["close"] < close:
+                entry = entry_bar["open"]
+                if entry > confirmation_close + pre_risk * 0.65 or entry < confirmation_close - pre_risk * 0.75:
                     continue
                 stop_distance = max(atr * 1.45, entry * 0.055)
                 stop = entry - stop_distance
@@ -23923,7 +25680,7 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 score = 50 + min(16, change_7d / 3) + min(14, volume_ratio * 4) + min(10, signal_close_pos * 10)
                 direction = "LONG"
                 max_hold = 8
-                decision_reason = "daily_proxy_trade_now: next_day_confirmation"
+                decision_reason = "daily_proxy_trade_now: confirmation_close_then_next_open"
             else:
                 recent_high = max(b["high"] for b in bars[max(0, idx - 7):idx + 1])
                 pullback_from_high = ((close - recent_high) / recent_high) * 100 if recent_high > 0 else 0
@@ -23940,13 +25697,14 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                     continue
                 if volume_ratio < 1.3:
                     continue
-                entry_idx = idx + 1
-                next_bar = bars[entry_idx]
-                entry = next_bar["open"]
+                confirmation_bar = bars[idx + 1]
+                confirmation_close = confirmation_bar["close"]
                 pre_risk = max(atr * 1.6, close * 0.07)
-                if entry < close - pre_risk * 0.65 or entry > recent_high:
+                if confirmation_bar["close"] > confirmation_bar["open"] and confirmation_close > close:
                     continue
-                if next_bar["close"] > next_bar["open"] and next_bar["close"] > close:
+                entry_idx = idx + 2
+                entry = bars[entry_idx]["open"]
+                if entry < confirmation_close - pre_risk * 0.65 or entry > recent_high:
                     continue
                 stop_distance = max(atr * 1.6, entry * 0.07)
                 stop = max(recent_high * 1.02, entry + stop_distance)
@@ -23958,7 +25716,7 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 score = 52 + min(18, change_7d / 4) + min(14, abs(pullback_from_high)) + min(12, volume_ratio * 3)
                 direction = "SHORT"
                 max_hold = 6
-                decision_reason = "daily_proxy_trade_now: crack_confirmed"
+                decision_reason = "daily_proxy_trade_now: crack_close_then_next_open"
 
             sim = _simulate_crypto_trade(bars, entry_idx, direction.lower(), entry, stop, tp1, tp2, max_hold)
             if not sim:
@@ -23970,6 +25728,7 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 "symbol": symbol,
                 "coin_id": coin_id,
                 "signal_date": bars[idx]["date"],
+                "confirmation_date": bars[idx + 1]["date"],
                 "direction": direction,
                 "grade": _crypto_signal_grade(score),
                 "score": round(score, 1),
@@ -23982,6 +25741,7 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
                 "tp2_target": tp2,
                 "decision": "TRADE_NOW",
                 "decision_reason": decision_reason,
+                "bar_source": f"{bar_exchange}_perpetual_1d" if bar_exchange else None,
             })
             trades.append(sim)
 
@@ -24338,10 +26098,25 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             rule = BACKTEST_RULES[strategy]
             sig = rule["signal"]
             direction = rule.get("direction", "long")
-            stop_pct = rule.get("stop_pct", 0.05)
-            tp1_rr = rule.get("tp1_rr", 1.5)
-            tp2_rr = rule.get("tp2_rr", tp1_rr)
-            target_rr = (float(tp1_rr) + float(tp2_rr)) / 2.0
+            stop_pct = float(rule.get("stop_pct", 0.05))
+            if not math.isfinite(stop_pct) or stop_pct <= 0:
+                raise ValueError(
+                    f"Backtest rule {strategy!r} has invalid stop_pct={stop_pct!r}; "
+                    "stop_pct must be a finite positive fraction"
+                )
+            tp1_rr = float(rule.get("tp1_rr", 1.5))
+            tp2_rr = float(rule.get("tp2_rr", tp1_rr))
+            if (
+                not math.isfinite(tp1_rr)
+                or not math.isfinite(tp2_rr)
+                or tp1_rr <= 0
+                or tp2_rr <= tp1_rr
+            ):
+                raise ValueError(
+                    f"Backtest rule {strategy!r} has invalid targets "
+                    f"tp1_rr={tp1_rr!r}, tp2_rr={tp2_rr!r}; "
+                    "targets must be finite and satisfy 0 < TP1 < TP2"
+                )
             max_hold = rule.get("max_hold_days", 5)
             entry_type = rule.get("entry", "next_open")
             min_price = rule.get("min_price", 1.0)
@@ -24361,44 +26136,86 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     days_held = position.get("days_held", 0) + 1
                     position["days_held"] = days_held
                     entry_p = position["entry_price"]
-                    risk = abs(entry_p * stop_pct)
+                    risk = entry_p * stop_pct
+
+                    tp1_hit = bool(position.get("tp1_hit"))
+                    entry_bar_ambiguous = (
+                        position.get("entry_type") == "prev_high"
+                        and position.get("entry_index") == i
+                    )
 
                     if direction == "short":
-                        # Short: stop above entry, blended TP1/TP2 target below.
-                        stop_price = entry_p * (1 + stop_pct)
-                        tp_price = entry_p - risk * target_rr
-                        if highs[i] >= stop_price:
-                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "short"))
-                            position = None
-                            continue
-                        if lows[i] <= tp_price:
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], tp_price, "short")
-                            trade["target_model"] = "blended_tp1_tp2"
-                            trade["tp1_rr"] = tp1_rr
-                            trade["tp2_rr"] = tp2_rr
+                        initial_stop = entry_p * (1 + stop_pct)
+                        active_stop = entry_p if tp1_hit else initial_stop
+                        tp1_price = entry_p - risk * tp1_rr
+                        tp2_price = entry_p - risk * tp2_rr
+
+                        # Daily OHLC has no intrabar ordering. Stop-first is the
+                        # conservative assumption whenever stop and target coexist.
+                        if highs[i] >= active_stop:
+                            runner_exit = max(opens[i], active_stop) if opens[i] >= active_stop else active_stop
+                            exit_price = (tp1_price + runner_exit) / 2.0 if tp1_hit else runner_exit
+                            reason = "TP1_STOP" if tp1_hit else "STOP"
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "short")
+                            trade["exit_reason"] = reason
                             trades.append(trade)
                             position = None
                             continue
+                        if tp1_hit and lows[i] <= tp2_price:
+                            exit_price = (tp1_price + tp2_price) / 2.0
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "short")
+                            trade.update({
+                                "exit_reason": "BLENDED_TP",
+                                "target_model": "50_50_tp1_tp2",
+                                "tp1_rr": tp1_rr,
+                                "tp2_rr": tp2_rr,
+                            })
+                            trades.append(trade)
+                            position = None
+                            continue
+                        if not tp1_hit and not entry_bar_ambiguous and lows[i] <= tp1_price:
+                            position["tp1_hit"] = True
                     else:
-                        # Long: stop below entry, blended TP1/TP2 target above.
-                        stop_price = entry_p * (1 - stop_pct)
-                        tp_price = entry_p + risk * target_rr
-                        if lows[i] <= stop_price:
-                            trades.append(_make_trade(position["entry_date"], entry_p, dates[i], stop_price, "long"))
-                            position = None
-                            continue
-                        if highs[i] >= tp_price:
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], tp_price, "long")
-                            trade["target_model"] = "blended_tp1_tp2"
-                            trade["tp1_rr"] = tp1_rr
-                            trade["tp2_rr"] = tp2_rr
+                        initial_stop = entry_p * (1 - stop_pct)
+                        active_stop = entry_p if tp1_hit else initial_stop
+                        tp1_price = entry_p + risk * tp1_rr
+                        tp2_price = entry_p + risk * tp2_rr
+
+                        if lows[i] <= active_stop:
+                            runner_exit = min(opens[i], active_stop) if opens[i] <= active_stop else active_stop
+                            exit_price = (tp1_price + runner_exit) / 2.0 if tp1_hit else runner_exit
+                            reason = "TP1_STOP" if tp1_hit else "STOP"
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "long")
+                            trade["exit_reason"] = reason
                             trades.append(trade)
                             position = None
                             continue
+                        if tp1_hit and highs[i] >= tp2_price:
+                            exit_price = (tp1_price + tp2_price) / 2.0
+                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "long")
+                            trade.update({
+                                "exit_reason": "BLENDED_TP",
+                                "target_model": "50_50_tp1_tp2",
+                                "tp1_rr": tp1_rr,
+                                "tp2_rr": tp2_rr,
+                            })
+                            trades.append(trade)
+                            position = None
+                            continue
+                        if not tp1_hit and not entry_bar_ambiguous and highs[i] >= tp1_price:
+                            position["tp1_hit"] = True
 
                     # Max hold days → exit at close
                     if days_held >= max_hold:
-                        trades.append(_make_trade(position["entry_date"], entry_p, dates[i], closes[i], direction))
+                        if position.get("tp1_hit"):
+                            exit_price = (tp1_price + closes[i]) / 2.0
+                            exit_reason = "TP1+EOD"
+                        else:
+                            exit_price = closes[i]
+                            exit_reason = "EOD"
+                        trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, direction)
+                        trade["exit_reason"] = exit_reason
+                        trades.append(trade)
                         position = None
                     continue
 
@@ -24467,13 +26284,25 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
                 # ── ENTRY ──
                 if entry_type == "next_open" and i + 1 < len(bars):
-                    position = {"entry_date": dates[i + 1], "entry_price": opens[i + 1], "days_held": 0}
+                    position = {
+                        "entry_date": dates[i + 1], "entry_price": opens[i + 1],
+                        "entry_index": i + 1, "entry_type": "next_open",
+                        "days_held": 0, "tp1_hit": False,
+                    }
                 elif entry_type == "at_close":
-                    position = {"entry_date": dates[i], "entry_price": closes[i], "days_held": 0}
+                    position = {
+                        "entry_date": dates[i], "entry_price": closes[i],
+                        "entry_index": i, "entry_type": "at_close",
+                        "days_held": 0, "tp1_hit": False,
+                    }
                 elif entry_type == "prev_high":
                     # Entry only if next day breaks prev high
                     if i + 1 < len(bars) and highs[i + 1] > highs[i]:
-                        position = {"entry_date": dates[i + 1], "entry_price": highs[i], "days_held": 0}
+                        position = {
+                            "entry_date": dates[i + 1], "entry_price": highs[i],
+                            "entry_index": i + 1, "entry_type": "prev_high",
+                            "days_held": 0, "tp1_hit": False,
+                        }
 
         else:
             return {"error": f"Unbekannte Strategie: {strategy}"}
@@ -24481,8 +26310,17 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         # Close any open position at last bar
         if position is not None:
             direction = BACKTEST_RULES.get(strategy, {}).get("direction", "long")
-            t = _make_trade(position["entry_date"], position["entry_price"], dates[-1], closes[-1], direction)
+            entry_p = position["entry_price"]
+            exit_price = closes[-1]
+            if position.get("tp1_hit"):
+                rule = BACKTEST_RULES.get(strategy, {})
+                risk = entry_p * float(rule.get("stop_pct", 0.05))
+                tp1_rr = float(rule.get("tp1_rr", 1.5))
+                tp1_price = entry_p - risk * tp1_rr if direction == "short" else entry_p + risk * tp1_rr
+                exit_price = (tp1_price + exit_price) / 2.0
+            t = _make_trade(position["entry_date"], entry_p, dates[-1], exit_price, direction)
             t["type"] += " (offen)"
+            t["exit_reason"] = "TP1+EOD" if position.get("tp1_hit") else "EOD"
             trades.append(t)
 
         stats = _backtest_stats(trades, ticker, strategy, months)
@@ -24615,18 +26453,6 @@ def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma
             print(f"[Warning] {e}")
     return {"status": "success", "data": {}, "cached_at": None}
 
-
-@app.get("/")
-def root():
-    """Root endpoint — API info."""
-    return {
-        "name": "TradingBot Scanner API",
-        "version": API_VERSION,
-        "docs": "/docs",
-        "openapi": "/openapi.json",
-    }
-
-
 # ── Auto-Trader Endpoints ──
 _autotrader_thread = None
 
@@ -24634,8 +26460,9 @@ class AutotraderConfigUpdate(BaseModel):
     config: dict
 
 @app.get("/api/autotrader/status")
-def autotrader_status():
+def autotrader_status(authorization: Optional[str] = Header(None)):
     """Get Auto-Trader status, config, and recent log."""
+    _require_admin(authorization)
     state = _autotrader_state_read()
     config = _autotrader_config_load()
     market_hours = _autotrader_is_market_hours()
@@ -24656,8 +26483,12 @@ def autotrader_status():
     }
 
 @app.post("/api/autotrader/config")
-def autotrader_update_config(body: AutotraderConfigUpdate):
+def autotrader_update_config(
+    body: AutotraderConfigUpdate,
+    authorization: Optional[str] = Header(None),
+):
     """Update Auto-Trader configuration."""
+    _require_admin(authorization)
     config = _autotrader_config_load()
     config.update(body.config)
     _autotrader_config_save(config)
@@ -24665,8 +26496,9 @@ def autotrader_update_config(body: AutotraderConfigUpdate):
     return {"ok": True, "config": config}
 
 @app.post("/api/autotrader/start")
-def autotrader_start():
+def autotrader_start(authorization: Optional[str] = Header(None)):
     """Start the Auto-Trader background loop."""
+    _require_admin(authorization)
     global _autotrader_thread
     if _autotrader_thread and _autotrader_thread.is_alive():
         return {"ok": False, "error": "Auto-Trader läuft bereits"}
@@ -24681,8 +26513,9 @@ def autotrader_start():
     return {"ok": True, "message": "Auto-Trader gestartet"}
 
 @app.post("/api/autotrader/stop")
-def autotrader_stop():
+def autotrader_stop(authorization: Optional[str] = Header(None)):
     """Stop the Auto-Trader background loop."""
+    _require_admin(authorization)
     _autotrader_request_stop()
     state = _autotrader_state_read()
     state["status"] = "stopped"
@@ -24691,8 +26524,9 @@ def autotrader_stop():
     return {"ok": True, "message": "Auto-Trader wird gestoppt"}
 
 @app.post("/api/autotrader/scan-once")
-def autotrader_run_single_scan():
+def autotrader_run_single_scan(authorization: Optional[str] = Header(None)):
     """Run a single Auto-Trader scan (not background loop)."""
+    _require_admin(authorization)
     poly_key = os.environ.get("POLYGON_KEY", "")
     if not poly_key:
         return {"ok": False, "error": "Polygon API Key fehlt"}
@@ -24700,8 +26534,9 @@ def autotrader_run_single_scan():
     return {"ok": True, "result": result}
 
 @app.post("/api/autotrader/clear-positions")
-def autotrader_clear_positions():
+def autotrader_clear_positions(authorization: Optional[str] = Header(None)):
     """Clear all tracked positions (does NOT close actual broker positions)."""
+    _require_admin(authorization)
     state = _autotrader_state_read()
     state["positions"] = []
     state["trades_today"] = 0
@@ -24742,6 +26577,42 @@ _ADMIN_DATA_DIR = Path(os.environ.get("ALPHA_DATA_DIR", Path(__file__).parent / 
 _ADMIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
 _COUPON_PATH = _ADMIN_DATA_DIR / "alpha_station_coupons.json"
 _TICKET_PATH = _ADMIN_DATA_DIR / "alpha_station_tickets.json"
+_ADMIN_DATA_LOCK = threading.RLock()
+
+
+def _require_coupons_enabled() -> None:
+    if not COUPONS_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Coupon redemption is disabled for this deployment",
+        )
+
+
+def _atomic_write_admin_json(path: Path, data: Dict[str, Any]) -> None:
+    """Persist small admin stores without exposing a partially written JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(data, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+            tmp_path = Path(handle.name)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _load_coupons() -> Dict:
@@ -24750,8 +26621,10 @@ def _load_coupons() -> Dict:
     if os.path.exists(coupon_path):
         try:
             with open(coupon_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("coupons"), list):
+                return data
+        except (OSError, json.JSONDecodeError):
             return {"coupons": []}
     return {"coupons": []}
 
@@ -24759,11 +26632,10 @@ def _load_coupons() -> Dict:
 def _save_coupons(data: Dict):
     """Save coupons to JSON file."""
     try:
-        coupon_path = _COUPON_PATH
-        with open(coupon_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
+        _atomic_write_admin_json(_COUPON_PATH, data)
+    except OSError as e:
         print(f"[Error] Coupons speichern fehlgeschlagen: {e}")
+        raise HTTPException(status_code=500, detail="Coupon storage unavailable") from e
 
 
 def _load_tickets() -> Dict:
@@ -24772,8 +26644,10 @@ def _load_tickets() -> Dict:
     if os.path.exists(ticket_path):
         try:
             with open(ticket_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("tickets"), list):
+                return data
+        except (OSError, json.JSONDecodeError):
             return {"tickets": [], "next_id": 1}
     return {"tickets": [], "next_id": 1}
 
@@ -24781,11 +26655,10 @@ def _load_tickets() -> Dict:
 def _save_tickets(data: Dict):
     """Save support tickets to JSON file."""
     try:
-        ticket_path = _TICKET_PATH
-        with open(ticket_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
+        _atomic_write_admin_json(_TICKET_PATH, data)
+    except OSError as e:
         print(f"[Error] Tickets speichern fehlgeschlagen: {e}")
+        raise HTTPException(status_code=500, detail="Ticket storage unavailable") from e
 
 
 # ── Admin: User Management ──
@@ -24806,6 +26679,8 @@ def admin_list_users(authorization: Optional[str] = Header(None)):
             "created_at": user_data.get("created_at", ""),
             "last_login": user_data.get("last_login", ""),
             "trial_ends_at": user_data.get("trial_ends_at", ""),
+            "manual_plan_ends_at": user_data.get("manual_plan_ends_at", ""),
+            "manual_plan_source": user_data.get("manual_plan_source", ""),
             "stripe_customer_id": user_data.get("stripe_customer_id", ""),
             "is_admin": email in ADMIN_EMAILS,
         })
@@ -24826,15 +26701,18 @@ def admin_update_user_plan(email: str, req_body: PlanUpdateRequest, authorizatio
     if plan not in valid_plans:
         raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
 
-    # Load and update database
-    db = _load_users()
+    def _apply_admin_plan(user: Dict[str, Any]) -> None:
+        user["plan"] = plan
+        user.pop("manual_plan_ends_at", None)
+        user.pop("manual_plan_source", None)
+        user["trial_ends_at"] = (
+            (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+            if plan == "trial"
+            else None
+        )
 
-    if email not in db.get("users", {}):
+    if _update_user_atomic(email, _apply_admin_plan) is None:
         raise HTTPException(status_code=404, detail="User not found")
-
-    db["users"][email]["plan"] = plan
-
-    _save_users(db)
     return {"success": True, "message": f"Plan für {email} auf {plan} aktualisiert"}
 
 
@@ -24845,15 +26723,8 @@ def admin_delete_user(email: str, authorization: Optional[str] = Header(None)):
 
     email = email.lower().strip()
 
-    # Load database
-    db = _load_users()
-
-    if email not in db.get("users", {}):
+    if not _delete_user(email):
         raise HTTPException(status_code=404, detail="User not found")
-
-    del db["users"][email]
-
-    _save_users(db)
     return {"success": True, "message": f"Benutzer {email} gelöscht"}
 
 
@@ -24945,6 +26816,7 @@ def admin_get_logs(authorization: Optional[str] = Header(None)):
 def admin_create_coupon(req_body: CouponCreateRequest, authorization: Optional[str] = Header(None)):
     """Create a new coupon (admin only)."""
     payload, admin_email = _require_admin(authorization)
+    _require_coupons_enabled()
 
     code = req_body.code.upper().strip()
     plan = req_body.plan.lower().strip()
@@ -24954,35 +26826,39 @@ def admin_create_coupon(req_body: CouponCreateRequest, authorization: Optional[s
     if plan not in valid_plans:
         raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {', '.join(valid_plans)}")
 
-    if req_body.duration_days < 1:
-        raise HTTPException(status_code=400, detail="duration_days must be >= 1")
+    if not re.fullmatch(r"[A-Z0-9_-]{3,32}", code):
+        raise HTTPException(status_code=400, detail="Coupon code must contain 3-32 letters, numbers, '-' or '_'")
 
-    if req_body.max_uses < 1:
-        raise HTTPException(status_code=400, detail="max_uses must be >= 1")
+    if not 1 <= req_body.duration_days <= 3650:
+        raise HTTPException(status_code=400, detail="duration_days must be between 1 and 3650")
 
-    # Load existing coupons
-    data = _load_coupons()
+    if not 1 <= req_body.max_uses <= 100000:
+        raise HTTPException(status_code=400, detail="max_uses must be between 1 and 100000")
 
-    # Check for duplicate
-    for coupon in data.get("coupons", []):
-        if coupon["code"] == code:
-            raise HTTPException(status_code=400, detail="Coupon code already exists")
+    description = str(req_body.description or "").strip()
+    if len(description) > 500:
+        raise HTTPException(status_code=400, detail="Coupon description is too long")
 
-    # Create coupon
-    coupon = {
-        "code": code,
-        "plan": plan,
-        "duration_days": req_body.duration_days,
-        "max_uses": req_body.max_uses,
-        "uses": 0,
-        "created_at": datetime.utcnow().isoformat(),
-        "created_by": admin_email,
-        "description": req_body.description,
-        "active": True,
-    }
+    with _ADMIN_DATA_LOCK:
+        data = _load_coupons()
+        for existing in data.get("coupons", []):
+            if existing.get("code") == code:
+                raise HTTPException(status_code=400, detail="Coupon code already exists")
 
-    data["coupons"].append(coupon)
-    _save_coupons(data)
+        coupon = {
+            "code": code,
+            "plan": plan,
+            "duration_days": req_body.duration_days,
+            "max_uses": req_body.max_uses,
+            "uses": 0,
+            "redeemed_by": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": admin_email,
+            "description": description,
+            "active": True,
+        }
+        data["coupons"].append(coupon)
+        _save_coupons(data)
 
     return {"success": True, "coupon": coupon}
 
@@ -24991,8 +26867,10 @@ def admin_create_coupon(req_body: CouponCreateRequest, authorization: Optional[s
 def admin_list_coupons(authorization: Optional[str] = Header(None)):
     """List all coupons (admin only)."""
     _require_admin(authorization)
+    _require_coupons_enabled()
 
-    data = _load_coupons()
+    with _ADMIN_DATA_LOCK:
+        data = _load_coupons()
     return {"coupons": data.get("coupons", [])}
 
 
@@ -25000,15 +26878,16 @@ def admin_list_coupons(authorization: Optional[str] = Header(None)):
 def admin_toggle_coupon(code: str, authorization: Optional[str] = Header(None)):
     """Toggle coupon active/inactive (admin only)."""
     _require_admin(authorization)
+    _require_coupons_enabled()
 
     code = code.upper().strip()
-    data = _load_coupons()
-
-    for coupon in data.get("coupons", []):
-        if coupon["code"] == code:
-            coupon["active"] = not coupon["active"]
-            _save_coupons(data)
-            return {"success": True, "coupon": coupon}
+    with _ADMIN_DATA_LOCK:
+        data = _load_coupons()
+        for coupon in data.get("coupons", []):
+            if coupon.get("code") == code:
+                coupon["active"] = not bool(coupon.get("active", False))
+                _save_coupons(data)
+                return {"success": True, "coupon": coupon}
 
     raise HTTPException(status_code=404, detail="Coupon not found")
 
@@ -25017,17 +26896,16 @@ def admin_toggle_coupon(code: str, authorization: Optional[str] = Header(None)):
 def admin_delete_coupon(code: str, authorization: Optional[str] = Header(None)):
     """Delete a coupon (admin only)."""
     _require_admin(authorization)
+    _require_coupons_enabled()
 
     code = code.upper().strip()
-    data = _load_coupons()
-
-    original_count = len(data.get("coupons", []))
-    data["coupons"] = [c for c in data.get("coupons", []) if c["code"] != code]
-
-    if len(data["coupons"]) == original_count:
-        raise HTTPException(status_code=404, detail="Coupon not found")
-
-    _save_coupons(data)
+    with _ADMIN_DATA_LOCK:
+        data = _load_coupons()
+        original_count = len(data.get("coupons", []))
+        data["coupons"] = [c for c in data.get("coupons", []) if c.get("code") != code]
+        if len(data["coupons"]) == original_count:
+            raise HTTPException(status_code=404, detail="Coupon not found")
+        _save_coupons(data)
     return {"success": True, "message": f"Coupon {code} gelöscht"}
 
 
@@ -25047,48 +26925,90 @@ def redeem_coupon(req_body: RedeemCouponRequest, authorization: Optional[str] = 
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=403, detail="Invalid or expired token")
+    _require_coupons_enabled()
 
     user_email = payload.get("email", "")
     code = req_body.code.upper().strip()
 
-    # Load coupons
-    coupon_data = _load_coupons()
-    coupon = None
-    coupon_index = -1
-
-    for idx, c in enumerate(coupon_data.get("coupons", [])):
-        if c["code"] == code:
-            coupon = c
-            coupon_index = idx
-            break
-
-    if not coupon:
+    if not re.fullmatch(r"[A-Z0-9_-]{3,32}", code):
         raise HTTPException(status_code=404, detail="Coupon not found")
 
-    if not coupon.get("active", False):
-        raise HTTPException(status_code=400, detail="Coupon is not active")
+    with _ADMIN_DATA_LOCK:
+        coupon_data = _load_coupons()
+        coupon = next((c for c in coupon_data.get("coupons", []) if c.get("code") == code), None)
+        if not coupon:
+            raise HTTPException(status_code=404, detail="Coupon not found")
+        if not coupon.get("active", False):
+            raise HTTPException(status_code=400, detail="Coupon is not active")
+        if int(coupon.get("uses", 0) or 0) >= int(coupon.get("max_uses", 0) or 0):
+            raise HTTPException(status_code=400, detail="Coupon has reached max uses")
 
-    if coupon.get("uses", 0) >= coupon.get("max_uses", 0):
-        raise HTTPException(status_code=400, detail="Coupon has reached max uses")
+        redeemed_by = [str(value).strip().lower() for value in coupon.get("redeemed_by", [])]
+        if user_email in redeemed_by:
+            raise HTTPException(status_code=409, detail="Coupon already redeemed by this account")
 
-    # Load user database and update plan
-    db = _load_users()
+        duration_days = max(1, int(coupon.get("duration_days", 1) or 1))
+        now_utc = datetime.now(timezone.utc)
+        coupon_source = f"coupon:{code}"
+        previous_fields: Dict[str, Tuple[bool, Any]] = {}
+        granted_expiry: Dict[str, str] = {}
 
-    if user_email not in db.get("users", {}):
-        raise HTTPException(status_code=404, detail="User not found")
+        def _grant_coupon(user: Dict[str, Any]) -> None:
+            for key in (
+                "plan", "manual_plan_ends_at", "manual_plan_source", "trial_ends_at"
+            ):
+                previous_fields[key] = (key in user, deepcopy(user.get(key)))
 
-    # Update user plan
-    db["users"][user_email]["plan"] = coupon["plan"]
+            base_time = now_utc
+            existing_end = user.get("manual_plan_ends_at")
+            if user.get("plan") == coupon.get("plan") and existing_end:
+                try:
+                    parsed_end = datetime.fromisoformat(
+                        str(existing_end).replace("Z", "+00:00")
+                    )
+                    if parsed_end.tzinfo is None:
+                        parsed_end = parsed_end.replace(tzinfo=timezone.utc)
+                    base_time = max(base_time, parsed_end.astimezone(timezone.utc))
+                except (TypeError, ValueError):
+                    pass
 
-    # Increment coupon uses
-    coupon_data["coupons"][coupon_index]["uses"] += 1
+            expires_at = (base_time + timedelta(days=duration_days)).isoformat()
+            user["plan"] = coupon["plan"]
+            user["manual_plan_ends_at"] = expires_at
+            user["manual_plan_source"] = coupon_source
+            user["trial_ends_at"] = None
+            granted_expiry["value"] = expires_at
 
-    _save_users(db)
-    _save_coupons(coupon_data)
+        user = _update_user_atomic(user_email, _grant_coupon)
+        if not isinstance(user, dict):
+            raise HTTPException(status_code=404, detail="User not found")
+
+        coupon["uses"] = int(coupon.get("uses", 0) or 0) + 1
+        coupon.setdefault("redeemed_by", []).append(user_email)
+        coupon.setdefault("redemptions", []).append({"email": user_email, "redeemed_at": now_utc.isoformat()})
+
+        try:
+            _save_coupons(coupon_data)
+        except Exception:
+            def _rollback_coupon(current: Dict[str, Any]) -> None:
+                if (
+                    current.get("manual_plan_source") != coupon_source
+                    or current.get("manual_plan_ends_at") != granted_expiry.get("value")
+                ):
+                    return
+                for key, (was_present, previous_value) in previous_fields.items():
+                    if was_present:
+                        current[key] = deepcopy(previous_value)
+                    else:
+                        current.pop(key, None)
+
+            _update_user_atomic(user_email, _rollback_coupon)
+            raise
     return {
         "success": True,
         "message": f"Plan auf {coupon['plan']} aktualisiert via Coupon {code}",
         "new_plan": coupon["plan"],
+        "expires_at": granted_expiry["value"],
     }
 
 
@@ -25111,24 +27031,28 @@ def create_ticket(req_body: TicketCreateRequest, authorization: Optional[str] = 
 
     user_email = payload.get("email", "")
 
-    # Load tickets
-    data = _load_tickets()
-    ticket_id = data.get("next_id", 1)
+    subject = str(req_body.subject or "").strip()
+    message = str(req_body.message or "").strip()
+    if not 3 <= len(subject) <= 200:
+        raise HTTPException(status_code=400, detail="Ticket subject must contain 3-200 characters")
+    if not 10 <= len(message) <= 10000:
+        raise HTTPException(status_code=400, detail="Ticket message must contain 10-10000 characters")
 
-    # Create ticket
-    ticket = {
-        "id": ticket_id,
-        "email": user_email,
-        "subject": req_body.subject.strip(),
-        "message": req_body.message.strip(),
-        "status": "open",
-        "created_at": datetime.utcnow().isoformat(),
-        "replies": [],
-    }
-
-    data["tickets"].append(ticket)
-    data["next_id"] = ticket_id + 1
-    _save_tickets(data)
+    with _ADMIN_DATA_LOCK:
+        data = _load_tickets()
+        ticket_id = max(1, int(data.get("next_id", 1) or 1))
+        ticket = {
+            "id": ticket_id,
+            "email": user_email,
+            "subject": subject,
+            "message": message,
+            "status": "open",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "replies": [],
+        }
+        data.setdefault("tickets", []).append(ticket)
+        data["next_id"] = ticket_id + 1
+        _save_tickets(data)
 
     return {"success": True, "ticket": ticket}
 
@@ -25138,7 +27062,8 @@ def admin_list_tickets(authorization: Optional[str] = Header(None)):
     """List all support tickets (admin only)."""
     _require_admin(authorization)
 
-    data = _load_tickets()
+    with _ADMIN_DATA_LOCK:
+        data = _load_tickets()
     return {"tickets": data.get("tickets", [])}
 
 
@@ -25147,25 +27072,21 @@ def admin_reply_ticket(ticket_id: int, req_body: TicketReplyRequest, authorizati
     """Reply to a support ticket (admin only)."""
     _require_admin(authorization)
 
-    data = _load_tickets()
-    ticket = None
-
-    for t in data.get("tickets", []):
-        if t["id"] == ticket_id:
-            ticket = t
-            break
-
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-
-    reply = {
-        "message": req_body.message.strip(),
-        "from": "admin",
-        "created_at": datetime.utcnow().isoformat(),
-    }
-
-    ticket["replies"].append(reply)
-    _save_tickets(data)
+    message = str(req_body.message or "").strip()
+    if not 1 <= len(message) <= 10000:
+        raise HTTPException(status_code=400, detail="Reply must contain 1-10000 characters")
+    with _ADMIN_DATA_LOCK:
+        data = _load_tickets()
+        ticket = next((t for t in data.get("tickets", []) if t.get("id") == ticket_id), None)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        reply = {
+            "message": message,
+            "from": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        ticket.setdefault("replies", []).append(reply)
+        _save_tickets(data)
 
     return {"success": True, "ticket": ticket}
 
@@ -25179,19 +27100,13 @@ def admin_update_ticket_status(ticket_id: int, req_body: TicketStatusRequest, au
     if req_body.status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
 
-    data = _load_tickets()
-    ticket = None
-
-    for t in data.get("tickets", []):
-        if t["id"] == ticket_id:
-            ticket = t
-            break
-
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-
-    ticket["status"] = req_body.status
-    _save_tickets(data)
+    with _ADMIN_DATA_LOCK:
+        data = _load_tickets()
+        ticket = next((t for t in data.get("tickets", []) if t.get("id") == ticket_id), None)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        ticket["status"] = req_body.status
+        _save_tickets(data)
 
     return {"success": True, "ticket": ticket}
 
@@ -25214,7 +27129,8 @@ def get_my_tickets(authorization: Optional[str] = Header(None)):
     user_email = payload.get("email", "")
 
     # Load tickets
-    data = _load_tickets()
+    with _ADMIN_DATA_LOCK:
+        data = _load_tickets()
     user_tickets = [t for t in data.get("tickets", []) if t["email"] == user_email]
 
     return {"tickets": user_tickets}

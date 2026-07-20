@@ -18,11 +18,8 @@ sys.path.insert(0, str(BASE_DIR))
 import bg_service  # noqa: E402
 
 
-BI_LONG_CACHE = "/tmp/bi_cache_long.json"
-
-
-def _write_bi_cache(rows):
-    with open(BI_LONG_CACHE, "w", encoding="utf-8") as f:
+def _write_bi_cache(path, rows):
+    with path.open("w", encoding="utf-8") as f:
         json.dump({"results": rows, "cached_at": time.time()}, f)
 
 
@@ -49,7 +46,9 @@ def _base_row(ticker="GOOD", **overrides):
 
 def _setup_bi(monkeypatch, tmp_path, rows):
     """Setup wie test_mail_gates_bg: Caches/Dedupe isolieren, Versand aufzeichnen."""
-    _write_bi_cache(rows)
+    cache_file = tmp_path / "bi_cache_long.json"
+    _write_bi_cache(cache_file, rows)
+    monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(cache_file))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)

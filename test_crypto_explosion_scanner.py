@@ -44,13 +44,21 @@ def _candidate(price=9.95, change=4.0):
     }
 
 
-def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
-    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: {
-        "btc_24h": 0.2,
+def _btc_context(change, btc_24h=0.1):
+    return {
+        "btc_24h": btc_24h,
+        "btc_7d": 1.0,
         "coin_24h": change,
-        "alpha_24h": change - 0.2,
+        "alpha_24h": change - btc_24h,
         "tailwind": True,
-    })
+        "allows_long": True,
+        "known": True,
+        "data_status": "ok",
+    }
+
+
+def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change, 0.2))
     bars5 = _bars(90, start=9.48, step=0.004, volume=1000, last={
         "open": 9.93,
         "high": 9.97,
@@ -77,12 +85,7 @@ def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
 
 
 def test_crypto_explosion_confirmed_breakout_has_valid_plan(monkeypatch):
-    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: {
-        "btc_24h": 0.1,
-        "coin_24h": change,
-        "alpha_24h": change - 0.1,
-        "tailwind": True,
-    })
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change))
     bars5 = _bars(90, start=9.50, step=0.004, volume=1000, last={
         "open": 10.00,
         "high": 10.14,
@@ -109,12 +112,7 @@ def test_crypto_explosion_confirmed_breakout_has_valid_plan(monkeypatch):
 
 
 def test_crypto_explosion_rejects_late_parabolic_move(monkeypatch):
-    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: {
-        "btc_24h": 0.0,
-        "coin_24h": change,
-        "alpha_24h": change,
-        "tailwind": True,
-    })
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change, 0.0))
     bars5 = _bars(90, start=8.4, step=0.018, volume=1200, last={
         "open": 10.4,
         "high": 10.8,
@@ -134,12 +132,7 @@ def test_crypto_explosion_rejects_late_parabolic_move(monkeypatch):
 
 
 def test_crypto_explosion_ignores_forming_breakout_candle(monkeypatch):
-    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: {
-        "btc_24h": 0.1,
-        "coin_24h": change,
-        "alpha_24h": change - 0.1,
-        "tailwind": True,
-    })
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change))
     bars5 = _bars(90, start=9.50, step=0.004, volume=1000, last={
         "open": 9.92,
         "high": 9.98,
@@ -164,7 +157,7 @@ def test_crypto_explosion_ignores_forming_breakout_candle(monkeypatch):
 
 
 def test_crypto_explosion_rejects_stale_5m_confirmation(monkeypatch):
-    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda *args: {"tailwind": True})
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda *args: _btc_context(4.0))
     bars5 = _bars(90, start=9.50, step=0.004, volume=1000, last={
         "open": 10.00,
         "high": 10.14,

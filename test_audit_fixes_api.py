@@ -181,7 +181,8 @@ def test_h10_save_cache_file_keeps_old_file_on_failure(tmp_path, monkeypatch):
         raise RuntimeError("simulierter Crash mitten im Serialisieren")
 
     monkeypatch.setattr(api.json, "dump", boom)
-    api.save_cache_file(str(target), [{"x": 1}])
+    with pytest.raises(RuntimeError, match="simulierter Crash"):
+        api.save_cache_file(str(target), [{"x": 1}])
 
     # Alte Datei ist byte-identisch lesbar geblieben (kein Partial-Write) ...
     assert json.loads(target.read_text(encoding="utf-8"))["results"] == ["OLD"]
@@ -213,17 +214,20 @@ def test_h11_tab_gates_cover_crypto_and_context_endpoints():
 
 
 def test_h11_default_deny_public_allowlist_explicit():
-    # Legitime Public-Routen bleiben explizit erlaubt ...
+    # Only routes needed before authentication remain public.
     for path in (
         "/api/health",
-        "/api/system-health",
-        "/api/commercial-readiness",
         "/api/auth/register",
         "/api/auth/login",
         "/api/auth/plans",
+        "/api/legal-info",
         "/api/stripe/webhook",
     ):
         assert path in api._PUBLIC_API_PATHS, path
+    # Operational and launch diagnostics expose deployment details and must
+    # require an authenticated/admin context.
+    assert "/api/system-health" not in api._PUBLIC_API_PATHS
+    assert "/api/commercial-readiness" not in api._PUBLIC_API_PATHS
     # ... und die alte Blanket-Ausnahme fuer /api/auth/* (Default-Allow fuer
     # unbekannte Auth-Routen) ist aus dem Commerce-Gate entfernt.
     gate_src = inspect.getsource(api.commerce_auth_gate)

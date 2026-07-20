@@ -2500,6 +2500,7 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
 
     api._save_trade_reminders([{
         "id": "rem1",
+        "owner_email": "owner@example.com",
         "ticker": "BROCCOLI",
         "asset_type": "crypto",
         "scanner": "early_movers",
@@ -2519,6 +2520,74 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
     assert reminders[0]["status"] == "triggered"
     assert reminders[0]["trigger_result"]["reason"] == "5m_breakout_volume_confirmed"
     assert sent and sent[0][2] is True
+
+
+def test_legacy_ownerless_trade_reminder_is_cancelled_without_email(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(tmp_path / "trade_reminders.json"))
+    monkeypatch.setattr(api, "_reminder_now", lambda: 1_000_000.0)
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda *args, **kwargs: sent.append((args, kwargs)) or True)
+    api._save_trade_reminders([{
+        "id": "legacy-reminder",
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "status": "active",
+        "expires_at": 1_010_000.0,
+        "last_checked_at": 0,
+    }])
+
+    api._process_trade_reminders_once()
+
+    reminder = api._load_trade_reminders()[0]
+    assert reminder["status"] == "cancelled"
+    assert reminder["cancellation_reason"] == "missing_owner_email"
+    assert sent == []
+
+
+def test_multi_recipient_alert_uses_undisclosed_to_header(monkeypatch):
+    captured = {}
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            return None
+
+        def starttls(self):
+            return None
+
+        def login(self, *args, **kwargs):
+            return None
+
+        def sendmail(self, sender, recipients, message):
+            captured["sender"] = sender
+            captured["recipients"] = recipients
+            captured["message"] = message
+
+        def quit(self):
+            return None
+
+    monkeypatch.setattr(api, "_SECRETS", {
+        "GMAIL_USER": "sender@example.com",
+        "GMAIL_APP_PASSWORD": "unit-password",
+        "ALERT_EMAIL": "sender@example.com",
+    })
+    monkeypatch.setattr(api.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(api, "is_telegram_configured", lambda: False)
+
+    sent = api._send_email_alert(
+        "Private recipient test",
+        "<p>Signal</p>",
+        bypass_startup_cooldown=True,
+        recipient_emails=["first@example.com", "second@example.com"],
+        mail_class="trade",
+    )
+
+    assert sent is True
+    assert captured["recipients"] == ["first@example.com", "second@example.com"]
+    assert "To: undisclosed-recipients:;" in captured["message"]
+    assert "To: first@example.com" not in captured["message"]
 
 
 def test_new_listing_watch_mail_blocks_cross_exchange_announcement_mismatch():

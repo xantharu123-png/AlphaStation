@@ -11,6 +11,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from modules.volume_analysis import calculate_volume_profile
+from modules.trade_levels import trade_geometry
 
 
 def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -34,7 +35,11 @@ def round_trade_price(price: Any) -> float:
         return round(val, 3)
     if aval >= 0.01:
         return round(val, 5)
-    return round(val, 8)
+    if aval > 0:
+        # Preserve six significant digits for micro-priced crypto. Fixed
+        # decimal rounding can otherwise collapse a valid level to 0.0.
+        return float(f"{val:.6g}")
+    return 0.0
 
 
 def normalize_ohlcv_bars(bars: List[Dict[str, Any]], lookback: Optional[int] = None) -> List[Dict[str, float]]:
@@ -61,6 +66,56 @@ def normalize_ohlcv_bars(bars: List[Dict[str, Any]], lookback: Optional[int] = N
             "volume": volume,
         })
     return parsed
+
+
+def calculate_wilder_atr(
+    bars: List[Dict[str, Any]],
+    period: int = 14,
+    lookback: Optional[int] = None,
+) -> float:
+    """Return a canonical Wilder ATR for mixed API bar shapes.
+
+    ATR is an absolute price distance, calculated on the same timeframe as
+    ``bars``. Volume is intentionally not required because true range only
+    depends on high, low, and the previous close. Returning ``0.0`` for fewer
+    than ``period + 1`` valid bars keeps callers explicit about their fallback.
+    """
+    try:
+        period = max(1, int(period))
+    except (TypeError, ValueError):
+        period = 14
+
+    source = (bars or [])[-lookback:] if lookback and lookback > 0 else (bars or [])
+    parsed: List[Dict[str, float]] = []
+    for bar in source:
+        if not isinstance(bar, dict):
+            continue
+        close = _safe_float(bar.get("close", bar.get("c")))
+        high = _safe_float(bar.get("high", bar.get("h")))
+        low = _safe_float(bar.get("low", bar.get("l")))
+        if close is None or high is None or low is None:
+            continue
+        if close <= 0 or high <= 0 or low <= 0 or high < low:
+            continue
+        parsed.append({"high": high, "low": low, "close": close})
+
+    if len(parsed) < period + 1:
+        return 0.0
+
+    true_ranges: List[float] = []
+    for index in range(1, len(parsed)):
+        bar = parsed[index]
+        previous_close = parsed[index - 1]["close"]
+        true_ranges.append(max(
+            bar["high"] - bar["low"],
+            abs(bar["high"] - previous_close),
+            abs(bar["low"] - previous_close),
+        ))
+
+    atr = sum(true_ranges[:period]) / period
+    for true_range in true_ranges[period:]:
+        atr = ((period - 1) * atr + true_range) / period
+    return float(atr) if math.isfinite(atr) and atr > 0 else 0.0
 
 
 def _dedupe_levels(levels: List[Dict[str, Any]], entry: float) -> List[Dict[str, Any]]:
@@ -199,13 +254,51 @@ def _distance_ok(price: float, entry: float, min_reward: float, direction: str) 
     return 0 < price < entry and (entry - price) >= min_reward
 
 
+def _level_kind(level: Dict[str, Any]) -> str:
+    return str(level.get("kind") or "").strip().upper()
+
+
+def _level_source(level: Dict[str, Any]) -> str:
+    return str(level.get("source") or "VRVP level").strip()
+
+
+def _is_lvn_edge(level: Dict[str, Any]) -> bool:
+    return _level_kind(level) == "LVN_EDGE" or "LVN" in _level_source(level).upper()
+
+
+def _is_structural_barrier(level: Dict[str, Any]) -> bool:
+    """True for traded-volume zones, never for an empty-volume gap edge."""
+    if _is_lvn_edge(level):
+        return False
+    kind = _level_kind(level)
+    source = _level_source(level).upper()
+    return kind in {"POC", "VAH", "VAL", "HVN"} or any(
+        token in source for token in ("VRVP POC", "VRVP VAH", "VRVP VAL", "VRVP HVN")
+    )
+
+
+def _is_stop_anchor(level: Dict[str, Any], side: str) -> bool:
+    """Use only defensible volume acceptance zones as stop invalidation."""
+    if not _is_structural_barrier(level):
+        return False
+    kind = _level_kind(level)
+    source = _level_source(level).upper()
+    if kind == "POC" or "VRVP POC" in source:
+        return True
+    if side == "LONG":
+        return kind == "VAL" or "VRVP VAL" in source or "HVN LOW" in source
+    return kind == "VAH" or "VRVP VAH" in source or "HVN HIGH" in source
+
+
 def _candidate_prices(vrvp: Dict[str, Any], side: str, target: bool) -> List[Tuple[float, str]]:
     key = "resistances" if (side == "LONG") == target else "supports"
     candidates: List[Tuple[float, str]] = []
     for level in vrvp.get(key) or []:
+        if not target and not _is_stop_anchor(level, side):
+            continue
         price = _safe_float(level.get("price"))
         if price and price > 0:
-            candidates.append((price, str(level.get("source") or "VRVP level")))
+            candidates.append((price, _level_source(level)))
     return candidates
 
 
@@ -237,6 +330,8 @@ def _nearest_target_level(vrvp: Dict[str, Any], side: str, entry: float) -> Opti
     key = "resistances" if side == "LONG" else "supports"
     levels = []
     for level in vrvp.get(key) or []:
+        if not _is_structural_barrier(level):
+            continue
         price = _safe_float(level.get("price"))
         if price is None or price <= 0:
             continue
@@ -343,6 +438,9 @@ def apply_vrvp_to_trade_setup(
 
     profile = _asset_profile(asset_type)
     atr_value = _safe_float(atr, 0.0) or 0.0
+    if atr_value < 0 or atr_value > entry * 0.50:
+        enriched["vrvp_atr_warning"] = "implausible_atr_ignored"
+        atr_value = 0.0
     min_tp_reward = max(risk * 1.5, entry * profile["min_tp_pct"], atr_value * 0.70)
     min_tp2_reward = max(risk * 2.4, min_tp_reward * 1.5, entry * profile["min_tp_pct"] * 1.8)
     used: List[str] = []
@@ -354,9 +452,9 @@ def apply_vrvp_to_trade_setup(
             valid_stops = [(p, s) for p, s in stop_candidates if p < entry]
             valid_stops.sort(key=lambda x: x[0], reverse=True)
             for support, source in valid_stops:
-                proposed = support - max(entry * profile["stop_buffer_pct"], atr_value * 0.05)
+                proposed = support - max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
                 new_risk = entry - proposed
-                if new_risk >= risk * 0.55 and new_risk <= risk * profile["max_stop_mult"]:
+                if new_risk >= risk * 0.80 and new_risk <= risk * profile["max_stop_mult"]:
                     stop = proposed
                     enriched["stop_source"] = f"{source} invalidation"
                     used.append("stop")
@@ -365,9 +463,9 @@ def apply_vrvp_to_trade_setup(
             valid_stops = [(p, s) for p, s in stop_candidates if p > entry]
             valid_stops.sort(key=lambda x: x[0])
             for resistance, source in valid_stops:
-                proposed = resistance + max(entry * profile["stop_buffer_pct"], atr_value * 0.05)
+                proposed = resistance + max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
                 new_risk = proposed - entry
-                if new_risk >= risk * 0.55 and new_risk <= risk * profile["max_stop_mult"]:
+                if new_risk >= risk * 0.80 and new_risk <= risk * profile["max_stop_mult"]:
                     stop = proposed
                     enriched["stop_source"] = f"{source} invalidation"
                     used.append("stop")
@@ -410,16 +508,21 @@ def apply_vrvp_to_trade_setup(
         tp2 = entry + max(risk * 2.45, abs(tp1 - entry) * 1.35) if side == "LONG" else max(0.00000001, entry - max(risk * 2.45, abs(tp1 - entry) * 1.35))
         enriched["tp2_source"] = "risk fallback after VRVP validation"
 
+    geometry = trade_geometry(entry, stop, tp1, tp2, side)
+    if not geometry["valid"]:
+        enriched["vrvp_applied"] = False
+        enriched["vrvp_geometry_errors"] = list(geometry.get("errors") or [])
+        return enriched
+
     _set_level_aliases(enriched, "entry", entry)
     _set_level_aliases(enriched, "stop", stop)
     _set_level_aliases(enriched, "tp1", tp1)
     _set_level_aliases(enriched, "tp2", tp2)
 
-    reward1 = abs(tp1 - entry)
-    reward2 = abs(tp2 - entry)
-    rr_tp1 = reward1 / risk if risk > 0 else 0.0
-    rr_tp2 = reward2 / risk if risk > 0 else 0.0
-    rr = (rr_tp1 + rr_tp2) / 2 if rr_tp2 > 0 else rr_tp1
+    risk = float(geometry["risk"])
+    rr_tp1 = float(geometry["rr_tp1"])
+    rr_tp2 = float(geometry["rr_tp2"])
+    rr = float(geometry["rr"])
 
     enriched["risk"] = round_trade_price(risk)
     enriched["rr"] = round(rr, 2)

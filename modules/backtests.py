@@ -17,6 +17,7 @@ from modules.helpers import check_signal
 from modules.patterns import analyze_breakout_imminent
 from modules.scanners import _compute_biotech_technical_from_bars
 from modules.data_fetchers import fetch_backtest_daily_data
+from modules.trade_levels import trade_geometry
 
 
 # ── Backtest Universes (kopiert aus scanner.py) ──
@@ -139,10 +140,14 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
             price = r.get("c", 0)
             volume = r.get("v", 0)
             
-            if price < min_price or volume < min_volume:
+            if price <= 0:
                 continue
-            
-            total_tickers_seen.add(ticker)
+
+            # Preserve the complete path. Filtering history here can hide
+            # later crash bars and stop hits; eligibility is checked only on
+            # the signal bar below.
+            if price >= min_price and volume >= min_volume:
+                total_tickers_seen.add(ticker)
             
             bar = {
                 "date": date_str,
@@ -181,6 +186,8 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
             metrics = compute_daily_metrics(bars, idx)
             if not metrics or metrics["price"] <= 0:
                 continue
+            if metrics["price"] < min_price or float(bars[idx].get("volume") or 0) < min_volume:
+                continue
             
             for strat_name in strategies:
                 strat = BACKTEST_STRATEGY_RULES[strat_name]
@@ -189,7 +196,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
                 
                 if check_signal(metrics, strat["signal"]):
                     # Dedup: Max 1 Trade pro Ticker pro Tag
-                    dedup_key = (ticker, bars[idx]["date"])
+                    dedup_key = (ticker, bars[idx]["date"], strat_name)
                     if dedup_key in seen_signals:
                         continue
                     
@@ -290,10 +297,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
             price = r.get("c", 0)
             volume = r.get("v", 0)
-            if price < min_price or volume < min_volume:
+            if price <= 0:
                 continue
-
-            total_tickers_seen.add(ticker)
+            if price >= min_price and volume >= min_volume:
+                total_tickers_seen.add(ticker)
             bar = {
                 "date": date_str,
                 "open": r.get("o", 0),
@@ -353,6 +360,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
             # 50-Bar Rolling Window (genug für MACD 26+9=35)
             window = bars[idx-window_size:idx]
+            if (
+                float(window[-1].get("close") or 0) < min_price
+                or float(window[-1].get("volume") or 0) < min_volume
+            ):
+                continue
 
             result = analyze_breakout_imminent(window, direction=direction)
             # V2.1+: Returns 8 values (mit smart_money_fires, smart_money_hits)
@@ -439,11 +451,19 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if direction == "short" and stop_price <= range_low:
                 continue
 
-            # FIX #2: Risk mit realistischem Entry berechnen (Mitte der Retest-Zone)
+            # Risk/Reward uses the same signed geometry as live and alert paths.
             est_entry = (retest_zone_upper + retest_zone_lower) / 2
-            risk = abs(est_entry - stop_price)
-            reward_blended = 0.5 * abs(tp1_price - est_entry) + 0.5 * abs(tp2_price - est_entry)
-            rr = round(reward_blended / risk, 2) if risk > 0 else 0
+            geometry = trade_geometry(
+                est_entry,
+                stop_price,
+                tp1_price,
+                tp2_price,
+                direction.upper(),
+            )
+            if not geometry["valid"]:
+                continue
+            risk = geometry["risk"]
+            rr = geometry["rr"] or 0
 
             if rr < 2.0:  # FIX #5: Min 2.0:1 R:R (realistischer mit weiterem Stop)
                 continue
@@ -529,11 +549,12 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             current_stop = stop_price
 
             for day_offset in range(1, max_hold + 1):
-                future_idx = idx + day_offset
+                future_idx = idx + day_offset - 1
                 if future_idx >= len(bars):
                     break
 
                 future_bar = bars[future_idx]
+                entered_this_bar = False
 
                 # === PHASE 1: Breakout-Bestätigung ===
                 if not breakout_confirmed:
@@ -564,10 +585,16 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         if price_pulled_back and price_above_stop and had_upward_move:
                             actual_entry = max(future_bar["close"], retest_zone_lower) * (1 + slippage)
                             entry_filled = True
+                            entered_this_bar = True
                             entry_date = future_bar["date"]
                             bars_held = 0
-                            # FIX #2: Rekalkuliere Risk mit echtem Entry
-                            risk = abs(actual_entry - stop_price)
+                            # Recalculate signed risk with the actually filled entry.
+                            risk = actual_entry - stop_price
+                            if risk <= 0:
+                                entry_filled = False
+                                actual_entry = None
+                                entry_date = None
+                                break
                     else:  # short
                         breakout_high = min(breakout_high, future_bar["low"])
                         price_pulled_back = future_bar["high"] >= retest_zone_lower
@@ -577,14 +604,25 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         if price_pulled_back and price_below_stop and had_downward_move:
                             actual_entry = min(future_bar["close"], retest_zone_upper) * (1 - slippage)
                             entry_filled = True
+                            entered_this_bar = True
                             entry_date = future_bar["date"]
                             bars_held = 0
-                            risk = abs(actual_entry - stop_price)
+                            risk = stop_price - actual_entry
+                            if risk <= 0:
+                                entry_filled = False
+                                actual_entry = None
+                                entry_date = None
+                                break
 
                     if day_offset >= 15 and not entry_filled:
                         break
                     if not entry_filled:
                         continue
+
+                # The retest fill is modelled at this daily bar's close. Its
+                # earlier high/low cannot be reused as post-entry execution.
+                if entered_this_bar:
+                    continue
 
                 bars_held += 1
 
@@ -597,17 +635,19 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     tp2_possible = future_bar["high"] >= tp2_price
 
                     if stop_hit and tp2_possible:
-                        if abs(bar_open - current_stop) < abs(bar_open - tp2_price):
-                            exit_price = current_stop * (1 - slippage)
-                            exit_reason = "BE_STOP" if tp1_hit else "STOP"
-                        else:
-                            tp1_hit = True
-                            exit_price = tp2_price * (1 - slippage)
-                            exit_reason = "TP2"
+                        # Daily OHLC cannot reveal whether stop or target traded
+                        # first. Use the conservative stop outcome instead of an
+                        # optimistic open-distance guess.
+                        runner_exit = current_stop * (1 - slippage)
+                        tp1_exit = tp1_price * (1 - slippage)
+                        exit_price = (tp1_exit + runner_exit) / 2 if tp1_hit else runner_exit
+                        exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
                     elif stop_hit:
-                        exit_price = current_stop * (1 - slippage)
+                        runner_exit = current_stop * (1 - slippage)
+                        tp1_exit = tp1_price * (1 - slippage)
+                        exit_price = (tp1_exit + runner_exit) / 2 if tp1_hit else runner_exit
                         exit_reason = "BE_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
@@ -618,7 +658,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                             trail_level = actual_entry + (tp1_price - actual_entry) * 0.66
                             current_stop = trail_level
                         if tp2_possible:
-                            exit_price = tp2_price * (1 - slippage)
+                            tp1_exit = tp1_price * (1 - slippage)
+                            tp2_exit = tp2_price * (1 - slippage)
+                            exit_price = (tp1_exit + tp2_exit) / 2
                             exit_reason = "TP2"
                             exit_date = future_bar["date"]
                             break
@@ -628,17 +670,18 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     tp2_possible = future_bar["low"] <= tp2_price
 
                     if stop_hit and tp2_possible:
-                        if abs(bar_open - current_stop) < abs(bar_open - tp2_price):
-                            exit_price = current_stop * (1 + slippage)
-                            exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
-                        else:
-                            tp1_hit = True
-                            exit_price = tp2_price * (1 + slippage)
-                            exit_reason = "TP2"
+                        # Same ambiguity for shorts: without intraday bars the
+                        # only defensible fill assumption is the adverse one.
+                        runner_exit = current_stop * (1 + slippage)
+                        tp1_exit = tp1_price * (1 + slippage)
+                        exit_price = (tp1_exit + runner_exit) / 2 if tp1_hit else runner_exit
+                        exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
                     elif stop_hit:
-                        exit_price = current_stop * (1 + slippage)
+                        runner_exit = current_stop * (1 + slippage)
+                        tp1_exit = tp1_price * (1 + slippage)
+                        exit_price = (tp1_exit + runner_exit) / 2 if tp1_hit else runner_exit
                         exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
                         exit_date = future_bar["date"]
                         break
@@ -649,7 +692,9 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                             trail_level = actual_entry - (actual_entry - tp1_price) * 0.66
                             current_stop = trail_level
                         if tp2_possible:
-                            exit_price = tp2_price * (1 + slippage)
+                            tp1_exit = tp1_price * (1 + slippage)
+                            tp2_exit = tp2_price * (1 + slippage)
+                            exit_price = (tp1_exit + tp2_exit) / 2
                             exit_reason = "TP2"
                             exit_date = future_bar["date"]
                             break
@@ -659,7 +704,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if entry_filled and exit_price is None:
                 if tp1_hit:
                     # TP1 wurde erreicht, TP2 nicht → simuliere 50/50 Split
-                    last_idx = min(idx + max_hold, len(bars)-1)
+                    last_idx = min(idx + max_hold - 1, len(bars)-1)
                     tp1_exit = tp1_price * (1 - slippage if direction == "long" else 1 + slippage)
                     close_exit = bars[last_idx]["close"]
                     # Gewichteter Exit: 50% TP1 + 50% Close (BE-Stop schützt 2. Hälfte)
@@ -673,7 +718,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                     exit_date = bars[last_idx]["date"]
                 elif entry_filled:
                     # Max Hold → Exit at Close, aber min Breakeven wenn im Plus
-                    last_idx = min(idx + max_hold, len(bars)-1)
+                    last_idx = min(idx + max_hold - 1, len(bars)-1)
                     close_price = bars[last_idx]["close"]
                     if direction == "long":
                         # Wenn Close unter Entry → raus bei Entry (Breakeven)
@@ -871,10 +916,10 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
 
             price = r.get("c", 0)
             volume = r.get("v", 0)
-            if price < min_price or volume < min_volume:
+            if price <= 0:
                 continue
-
-            total_tickers_seen.add(ticker)
+            if price >= min_price and volume >= min_volume:
+                total_tickers_seen.add(ticker)
             bar = {
                 "date": date_str,
                 "open": r.get("o", 0),
@@ -928,6 +973,11 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
 
             # 50-Bar Rolling Window
             window = bars[idx-window_size:idx]
+            if (
+                float(window[-1].get("close") or 0) < min_price
+                or float(window[-1].get("volume") or 0) < min_volume
+            ):
+                continue
 
             # === BIOTECH TECHNICAL SCORE (offline) ===
             tech_result = _compute_biotech_technical_from_bars(window)
@@ -984,10 +1034,10 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
 
             # === ENTRY/STOP/TARGET BERECHNUNG ===
             # Entry: Next Day Open (Momentum-Einstieg nach Volume Spike)
-            if idx + 1 >= len(bars):
+            if idx >= len(bars):
                 continue
 
-            entry_bar = bars[idx + 1]
+            entry_bar = bars[idx]
             entry_price = entry_bar["open"]
             if entry_price <= 0:
                 continue
@@ -1027,7 +1077,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             max_hold = 15  # Biotech-Catalyst-Trades sind kürzer
             trade_result = {
                 "ticker": ticker,
-                "signal_date": bars[idx]["date"],
+                "signal_date": bars[idx - 1]["date"],
                 "grade": grade,
                 "score": tech_score,
                 "max_score": 20,
@@ -1051,7 +1101,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             entry_date = entry_bar["date"]
 
             for day_offset in range(max_hold):
-                bar_idx = idx + 1 + day_offset  # +1 weil Entry am nächsten Tag
+                bar_idx = idx + day_offset
                 if bar_idx >= len(bars):
                     break
 
@@ -1062,16 +1112,20 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 if future_bar["low"] <= current_stop:
                     # Gap-through Check
                     if future_bar["open"] <= current_stop:
-                        exit_price = future_bar["open"] * (1 - slippage)
+                        runner_exit = future_bar["open"] * (1 - slippage)
                     else:
-                        exit_price = current_stop * (1 - slippage)
+                        runner_exit = current_stop * (1 - slippage)
+                    tp1_exit = tp1_price * (1 - slippage)
+                    exit_price = (tp1_exit + runner_exit) / 2 if tp1_hit else runner_exit
                     exit_reason = "BE_STOP" if tp1_hit else "STOP"
                     exit_date = future_bar["date"]
                     break
 
                 # TP2 Check (nur wenn TP1 schon in VORHERIGEM Bar getroffen)
                 if tp1_hit and future_bar["high"] >= tp2_price:
-                    exit_price = tp2_price * (1 - slippage)
+                    tp1_exit = tp1_price * (1 - slippage)
+                    tp2_exit = tp2_price * (1 - slippage)
+                    exit_price = (tp1_exit + tp2_exit) / 2
                     exit_reason = "TP2"
                     exit_date = future_bar["date"]
                     break
@@ -1087,7 +1141,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             if exit_price is None:
                 if tp1_hit:
                     # TP1 erreicht, TP2 nicht → 50/50 Split
-                    last_idx = min(idx + 1 + max_hold - 1, len(bars) - 1)
+                    last_idx = min(idx + max_hold - 1, len(bars) - 1)
                     tp1_exit = tp1_price * (1 - slippage)
                     close_exit = bars[last_idx]["close"]
                     be_protected = max(close_exit, actual_entry)  # BE-Schutz
@@ -1096,7 +1150,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                     exit_date = bars[last_idx]["date"]
                 else:
                     # Max Hold → Exit at Close
-                    last_idx = min(idx + 1 + max_hold - 1, len(bars) - 1)
+                    last_idx = min(idx + max_hold - 1, len(bars) - 1)
                     exit_price = bars[last_idx]["close"]
                     exit_reason = "MAX_HOLD"
                     exit_date = bars[last_idx]["date"]
@@ -1109,8 +1163,9 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 trade_result["is_winner"] = False
             else:
                 pnl_pct = ((exit_price - actual_entry) / actual_entry) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
-                r_multiple = (exit_price - actual_entry) / risk if risk > 0 else 0
-                r_multiple = max(r_multiple, -2.0)  # Cap bei -2R (Gap-through)
+                risk_pct = (risk / actual_entry) * 100 if risk > 0 else 0
+                r_multiple = pnl_pct / risk_pct if risk_pct > 0 else 0
+                r_multiple = max(r_multiple, -2.0)  # Net of fees; cap gap-through losses.
 
                 trade_result["actual_entry"] = round(actual_entry, 2)
                 trade_result["exit_price"] = round(exit_price, 2)
@@ -1260,6 +1315,7 @@ def simulate_trade(bars, signal_idx, strategy):
         tp1_price = entry_price - risk * tp1_rr
         tp2_price = entry_price - risk * tp2_rr
         blended_target_price = entry_price - risk * target_rr
+    initial_stop_price = stop_price
     
     # === TRADE SIMULIEREN ===
     exit_price = None
@@ -1286,16 +1342,17 @@ def simulate_trade(bars, signal_idx, strategy):
             if bar["low"] <= stop_price:
                 # Wenn auch TP1 an diesem Tag möglich → konservativ: Stop first
                 if bar["open"] <= stop_price:
-                    exit_price = bar["open"]  # Gapped through stop
+                    runner_exit = bar["open"]  # Gapped through stop
                 else:
-                    exit_price = stop_price
-                exit_reason = "STOP"
+                    runner_exit = stop_price
+                exit_price = (tp1_price + runner_exit) / 2 if tp1_hit else runner_exit
+                exit_reason = "TP1_STOP" if tp1_hit else "STOP"
                 exit_date = bar["date"]
                 break
             
-            # Target Check: blended TP1/TP2 expected reward, matching live gating.
-            if tp1_hit and bar["high"] >= blended_target_price:
-                exit_price = blended_target_price
+            # TP2 applies only to the remaining half after TP1.
+            if tp1_hit and bar["high"] >= tp2_price:
+                exit_price = (tp1_price + tp2_price) / 2
                 exit_reason = "BLENDED_TP"
                 exit_date = bar["date"]
                 break
@@ -1312,16 +1369,17 @@ def simulate_trade(bars, signal_idx, strategy):
             
             if bar["high"] >= stop_price:
                 if bar["open"] >= stop_price:
-                    exit_price = bar["open"]
+                    runner_exit = bar["open"]
                 else:
-                    exit_price = stop_price
-                exit_reason = "STOP"
+                    runner_exit = stop_price
+                exit_price = (tp1_price + runner_exit) / 2 if tp1_hit else runner_exit
+                exit_reason = "TP1_STOP" if tp1_hit else "STOP"
                 exit_date = bar["date"]
                 break
             
-            # Target Check: blended TP1/TP2 expected reward, matching live gating.
-            if tp1_hit and bar["low"] <= blended_target_price:
-                exit_price = blended_target_price
+            # TP2 applies only to the remaining half after TP1.
+            if tp1_hit and bar["low"] <= tp2_price:
+                exit_price = (tp1_price + tp2_price) / 2
                 exit_reason = "BLENDED_TP"
                 exit_date = bar["date"]
                 break
@@ -1334,17 +1392,19 @@ def simulate_trade(bars, signal_idx, strategy):
     # Max Hold erreicht → Exit at Close
     if exit_reason is None:
         last_bar_idx = min(trade_start_idx + max_hold - 1, len(bars) - 1)
-        exit_price = bars[last_bar_idx]["close"]
+        runner_exit = bars[last_bar_idx]["close"]
+        exit_price = (tp1_price + runner_exit) / 2 if tp1_hit else runner_exit
         exit_reason = "TP1+EOD" if tp1_hit else "EOD"
         exit_date = bars[last_bar_idx]["date"]
     
     # === P&L BERECHNEN ===
     if direction == "long":
         pnl_pct = ((exit_price - entry_price) / entry_price) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
-        r_multiple = (exit_price - entry_price) / risk if risk > 0 else 0
     else:
         pnl_pct = ((entry_price - exit_price) / entry_price) * 100 - 0.2  # 0.1% entry + 0.1% exit fee
-        r_multiple = (entry_price - exit_price) / risk if risk > 0 else 0
+
+    risk_pct = (risk / entry_price) * 100 if risk > 0 else 0
+    r_multiple = pnl_pct / risk_pct if risk_pct > 0 else 0
     
     # Cap R-Multiple: Max -2R bei Gap-Through (realistischer Slippage)
     r_multiple = max(r_multiple, -2.0)
@@ -1358,13 +1418,13 @@ def simulate_trade(bars, signal_idx, strategy):
         "entry_date": bars[trade_start_idx]["date"] if trade_start_idx < len(bars) else signal_day["date"],
         "exit_date": exit_date,
         "entry_price": round(entry_price, 2),
-        "stop_price": round(stop_price, 2),
+        "stop_price": round(initial_stop_price, 2),
         "tp1_price": round(tp1_price, 2),
         "tp2_price": round(tp2_price, 2),
         "blended_target_price": round(blended_target_price, 2),
         "exit_price": round(exit_price, 2),
         "exit_reason": exit_reason,
-        "target_model": "blended_tp1_tp2",
+        "target_model": "50_50_tp1_tp2",
         "pnl_pct": round(pnl_pct, 2),
         "r_multiple": round(r_multiple, 2),
         "bars_held": bars_held,

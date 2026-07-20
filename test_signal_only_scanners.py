@@ -13,7 +13,14 @@ def test_early_mover_signal_only_shows_scored_candidates_and_confirmed_trades():
         "risk_flags": [],
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.1,
-        "btc_context": {"tailwind": True},
+        "btc_context": {
+            "tailwind": True,
+            "allows_long": True,
+            "btc_24h": 0.2,
+            "btc_7d": 1.0,
+            "alpha_24h": 1.0,
+            "data_status": "ok",
+        },
     }
     payload = {
         "coins": [

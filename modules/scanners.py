@@ -11,6 +11,7 @@ import json
 import re
 import time
 import threading
+import tempfile
 import datetime as dt
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -28,7 +29,11 @@ from modules.helpers import is_spac
 from modules.patterns import analyze_breakout_imminent, analyze_candles
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
 from modules.trade_levels import trade_geometry
-from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
+from modules.vrvp_levels import (
+    apply_vrvp_to_trade_setup,
+    build_vrvp_structure,
+    calculate_wilder_atr,
+)
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
@@ -466,6 +471,11 @@ def _autotrader_is_market_hours():
         return True  # Fallback: immer erlauben
 
 
+def _autotrader_long_geometry(entry, stop, tp1, tp2):
+    """Return validated, signed geometry for BI AutoTrader long orders."""
+    return trade_geometry(entry, stop, tp1, tp2, "LONG")
+
+
 def autotrader_scan_once(poly_key, config=None):
     """
      Einmaliger Auto-Trader Scan-Durchlauf.
@@ -526,7 +536,8 @@ def autotrader_scan_once(poly_key, config=None):
     _autotrader_log(f" Starte Scan — Max {config['max_tickers_scan']} Tickers", "INFO")
 
     # Lade 55 Tage History über Grouped Daily
-    window_size = 50
+    # 50 completed analysis candles plus one separate trigger candle.
+    window_size = 51
     start_dt = datetime.now() - timedelta(days=window_size + 15)  # +Buffer für Wochenenden
     trading_days = []
     current_d = start_dt
@@ -591,6 +602,12 @@ def autotrader_scan_once(poly_key, config=None):
 
         bars = ticker_history[ticker]
         window = bars[-window_size:]
+        # The newest completed bar is the trigger/market bar. BI structure,
+        # range and score must only use information that existed beforehand.
+        analysis_window = window[:-1]
+        trigger_bar = window[-1]
+        if len(analysis_window) < 49:
+            continue
 
         # Skip wenn schon Position oder im Cooldown
         if ticker in position_tickers:
@@ -600,7 +617,7 @@ def autotrader_scan_once(poly_key, config=None):
 
         # BI V2 Analyse
         try:
-            bi_result = analyze_breakout_imminent(window, direction="long")
+            bi_result = analyze_breakout_imminent(analysis_window, direction="long")
             if len(bi_result) == 8:
                 is_valid, bi_score, bi_max, details, confidence, grade, sm_fires, sm_hits = bi_result
             else:
@@ -616,28 +633,24 @@ def autotrader_scan_once(poly_key, config=None):
             if grade == "D":
                 continue
 
-            # Score-Minimum (als Prozent)
+            # Raw score; gap penalties are applied before the final gate below.
             score_pct = (bi_score / bi_max * 100) if bi_max > 0 else 0
-            if score_pct < min_bi_pct:
-                continue
 
             # Smart Money Minimum
             if sm_hits < min_sm:
                 continue
 
-            result["signals_found"] += 1
-
             # Berechne Entry/Stop/TP (identisch zum Backtest)
             # True Range statt Simple Range (berücksichtigt Gap-Risiko)
-            _atr_bars = window[-5:]
+            _atr_bars = analysis_window[-6:]
             _tr_vals = []
             for _ai in range(len(_atr_bars)):
                 _h, _l = _atr_bars[_ai]["high"], _atr_bars[_ai]["low"]
                 _pc = _atr_bars[_ai - 1]["close"] if _ai > 0 else _atr_bars[_ai]["open"]
                 _tr_vals.append(max(_h - _l, abs(_h - _pc), abs(_l - _pc)))
             atr_5 = sum(_tr_vals) / len(_tr_vals) if _tr_vals else 0
-            range_high = max(b["high"] for b in window[-15:])
-            range_low = min(b["low"] for b in window[-15:])
+            range_high = max(b["high"] for b in analysis_window[-15:])
+            range_low = min(b["low"] for b in analysis_window[-15:])
             range_size = range_high - range_low
 
             # Qualitäts-Checks
@@ -646,8 +659,8 @@ def autotrader_scan_once(poly_key, config=None):
                 continue
 
             # Fix 1a: Gap/ATR Ratio - frühe Gapbewegungen filtern
-            prev_close = window[-2]["close"] if len(window) >= 2 else window[-1]["close"]
-            gap_pct = ((window[-1]["open"] - prev_close) / prev_close * 100) if prev_close > 0 else 0
+            prev_close = analysis_window[-1]["close"]
+            gap_pct = ((trigger_bar["open"] - prev_close) / prev_close * 100) if prev_close > 0 else 0
             atr_pct = (atr_5 / prev_close * 100) if prev_close > 0 else 3.0
             gap_to_atr = abs(gap_pct) / (atr_pct if atr_pct > 0 else 3.0)
 
@@ -657,6 +670,9 @@ def autotrader_scan_once(poly_key, config=None):
                 details.append(f"Gap/ATR={gap_to_atr:.1f} — Fade-Risiko")
             elif gap_to_atr < 0.3:
                 score_pct *= 0.7  # Gap zu klein = schwaches Signal
+
+            if score_pct < min_bi_pct:
+                continue
 
             # Entry/Stop/TP Berechnung
             breakout_level = range_high
@@ -673,25 +689,33 @@ def autotrader_scan_once(poly_key, config=None):
             # Wenn Kurs bereits >2% ueber Entry liegt, sind wir zu spaet dran —
             # LMT BUY wuerde entweder sofort als Market-Order fuellen (Chase) oder
             # auf unwahrscheinlichen Pullback warten. Signal droppen.
-            current_price_check = window[-1]["close"]
-            if current_price_check > entry_price * 1.02:
+            current_price_check = trigger_bar["close"]
+            chase_cap = entry_price + max(atr_5 * 0.50, (entry_price - stop_price) * 0.50)
+            if current_price_check > chase_cap or current_price_check <= stop_price:
                 continue
 
-            risk = abs(entry_price - stop_price)
-            # HIGH-2 FIX (Audit V1): R:R gewichtet berechnen (50% TP1 + 50% TP2),
-            # statt nur TP1. Reflektiert den tatsaechlichen Blended-Exit der Bracket-Order.
-            reward_blended = 0.5 * abs(tp1_price - entry_price) + 0.5 * abs(tp2_price - entry_price)
-            rr = round(reward_blended / risk, 2) if risk > 0 else 0
+            geometry = _autotrader_long_geometry(
+                entry_price,
+                stop_price,
+                tp1_price,
+                tp2_price,
+            )
+            if not geometry["valid"]:
+                continue
+            risk = geometry["risk"]
+            rr = geometry["rr"] or 0
 
             if rr < config.get("min_rr", 2.0):
                 continue
 
             # Trend Check (SMA20 > SMA50)
-            w_closes = [b["close"] for b in window]
+            w_closes = [b["close"] for b in analysis_window]
             sma20 = sum(w_closes[-20:]) / 20
             sma50 = sum(w_closes[-50:]) / 50 if len(w_closes) >= 50 else sma20
             if sma20 <= sma50 * 0.97:
                 continue
+
+            result["signals_found"] += 1
 
             qualified_signals.append({
                 "ticker": ticker,
@@ -710,7 +734,10 @@ def autotrader_scan_once(poly_key, config=None):
                 "tp1_source": "range_measured_move",
                 "tp2_source": "range_measured_move",
                 "range_pct": round(range_pct, 1),
-                "current_price": window[-1]["close"],
+                "current_price": trigger_bar["close"],
+                "trigger_bar_date": trigger_bar.get("date"),
+                "order_type": "STP_LMT",
+                "stop_limit": round(entry_price + max(0.01, entry_price * 0.003), 2),
             })
 
         except Exception as e:
@@ -766,11 +793,13 @@ def autotrader_scan_once(poly_key, config=None):
             main_action = "BUY"
             exit_action = "SELL"
 
-            # Parent: Limit Buy
+            # Parent: Stop-limit breakout order. A buy-limit above market can
+            # execute immediately and silently turn a trigger into a chase.
             parent = Order(
                 action=main_action,
-                orderType="LMT",
-                lmtPrice=round(signal["entry"], 2),
+                orderType="STP LMT",
+                auxPrice=round(signal["entry"], 2),
+                lmtPrice=round(signal["stop_limit"], 2),
                 totalQuantity=shares,
                 transmit=False
             )
@@ -951,7 +980,8 @@ def _bi_cache_load(direction="long"):
 
 
 def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total=0, detail=""):
-    """Speichert BI-Ergebnisse im Cache."""
+    """Speichert atomar; Live-Zwischenstaende ersetzen nie den Final-Cache."""
+    tmp_path = None
     try:
         cache = {
             "cached_at": datetime.now().isoformat(),
@@ -964,12 +994,38 @@ def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total
             "count": len(results),
             "results": results
         }
-        path = _bi_cache_path(direction)
-        with open(path, "w") as f:
+        final_path = _bi_cache_path(direction)
+        path = f"{final_path}.partial" if partial else final_path
+        tmp_dir = os.path.dirname(path) or "."
+        with tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False, suffix=".tmp") as f:
+            tmp_path = f.name
             json.dump(cache, f, default=str)
+        os.replace(tmp_path, path)
+        tmp_path = None
+        if not partial:
+            try:
+                os.unlink(f"{final_path}.partial")
+            except FileNotFoundError:
+                pass
         print(f"[BI {direction}] Cache gespeichert: {len(results)} Ergebnisse → {path}")
     except Exception as e:
         print(f"[BI {direction}] FEHLER beim Cache-Speichern: {e}")
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def _raise_on_systemic_analysis_failures(scan_name, attempts, errors):
+    """Reject a scan when a shared code/data defect breaks almost every candidate."""
+    attempts = int(attempts or 0)
+    errors = int(errors or 0)
+    if attempts >= 10 and errors >= 10 and errors * 5 >= attempts * 4:
+        raise RuntimeError(
+            f"{scan_name}: systemischer Analysefehler bei {errors}/{attempts} Kandidaten"
+        )
 
 
 def _bi_interleave_candidates_by_symbol(candidates):
@@ -1184,11 +1240,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
             except Exception as e:
                 _bi_progress_write(direction, "error", detail=f"Universe-Fehler: {str(e)[:50]}")
-                return
+                raise RuntimeError(f"BI {direction} Universe konnte nicht geladen werden") from e
 
         if not candidates:
             _bi_progress_write(direction, "error", detail="Keine Kandidaten verfügbar")
-            return
+            raise RuntimeError(f"BI {direction}: keine Kandidaten verfügbar")
 
         candidates = _bi_interleave_candidates_by_symbol(candidates)
         total = len(candidates)
@@ -1212,6 +1268,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _score_buckets = {"0-19": 0, "20-39": 0, "40-59": 0, "60-79": 0, "80-99": 0, "100+": 0}
         _short_trend_fail = 0
         _pattern_killed = 0
+        analysis_attempts = 0
+        analysis_errors = 0
 
         for candidate in candidates:
             # ── Stop-Signal prüfen ──
@@ -1330,6 +1388,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 no_data_count += 1
                 continue
 
+            analysis_attempts += 1
             try:
                 # ── Already-Broke-Out Filter: Aktie hat heute schon >15% gemacht → kein "Imminent" mehr ──
                 # Breakout IMMINENT = BEVOR der Breakout passiert, nicht NACHDEM er schon +30% gemacht hat
@@ -1534,6 +1593,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     min_bars=30,
                     lookback=90,
                 )
+                _vrvp_atr = calculate_wilder_atr(all_bars, period=14, lookback=90) or atr_5
                 _setup = apply_vrvp_to_trade_setup(
                     {
                         "Entry": candidate.get("Entry"),
@@ -1549,7 +1609,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _vrvp,
                     direction=direction.upper(),
                     asset_type="stock_swing",
-                    atr=atr_5,
+                    atr=_vrvp_atr,
                 )
                 candidate["Entry"] = _setup.get("Entry", candidate.get("Entry"))
                 candidate["StopLoss"] = _setup.get("StopLoss", candidate.get("StopLoss"))
@@ -1766,10 +1826,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     )
                     print(f"[BI {direction}] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
             except Exception as e:
+                analysis_errors += 1
                 print(f"[BI {direction}] Error analyzing {ticker}: {e}")
                 continue
 
         # Finale Sortierung + Speichern
+        _raise_on_systemic_analysis_failures(
+            f"BI {direction}", analysis_attempts, analysis_errors
+        )
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
         _bi_cache_save(
             results,
@@ -1798,6 +1862,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
     except Exception as e:
         _bi_progress_write(direction, "error", detail=f"Fehler: {str(e)[:100]}")
+        raise
 
 
 def _biotech_config_load():
@@ -1840,14 +1905,41 @@ def _biotech_progress_read():
         return None
 
 
-def _biotech_cache_save(results):
+def _biotech_cache_save(results, *, partial=False, checked=0, total=0, detail=""):
+    """Speichert atomar; Live-Zwischenstaende ersetzen nie den Final-Cache."""
+    tmp_path = None
     try:
-        path = _biotech_cache_file()
-        with open(path, "w") as f:
-            json.dump({"cached_at": datetime.now().isoformat(), "results": results, "timestamp": time.time()}, f, default=str)
+        final_path = _biotech_cache_file()
+        path = f"{final_path}.partial" if partial else final_path
+        payload = {
+            "cached_at": datetime.now().isoformat(),
+            "results": results,
+            "timestamp": time.time(),
+            "partial": bool(partial),
+            "checked": int(checked or 0),
+            "total": int(total or 0),
+            "detail": detail or "",
+        }
+        tmp_dir = os.path.dirname(path) or "."
+        with tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False, suffix=".tmp") as f:
+            tmp_path = f.name
+            json.dump(payload, f, default=str)
+        os.replace(tmp_path, path)
+        tmp_path = None
+        if not partial:
+            try:
+                os.unlink(f"{final_path}.partial")
+            except FileNotFoundError:
+                pass
         print(f"[Biotech] Cache gespeichert: {len(results)} Ergebnisse → {path}")
     except Exception as e:
         print(f"[Biotech] FEHLER beim Cache-Speichern: {e}")
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def _biotech_cache_load(max_age_hours=2):
@@ -2372,7 +2464,23 @@ def _biotech_technical_score(poly_key, ticker):
             return {"technical_score": 0, "details": {}}
 
         bars = resp.json().get("results", [])
-        if not bars or len(bars) < 20:
+        normalized_bars = []
+        for raw_bar in bars if isinstance(bars, list) else []:
+            bar = dict(raw_bar)
+            try:
+                timestamp_ms = float(bar.get("t") or 0)
+                if timestamp_ms > 0:
+                    import pytz
+                    et_zone = pytz.timezone("US/Eastern")
+                    bar["date"] = datetime.fromtimestamp(
+                        timestamp_ms / 1000.0,
+                        tz=dt.timezone.utc,
+                    ).astimezone(et_zone).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OverflowError):
+                pass
+            normalized_bars.append(bar)
+        bars = _bi_strip_partial_bar(normalized_bars)
+        if not bars or len(bars) < 21:
             return {"technical_score": 0, "details": {}}
 
         tech_score = 0
@@ -2384,9 +2492,11 @@ def _biotech_technical_score(poly_key, ticker):
         lows = [b["l"] for b in bars]
 
         current_price = closes[-1]
-        avg_vol_20 = sum(volumes[-20:]) / 20
-        avg_vol_50 = sum(volumes[-min(50, len(volumes)):]) / min(50, len(volumes))
         last_vol = volumes[-1]
+        prior_20_volumes = volumes[-21:-1]
+        avg_vol_20 = sum(prior_20_volumes) / len(prior_20_volumes)
+        prior_50_volumes = volumes[-51:-1] if len(volumes) >= 51 else volumes[:-1]
+        avg_vol_50 = sum(prior_50_volumes) / max(1, len(prior_50_volumes))
 
         # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
         rvol = last_vol / max(1, avg_vol_20)
@@ -2948,11 +3058,12 @@ def _biotech_background_scan(poly_key):
                                 detail=f"{total} Biotech-Aktien gefunden, starte Full Scan...")
 
         if total == 0:
-            _biotech_progress_write("done", checked=0, total=0, hits=0, detail="Keine Biotech-Aktien gefunden")
-            return
+            raise RuntimeError("Biotech-Universum ist leer")
 
         results = []
         checked = 0
+        analysis_attempts = 0
+        analysis_errors = 0
 
         for stock in universe:
             # Stop-Signal prüfen
@@ -2962,7 +3073,13 @@ def _biotech_background_scan(poly_key):
                 # Bisherige Ergebnisse trotzdem speichern
                 if results:
                     results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
-                    _biotech_cache_save(results)
+                    _biotech_cache_save(
+                        results,
+                        partial=True,
+                        checked=checked,
+                        total=total,
+                        detail=f"Manuell gestoppt bei {checked}/{total}",
+                    )
                 _biotech_clear_stop()
                 return
 
@@ -2987,6 +3104,7 @@ def _biotech_background_scan(poly_key):
                 _biotech_progress_write("running", checked=checked, total=total,
                                         hits=len(results), detail=f"Analysiere {ticker}...")
 
+            analysis_attempts += 1
             try:
                 # A) News + Catalyst Scan
                 news_data = _scan_biotech_news(poly_key, ticker, limit=5)
@@ -3434,15 +3552,25 @@ def _biotech_background_scan(poly_key):
                 # V2.2: Live-Zwischenergebnisse
                 if len(results) % 3 == 0 or len(results) == 1:
                     _live = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
-                    _biotech_cache_save(_live)
+                    _biotech_cache_save(
+                        _live,
+                        partial=True,
+                        checked=checked,
+                        total=total,
+                        detail=f"Zwischenstand: {checked}/{total} analysiert",
+                    )
                     print(f"[BIOTECH] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
 
             except Exception as _bio_err:
+                analysis_errors += 1
                 import traceback
                 print(f"[BIOTECH] Fehler bei {ticker}: {_bio_err}\n{traceback.format_exc()}")
                 continue
 
         # Finale Sortierung + Speichern
+        _raise_on_systemic_analysis_failures(
+            "Biotech Full", analysis_attempts, analysis_errors
+        )
         results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
         _biotech_cache_save(results)
 
@@ -3453,6 +3581,7 @@ def _biotech_background_scan(poly_key):
 
     except Exception as e:
         _biotech_progress_write("error", detail=f"Fehler: {str(e)[:150]}")
+        raise
 
 
 def _biotech_universe_cache_save(universe):
@@ -3519,6 +3648,8 @@ def _biotech_quick_scan(poly_key):
         existing_map = {r["Ticker"]: r for r in existing}
         results = []
         checked = 0
+        analysis_attempts = 0
+        analysis_errors = 0
 
         _biotech_clear_stop()  # Altes Stop-Signal löschen
         for ticker in all_tickers:
@@ -3528,7 +3659,13 @@ def _biotech_quick_scan(poly_key):
                                         hits=len(results), detail=f" Quick Scan gestoppt bei {checked}/{total}")
                 if results:
                     results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
-                    _biotech_cache_save(results)
+                    _biotech_cache_save(
+                        results,
+                        partial=True,
+                        checked=checked,
+                        total=total,
+                        detail=f"Quick Scan gestoppt bei {checked}/{total}",
+                    )
                 _biotech_clear_stop()
                 return
 
@@ -3537,6 +3674,7 @@ def _biotech_quick_scan(poly_key):
                 _biotech_progress_write("running", checked=checked, total=total,
                                         hits=len(results), detail=f" Quick: {ticker}...")
 
+            analysis_attempts += 1
             try:
                 _in_catalyst_calendar = ticker.upper() in catalyst_calendar_tickers
                 # NUR News neu scannen
@@ -3684,9 +3822,13 @@ def _biotech_quick_scan(poly_key):
                             "BPIQ_Catalysts": bpiq_data.get("catalyst_readouts", [])[:5],
                         })
             except Exception as _bio_q_err:
+                analysis_errors += 1
                 print(f"[BIOTECH-QUICK] Fehler bei {ticker}: {_bio_q_err}")
                 continue
 
+        _raise_on_systemic_analysis_failures(
+            "Biotech Quick", analysis_attempts, analysis_errors
+        )
         results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
         _biotech_cache_save(results)
 
@@ -3697,6 +3839,7 @@ def _biotech_quick_scan(poly_key):
 
     except Exception as e:
         _biotech_progress_write("error", detail=f"Quick Scan Fehler: {str(e)[:150]}")
+        raise
 
 
 def _compute_biotech_technical_from_bars(bars):

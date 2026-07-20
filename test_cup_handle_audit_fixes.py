@@ -111,6 +111,8 @@ def _mock_mail_env(monkeypatch, allowed):
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **k: None)
     monkeypatch.setattr(api, "_email_dedupe_remaining", lambda *a, **k: 0)
     monkeypatch.setattr(api, "_email_dedupe_mark", lambda *a, **k: None)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *a, **k: True)
+    monkeypatch.setattr(api, "_email_dedupe_release", lambda *a, **k: True)
     monkeypatch.setattr(api, "_record_email_event", lambda *a, **k: None)
     monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *a, **k: None)
     # Kalender deterministisch: "heute ist US-Handelstag" (kein Wochenend-Flake)

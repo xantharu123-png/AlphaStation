@@ -16,7 +16,14 @@ def _candidate(symbol="COIN", score=86, entry_score=76, action="LONG_TRIGGER", s
         "risk_flags": [],
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.18,
-        "btc_context": {"tailwind": True},
+        "btc_context": {
+            "tailwind": True,
+            "allows_long": True,
+            "btc_24h": 0.2,
+            "btc_7d": 1.0,
+            "alpha_24h": 1.0,
+            "data_status": "ok",
+        },
     }
 
 

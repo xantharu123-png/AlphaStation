@@ -1,6 +1,7 @@
 import time
 from datetime import datetime, timedelta, timezone
 
+import modules.new_listing_scanner as new_listing_scanner
 from modules.new_listing_scanner import (
     _attach_announcement_contracts,
     _clean_listing_base_symbol,
@@ -235,6 +236,44 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
     assert signal["grade"] in ("S", "A")
     assert signal["signal_quality"] == "tradeable"
     assert _is_tradeable_short_signal(signal) is True
+
+
+def test_new_listing_short_rejects_invalid_post_vrvp_geometry(monkeypatch):
+    monkeypatch.setattr(
+        new_listing_scanner,
+        "apply_vrvp_to_trade_setup",
+        lambda setup, *_args, **_kwargs: {
+            **setup,
+            "entry": 97,
+            "stop": 101,
+            "tp1": 90,
+            "tp2": 92,
+        },
+    )
+
+    signal = generate_short_signal(
+        "BADLEVELUSDT",
+        {
+            "ath": 100,
+            "current_price": 97,
+            "pump_pct": 80,
+            "from_ath_pct": 3.0,
+            "momentum_recent": -0.8,
+            "current_red_streak": 1,
+            "avg_upper_wick_pct": 25,
+            "micro_trigger_ok": True,
+            "micro_score": 75,
+            "micro_stop_loss": 101,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal is None
 
 
 def test_missing_listing_context_is_watch_only_even_if_crack_is_confirmed():

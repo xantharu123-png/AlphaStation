@@ -77,8 +77,9 @@ def test_email_status_reports_common_stock_guard_without_keys(tmp_path, monkeypa
     monkeypatch.setattr(api, "COMMON_STOCK_UNIVERSE_CACHE", str(cache_file))
     monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
     monkeypatch.setattr(api, "_COMMON_STOCK_UNIVERSE_MEM", {"loaded_at": 0, "tickers": None, "source": "not_loaded"})
+    monkeypatch.setattr(api, "_require_admin", lambda authorization: ({}, "admin@example.com"))
 
-    status = api.get_email_alert_status()
+    status = api.get_email_alert_status("Bearer admin-token")
 
     assert status["common_stock_guard"]["available"] is True
     assert status["common_stock_guard"]["ticker_count"] == 1

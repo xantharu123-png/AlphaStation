@@ -221,14 +221,9 @@ def test_early_mover_swing_does_not_require_5m_but_intraday_does(monkeypatch):
     assert "early_mover_wait_entry_confirmation" in _early_mover_long_rule_reasons(row)
 
 
-def test_backtest_simulation_uses_blended_tp1_tp2_target():
-    bars = [
-        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
-        {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
-        {"date": "2026-01-03", "open": 106, "high": 111, "low": 104, "close": 110},
-    ]
-    strategy = {
-        "direction": "long",
+def _two_target_strategy(direction="long"):
+    return {
+        "direction": direction,
         "entry": "at_close",
         "stop_pct": 0.05,
         "tp1_rr": 1.0,
@@ -236,9 +231,60 @@ def test_backtest_simulation_uses_blended_tp1_tp2_target():
         "max_hold_days": 3,
     }
 
-    trade = simulate_trade(bars, 0, strategy)
+
+def test_backtest_does_not_exit_at_untraded_average_target():
+    bars = [
+        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
+        {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
+        {"date": "2026-01-03", "open": 106, "high": 111, "low": 104, "close": 110},
+    ]
+
+    trade = simulate_trade(bars, 0, _two_target_strategy())
 
     assert trade is not None
-    assert trade["target_model"] == "blended_tp1_tp2"
+    assert trade["target_model"] == "50_50_tp1_tp2"
+    assert trade["exit_reason"] == "TP1+EOD"
+    assert trade["tp1_hit"] is True
+    assert trade["r_multiple"] == 1.45
+
+
+def test_backtest_blends_actual_tp1_and_tp2_fills_only_after_tp2_trades():
+    bars = [
+        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
+        {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
+        {"date": "2026-01-03", "open": 106, "high": 116, "low": 104, "close": 115},
+    ]
+
+    trade = simulate_trade(bars, 0, _two_target_strategy())
+
+    assert trade is not None
     assert trade["exit_reason"] == "BLENDED_TP"
-    assert trade["r_multiple"] == 2.0
+    assert trade["r_multiple"] == 1.96
+
+
+def test_backtest_tp1_then_breakeven_stop_keeps_only_partial_profit():
+    bars = [
+        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
+        {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
+        {"date": "2026-01-03", "open": 104, "high": 106, "low": 99, "close": 100},
+    ]
+
+    trade = simulate_trade(bars, 0, _two_target_strategy())
+
+    assert trade is not None
+    assert trade["exit_reason"] == "TP1_STOP"
+    assert trade["r_multiple"] == 0.46
+
+
+def test_backtest_short_partial_exit_is_directionally_symmetric():
+    bars = [
+        {"date": "2026-01-01", "open": 101, "high": 102, "low": 99, "close": 100},
+        {"date": "2026-01-02", "open": 99.8, "high": 101, "low": 94, "close": 95},
+        {"date": "2026-01-03", "open": 94, "high": 96, "low": 84, "close": 85},
+    ]
+
+    trade = simulate_trade(bars, 0, _two_target_strategy(direction="short"))
+
+    assert trade is not None
+    assert trade["exit_reason"] == "BLENDED_TP"
+    assert trade["r_multiple"] == 1.96

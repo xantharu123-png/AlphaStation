@@ -17,6 +17,8 @@ import statistics
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from modules.trade_levels import trade_geometry
+
 
 PENNY_MIN_PRICE = 0.20
 PENNY_MAX_PRICE = 5.00
@@ -25,6 +27,9 @@ PENNY_TRIGGER_MAX_AGE_SECONDS = 360.0
 PENNY_MIN_TRADE_SCORE = 80.0
 PENNY_NEAREST_BARRIER_MIN_R = 1.35
 PENNY_MAX_ENTRY_DRIFT_R = 0.35
+PENNY_DEFAULT_SLIPPAGE_BPS = 15.0
+PENNY_MIN_NET_TP1_RR = 1.0
+PENNY_MIN_NET_EFFECTIVE_RR = 1.5
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -92,6 +97,31 @@ def _valid_bars(bars: Sequence[Dict[str, Any]]) -> List[Dict[str, float]]:
             continue
         result.append(item)
     return result
+
+
+def _timestamp_seconds(value: Any) -> float:
+    timestamp = _num(value)
+    while timestamp > 10_000_000_000:
+        timestamp /= 1000.0
+    return timestamp
+
+
+def _completed_bars(
+    bars: Sequence[Dict[str, Any]],
+    *,
+    timeframe_seconds: float,
+    now_ts: float,
+) -> List[Dict[str, float]]:
+    """Return sorted, de-duplicated bars whose interval has fully closed."""
+    completed: Dict[float, Dict[str, float]] = {}
+    for item in _valid_bars(bars):
+        timestamp = _timestamp_seconds(item.get("timestamp"))
+        if timestamp <= 0 or timestamp + timeframe_seconds > now_ts:
+            continue
+        normalized = dict(item)
+        normalized["timestamp"] = timestamp
+        completed[timestamp] = normalized
+    return [completed[key] for key in sorted(completed)]
 
 
 def grade_for_score(score: Any) -> str:
@@ -168,7 +198,8 @@ def analyze_penny_intraday(
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Analyze only completed chronological 5-minute bars."""
-    data = _valid_bars(bars)
+    now_value = float(now_ts if now_ts is not None else time.time())
+    data = _completed_bars(bars, timeframe_seconds=300.0, now_ts=now_value)
     result: Dict[str, Any] = {
         "data_ok": False,
         "fresh": False,
@@ -246,9 +277,6 @@ def analyze_penny_intraday(
     )
 
     timestamp = latest["timestamp"]
-    if timestamp > 10_000_000_000:
-        timestamp /= 1000.0
-    now_value = float(now_ts if now_ts is not None else time.time())
     candle_closed_at = timestamp + 300.0 if timestamp > 0 else 0.0
     age_seconds = max(0.0, now_value - candle_closed_at) if candle_closed_at else None
     fresh = bool(age_seconds is not None and age_seconds <= PENNY_TRIGGER_MAX_AGE_SECONDS)
@@ -364,6 +392,8 @@ def build_penny_trade_plan(
     *,
     extra_resistances: Optional[Sequence[Dict[str, Any]]] = None,
     entry_price: Optional[float] = None,
+    spread_bps: float = 0.0,
+    slippage_bps: float = PENNY_DEFAULT_SLIPPAGE_BPS,
 ) -> Dict[str, Any]:
     """Build stop and targets from actual invalidation/barrier structure."""
     entry = _num(entry_price, _num(intraday.get("price")))
@@ -451,25 +481,71 @@ def build_penny_trade_plan(
             },
         }
 
-    tp1_price = _num(tp1.get("price"))
-    tp2_price = _num(tp2.get("price"))
-    rr_tp1 = (tp1_price - entry) / risk
-    rr_tp2 = (tp2_price - entry) / risk
-    effective_rr = rr_tp1 * 0.5 + rr_tp2 * 0.5
+    entry = _round_price(entry)
+    stop = _round_price(stop)
+    tp1_price = _round_price(tp1.get("price"))
+    tp2_price = _round_price(tp2.get("price"))
+    geometry = trade_geometry(entry, stop, tp1_price, tp2_price, "LONG")
+    if not geometry.get("valid"):
+        return {
+            "valid": False,
+            "blockers": ["invalid_trade_geometry"],
+            "geometry_errors": geometry.get("errors", []),
+        }
+    risk = float(geometry["risk"])
+    rr_tp1 = float(geometry["rr_tp1"])
+    rr_tp2 = float(geometry["rr_tp2"])
+    gross_effective_rr = float(geometry["rr"])
+    round_trip_cost = entry * (
+        max(0.0, _num(spread_bps)) + 2.0 * max(0.0, _num(slippage_bps))
+    ) / 10_000.0
+    net_rr_tp1 = (tp1_price - entry - round_trip_cost) / risk
+    net_rr_tp2 = (tp2_price - entry - round_trip_cost) / risk
+    net_effective_rr = net_rr_tp1 * 0.5 + net_rr_tp2 * 0.5
+    cost_blockers: List[str] = []
+    if net_rr_tp1 < PENNY_MIN_NET_TP1_RR:
+        cost_blockers.append("net_tp1_reward_below_cost_adjusted_minimum")
+    if net_effective_rr < PENNY_MIN_NET_EFFECTIVE_RR:
+        cost_blockers.append("net_effective_rr_below_cost_adjusted_minimum")
+    if cost_blockers:
+        return {
+            "valid": False,
+            "blockers": cost_blockers,
+            "entry": entry,
+            "stop_loss": stop,
+            "tp1": tp1_price,
+            "tp2": tp2_price,
+            "risk": _round_price(risk),
+            "gross_rr": round(gross_effective_rr, 2),
+            "net_rr": round(net_effective_rr, 2),
+            "gross_rr_tp1": round(rr_tp1, 2),
+            "gross_rr_tp2": round(rr_tp2, 2),
+            "net_rr_tp1": round(net_rr_tp1, 2),
+            "net_rr_tp2": round(net_rr_tp2, 2),
+            "round_trip_cost": _round_price(round_trip_cost),
+            "cost_model": "spread plus two-sided slippage",
+        }
     return {
         "valid": True,
         "blockers": [],
         "direction": "LONG",
-        "entry": _round_price(entry),
-        "stop": _round_price(stop),
-        "stop_loss": _round_price(stop),
-        "tp1": _round_price(tp1_price),
-        "tp2": _round_price(tp2_price),
+        "entry": entry,
+        "stop": stop,
+        "stop_loss": stop,
+        "tp1": tp1_price,
+        "tp2": tp2_price,
         "risk": _round_price(risk),
-        "rr": round(effective_rr, 2),
-        "live_rr": round(effective_rr, 2),
-        "rr_tp1": round(rr_tp1, 2),
-        "rr_tp2": round(rr_tp2, 2),
+        "rr": round(net_effective_rr, 2),
+        "live_rr": round(net_effective_rr, 2),
+        "rr_tp1": round(net_rr_tp1, 2),
+        "rr_tp2": round(net_rr_tp2, 2),
+        "gross_rr": round(gross_effective_rr, 2),
+        "gross_rr_tp1": round(rr_tp1, 2),
+        "gross_rr_tp2": round(rr_tp2, 2),
+        "round_trip_cost": _round_price(round_trip_cost),
+        "spread_bps": round(max(0.0, _num(spread_bps)), 1),
+        "slippage_bps": round(max(0.0, _num(slippage_bps)), 1),
+        "cost_model": "spread plus two-sided slippage",
         "stop_source": stop_source,
         "tp1_source": str(tp1.get("source") or "structural resistance"),
         "tp2_source": str(tp2.get("source") or "structural resistance"),
@@ -579,6 +655,7 @@ def evaluate_penny_candidate(
         daily_bars,
         extra_resistances=extra_resistances,
         entry_price=execution_price,
+        spread_bps=spread_bps,
     )
     trade_score = _clamp(pump_potential * 0.35 + entry_quality * 0.45 + (100.0 - dump_risk) * 0.20)
     hard_blockers: List[str] = []
@@ -793,10 +870,11 @@ def evaluate_penny_signal_outcome(
     stop = _num(stop)
     tp1 = _num(tp1)
     tp2 = _num(tp2)
-    risk = entry - stop
+    geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
     data = _valid_bars(future_bars)
-    if entry <= 0 or stop <= 0 or risk <= 0 or not (tp2 > tp1 > entry) or not data:
+    if not geometry.get("valid") or not data:
         return {"valid": False, "outcome": "INVALID", "net_r": None}
+    risk = float(geometry["risk"])
 
     round_trip_cost = entry * (max(0.0, spread_bps) + 2.0 * max(0.0, slippage_bps)) / 10_000.0
     tp1_seen = False

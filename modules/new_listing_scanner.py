@@ -35,7 +35,12 @@ import html as html_lib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
+from modules.vrvp_levels import (
+    apply_vrvp_to_trade_setup,
+    build_vrvp_structure,
+    calculate_wilder_atr,
+)
+from modules.trade_levels import trade_geometry
 
 try:
     import requests as req
@@ -267,6 +272,9 @@ def fetch_cryptocom_ticker(instrument_name):
             ),
             "change_24h": float(t.get("c", 0)) * 100 if t.get("c") else 0,
             "open_interest": float(t.get("oi", 0)),
+            "open_interest_available": "oi" in t and t.get("oi") not in (None, ""),
+            "funding_available": False,
+            "long_short_ratio_available": False,
             "timestamp": t.get("t", 0),
         }
     return None
@@ -362,6 +370,31 @@ def fetch_bitget_orderbook(symbol, depth=20):
 
 
 MEXC_FUTURES_BASE = "https://contract.mexc.com/api/v1/contract"
+_MEXC_CONTRACT_SIZE_CACHE = {"ts": 0.0, "data": {}}
+
+
+def fetch_mexc_contract_sizes(force=False):
+    """Return MEXC contract multipliers keyed by the exchange symbol."""
+    now = time.time()
+    cached = _MEXC_CONTRACT_SIZE_CACHE.get("data") or {}
+    if cached and not force and now - float(_MEXC_CONTRACT_SIZE_CACHE.get("ts") or 0) < 900:
+        return dict(cached)
+
+    data = _api_get(f"{MEXC_FUTURES_BASE}/detail")
+    if not data or not data.get("success"):
+        return dict(cached)
+    sizes = {}
+    for contract in data.get("data", []) or []:
+        symbol = str(contract.get("symbol") or "")
+        try:
+            contract_size = float(contract.get("contractSize") or 0)
+        except (TypeError, ValueError):
+            contract_size = 0.0
+        if symbol and contract_size > 0:
+            sizes[symbol] = contract_size
+    if sizes:
+        _MEXC_CONTRACT_SIZE_CACHE.update({"ts": now, "data": sizes})
+    return dict(sizes or cached)
 
 def fetch_mexc_futures_instruments():
     """
@@ -373,9 +406,16 @@ def fetch_mexc_futures_instruments():
         return []
 
     contracts = data.get("data", [])
+    contract_sizes = {}
     perps = []
     for c in contracts:
         if c.get("quoteCoin") == "USDT" and c.get("state") == 0:  # state 0 = aktiv
+            try:
+                contract_size = float(c.get("contractSize") or 0)
+            except (TypeError, ValueError):
+                contract_size = 0.0
+            if c.get("symbol") and contract_size > 0:
+                contract_sizes[c.get("symbol")] = contract_size
             perps.append({
                 "symbol": c.get("symbol", ""),
                 "base": c.get("baseCoin", ""),
@@ -386,7 +426,10 @@ def fetch_mexc_futures_instruments():
                 "exchange": "mexc",
                 "is_new": c.get("isNew", False),
                 "create_time": c.get("createTime", 0),
+                "contract_size": contract_size or None,
             })
+    if contract_sizes:
+        _MEXC_CONTRACT_SIZE_CACHE.update({"ts": time.time(), "data": contract_sizes})
     return perps
 
 
@@ -411,15 +454,23 @@ def fetch_mexc_ticker(symbol):
         contract_size = float(contract_size_raw) if contract_size_raw not in (None, "") else 0.0
     except (TypeError, ValueError):
         contract_size = 0.0
+    if contract_size <= 0:
+        contract_size = float(fetch_mexc_contract_sizes().get(symbol) or 0)
+    price = float(t.get("lastPrice", 0))
     if contract_size > 0:
         open_interest = oi_contracts * contract_size
+        open_interest_usd = open_interest * price
         oi_usd_estimate = False
+        oi_data_status = "ok"
     else:
-        open_interest = oi_contracts
+        # Raw contract counts are not comparable across MEXC instruments.
+        open_interest = 0.0
+        open_interest_usd = 0.0
         oi_usd_estimate = True
+        oi_data_status = "missing_contract_size"
 
     return {
-        "price": float(t.get("lastPrice", 0)),
+        "price": price,
         "bid": float(t.get("bid1", 0)),
         "ask": float(t.get("ask1", 0)),
         "high_24h": float(t.get("high24Price", 0)),
@@ -428,8 +479,14 @@ def fetch_mexc_ticker(symbol):
         "volume_usd_24h": float(t.get("amount24", 0)),
         "change_24h": float(t.get("riseFallRate", 0)) * 100,
         "open_interest": open_interest,
+        "open_interest_usd": open_interest_usd,
+        "contract_size": contract_size or None,
         "oi_usd_estimate": oi_usd_estimate,
+        "oi_data_status": oi_data_status,
         "funding_rate": float(t.get("fundingRate", 0)),
+        "open_interest_available": oi_data_status == "ok",
+        "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
+        "long_short_ratio_available": False,
         "timestamp": t.get("timestamp", 0),
     }
 
@@ -519,6 +576,9 @@ def fetch_binance_ticker(symbol):
         "open_interest": 0,
         "funding_rate": 0,
         "long_short_ratio": 0,
+        "open_interest_available": False,
+        "funding_available": False,
+        "long_short_ratio_available": False,
         "timestamp": int(data.get("closeTime", 0)),
     }
 
@@ -527,6 +587,7 @@ def fetch_binance_ticker(symbol):
         oi_data = _api_get(f"{BINANCE_FUTURES_BASE}/openInterest", {"symbol": symbol})
         if oi_data and isinstance(oi_data, dict):
             result["open_interest"] = float(oi_data.get("openInterest", 0))
+            result["open_interest_available"] = "openInterest" in oi_data
     except Exception:
         pass
 
@@ -535,6 +596,7 @@ def fetch_binance_ticker(symbol):
         fr_data = _api_get(f"{BINANCE_FUTURES_BASE}/premiumIndex", {"symbol": symbol})
         if fr_data and isinstance(fr_data, dict):
             result["funding_rate"] = float(fr_data.get("lastFundingRate", 0))
+            result["funding_available"] = "lastFundingRate" in fr_data
     except Exception:
         pass
 
@@ -544,6 +606,7 @@ def fetch_binance_ticker(symbol):
                            {"symbol": symbol, "period": "1h", "limit": 1})
         if ls_data and isinstance(ls_data, list) and len(ls_data) > 0:
             result["long_short_ratio"] = float(ls_data[0].get("longShortRatio", 0))
+            result["long_short_ratio_available"] = "longShortRatio" in ls_data[0]
     except Exception:
         pass
 
@@ -634,6 +697,9 @@ def fetch_bitget_ticker(symbol):
         "change_24h": float(t.get("change24h", 0)) * 100,
         "open_interest": float(t.get("holdingAmount", 0)),
         "funding_rate": float(t.get("fundingRate", 0)),
+        "open_interest_available": "holdingAmount" in t and t.get("holdingAmount") not in (None, ""),
+        "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
+        "long_short_ratio_available": False,
         "timestamp": int(t.get("ts", 0)),
     }
 
@@ -1040,6 +1106,20 @@ def detect_new_listings():
                 except Exception:
                     is_first_run = True  # Korrupter Cache = wie erster Lauf
 
+            cache_plausible = (
+                is_first_run
+                or len(cached_symbols) < 20
+                or len(current_symbols) >= max(10, int(len(cached_symbols) * 0.80))
+            )
+            if not cache_plausible:
+                log.warning(
+                    "NLS: Partielle %s-Antwort vermutet (%s statt zuvor %s Symbole); "
+                    "Cache und Diff bleiben unveraendert",
+                    ex_name,
+                    len(current_symbols),
+                    len(cached_symbols),
+                )
+
             if is_first_run:
                 # ══ ERSTER LAUF: Cache seeden, NICHTS als "neu" aus Diff melden ══
                 # Beim allerersten Lauf sind alle Symbole unbekannt. Wir SEEDEN
@@ -1048,7 +1128,7 @@ def detect_new_listings():
                 log.info(f"🌱 NLS: Erster Lauf für {ex_name} — "
                          f"seede Cache mit {len(current_symbols)} Symbolen "
                          f"(KEIN Cache-Diff, nur Timestamp-basierte Erkennung)")
-            else:
+            elif cache_plausible:
                 # ══ FOLGE-LAUF: Cache-Diff erkennt wirklich neue Symbole ══
                 new_symbols = current_symbols - cached_symbols
                 if new_symbols:
@@ -1061,7 +1141,7 @@ def detect_new_listings():
                         all_new.extend(new_listings)
 
             # Cache aktualisieren (immer, auch beim ersten Lauf)
-            if current_symbols:
+            if current_symbols and cache_plausible:
                 cache_file.write_text(json.dumps({
                     "symbols": list(current_symbols),
                     "last_update": datetime.now(timezone.utc).isoformat(),
@@ -1244,6 +1324,24 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
             for c in candles[-72:]
         ],
     }
+    ticker = ticker if isinstance(ticker, dict) else {}
+    spread_available = bool(
+        _to_float(ticker.get("bid")) > 0
+        and _to_float(ticker.get("ask")) > 0
+        and _to_float(ticker.get("ask")) >= _to_float(ticker.get("bid"))
+    )
+    depth_available = bool(
+        isinstance(book, dict)
+        and (book.get("bids") or book.get("asks"))
+    )
+    oi_available = bool(
+        ticker.get("open_interest_available")
+        or ticker.get("oi_data_status") == "ok"
+    )
+    funding_available = bool(ticker.get("funding_available"))
+    long_short_available = bool(ticker.get("long_short_ratio_available"))
+    momentum_available = False
+    btc_context_available = False
 
     # ═══════════════════════════════════════════════════════════════════════
     # 1. PUMP MAGNITUDE (0-20)
@@ -1311,9 +1409,13 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
 
         avg_recent = sum(recent_returns) / len(recent_returns) if recent_returns else 0
         avg_earlier = sum(earlier_returns) / len(earlier_returns) if earlier_returns else 0
+        momentum_available = bool(recent_returns and earlier_returns)
 
-        # Momentum-Verlust: früher positiv, jetzt negativ oder flacher
-        if avg_earlier > 0.5 and avg_recent < -0.5:
+        # Momentum decay needs two real comparison windows. Missing history is
+        # missing data, not evidence of exhaustion.
+        if not momentum_available:
+            pts = 0
+        elif avg_earlier > 0.5 and avg_recent < -0.5:
             pts = 15  # Klarer Momentum-Wechsel
         elif avg_earlier > 0.3 and avg_recent < 0:
             pts = 12
@@ -1327,7 +1429,10 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         score += pts
         pump_data["momentum_recent"] = round(avg_recent, 3)
         pump_data["momentum_earlier"] = round(avg_earlier, 3)
-        details.append(f" Momentum: {avg_earlier:+.2f}%/h → {avg_recent:+.2f}%/h → {pts}/15")
+        if momentum_available:
+            details.append(f" Momentum: {avg_earlier:+.2f}%/h → {avg_recent:+.2f}%/h → {pts}/15")
+        else:
+            details.append(" Momentum: Vergleichsfenster unvollständig")
     else:
         details.append(" Momentum: zu wenig Candles (<6)")
 
@@ -1401,38 +1506,41 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     # 6. SPREAD & DEPTH (0-10)
     #    Weiter Spread + dünnes Orderbuch = Liquidität trocknet aus
     # ═══════════════════════════════════════════════════════════════════════
-    pts = 0
-    if ticker and ticker.get("bid") and ticker.get("ask"):
+    spread_pts = 0
+    depth_pts = 0
+    if spread_available:
         bid = ticker["bid"]
         ask = ticker["ask"]
         mid_price = (bid + ask) / 2
         spread_pct = (ask - bid) / mid_price * 100 if mid_price > 0 else 0
 
         if spread_pct >= 1.5:
-            pts = 7
+            spread_pts = 7
         elif spread_pct >= 0.5:
-            pts = 4
+            spread_pts = 4
         elif spread_pct >= 0.1:
-            pts = 1
+            spread_pts = 1
 
         pump_data["spread_pct"] = round(spread_pct, 3)
-        details.append(f" Spread: {spread_pct:.2f}% → {pts}/10")
+        details.append(f" Spread: {spread_pct:.2f}% → {spread_pts}/7")
     else:
         details.append(" Spread: keine Daten")
 
-    if book:
+    if depth_available:
         bid_depth = sum(p * q for p, q in book.get("bids", []))
         ask_depth = sum(p * q for p, q in book.get("asks", []))
         total_depth = bid_depth + ask_depth
         pump_data["book_depth_usd"] = round(total_depth, 0)
 
         if total_depth < 2000:
-            pts += 3
+            depth_pts = 3
         elif total_depth < 5000:
-            pts += 1
-        details.append(f"   Depth: ${total_depth:,.0f} → +{min(3, max(0, pts-4))}/3")
+            depth_pts = 1
+        details.append(f"   Depth: ${total_depth:,.0f} → {depth_pts}/3")
+    else:
+        details.append("   Depth: keine Daten")
 
-    score += min(10, pts)
+    score += min(10, spread_pts + depth_pts)
 
     # ═══════════════════════════════════════════════════════════════════════
     # 7. OI-PRÄSENZ + ATH-ABSTAND (0-10)
@@ -1442,8 +1550,8 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    bei messbarem Preisverfall NACH OI-Aufbau belegbar — ohne OI-Verlauf
     #    bleibt das Label neutral.
     # ═══════════════════════════════════════════════════════════════════════
-    if ticker and ticker.get("open_interest", 0) > 0:
-        oi = ticker["open_interest"]
+    if oi_available:
+        oi = max(0.0, _to_float(ticker.get("open_interest")))
         if current_from_ath >= 10 and oi > 0:
             pts = 10
             details.append(f"📊 OI praesent: {oi:,.0f} bei {current_from_ath:.1f}% unter ATH → {pts}/10 (OI-Praesenz + ATH-Abstand, keine OI-History)")
@@ -1453,9 +1561,12 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         elif current_from_ath >= 2:
             pts = 4
             details.append(f"📊 OI praesent: {oi:,.0f} → {pts}/10")
-        else:
+        elif oi > 0:
             pts = 0
             details.append(f"📊 OI: {oi:,.0f} (neutral)")
+        else:
+            pts = 0
+            details.append("📊 OI: 0 (gültiger Messwert, neutral)")
         score += pts
         pump_data["open_interest"] = oi
         if ticker.get("oi_usd_estimate"):
@@ -1469,7 +1580,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    Hohe positive Funding = Longs überhitzt, zahlen Shorts
     #    Extrem hohe Funding (>0.1%) bei neuen Listings = fast sicherer Dump
     # ═══════════════════════════════════════════════════════════════════════
-    fr = ticker.get("funding_rate", 0) if ticker else 0
+    fr = _to_float(ticker.get("funding_rate"))
     # M-Funding-Intervall AUDIT FIX: Die Schwellen unten sind pro-8h kalibriert.
     # Liefert ein Fetcher kuenftig ein Intervall-Feld, wird hier auf 8h normalisiert.
     # Stand heute liefern fetch_mexc/bitget/binance_ticker KEIN Intervall-Feld
@@ -1478,11 +1589,11 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     # collectCycle oder Bitget fundingTime-Abstand), Feld im Ticker-Dict setzen.
     FUNDING_STANDARD_INTERVAL_H = 8.0
     funding_interval_h = _to_float((ticker or {}).get("funding_interval_hours"), 0)
-    if fr and funding_interval_h > 0 and funding_interval_h != FUNDING_STANDARD_INTERVAL_H:
+    if funding_available and funding_interval_h > 0 and funding_interval_h != FUNDING_STANDARD_INTERVAL_H:
         fr = fr * (FUNDING_STANDARD_INTERVAL_H / funding_interval_h)
-    if fr and fr > 0:
+    if funding_available and fr > 0:
         fr_pct = fr * 100  # z.B. 0.001 → 0.1% (pro 8h)
-        if fr_pct >= 0.3:      # Extrem (> 0.3% pro 8h = 3.6%/Tag Kosten!)
+        if fr_pct >= 0.3:      # Extrem (> 0.3% pro 8h = 0.9%/Tag, ohne Compounding)
             pts = 15
         elif fr_pct >= 0.1:    # Sehr hoch (> 0.1%)
             pts = 12
@@ -1497,13 +1608,16 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         score += pts
         pump_data["funding_rate"] = round(fr_pct, 4)
         details.append(f"💰 Funding: {fr_pct:.3f}% (Longs zahlen) → {pts}/15")
-    elif fr and fr < 0:
+    elif funding_available and fr < 0:
         fr_pct = fr * 100
         # Negative Funding = Shorts zahlen → GEGEN unseren Short
         malus = 5 if fr_pct < -0.05 else 3 if fr_pct < -0.02 else 1
         score = max(0, score - malus)
         pump_data["funding_rate"] = round(fr_pct, 4)
         details.append(f"💰 Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -{malus} Malus")
+    elif funding_available:
+        pump_data["funding_rate"] = 0.0
+        details.append("💰 Funding: 0.000% (gültiger Messwert, neutral)")
     else:
         details.append("💰 Funding: keine Daten")
 
@@ -1513,8 +1627,8 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    = Liquidation Cascade wahrscheinlich → Dump
     #    Binance liefert topLongShortAccountRatio
     # ═══════════════════════════════════════════════════════════════════════
-    ls_ratio = ticker.get("long_short_ratio", 0) if ticker else 0
-    if ls_ratio and ls_ratio > 0:
+    ls_ratio = _to_float(ticker.get("long_short_ratio"))
+    if long_short_available and ls_ratio > 0:
         # long_short_ratio > 1 = mehr Longs als Shorts
         long_pct = (ls_ratio / (1 + ls_ratio)) * 100  # z.B. 2.5 → 71.4% Long
         if long_pct >= 80:       # Extrem einseitig → fast sicherer Dump
@@ -1533,6 +1647,9 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         pump_data["long_short_ratio"] = round(ls_ratio, 2)
         pump_data["long_pct"] = round(long_pct, 1)
         details.append(f"⚖️ L/S Ratio: {ls_ratio:.2f} ({long_pct:.0f}% Long) → {pts}/15")
+    elif long_short_available:
+        pump_data["long_short_ratio"] = round(ls_ratio, 2)
+        details.append("⚖️ L/S Ratio: gültiger Neutral-/Nullwert")
     else:
         details.append("⚖️ L/S Ratio: keine Daten")
 
@@ -1582,8 +1699,8 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #     24-72h: ideales Short-Fenster (Hype vorbei, Dump beginnt)
     #     >72h: späte Phase (Dump läuft oder schon durch)
     # ═══════════════════════════════════════════════════════════════════════
-    if is_new_listing:
-        hours = listing_age_hours if listing_age_hours is not None else pump_data.get("hours_tracked", n)
+    if is_new_listing and listing_age_hours is not None:
+        hours = max(0.0, _to_float(listing_age_hours))
         if hours >= 24 and hours <= 72:
             pts = 10  # Sweet Spot: Hype ist vorbei, Dump-Phase
         elif hours >= 12 and hours < 24:
@@ -1599,6 +1716,9 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         score += pts
         pump_data["listing_age_hours"] = round(hours, 1)
         details.append(f"⏱️ Listing Alter: {hours:.1f}h → {pts}/10 ({'Sweet Spot!' if 24 <= hours <= 72 else 'Zu früh' if hours < 6 else 'Spät' if hours > 72 else ''})")
+    elif is_new_listing:
+        pump_data["listing_age_hours"] = None
+        details.append("⏱️ Listing Alter: unbekannt (kein Candle-Anzahl-Fallback)")
     else:
         pump_data["listing_age_hours"] = None
         details.append("⏱️ Listing Alter: aktiver Pump, kein New-Listing-Altersbonus")
@@ -1612,6 +1732,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     try:
         btc_candles = fetch_binance_candles("BTCUSDT", "1h", min(n, 24))
         if btc_candles and len(btc_candles) >= 3:
+            btc_context_available = True
             btc_first = btc_candles[0]["open"]
             btc_last = btc_candles[-1]["close"]
             btc_change = ((btc_last - btc_first) / btc_first * 100) if btc_first > 0 else 0
@@ -1665,19 +1786,55 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     score += btc_divergence_pts
 
     # ═══════════════════════════════════════════════════════════════════════
-    # GESAMT-SCORE (max 155 Punkte → normalisiert auf 0-100)
+    # GESAMT-SCORE: normalize only across dimensions that were actually
+    # measured. A coverage cap prevents sparse exchange responses from being
+    # inflated into an actionable score.
     # ═══════════════════════════════════════════════════════════════════════
-    # Komponenten: 20+20+15+15+15+10+10+15+15+10+10+10(btc_div) = 165 theoretisch
-    # Spread+Depth ist min(10, pts) → max 10. Echtes Max variiert mit Daten.
-    # Nutze 160 als Basis (nicht alle Komponenten liefern gleichzeitig Max)
-    max_possible = 160
-    normalized = int(round(score / max_possible * 100))
+    component_availability = {
+        "pump": (20, True),
+        "volume_decline": (20, vol_first > 0),
+        "momentum_decay": (15, momentum_available),
+        "wick_rejection": (15, bool(upper_wicks)),
+        "price_position": (15, True),
+        "spread": (7, spread_available),
+        "orderbook_depth": (3, depth_available),
+        "open_interest": (10, oi_available),
+        "funding": (15, funding_available),
+        "long_short_ratio": (15, long_short_available),
+        "red_candles": (10, True),
+        "listing_age": (10, bool(is_new_listing and listing_age_hours is not None)),
+        "btc_context": (10, btc_context_available),
+    }
+    applicable_max = 165 if is_new_listing else 155
+    available_max = sum(weight for weight, available in component_availability.values() if available)
+    missing_dimensions = [
+        name for name, (_, available) in component_availability.items()
+        if not available and not (name == "listing_age" and not is_new_listing)
+    ]
+    data_coverage = available_max / applicable_max if applicable_max > 0 else 0.0
+    normalized = int(round(score / available_max * 100)) if available_max > 0 else 0
+    if data_coverage < 0.50:
+        score_cap = 59
+    elif data_coverage < 0.65:
+        score_cap = 69
+    elif data_coverage < 0.80:
+        score_cap = 79
+    else:
+        score_cap = 100
+    normalized = max(0, min(score_cap, normalized))
 
     pump_data["raw_score"] = score
-    pump_data["max_score"] = max_possible
-    details.append(f"══ GESAMT: {score}/{max_possible} Punkte → normalisiert {normalized}/100")
+    pump_data["max_score"] = available_max
+    pump_data["theoretical_max_score"] = applicable_max
+    pump_data["data_coverage_pct"] = round(data_coverage * 100, 1)
+    pump_data["score_cap"] = score_cap
+    pump_data["missing_dimensions"] = missing_dimensions
+    details.append(
+        f"══ GESAMT: {score}/{available_max} verfügbare Punkte → {normalized}/100 "
+        f"(Datenabdeckung {data_coverage:.0%}, Cap {score_cap})"
+    )
 
-    return min(100, normalized), details, pump_data
+    return normalized, details, pump_data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1971,7 +2128,9 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     micro_stop = max(local_stop, min_stop)
     ath = _to_float(pump_data.get("ath"))
     tp1 = ath * (1 - CONFIG["tp1_from_ath_pct"] / 100) if ath > 0 else 0
-    rr_preview = (entry - tp1) / (micro_stop - entry) if micro_stop > entry and tp1 > 0 else 0
+    tp2 = ath * (1 - CONFIG["tp2_from_ath_pct"] / 100) if ath > 0 else 0
+    preview_geometry = trade_geometry(entry, micro_stop, tp1, tp2, "SHORT")
+    rr_preview = float(preview_geometry["rr_tp1"]) if preview_geometry.get("valid") else 0
 
     warnings = []
     if too_early:
@@ -2060,9 +2219,18 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "SHORT",
         timeframe="1h_listing",
         num_bins=18,
-        min_bars=12,
+        min_bars=20,
         lookback=72,
     )
+    vrvp_atr = calculate_wilder_atr(
+        pump_data.get("vrvp_bars") or [],
+        period=14,
+        lookback=72,
+    )
+    if vrvp_atr <= 0:
+        # Sparse new-listing history cannot support ATR(14). Keep a bounded
+        # volatility fallback instead of mislabelling ATH distance as ATR.
+        vrvp_atr = max(current * 0.025, min(current * 0.12, abs(ath - current) * 0.25))
     setup = apply_vrvp_to_trade_setup(
         {
             "entry": entry,
@@ -2078,7 +2246,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         vrvp,
         direction="SHORT",
         asset_type="crypto_short",
-        atr=max(0.00000001, ath - current) if ath > current else current * 0.08,
+        atr=vrvp_atr,
     )
     entry = _to_float(setup.get("entry")) or entry
     stop = _to_float(setup.get("stop")) or stop
@@ -2088,13 +2256,25 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     tp1_source = str(setup.get("tp1_source") or tp1_source)
     tp2_source = str(setup.get("tp2_source") or tp2_source)
 
-    risk = max(0, stop - entry)
-    reward1 = max(0, entry - tp1)
-    reward2 = max(0, entry - tp2)
-    rr1 = round(reward1 / risk, 2) if risk > 0 else 0
-    rr2 = round(reward2 / risk, 2) if risk > 0 else 0
+    # A projected dump target that now sits above the live short entry has
+    # already been missed. Keep that row only as an explicit no-trade audit
+    # case; never turn the wrong-side distance into positive reward via abs().
     tp1_missed = tp1 >= entry
     tp2_missed = tp2 >= entry
+    risk = stop - entry
+    if risk <= 0:
+        return None
+
+    if tp1_missed:
+        rr1 = 0.0
+        rr2 = round((entry - tp2) / risk, 2) if not tp2_missed else 0.0
+    else:
+        geometry = trade_geometry(entry, stop, tp1, tp2, "SHORT")
+        if not geometry["valid"]:
+            return None
+        risk = float(geometry["risk"])
+        rr1 = float(geometry["rr_tp1"])
+        rr2 = float(geometry["rr_tp2"])
     rr_effective = 0 if tp2_missed else (rr2 if tp1_missed else rr1)
     risk_pct = round((stop - entry) / entry * 100, 2) if entry > 0 else 999
 
@@ -2201,6 +2381,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("turn_not_confirmed")
     if not rr_ok:
         risk_flags.append("rr_too_low")
+    if tp1_missed:
+        risk_flags.append("tp1_missed_no_chase")
+    if tp2_missed:
+        risk_flags.append("tp2_missed_no_trade")
     if not risk_ok:
         risk_flags.append("risk_too_wide")
     if not safety_ok:
@@ -2805,12 +2989,12 @@ def run_new_listing_scanner():
         results["announcement_watchlist"] = announcement_watchlist[:30]
         for nl in new_listings:
             results["new_listings_detected"].append(nl["symbol"])
-            listing_ts = (
+            exchange_listing_ts = (
                 nl.get("onboard_date")
                 or nl.get("create_time")
                 or nl.get("launch_time")
-                or nl.get("announcement_release_ms")
             )
+            listing_ts = exchange_listing_ts or nl.get("announcement_release_ms")
             monitoring = add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"), listing_ts_ms=listing_ts, source="new_listing")
             key = _monitor_key(nl["symbol"], nl.get("exchange", "crypto.com"))
             if key in monitoring and nl.get("announcement_source"):
@@ -2823,12 +3007,18 @@ def run_new_listing_scanner():
                         ).isoformat()
                 except Exception:
                     announcement_listing_time = None
+                existing_listing_time = monitoring[key].get("listing_time")
                 monitoring[key].update({
                     "source": "new_listing",
                     "status": "monitoring",
-                    "listing_time": announcement_listing_time or monitoring[key].get("listing_time"),
+                    # Never replace a real exchange launch with the earlier
+                    # announcement. Otherwise a five-minute-old market can look
+                    # 24-72 hours old and bypass the post-launch safety window.
+                    "listing_time": existing_listing_time or announcement_listing_time,
                     "listing_detection": "exchange_announcement",
-                    "listing_age_source_override": "announcement_time",
+                    "listing_age_source_override": (
+                        "exchange_timestamp" if exchange_listing_ts else "announcement_time"
+                    ),
                     "announcement_source": nl.get("announcement_source"),
                     "announcement_exchange": nl.get("announcement_exchange"),
                     "announcement_title": nl.get("announcement_title"),
@@ -2875,6 +3065,32 @@ def run_new_listing_scanner():
                 time.sleep(0.5)  # Rate Limiting
                 symbol = mon_data.get("symbol") or str(mon_key).split(":", 1)[-1]
                 exchange = mon_data.get("exchange", "crypto.com")
+
+                # Expiry is time-based and must not depend on a successful
+                # ticker request. Otherwise an unavailable/delisted contract
+                # can keep an old signal alive forever.
+                if mon_data.get("status") == "signal":
+                    lifecycle_status, lifecycle_reason = evaluate_signal_lifecycle(
+                        mon_data, None
+                    )
+                    if lifecycle_status == "expired":
+                        mon_data["status"] = lifecycle_status
+                        mon_data["status_reason"] = lifecycle_reason
+                        mon_data["status_changed_at"] = datetime.now(timezone.utc).isoformat()
+                        results["monitoring"].append({
+                            "symbol": symbol,
+                            "exchange": exchange,
+                            "source": mon_data.get("source", "new_listing"),
+                            "price": _to_float(mon_data.get("signal_entry")),
+                            "stop_loss": _to_float(mon_data.get("signal_stop_loss")),
+                            "status": "expired",
+                            "status_reason": lifecycle_reason,
+                            "grade": "EXPIRED",
+                            "timing": "Signal abgelaufen (24h)",
+                            "trade_category": "SIGNAL_EXPIRED",
+                            "risk_flags": [lifecycle_reason] if lifecycle_reason else [],
+                        })
+                        continue
 
                 # Daten holen (Multi-Exchange Adapter)
                 ticker = fetch_ticker_for(symbol, exchange)

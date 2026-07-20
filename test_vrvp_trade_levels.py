@@ -1,4 +1,12 @@
-from modules.vrvp_levels import build_vrvp_structure, apply_vrvp_to_trade_setup
+from pathlib import Path
+
+from modules.trade_levels import trade_geometry
+from modules.indicators import calculate_atr_14
+from modules.vrvp_levels import (
+    apply_vrvp_to_trade_setup,
+    build_vrvp_structure,
+    calculate_wilder_atr,
+)
 
 
 def _bars_with_nodes(low_node: float = 95.0, high_node: float = 112.0):
@@ -53,6 +61,9 @@ def test_vrvp_lifts_long_targets_to_structural_resistance():
     assert enriched["rr"] >= 1.95
     assert enriched["vrvp_poc"] is not None
     assert "vrvp" in enriched["level_model"]
+    assert trade_geometry(
+        enriched["entry"], enriched["stop"], enriched["tp1"], enriched["tp2"], "LONG"
+    )["valid"] is True
 
 
 def test_vrvp_short_targets_remain_below_entry_and_separate():
@@ -75,6 +86,9 @@ def test_vrvp_short_targets_remain_below_entry_and_separate():
     assert enriched["rr_tp2"] >= 2.4
     assert enriched["rr"] >= 1.95
     assert enriched["vrvp_poc"] is not None
+    assert trade_geometry(
+        enriched["entry"], enriched["stop"], enriched["tp1"], enriched["tp2"], "SHORT"
+    )["valid"] is True
 
 
 def test_vrvp_validation_prevents_duplicate_targets():
@@ -141,3 +155,64 @@ def test_vrvp_marks_near_underlying_support_as_short_gate():
     assert enriched["underlying_support"]["price"] == 99.45
     assert enriched["barrier_gate"] == "BREAK_SUPPORT_REQUIRED"
     assert "near_underlying_support" in enriched["risk_flags"]
+
+
+def test_canonical_wilder_atr_matches_indicator_reference():
+    bars = []
+    close = 100.0
+    for index in range(36):
+        open_price = close
+        close = open_price + (0.6 if index % 3 else -0.35)
+        bars.append({
+            "o": open_price,
+            "h": max(open_price, close) + 1.2 + index * 0.01,
+            "l": min(open_price, close) - 0.8,
+            "c": close,
+            "v": 0 if index % 5 == 0 else 10_000,
+        })
+
+    normalized = [
+        {"high": bar["h"], "low": bar["l"], "close": bar["c"]}
+        for bar in bars
+    ]
+    expected, _ = calculate_atr_14(normalized)
+
+    assert round(calculate_wilder_atr(bars), 4) == expected
+
+
+def test_canonical_wilder_atr_requires_full_period_and_rejects_bad_bars():
+    short_history = [
+        {"high": 10.5, "low": 9.5, "close": 10.0}
+        for _ in range(14)
+    ]
+    assert calculate_wilder_atr(short_history) == 0.0
+
+    enough_history = short_history + [
+        {"high": 11.0, "low": 9.0, "close": 10.5},
+        {"high": 1.0, "low": 2.0, "close": 1.5},
+    ]
+    assert calculate_wilder_atr(enough_history) > 0
+
+
+def test_structural_level_callsites_use_canonical_atr_before_fallbacks():
+    root = Path(__file__).resolve().parent
+    api_source = (root / "api.py").read_text(encoding="utf-8")
+    scanner_source = (root / "modules" / "scanners.py").read_text(encoding="utf-8")
+    listing_source = (root / "modules" / "new_listing_scanner.py").read_text(encoding="utf-8")
+
+    assert api_source.count("calculate_wilder_atr(") >= 5
+    assert "calculate_wilder_atr(all_bars" in scanner_source
+    assert "calculate_wilder_atr(\n        pump_data.get(\"vrvp_bars\")" in listing_source
+    assert "atr=max(0.00000001, ath - current" not in listing_source
+
+
+def test_root_scanner_copies_are_isolated_from_production_modules():
+    root = Path(__file__).resolve().parent
+    listing_shim = (root / "new_listing_scanner.py").read_text(encoding="utf-8")
+    volume_stub = (root / "volume_profile.py").read_text(encoding="utf-8")
+
+    assert "from modules.new_listing_scanner import *" in listing_shim
+    assert len(listing_shim.splitlines()) < 20
+    assert "raise ImportError(" in volume_stub
+    assert "modules.vrvp_levels" in volume_stub
+    assert len(volume_stub.splitlines()) < 20

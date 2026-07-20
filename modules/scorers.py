@@ -1561,14 +1561,15 @@ def calculate_exhaustion_score(change_24h, change_7d, btc_change_7d, rvol, close
         # Assume typical hourly volatility range: -2% to +2% for most coins
         typical_hourly_changes = [-2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2]
         z_score_1h = _z_score(change_1h, typical_hourly_changes) if change_1h is not None else 0
+        downside_z = max(0.0, -z_score_1h)
 
-        if change_7d > 8 and change_1h < -2.0 and z_score_1h >= 2.0:
+        if change_7d > 8 and change_1h < -2.0 and downside_z >= 1.5:
             score += 10
             details.append(f" [FIX6] 1h-Reversal (Z={z_score_1h:.1f}): {change_1h:+.1f}% letzte Stunde! (7d war +{change_7d:.0f}%) — Kipp-Signal")
-        elif change_7d > 8 and change_1h < -0.5 and z_score_1h >= 1.5:
+        elif change_7d > 8 and change_1h < -0.5 and downside_z >= 0.35:
             score += 7
             details.append(f" [FIX6] 1h dreht (Z={z_score_1h:.1f}): {change_1h:+.1f}% (erste Schwäche nach 7d +{change_7d:.0f}%)")
-        elif change_7d > 8 and change_1h < avg_hourly_expected * 0.3 and z_score_1h >= 1.0:
+        elif change_7d > 8 and change_1h < avg_hourly_expected * 0.3 and change_1h <= 0:
             score += 4
             details.append(f" [FIX6] 1h verlangsamt (Z={z_score_1h:.1f}): {change_1h:+.2f}% (erwartet: {avg_hourly_expected:+.2f}%/h)")
         elif change_7d > 8 and change_1h > 3.0 and z_score_1h >= 2.0:

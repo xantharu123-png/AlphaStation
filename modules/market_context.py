@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
+from zoneinfo import ZoneInfo
 
 
 HEADLINE_CATEGORIES = {
@@ -247,6 +248,20 @@ def missing_headline_risk(error: str = "Headline data unavailable") -> Dict[str,
     }
 
 
+def missing_event_risk(error: str = "Economic calendar unavailable") -> Dict[str, Any]:
+    """Defensive unknown state when scheduled event data cannot be trusted."""
+    now_utc = datetime.now(timezone.utc)
+    return {
+        "score": 30,
+        "level": "UNKNOWN",
+        "data_status": "error",
+        "error": error,
+        "upcoming_events": [],
+        "source": "Alpha Station economic calendar",
+        "timestamp": now_utc.isoformat(),
+    }
+
+
 def analyze_headlines(headlines: Iterable[Dict[str, Any]], now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """Score market-moving political/macro headline risk from recent headlines."""
     now_utc = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -362,15 +377,32 @@ def build_event_risk(events: Iterable[Dict[str, Any]], now_utc: Optional[datetim
         if not isinstance(event, dict):
             continue
         dt = _parse_dt(event.get("datetime_et") or event.get("datetime_local"))
+        date_only = False
         if not dt:
             date_text = event.get("date")
             if not date_text:
                 continue
             try:
-                dt = datetime.fromisoformat(str(date_text)).replace(tzinfo=timezone.utc)
+                # A calendar row without an exact time represents an ET event
+                # day, not midnight UTC. Keep it active for the whole US day so
+                # it cannot disappear before the cash session starts.
+                event_day = datetime.fromisoformat(str(date_text)[:10]).date()
+                eastern = ZoneInfo("America/New_York")
+                now_et = now_utc.astimezone(eastern)
+                day_start_et = datetime.combine(event_day, datetime.min.time(), tzinfo=eastern)
+                day_end_et = datetime.combine(event_day, datetime.max.time(), tzinfo=eastern)
+                date_only = True
+                if now_et < day_start_et:
+                    hours = (day_start_et - now_et).total_seconds() / 3600
+                elif now_et <= day_end_et:
+                    hours = 0.0
+                else:
+                    hours = -(now_et - day_end_et).total_seconds() / 3600
+                dt = day_start_et.astimezone(timezone.utc)
             except Exception:
                 continue
-        hours = (dt - now_utc).total_seconds() / 3600
+        else:
+            hours = (dt - now_utc).total_seconds() / 3600
         if hours < -2 or hours > 48:
             continue
         importance = str(event.get("importance", "")).lower()
@@ -391,6 +423,7 @@ def build_event_risk(events: Iterable[Dict[str, Any]], now_utc: Optional[datetim
             "time_et": event.get("time_et"),
             "importance": event.get("importance"),
             "hours_until": round(hours, 1),
+            "date_only": date_only,
             "source": event.get("source"),
         })
 
@@ -414,29 +447,29 @@ def build_market_context(
     headline_risk = headline_risk or {"score": 0, "level": "LOW", "top_headlines": []}
     event_risk = event_risk or {"score": 0, "level": "LOW", "upcoming_events": []}
 
-    fear_score = _to_float(crash_data.get("fear_score"), 50)
+    raw_fear_score = crash_data.get("fear_score")
+    fear_score_available = raw_fear_score is not None and str(raw_fear_score).strip() != ""
+    fear_score = _to_float(raw_fear_score, 50)
     vix = _to_float((crash_data.get("vix") or {}).get("price"), 0)
     breadth = crash_data.get("breadth") or {}
     ad_ratio = _to_float(breadth.get("ad_ratio"), 1.0)
     advancing_pct = _to_float(breadth.get("advancing_pct"), 50)
 
+    # fear_score already includes VIX level/trend, breadth and index momentum.
+    # Applying VIX and breadth again made the final regime needlessly nervous.
     market_risk = max(0.0, min(100.0, 100.0 - fear_score))
-    if vix >= 35:
-        market_risk += 30
-    elif vix >= 30:
-        market_risk += 24
-    elif vix >= 25:
-        market_risk += 18
-    elif vix >= 20:
-        market_risk += 10
-    elif 0 < vix <= 14:
-        market_risk -= 8
-    if ad_ratio < 0.5 or advancing_pct < 30:
-        market_risk += 16
-    elif ad_ratio < 0.7 or advancing_pct < 40:
-        market_risk += 10
-    elif ad_ratio > 1.5 and advancing_pct > 55:
-        market_risk -= 8
+    risk_basis = "fear_score"
+    if not fear_score_available:
+        # Fall back to direct market inputs only when the aggregate is missing.
+        proxies = []
+        if vix > 0:
+            proxies.append(max(0.0, min(100.0, (vix - 12.0) / 23.0 * 100.0)))
+        if ad_ratio > 0:
+            breadth_risk = max(0.0, min(100.0, (1.5 - ad_ratio) / 1.2 * 100.0))
+            advancing_risk = max(0.0, min(100.0, (60.0 - advancing_pct) / 40.0 * 100.0))
+            proxies.append((breadth_risk + advancing_risk) / 2.0)
+        market_risk = sum(proxies) / len(proxies) if proxies else 50.0
+        risk_basis = "direct_market_proxy" if proxies else "neutral_fallback"
     market_risk = max(0.0, min(100.0, market_risk))
 
     headline_status = str(headline_risk.get("data_status", "ok")).lower()
@@ -460,7 +493,10 @@ def build_market_context(
     elif headline_status in {"ok", "fresh"}:
         headline_risk = dict(headline_risk)
         headline_risk["confirmation"] = "confirmed_by_" + ",".join(headline_confirmers) if headline_confirmers else "headline_only"
+    event_status = str(event_risk.get("data_status", "ok")).lower()
     event_score = _to_float(event_risk.get("score"), 0)
+    if event_status not in {"ok", "fresh"}:
+        event_score = max(event_score, 30)
     overall_risk = int(round(market_risk * 0.50 + headline_score * 0.30 + event_score * 0.20))
 
     if overall_risk >= 75:
@@ -484,7 +520,7 @@ def build_market_context(
         trade_mode = "AGGRESSIVE_SELECTIVE"
         size_multiplier = 1.00
 
-    if headline_status not in {"ok", "fresh"} and regime == "RISK_ON":
+    if (headline_status not in {"ok", "fresh"} or event_status not in {"ok", "fresh"}) and regime == "RISK_ON":
         regime = "NEUTRAL"
         trade_mode = "SELECTIVE"
         size_multiplier = 0.75
@@ -492,6 +528,8 @@ def build_market_context(
     warnings = []
     if headline_status not in {"ok", "fresh"}:
         warnings.append("Headline-Daten unbekannt/fehlerhaft: defensiver Modus statt blind Risk-On.")
+    if event_status not in {"ok", "fresh"}:
+        warnings.append("Kalender-/Event-Daten unbekannt: defensiver Modus statt blind Risk-On.")
     if headline_score >= 50:
         warnings.append("Headline-/Politikrisiko hoch: keine FOMO-Market-Entries.")
     if event_score >= 50:
@@ -511,6 +549,7 @@ def build_market_context(
         "short_bias": "normal" if regime in {"NEUTRAL", "RISK_ON"} else "favored_but_no_chase",
         "market_risk": {
             "score": int(round(market_risk)),
+            "basis": risk_basis,
             "fear_score": int(round(fear_score)),
             "vix": vix or None,
             "ad_ratio": ad_ratio,

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import api
 
 
@@ -112,6 +114,90 @@ def test_crypto_trade_simulation_short_stops_before_target_when_same_daily_bar()
     assert trade["pnl_pct"] == -10.0
 
 
+def test_crypto_trade_simulation_keeps_tp1_partial_when_runner_trails_out():
+    bars = [
+        {"date": "2026-01-01", "open": 10.0, "high": 11.6, "low": 9.8, "close": 11.2},
+        {"date": "2026-01-02", "open": 10.8, "high": 11.0, "low": 10.2, "close": 10.3},
+    ]
+
+    trade = api._simulate_crypto_trade(
+        bars=bars,
+        entry_idx=0,
+        direction="long",
+        entry=10.0,
+        stop=9.0,
+        tp1=11.5,
+        tp2=12.5,
+        max_hold=2,
+        fee_pct=0.0,
+    )
+
+    assert trade is not None
+    assert trade["outcome"] == "TRAIL_STOP"
+    assert trade["tp1_hit"] is True
+    assert trade["exit_price"] == 10.875
+    assert trade["r_multiple"] == 0.88
+
+
+def test_crypto_backtest_enters_after_confirmation_close_not_before(monkeypatch):
+    bars = []
+    start_date = datetime(2026, 1, 1)
+    for idx in range(46):
+        close = 9.0
+        if 24 <= idx <= 29:
+            close = 9.4 + (idx - 24) * 0.1
+        elif idx == 30:
+            close = 10.1
+        elif idx == 31:
+            close = 10.2
+        elif idx >= 32:
+            close = 10.25
+        bars.append({
+            "date": (start_date + timedelta(days=idx)).date().isoformat(),
+            "open": close - 0.05,
+            "high": close + 0.1,
+            "low": close - 0.2,
+            "close": close,
+            "volume": 200.0 if idx == 30 else 100.0,
+        })
+    bars[31]["open"] = 10.1
+    bars[32]["open"] = 10.25
+
+    captured = []
+
+    def fake_simulator(_bars, entry_idx, direction, entry, stop, tp1, tp2, max_hold):
+        captured.append((entry_idx, entry, direction))
+        return {
+            "entry_date": _bars[entry_idx]["date"],
+            "actual_entry": entry,
+            "exit_date": _bars[entry_idx]["date"],
+            "exit_price": entry,
+            "outcome": "MAX_HOLD",
+            "tp1_hit": False,
+            "pnl_pct": 0.0,
+            "r_multiple": 0.0,
+            "is_winner": False,
+        }
+
+    monkeypatch.setattr(api, "_crypto_backtest_universe", lambda _max: [{"id": "test", "symbol": "tst"}])
+    monkeypatch.setattr(
+        api,
+        "_validated_exchange_daily_crypto_bars",
+        lambda _coin, days: (bars, "binance"),
+    )
+    monkeypatch.setattr(api, "_simulate_crypto_trade", fake_simulator)
+
+    api._run_crypto_backtest(api.BacktestRequest(
+        strategy="crypto_early_mover_long",
+        months=1,
+        max_tickers=5,
+        job_id="crypto_no_lookahead",
+    ))
+
+    assert captured
+    assert captured[0] == (32, 10.25, "long")
+
+
 def test_backtest_result_sorts_trades_chronologically_before_drawdown():
     trades = [
         {"ticker": "LATE", "entry_date": "2026-01-10", "pnl_pct": -10.0, "r_multiple": -1, "outcome": "STOP"},
@@ -145,6 +231,36 @@ def test_crypto_trade_simulation_rejects_invalid_long_levels():
     )
 
     assert trade is None
+
+
+def test_crypto_trade_simulation_rejects_wrong_side_and_duplicate_targets():
+    bars = [
+        {"date": "2026-01-01", "open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0},
+        {"date": "2026-01-02", "open": 10.0, "high": 13.0, "low": 7.0, "close": 10.0},
+    ]
+
+    assert api._simulate_crypto_trade(
+        bars=bars,
+        entry_idx=1,
+        direction="long",
+        entry=10.0,
+        stop=9.0,
+        tp1=9.5,
+        tp2=12.0,
+        max_hold=1,
+        fee_pct=0.0,
+    ) is None
+    assert api._simulate_crypto_trade(
+        bars=bars,
+        entry_idx=1,
+        direction="short",
+        entry=10.0,
+        stop=11.0,
+        tp1=8.5,
+        tp2=8.5,
+        max_hold=1,
+        fee_pct=0.0,
+    ) is None
 
 
 def test_backtest_progress_lifecycle():

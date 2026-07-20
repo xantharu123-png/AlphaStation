@@ -120,6 +120,79 @@ def test_live_rr_and_distance_ignore_stale_provided_values_when_levels_exist():
     assert health["metrics"]["distance_to_entry_r"] == 1.6
 
 
+def test_duplicate_targets_are_never_tradeable_even_with_stale_live_rr():
+    row = {
+        "ticker": "DUP",
+        "direction": "LONG",
+        "current_price": 10.0,
+        "entry": 10.0,
+        "stop": 9.5,
+        "tp1": 11.0,
+        "tp2": 11.0,
+        "live_rr_ratio": 4.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.85,
+        "dollar_volume": 10_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert health["decision"] == "NO_TRADE"
+    assert health["trade_geometry_valid"] is False
+    assert "invalid_trade_geometry" in health["exclusion_reasons"]
+    assert health["metrics"]["live_rr"] == 0.0
+
+
+def test_wrong_side_target_is_never_tradeable():
+    row = {
+        "ticker": "WRONG",
+        "direction": "SHORT",
+        "current_price": 20.0,
+        "entry": 20.0,
+        "stop": 20.5,
+        "tp1": 20.2,
+        "tp2": 19.0,
+        "risk_reward": 5.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.15,
+        "dollar_volume": 10_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_short")
+
+    assert health["decision"] == "NO_TRADE"
+    assert health["trade_geometry_valid"] is False
+    assert "invalid_trade_geometry" in health["exclusion_reasons"]
+    assert health["metrics"]["live_rr"] == 0.0
+
+
+def test_missing_tp2_waits_for_trigger_instead_of_claiming_tradeable():
+    row = {
+        "ticker": "PARTIAL",
+        "direction": "LONG",
+        "current_price": 10.0,
+        "entry": 10.0,
+        "stop": 9.5,
+        "tp1": 11.0,
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.85,
+        "dollar_volume": 10_000_000,
+    }
+
+    health = calculate_trade_health(row, "bi_long")
+
+    assert health["decision"] == "WAIT_FOR_TRIGGER"
+    assert health["trade_geometry_valid"] is False
+    assert not health["exclusion_reasons"]
+    assert any("Entry/Stop/TP" in warning for warning in health["warnings"])
+
+
 def test_short_distance_uses_short_math():
     row = {
         "ticker": "DOWN",

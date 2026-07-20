@@ -450,8 +450,11 @@ def _h3_users():
 
 
 def test_h3_watch_mails_require_subscriber_optin(monkeypatch):
-    monkeypatch.setattr(auth, "_load_users", _h3_users)
-    monkeypatch.setattr(auth, "_save_users", lambda db: None)
+    monkeypatch.setattr(
+        auth,
+        "_load_effective_users_atomic",
+        lambda: _h3_users()["users"],
+    )
 
     watch = auth.get_email_alert_recipients(trade_horizon="swing", mail_class="watch")
     trade = auth.get_email_alert_recipients(trade_horizon="swing", mail_class="trade")
@@ -462,7 +465,7 @@ def test_h3_watch_mails_require_subscriber_optin(monkeypatch):
     assert default == trade  # trade-Verhalten unveraendert (Default)
 
 
-def test_h3_send_email_alert_passes_mail_class_and_keeps_operator(monkeypatch):
+def test_h3_send_email_alert_passes_mail_class_and_operator_watch_is_opt_in(monkeypatch):
     captured = {}
     deliveries = []
 
@@ -498,9 +501,54 @@ def test_h3_send_email_alert_passes_mail_class_and_keeps_operator(monkeypatch):
 
     ok = api._send_email_alert("Crypto Retest-Zonen (1 Kandidaten)", "<p>x</p>", bypass_startup_cooldown=True, mail_class="watch")
 
-    assert ok is True
+    assert ok is False
     assert captured["mail_class"] == "watch"
-    # Betreiber (ALERT_EMAIL) bekommt weiterhin ALLE Klassen
+    assert deliveries == []
+
+
+def test_h3_operator_can_explicitly_opt_in_to_watch_mail(monkeypatch):
+    deliveries = []
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            deliveries.append(list(recipients))
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(
+        api,
+        "_SECRETS",
+        {
+            "GMAIL_USER": "op@x.com",
+            "GMAIL_APP_PASSWORD": "pw",
+            "ALERT_EMAIL": "op@x.com",
+            "ALERT_OPERATOR_WATCH_OPTIN": "1",
+        },
+    )
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+
+    ok = api._send_email_alert(
+        "Crypto Retest-Zonen (1 Kandidaten)",
+        "<p>x</p>",
+        bypass_startup_cooldown=True,
+        mail_class="watch",
+    )
+
+    assert ok is True
     assert deliveries == [["op@x.com"]]
 
 

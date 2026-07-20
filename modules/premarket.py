@@ -17,6 +17,96 @@ from modules.strategies import classify_pm_setup
 # Constants
 PM_TRACKER_FILE = "/tmp/alpha_station_pm_tracker.json"
 
+
+def _simulate_pm_setup(session_bars, setup, direction, fee_pct=0.25):
+    """Conservative 5m execution model for the pre-market tracker."""
+    direction = str(direction or "LONG").upper()
+    entry = float(setup.get("entry", 0) or 0)
+    stop = float(setup.get("stop", 0) or 0)
+    tp1 = float(setup.get("tp1", 0) or 0)
+    tp2 = float(setup.get("tp2", 0) or 0)
+    result = {
+        "entry_hit": False,
+        "entry_bar_idx": -1,
+        "fill_price": 0.0,
+        "stop_hit": False,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "exit_price": 0.0,
+        "exit_reason": "NO ENTRY",
+        "pnl_dollar": 0.0,
+        "pnl_pct": 0.0,
+        "r_multiple": 0.0,
+    }
+    if entry <= 0 or stop <= 0 or tp1 <= 0 or tp2 <= 0:
+        result["exit_reason"] = "INVALID LEVELS"
+        return result
+    if direction == "LONG":
+        geometry_valid = stop < entry < tp1 < tp2
+    else:
+        geometry_valid = tp2 < tp1 < entry < stop
+    if not geometry_valid:
+        result["exit_reason"] = "INVALID GEOMETRY"
+        return result
+
+    realized_exit = None
+    runner_exit = None
+    for bi, bar in enumerate(session_bars or []):
+        bar_open = float(bar.get("o", 0) or 0)
+        bar_high = float(bar.get("h", 0) or 0)
+        bar_low = float(bar.get("l", 0) or 0)
+
+        if not result["entry_hit"]:
+            triggered = bar_high >= entry if direction == "LONG" else bar_low <= entry
+            if not triggered:
+                continue
+            fill_price = max(entry, bar_open) if direction == "LONG" else min(entry, bar_open)
+            target_missed = fill_price >= tp1 if direction == "LONG" else fill_price <= tp1
+            if target_missed:
+                result["exit_reason"] = "GAP PAST TP1 - NO ENTRY"
+                break
+            result["entry_hit"] = True
+            result["entry_bar_idx"] = bi
+            result["fill_price"] = fill_price
+
+        # Intrabar order is unknown; stop-first avoids optimistic fills.
+        stop_touched = bar_low <= stop if direction == "LONG" else bar_high >= stop
+        tp1_touched = bar_high >= tp1 if direction == "LONG" else bar_low <= tp1
+        tp2_touched = bar_high >= tp2 if direction == "LONG" else bar_low <= tp2
+        if stop_touched:
+            result["stop_hit"] = True
+            runner_exit = stop
+            result["exit_reason"] = "TP1_STOP" if result["tp1_hit"] else "STOP"
+            break
+        if tp2_touched:
+            result["tp1_hit"] = True
+            result["tp2_hit"] = True
+            realized_exit = tp1
+            runner_exit = tp2
+            result["exit_reason"] = "TP2"
+            break
+        if tp1_touched and not result["tp1_hit"]:
+            result["tp1_hit"] = True
+            realized_exit = tp1
+
+    if result["entry_hit"]:
+        day_close = float((session_bars or [{}])[-1].get("c", result["fill_price"]) or result["fill_price"])
+        if runner_exit is None:
+            runner_exit = day_close
+            result["exit_reason"] = "EOD_TP1" if result["tp1_hit"] else "EOD"
+        weighted_exit = 0.5 * realized_exit + 0.5 * runner_exit if realized_exit is not None else runner_exit
+        fill_price = result["fill_price"]
+        gross_pnl = weighted_exit - fill_price if direction == "LONG" else fill_price - weighted_exit
+        pnl_dollar = gross_pnl - fill_price * max(float(fee_pct or 0), 0.0) / 100.0
+        pnl_pct = pnl_dollar / fill_price * 100 if fill_price > 0 else 0.0
+        actual_risk = fill_price - stop if direction == "LONG" else stop - fill_price
+        risk_pct = actual_risk / fill_price * 100 if fill_price > 0 and actual_risk > 0 else 0.0
+        result["exit_price"] = weighted_exit
+        result["pnl_dollar"] = pnl_dollar
+        result["pnl_pct"] = pnl_pct
+        result["r_multiple"] = max(-2.0, pnl_pct / risk_pct) if risk_pct > 0 else 0.0
+    return result
+
 def _debug_log(msg, error=None):
     """Simple debug logger (stub — real version in scanner.py logs to UI)."""
     pass  # Silent in module context
@@ -247,84 +337,7 @@ def evaluate_pm_setups(poly_key, date_str, setups_data):
                 if entry <= 0:
                     continue
                 
-                # Walk through bars chronologisch
-                entry_hit = False
-                entry_bar_idx = -1
-                stop_hit = False
-                tp1_hit = False
-                tp2_hit = False
-                exit_price = 0
-                exit_reason = "OPEN"  # Noch offen
-                
-                for bi, bar in enumerate(session_bars):
-                    bar_high = bar.get("h", 0)
-                    bar_low = bar.get("l", 999999)
-                    
-                    if not entry_hit:
-                        # Check ob Entry getriggert wird
-                        if direction == "LONG":
-                            if bar_high >= entry:
-                                entry_hit = True
-                                entry_bar_idx = bi
-                        else:  # SHORT
-                            if bar_low <= entry:
-                                entry_hit = True
-                                entry_bar_idx = bi
-                    
-                    elif entry_hit:
-                        # Entry ist aktiv — check Stop und TPs
-                        if direction == "LONG":
-                            # Stop zuerst checken (konservativ)
-                            if bar_low <= stop:
-                                stop_hit = True
-                                exit_price = stop
-                                exit_reason = "STOP"
-                                break
-                            if bar_high >= tp2:
-                                tp2_hit = True
-                                tp1_hit = True
-                                exit_price = tp2
-                                exit_reason = "TP2"
-                                break
-                            if bar_high >= tp1 and not tp1_hit:
-                                tp1_hit = True
-                        else:  # SHORT
-                            if bar_high >= stop:
-                                stop_hit = True
-                                exit_price = stop
-                                exit_reason = "STOP"
-                                break
-                            if bar_low <= tp2:
-                                tp2_hit = True
-                                tp1_hit = True
-                                exit_price = tp2
-                                exit_reason = "TP2"
-                                break
-                            if bar_low <= tp1 and not tp1_hit:
-                                tp1_hit = True
-                
-                # Wenn Trade noch offen: Close at EOD
-                if entry_hit and not stop_hit and not tp2_hit:
-                    exit_price = day_close
-                    if tp1_hit:
-                        # TP1 wurde berührt, Exit aber bei Close (nicht bei TP1!)
-                        exit_reason = "EOD_TP1"  # Klarstellung: Exit=EOD, TP1 nur touched
-                    else:
-                        exit_reason = "EOD"
-                
-                # P&L berechnen
-                if entry_hit:
-                    if direction == "LONG":
-                        pnl_dollar = exit_price - entry
-                    else:
-                        pnl_dollar = entry - exit_price
-                    pnl_pct = (pnl_dollar / entry * 100) if entry > 0 else 0
-                    r_multiple = pnl_dollar / setup.get("risk", 1) if setup.get("risk", 0) > 0 else 0
-                else:
-                    pnl_dollar = 0
-                    pnl_pct = 0
-                    r_multiple = 0
-                    exit_reason = "NO ENTRY"
+                simulation = _simulate_pm_setup(session_bars, setup, direction)
                 
                 setup_results.append({
                     "setup_name": setup.get("name", ""),
@@ -334,15 +347,17 @@ def evaluate_pm_setups(poly_key, date_str, setups_data):
                     "stop": stop,
                     "tp1": tp1,
                     "tp2": tp2,
-                    "entry_hit": entry_hit,
-                    "stop_hit": stop_hit,
-                    "tp1_hit": tp1_hit,
-                    "tp2_hit": tp2_hit,
-                    "exit_price": round(exit_price, 2),
-                    "exit_reason": exit_reason,
-                    "pnl_dollar": round(pnl_dollar, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "r_multiple": round(r_multiple, 2),
+                    "entry_hit": simulation["entry_hit"],
+                    "entry_bar_idx": simulation["entry_bar_idx"],
+                    "fill_price": round(simulation["fill_price"], 4),
+                    "stop_hit": simulation["stop_hit"],
+                    "tp1_hit": simulation["tp1_hit"],
+                    "tp2_hit": simulation["tp2_hit"],
+                    "exit_price": round(simulation["exit_price"], 4),
+                    "exit_reason": simulation["exit_reason"],
+                    "pnl_dollar": round(simulation["pnl_dollar"], 4),
+                    "pnl_pct": round(simulation["pnl_pct"], 2),
+                    "r_multiple": round(simulation["r_multiple"], 2),
                 })
             
             results.append({

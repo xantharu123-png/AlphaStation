@@ -26,6 +26,7 @@ ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host 127.0.0.1 --port 
 
 Restart=always
 RestartSec=5
+UMask=0077
 
 # Logging
 StandardOutput=journal
@@ -42,20 +43,21 @@ NoNewPrivileges=true
 # spaeterer Wechsel auf ProtectSystem=strict nichts kaputt macht.
 ProtectSystem=full
 ReadWritePaths=/home/tradingbot/app
-# ProtectHome NICHT setzen — die App liegt unter /home/tradingbot/app.
-# PrivateTmp MUSS false bleiben: api.py und bg_service.py teilen sich
-# Scan-Caches in /tmp (per grep '"/tmp/' verifiziert, u.a. /tmp/bi_cache_long.json,
-# /tmp/bi_cache_short.json, /tmp/alpha_biotech_cache.json, /tmp/orb_scan_results.json,
-# /tmp/coingecko_markets_cache.json, /tmp/bear_scanner_cache.json,
-# /tmp/strategy_scan_cache.json). Mit PrivateTmp=true bekaeme jeder Prozess
-# ein eigenes /tmp und die Scan-Ergebnisse des Background-Service kaemen nie
-# in der API an. Gleiches gilt fuer tradingbot-bg.service.
-PrivateTmp=false
+# ProtectHome NICHT setzen - die App liegt unter /home/tradingbot/app.
+# Beide Dienste sehen dasselbe dedizierte Runtime-Verzeichnis als /tmp. Damit
+# bleiben die bestehenden Cache-Pfade kompatibel, ohne das globale Server-/tmp
+# mit anderen Prozessen zu teilen.
+PrivateTmp=true
+BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

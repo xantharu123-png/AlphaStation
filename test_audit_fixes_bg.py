@@ -13,6 +13,7 @@ Abgedeckte Audit-Punkte:
 Pfad-Konvention: session-unabhängig via __file__ (keine hardcodeten Session-Pfade).
 """
 import ast
+import json
 import os
 import sys
 import types
@@ -167,6 +168,13 @@ def test_h9_default_scan_set_ohne_api_overlap():
 
 def test_h9_env_override_bestimmt_scans():
     active, skipped = bg_service._resolve_bg_scan_set(env_value="btc_divergence, orb, new_listing")
+    assert active == set()
+    assert {"btc_divergence", "orb", "new_listing"}.issubset(skipped)
+
+    active, skipped = bg_service._resolve_bg_scan_set(
+        env_value="btc_divergence, orb, new_listing",
+        allow_api_overlap=True,
+    )
     assert active == {"btc_divergence", "orb", "new_listing"}
     assert "bi_long" in skipped
 
@@ -179,6 +187,21 @@ def test_h9_env_override_ignoriert_unbekannte_scans():
 def test_h9_env_nur_unbekannte_faellt_auf_default_zurueck():
     active, _ = bg_service._resolve_bg_scan_set(env_value="gibts_nicht")
     assert active == bg_service.BG_DEFAULT_SCAN_SET
+
+
+def test_bg_atomic_write_keeps_old_file_and_raises(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    target.write_text(json.dumps({"state": "OLD"}), encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("serialization failed")
+
+    monkeypatch.setattr(bg_service.json, "dump", boom)
+    with pytest.raises(RuntimeError, match="serialization failed"):
+        bg_service._atomic_write_json(str(target), {"state": "NEW"})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"state": "OLD"}
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -10,8 +10,9 @@
 #   (KEIN tradingbot-frontend-Service — Frontend ist statisch.)
 #
 # Migration von Alt-Installationen:
-#   alte Unit "tradingbot" (Streamlit scanner.py :8501) wird deaktiviert,
-#   "tradingbot-bg" wird mit der neuen, gehaerteten Unit-Datei ueberschrieben.
+#   tradingbot-frontend (:3000) und tradingbot (Streamlit :8501) werden erst
+#   nach erfolgreichem TLS/nginx-Test deaktiviert. tradingbot-bg wird mit der
+#   neuen, gehaerteten Unit-Datei ueberschrieben.
 # ============================================================
 set -e
 
@@ -52,6 +53,11 @@ if [[ ! $REPLY =~ ^[Jj]$ ]]; then
     exit 1
 fi
 
+# Gemeinsamer, service-isolierter Cache. Die systemd-Units binden dieses
+# Verzeichnis als ihr /tmp ein, damit API und Background-Scanner dieselben
+# Ergebnisse sehen, ohne das globale Server-/tmp freizugeben.
+sudo install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"
+
 # ── 6) Virtual Environment + Dependencies ──
 # Hinweis: Unit-Dateien und safe_deploy.sh erwarten das venv unter $APP_DIR/venv.
 echo "📦 Python Dependencies installieren..."
@@ -62,6 +68,9 @@ sudo -u tradingbot bash -c "
     pip install --upgrade pip
     pip install -r requirements.txt
 "
+
+echo "Pruefe versioniertes Frontend-Bundle..."
+sudo -u tradingbot "$APP_DIR/venv/bin/python" "$APP_DIR/scripts/verify_frontend_bundle.py"
 
 # ── 7) Produktions-.env anlegen (Pflicht — Units starten ohne .env NICHT) ──
 # Die App bootet im Commercial-Mode fail-closed: mit Default-Secrets
@@ -85,20 +94,21 @@ echo "⚙️ Systemd Services einrichten..."
 sudo cp "$APP_DIR/deploy/tradingbot-api.service" /etc/systemd/system/
 sudo cp "$APP_DIR/deploy/tradingbot-bg.service"  /etc/systemd/system/
 
-# ── 9) MIGRATION: alte Streamlit-Unit "tradingbot" stilllegen ──
-# Die alte Unit startete das FALSCHE Produkt (Streamlit scanner.py auf :8501
-# statt FastAPI api.py auf :8000). Sie wird deaktiviert und entfernt;
-# das Legacy-UI kann bei Bedarf manuell gestartet werden.
-if systemctl list-unit-files 'tradingbot.service' --no-legend 2>/dev/null | grep -q '^tradingbot.service'; then
-    echo "🔁 Migration: deaktiviere alte Streamlit-Unit 'tradingbot'..."
-    sudo systemctl disable --now tradingbot.service || true
-    sudo rm -f /etc/systemd/system/tradingbot.service
-fi
-
 sudo systemctl daemon-reload
 sudo systemctl enable tradingbot-api tradingbot-bg
 sudo systemctl restart tradingbot-bg
 sudo systemctl restart tradingbot-api
+
+disable_legacy_frontends() {
+    for legacy_unit in tradingbot-frontend.service tradingbot.service; do
+        if systemctl list-unit-files "$legacy_unit" --no-legend 2>/dev/null | grep -q "^$legacy_unit"; then
+            echo "Migration: deaktiviere Legacy-Unit $legacy_unit ..."
+            sudo systemctl disable --now "$legacy_unit" || true
+            sudo rm -f "/etc/systemd/system/$legacy_unit"
+        fi
+    done
+    sudo systemctl daemon-reload
+}
 
 echo "✅ Services gestartet (tradingbot-api, tradingbot-bg)"
 
@@ -132,12 +142,22 @@ if [ -n "$DOMAIN" ]; then
     sudo rm -f /etc/nginx/sites-enabled/default
     sudo nginx -t && sudo systemctl reload nginx
 
+    # Verify the replacement first while the old frontend is still available.
+    sudo env APP_DIR="$APP_DIR" ENV_FILE="$ENV_FILE" ALLOW_LEGACY_FRONTENDS=1 \
+        bash "$APP_DIR/deploy/verify_commercial_edge.sh"
+
+    # Retire direct legacy frontends only after their TLS replacement is live.
+    disable_legacy_frontends
+    sudo env APP_DIR="$APP_DIR" ENV_FILE="$ENV_FILE" \
+        bash "$APP_DIR/deploy/verify_commercial_edge.sh"
+
     echo "✅ Nginx aktiv: https://$DOMAIN  (Renewal laeuft automatisch via certbot.timer)"
 else
     echo "⏭️  Nginx/TLS uebersprungen. Spaeter manuell:"
     echo "    sudo certbot certonly --nginx -d DEINE_DOMAIN"
     echo "    sudo sed 's/\${DOMAIN}/DEINE_DOMAIN/g' $APP_DIR/deploy/nginx-tradingbot.conf | sudo tee /etc/nginx/sites-available/tradingbot"
     echo "    sudo ln -sf /etc/nginx/sites-available/tradingbot /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx"
+    echo "    Commercial launch remains BLOCKED; legacy services stay untouched until the TLS replacement is verified."
 fi
 
 # ── 11) Abschluss ──
