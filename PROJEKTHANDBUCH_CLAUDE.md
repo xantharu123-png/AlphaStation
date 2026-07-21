@@ -1,6 +1,6 @@
 # Alpha Station - Projekthandbuch und Claude-Übergabe
 
-**Stand:** 21. Juli 2026 (inkl. unabhängigem Nachaudit und Nachaudit-Fixpaket)
+**Stand:** 21. Juli 2026 (inkl. unabhängigem Nachaudit, Claude-Fixpaket und Codex-Abschlussprüfung)
 **Repository:** `C:\Users\miros\Desktop\TradingBot`
 **Produktname:** Alpha Station
 **Zweck dieses Dokuments:** Belastbare Übergabe an Claude oder einen anderen Senior-Entwickler, ohne den gesamten Chatverlauf erneut rekonstruieren zu müssen.
@@ -25,14 +25,22 @@ Der aktuelle technische Stand ist weit fortgeschritten:
 - Produktions-Deployment mit nginx, TLS-Prüfung, systemd-Hardening, Preflight-Tests und Rollback
 - Umfangreiche Regressionstests
 
-Der aktuell eingecheckte und zu GitHub synchronisierte Referenzstand ist:
+Der aktuell lokal verifizierte Entwicklungsstand ist:
 
 ```text
-Branch: main
-HEAD / origin/main: e004194 Clarify BI scanner trade states
+Branch: nachaudit-fixes-2026-07-21
+Code-Referenz: 2247aff Close scanner audit data and execution gaps
+Handbuch: separater Abschlusscommit auf demselben Branch
 ```
 
-Der eingecheckte Referenzstand (`e004194`) wurde mit **937 bestandenen Tests in 64 Testdateien**, Python-Compile-Checks und erfolgreicher Frontend-Bundle-Verifikation geprüft (Bundle-Quellhash `6a89182fa949`). **Achtung:** Der lokale Arbeitsbaum ist seit dem 21.07. NICHT mehr sauber — er enthält das bewusst uncommittete Nachaudit-Fixpaket (Abschnitt 19.8) plus die drei Audit-Reports. Details und Dateiliste stehen in 19.8 und 22.2.
+Der GitHub- und Produktionsstand ist weiterhin separat zu betrachten:
+
+```text
+Ziel nach Abschluss-Push: aktueller Branch-HEAD auf origin/main
+Produktion: erst nach Server-Pull, Safe-Deploy und Healthchecks nachgewiesen
+```
+
+Der Claude-Fixstand `b397f26` ist lokal committed. Darauf folgt der Codex-Abschlusscommit `2247aff`, der Claudes dokumentierte Restpunkte fachlich und technisch nachgeprüft und die deterministisch behebbaren Punkte geschlossen hat. Dieser Code- und Teststand wurde mit **985 bestandenen Tests in 69 Testdateien**, Python-Compile-Checks und erfolgreicher Frontend-Bundle-Verifikation geprüft (Bundle-Quellhash `fd30d7f297b8`). Der abschließende Push nach `origin/main` ersetzt keinen Server-Pull und keinen Produktions-Healthcheck. Details und Restgrenzen stehen in Abschnitt 19.8, 19.9, 22 und 23.
 
 Seit der vorherigen Handbuchfassung wurden insbesondere der vollständige Scanner- und Mathematik-Audit, die Laufzeit- und Scheduler-Härtung, die Breakout-Qualitätskalibrierung, die Cache-Versionierung, die rotierende Penny-Abdeckung und die verständliche BI-Zustandslogik eingecheckt. Der Git-/GitHub-Stand darf trotzdem nicht still mit dem tatsächlich auf dem Server deployten Stand gleichgesetzt werden; die Serverrevision muss nach jedem Deployment separat geprüft werden.
 
@@ -505,7 +513,7 @@ Danach muss ein normaler Chrome- oder Edge-Smoke-Test erfolgen. Kein Codex-Brows
 
 ## 18. Tests und Definition of Done
 
-Aktuell existieren 65 `test_*.py`-Dateien (inkl. `test_nachaudit_fixes.py`, +22 Tests). Der zuletzt vollständig verifizierte eingecheckte Stand (`e004194`) bestand **937 Tests**; nach dem Nachaudit-Fixpaket ist vor dem Commit ein neuer voller Lauf Pflicht (erwartet: 959).
+Aktuell existieren 69 `test_*.py`-Dateien. Der lokale Arbeitsstand aus `b397f26` plus Codex-Abschlussschicht bestand im vollständigen Lauf **985 Tests**. Der reine Claude-Commit `b397f26` bestand zuvor 959 Tests in 65 Testdateien; der ältere Hauptstand `e004194` bestand 937 Tests in 64 Testdateien. Diese lokalen Nachweise sind weder ein Produktionsnachweis noch ein Beleg für zukünftige Trading-Performance.
 
 Für jede fachliche Änderung gilt mindestens:
 
@@ -586,7 +594,7 @@ Ein grüner Testlauf beweist nur das getestete Verhalten. Tests dürfen keine fa
 
 ### 19.5 Vollständiger Scanner-, Mathematik- und Datenqualitätsaudit
 
-> **Wichtige Einordnung (Nachaudit 21.07.2026):** Die folgende Liste stammt aus dem Codex-Fixstatus vom 20.07. Ein unabhängiges Nachaudit (`AUDIT_NACHAUDIT_CODEX_2026-07-21.md`) hat jeden der 49 Befunde einzeln verifiziert. Das Ergebnis in einem Satz: Codex hat gut, aber nicht fertig gearbeitet — 34 von 49 Befunden waren sauber behoben (darunter alle Schwergewichte: Krypto-Zeitskala, MEXC-Einheiten, Tracker-Fill-Logik, AutoTrader-Order, RVOL-Normierung, patterns-Crash, Retest-Pfad), 12 nur teilweise, 2 gar nicht, 1 ohne produktiven Aufrufer (n. a.) — die ursprüngliche Aussage „alle Befunde behoben" war damit nachweislich zu optimistisch. Der Großteil der roten Blocker wurde am 21.07. mit dem Nachaudit-Fixpaket (Abschnitt 19.8) geschlossen; welche Reste offen bleiben, steht in der Restliste von 19.8. Diese Liste ist also erst **zusammen mit 19.8** der ehrliche Stand.
+> **Wichtige Einordnung (Nachaudit 21.07.2026):** Die folgende Liste stammt aus dem Codex-Fixstatus vom 20.07. Ein unabhängiges Nachaudit (`AUDIT_NACHAUDIT_CODEX_2026-07-21.md`) hat jeden der 49 Befunde einzeln verifiziert. Das Ergebnis in einem Satz: Codex hat gut, aber nicht fertig gearbeitet — 34 von 49 Befunden waren sauber behoben (darunter alle Schwergewichte: Krypto-Zeitskala, MEXC-Einheiten, Tracker-Fill-Logik, AutoTrader-Order, RVOL-Normierung, patterns-Crash, Retest-Pfad), 12 nur teilweise, 2 gar nicht, 1 ohne produktiven Aufrufer (n. a.) — die ursprüngliche Aussage „alle Befunde behoben" war damit nachweislich zu optimistisch. Der Großteil der roten Blocker wurde am 21.07. mit dem Nachaudit-Fixpaket (Abschnitt 19.8) geschlossen. Abschnitt 19.9 dokumentiert die anschließende Codex-Abschlussprüfung der damaligen Restliste und ist für den aktuellen lokalen Arbeitsstand maßgeblich.
 
 Zu den wichtigsten abgeschlossenen Korrekturen gehören:
 
@@ -616,7 +624,9 @@ Nach der Codex-Fixrunde vom 20.07. wurde ein unabhängiges Nachaudit durchgefüh
 
 Daraufhin wurde am 21.07. das folgende Fixpaket umgesetzt und anschließend **selbst noch einmal adversarial re-auditiert** (der Re-Audit fand drei Fehler *in diesen Fixes*, die im selben Zug nachgebessert wurden — siehe „Re-Audit-Korrekturen" unten). Regressionstests: `test_nachaudit_fixes.py`, 22 Tests, alle grün.
 
-Geänderte Dateien: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `modules/new_listing_scanner.py`, `modules/scanners.py`, `modules/backtests.py`, neu `test_nachaudit_fixes.py`.
+Geänderte Dateien: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `modules/new_listing_scanner.py`, `modules/scanners.py`, `modules/backtests.py`, neu `test_nachaudit_fixes.py` sowie die Nachaudit- und Übergabedokumentation.
+
+**Historischer Abgleich des Commits `b397f26`:** Das Fixpaket ist als lokaler Commit `b397f26` auf dem Branch `nachaudit-fixes-2026-07-21` vorhanden. Dieser Commit bestand 959 Tests; Compile und Frontend-Bundle-Verifikation waren erfolgreich. `AUDIT_NACHAUDIT_CODEX_2026-07-21.md` dokumentiert den Zustand **vor** diesem Fixpaket und ist deshalb Ursachenbeleg, nicht aktueller Post-Fix-Status. Auf `b397f26` folgt der Codex-Abschlusscommit `2247aff` aus Abschnitt 19.9. GitHub-Synchronisierung und Produktion bleiben getrennt nachzuweisen.
 
 **Umgesetzte Fixes:**
 
@@ -641,19 +651,30 @@ Geänderte Dateien: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `module
 - Der erste L8-Fix verglich `basis_dt < purge_cutoff` außerhalb des try/except → ein naiver (tz-loser) persistierter Zeitstempel hätte `cleanup_monitoring` per TypeError für den gesamten Lauf abgebrochen. Korrigiert: Vergleich im try, naive Zeitstempel werden tz-aware normalisiert.
 - Der erste N8-Guard saß nur im Bear/Turtle-Helfer; die Direkt-Projektions-Callsites (Strategy-Scan, Volume-Spikes) blieben ungeschützt. Korrigiert: Guard zentral in die Fraction-Funktion verlegt.
 
-**Bewusst noch offen (nicht launchblockierend, aber vor Kalibrier-Entscheidungen zu erledigen):**
+### 19.9 Codex-Abschlussprüfung 21.07.2026: Status der früheren Restliste
 
-1. H6-Rest: kein Kerzenzeit-Anker fürs Listing-Alter, kein Re-Anker bei nachträglich bekanntem Launch-Timestamp, `listing_age_source_override`-Label kann falsch etikettieren. (Entschärfung: Crypto.com hat keinen Announcement-Fetcher, der Haupt-Angriffsweg ist zu.)
-2. H10-Rest: LVN-Bins werden nicht zu Void-Zonen gemergt — TP-Ziele können weiter auf Binraster-Kanten statt am Volumen-Wiederanstieg liegen.
-3. M9-Rest: Perp-Matching (`perp_data.get(symbol)`) prüft weiterhin nicht die Preisplausibilität des Kontrakts (der 2%-Guard fängt nur den Trigger, nicht die Funding/OI-Scores).
-4. M11-Rest: Krypto-Swing-Mails ohne erfolgreichen 5m-Check tragen die Preisbasis vom Scan-Beginn; ein einzelner Ticker-Call unmittelbar vor der Trade-Mail fehlt (Penny hat ihn).
-5. M21-Rest: Coverage-Cap-Klippe (eine zusätzlich fehlende Dimension auf Crypto.com ⇒ Hard-Cap 79).
-6. L11: BPIQ-Teilpagination als 4h-Cache, v=0-Bars-Cache, stille 90-Tage-Kappung, 4H-Aggregation ohne Session-Alignment (`modules/data_fetchers.py`).
-7. Kalibrierung: Netto-R:R-Schwellen (`HARD_MIN_RR`/`PREFERRED_MIN_RR`) und BI-Grade-Schwellen wurden nach den Modelländerungen (Kosten; BI-Maximum 183→173/168) nicht rekalibriert; Signal 11 hat weiterhin keinen echten Benchmark-Vergleich; die Biotech-OVERDUE-Neugewichtung existiert nur in der toten Funktion `_check_clinical_trials`, der BPIQ-Live-Pfad scort Überfälliges unverändert.
-8. Restklasse H3: `_project_us_equity_rvol`-Guard deckt jetzt alle Projektionen, aber der `if not day_data: continue`-Pfad ohne None-Unterscheidung existiert weiterhin im BI-AutoTrader-History-Aufbau (`modules/scanners.py`) und in ORB/bg-Callsites.
-9. Testlücken aus der Codex-Runde: für M12–M15 (ORB/Turtle/Bear-Frische), H6 und M21 existieren weiterhin keine gezielten Regressionstests. Von den 22 Nachaudit-Tests sind zudem 8 reine Source-String-Asserts (prüfen Textvorkommen, nicht Verhalten).
-10. Bewusste Verhaltensänderungen aus der Codex-Fixrunde, die als solche im Blick bleiben müssen (kein Bug, aber Erwartungsmanagement): Wyckoff/Harmonics liefern ohne ausreichende Volumendaten keine bzw. gemalusterte Signale; Penny blockt „Dead-Tape-Ignitions" (≥3 von 12 Baseline-Bars mit 0-Volumen); Netto-R:R zieht Round-Trip-Kosten ab und bestraft Spread doppelt (Liquiditäts-Säule + Netto-R:R).
-11. Niedrig/Rest: Tracker bucht Gap-Exits vor dem Fill zu pessimistisch (N4); `_normalize_crypto_bars`-Dedup könnte den Cadence-Validator bei künftig falschem Exchange-Mapping maskieren (N5); market_context-Proxy rechnet bei komplett fehlenden Marktdaten mit Default-Werten (N9); BI-Short-Bonus kann `BI_MaxScore` übersteigen (Anzeige); `_tracker_crypto_fetcher` matcht weiterhin nur per Symbol (erster Treffer gewinnt); `invalidated_at` wird in `cleanup_monitoring` gelesen, aber nirgends geschrieben (Fallback nutzt `detected_at`).
+Die Restliste aus 19.8 wurde anschließend erneut gegen produktiven Code, Datenfluss, Mathematik und Verhaltenstests geprüft. Die deterministisch behebbaren Punkte sind im Commit `2247aff` geschlossen. Der frühere Text bleibt als Ursachenhistorie relevant, ist aber nicht mehr der aktuelle Fehlerstatus.
+
+**Geschlossene Punkte aus der früheren Restliste:**
+
+1. **H6 Listing-Alter:** `_first_exchange_candle_anchor` akzeptiert nur ausreichend vollständige, frische, lückenarme und nicht abgeschnittene Exchange-Historie. Sobald ein belastbarer Start bekannt wird, re-ankert das Monitoring auf den Exchange-Timestamp und kennzeichnet die Quelle korrekt. Verhaltenstests decken Anchor, Gaps, Staleness, Caps, Re-Anker und Cleanup ab.
+2. **H10 LVN-Zonen:** Benachbarte Low-Volume-Bins werden zu zusammenhängenden Volume-Voids gemergt. Ziele und Barrieren verwenden Zonenränder beziehungsweise den Volumen-Wiedereintritt statt zufälliger Binraster-Kanten; die Mikropreis-Toleranz ist ULP-basiert.
+3. **M9 Perp-Matching:** Kontrakte werden nicht mehr nur per Symbol übernommen. Exchange, exakter Kontrakt und Preisplausibilität werden validiert; skalierte Kontrakte wie `1000PEPEUSDT` werden unterstützt, unplausible Matches fail-closed verworfen.
+4. **M11 Mail-Frische:** Unmittelbar vor einer Early-Mover-Trade-Mail werden der exakte Venue-/Kontrakt-Chart, die letzte geschlossene 5m-Kerze, Preisplausibilität, Level-Geometrie, Live-R:R und Entry-Abstand erneut geprüft. Ein alter Scanpreis darf keine Trade-Mail mehr autorisieren.
+5. **M21 Coverage-Cap:** Der Cap ist kontinuierlich und monoton statt einer 79-Punkte-Klippe. Fehlende Daten reduzieren den erreichbaren Score schrittweise; eine einzelne Dimension erzeugt keinen abrupten Grade-Sprung.
+6. **L11 Datenqualität:** Unvollständige oder rate-limitierte BPIQ-Pagination ersetzt keinen vollständigen Cache; ein vorhandener vollständiger Cache bleibt erhalten. Krypto-Historie über 90 Tage wird im API-Pfad explizit abgelehnt statt still gekappt. Fehlendes Volumen und Teilhistorie sind sichtbar. 4H-Aggregation respektiert Session-/Zeitzonen-Grenzen und markiert partielle Quellkerzen.
+7. **Biotech/BI-Konsistenz:** Überfällige Catalyst-Daten liefern keinen positiven Edge-Score, sondern nur Warnkontext; der nächste zukünftige Readout wird bevorzugt. Der BI-Score wird vor Confidence und Grade auf sein echtes Maximum begrenzt.
+8. **H3 Fetch-/Kalenderpfade:** Fehlgeschlagene Historientage werden explizit gezählt; AutoTrader nutzt Handelstage statt Kalendertage und filtert historische Bars nicht mehr mit heutigen Preis-/Volumengrenzen. ORB- und Background-Pfade erzeugen bei fehlenden Daten kein Signal, sondern brechen fail-closed ab.
+9. **Tracker-Lifecycle:** Krypto-Signale speichern Coin-ID, Venue und Kontrakt; mehrdeutige Symboltreffer werden nicht mehr blind dem ersten Coin zugeordnet. Eine Invalidation vor Fill wird als `NO_FILL` gewertet, und `invalidated_at` wird tatsächlich geschrieben.
+10. **N4/N9/Broker-Safety:** Der Tracker trennt Vor-Fill-Invalidation von einem realen Verlust. Fehlende Markt-, News- oder Eventdaten können keinen stillen `RISK_ON`-Zustand mehr erzeugen. Bracket-Orders erzeugen keine Kinder mit null Stück; bei einer Aktie existiert nur ein positiver TP-Teilauftrag.
+11. **Regressionen:** Die neuen Verhaltenstests decken Listing-Anker, Coverage-Cap, Exchange-Identität, finale Mail-Revalidierung, Chart-Historie, 4H-Session-Aggregation, Markt-Kontext, Broker-Stückelung, Tracker-Identität/Lifecycle, BPIQ-Future-vs-Overdue sowie VRVP-Zonen ab. Die vollständige Suite umfasst 985 bestandene Tests in 69 Testdateien.
+
+**Bewusst weiterhin offen, weil nicht seriös allein per Code beweisbar:**
+
+- Netto-R:R-, Score-, Grade- und BI-Schwellen brauchen eine versionierte Out-of-Sample-/Walk-forward-Kalibrierung auf realen Signalen nach Gebühren, Spread und Slippage. Grüne Unit-Tests beweisen keine optimale Schwelle.
+- Signal 11 und andere Prognosekomponenten benötigen Benchmark, Konfidenzintervalle, Mindeststichprobe und Regime-Segmentierung. Bis dahin ist ihr Score ein Modellmerkmal, keine Gewinnwahrscheinlichkeit.
+- Vor Paid-Launch sind ein längerer Shadow-Run, Mail-vs.-UI-vs.-Tracker-Parität auf Produktionsdaten, normale Chrome-/Edge-Smoke-Tests, Server-Healthchecks sowie Rechts-, Steuer- und Marktdatenlizenzprüfung Pflicht.
+- Bewusste Schutzregeln bleiben bestehen: Wyckoff/Harmonics ohne belastbare Volumendaten werden unterdrückt; Penny blockt Dead-Tape-Ignitions; Netto-R:R berücksichtigt Round-Trip-Kosten und Liquiditätsrisiko. Diese Regeln dürfen nur evidenzbasiert gelockert werden.
 
 ### 19.6 Scheduler, Health und Scanner-Laufzeit
 
@@ -767,18 +788,19 @@ Ein langsamer Penny-Scan wurde früher nach einem Watchdog-Timeout nur im sichtb
 
 ## 22. Aktueller Git- und Arbeitsstand
 
-### 22.1 Referenzstand vor dieser Dokumentationsänderung
+### 22.1 Lokaler und synchronisierter Referenzstand
 
 ```text
-Branch: main
-HEAD: e004194 Clarify BI scanner trade states
-origin/main: e004194
-Synchronisation: main...origin/main, kein Rückstand
+Lokaler Branch: nachaudit-fixes-2026-07-21
+Code-Abschluss: 2247aff Close scanner audit data and execution gaps
+Handbuch: separater Dokumentationscommit auf demselben Branch
+GitHub-Ziel: aktueller Branch-HEAD wird nach vollständiger Prüfung nach origin/main gepusht
+Produktion: erst nach Server-Pull, Safe-Deploy und Healthchecks nachgewiesen
 ```
 
 ### 22.2 Lokaler Arbeitsstand
 
-Der lokale Arbeitsbaum enthält seit dem 21.07.2026 das **Nachaudit-Fixpaket** (Abschnitt 19.8) als bewusst noch nicht committete Differenz: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `modules/new_listing_scanner.py`, `modules/scanners.py`, `modules/backtests.py`, neu `test_nachaudit_fixes.py`, dieses Handbuch sowie die Audit-Reports `AUDIT_SCANNER_VOLLAUDIT_2026-07-19.md`, `AUDIT_SCANNER_FIXSTATUS_2026-07-20.md` und `AUDIT_NACHAUDIT_CODEX_2026-07-21.md`. Commit erst nach ausdrücklichem Betreiberauftrag und einem vollen lokalen Pytest-Lauf.
+Das **Nachaudit-Fixpaket** aus Abschnitt 19.8 ist vollständig in `b397f26` enthalten. Darauf folgt die committed Codex-Abschlussschicht `2247aff` aus Abschnitt 19.9. Sie ändert unter anderem `api.py`, `bg_service.py`, Daten-, Scanner-, Tracker-, Broker-, Markt-Kontext-, Pattern- und VRVP-Module, das Frontend-Bundle sowie die zugehörigen Regressionstests. Ein Push nach `origin/main` ist noch kein Nachweis, dass derselbe Stand produktiv läuft.
 
 Der auf dem Server aktive Commit ist damit nicht automatisch bewiesen. Vor einer Aussage über Produktion sind auf dem Server mindestens `git log -1 --oneline`, `/api/health`, `/api/system-health`, Mailstatus und die Scannerzustände zu prüfen.
 
@@ -788,13 +810,14 @@ Zuletzt lokal verifiziert:
 
 | Check | Ergebnis |
 |---|---|
-| vollständige Pytest-Suite | 937 bestanden in 64 Testdateien |
-| `api.py`, `bg_service.py` und kritische Tradingmodule | Compile OK |
-| Frontend-Bundle | Verifikation OK, Quellhash `6a89182fa949` |
-| Git/GitHub vor Handbuchänderung | `main` sauber und synchron auf `e004194` |
+| vollständige Pytest-Suite auf aktuellem Arbeitsbaum | 985 bestanden in 69 Testdateien |
+| alle geänderten Python-Produktivmodule | Compile OK |
+| Frontend-Bundle | Verifikation OK, Quellhash `fd30d7f297b8` |
+| lokaler Git-Stand | Feature-Branch `nachaudit-fixes-2026-07-21`, Code-Abschluss `2247aff` plus dieser Handbuch-Abgleich |
+| GitHub-Hauptstand | wird beim Abschluss-Push auf den aktuellen Branch-HEAD fast-forward synchronisiert; danach Remote-Hash separat prüfen |
 | letzte breite Auditabdeckung | Scanner, Mathematik, Datenqualität, Backtest, Mail- und Runtime-Safety |
 
-Die 937 Tests und der Bundle-Hash gelten für den eingecheckten Referenzstand `e004194`. Das Nachaudit-Fixpaket vom 21.07. wurde zusätzlich verifiziert mit: `python -m compileall` über alle geänderten Dateien, `test_nachaudit_fixes.py` (21/21) und den betroffenen Bestands-Suiten (~330 Tests grün in der Audit-Umgebung; Abweichungen dort ausschließlich fehlende Frontend-/Gitignore-Dateien der Prüf-Kopie). Vor dem Commit muss der Betreiber den vollen Pytest-Lauf lokal wiederholen. Ein normaler Chrome-/Edge-Smoke-Test und die Server-Healthchecks müssen beim nächsten Deployment erneut durchgeführt werden. Lokale Prüfung, GitHub und Produktion bleiben drei getrennte Nachweise.
+Die 959 Tests bleiben der historische Nachweis für `b397f26`; der committed Code-Abschluss `2247aff` besteht 985 Tests in 69 Testdateien. Zusätzlich wurden die geänderten Python-Dateien kompiliert und das Frontend-Bundle verifiziert. Ein normaler Chrome-/Edge-Smoke-Test und die Server-Healthchecks wurden dadurch nicht ersetzt und müssen beim nächsten Deployment erneut durchgeführt werden. Lokale Prüfung, GitHub und Produktion bleiben drei getrennte Nachweise.
 
 ## 24. Kommerzielle Freigabe
 
@@ -848,7 +871,7 @@ git status --short --branch
 git log -3 --oneline --decorate
 ```
 
-Erwarteter eingecheckter Referenzstand dieser Handbuchfassung ist `e004194` auf `main`. Bei Abweichungen zuerst Diff und Historie lesen. Keine Datei zurücksetzen und keine fremden Änderungen verwerfen.
+Erwarteter Code-Referenzstand dieser Handbuchfassung ist `2247aff` auf `nachaudit-fixes-2026-07-21`, ergänzt um den separaten Handbuch-Abschlusscommit. Nach dem Push muss `origin/main` auf denselben finalen Branch-HEAD zeigen. Bei Abweichungen zuerst Diff und Historie lesen. Keine Datei zurücksetzen und keine fremden Änderungen verwerfen.
 
 ### Schritt 2: Zielrevision vollständig verifizieren
 
@@ -940,20 +963,23 @@ Das Produkt soll den Trader unterstützen, nicht sein Urteilsvermögen ersetzen.
 ## 30. Startprompt für Claude
 
 ```text
-Lies zuerst PROJEKTHANDBUCH_CLAUDE.md (bes. Abschnitt 19.8),
+Lies zuerst PROJEKTHANDBUCH_CLAUDE.md (bes. Abschnitte 19.8 und 19.9),
 AUDIT_NACHAUDIT_CODEX_2026-07-21.md, COMMERCIAL_LAUNCH_CHECKLIST.md,
 deploy/safe_deploy.sh, den aktuellen git status und die letzten Commits.
 AUDIT_SCANNER_FIXSTATUS_2026-07-20.md nur mit der Einordnung aus 19.5 lesen —
 seine "alles behoben"-Aussage wurde vom Nachaudit widerlegt. Erwarteter
-eingecheckter Referenzstand ist e004194 auf main plus das uncommittete
-Nachaudit-Fixpaket (19.8); bei Abweichungen zuerst die Historie prüfen und
+Code-Referenzstand ist 2247aff auf nachaudit-fixes-2026-07-21, ergänzt um den
+separaten Handbuch-Abschlusscommit. Das Nachaudit-Fixpaket (19.8) und die
+Codex-Abschlussschicht (19.9) sind committed. Ein GitHub-Push ist nicht
+automatisch ein Produktionsdeployment. Bei Abweichungen zuerst die Historie prüfen und
 nichts zurücksetzen. Prüfe jede Aufgabe gegen die kanonischen Signalzustände und die
 Invarianten für Datenfrische, Entry/Stop/TP-Geometrie, Setup-vs-Execution,
 Swing-vs-Intraday und UI/Mail-Parität. Ändere keine Schwelle pauschal und
 versprich keine Gewinne. Nach Codeänderungen gezielte Tests, Full Pytest,
 Compile, Frontend-Bundle-Verifikation und bei UI/Auth einen normalen
-Chrome/Edge-Smoke-Test ausführen. 937 Tests sind der eingecheckte Referenzwert
-(e004194) bzw. 959 mit dem uncommitteten Nachaudit-Fixpaket,
+Chrome/Edge-Smoke-Test ausführen. 985 Tests in 69 Testdateien sind der lokal
+verifizierte Referenzwert des aktuellen Arbeitsbaums; b397f26 hatte 959 und
+e004194 zuvor 937 Tests,
 nicht eine unveränderliche Sollzahl. Vor Commit oder Push den Betreiber fragen.
 ```
 
@@ -969,10 +995,11 @@ nicht eine unveränderliche Sollzahl. Vor Commit oder Push den Betreiber fragen.
 | `06f3c61` | Cache-Revision | veraltete Breakout-Qualitätscaches ungültig gemacht |
 | `bbce55c` | Penny-Abdeckung | Volluniversum, Qualitätsblock und Rotation transparent getrennt |
 | `e004194` | BI-Handelszustände | interne Kandidatenbegriffe entfernt, klare Aktionen und Gründe eingeführt |
-| *(uncommitted, 21.07.)* | Nachaudit-Fixpaket (Abschnitt 19.8) | 5 der 7 roten Nachaudit-Blocker vollständig geschlossen (Bear-ATR-Chronologie, NLS-TypeError, LVN-Overhead-Gate, Quick-Scan-RVOL-Richtung, Tracker-Cache-TTL) plus M9-Ausschlüsse/Symbol-Kollision, N6–N11, M16, H3-`failed_fetch_days`, L8-Purge, Kleinfixes; +22 Regressionstests. Offen aus den roten Blockern: M9-Perp-Match-Plausibilisierung und die M12/M13/M15-Regressionstests (siehe 19.8-Restliste 3/9). |
+| `b397f26` | Nachaudit-Fixpaket (Abschnitt 19.8) | 5 der 7 roten Nachaudit-Blocker vollständig geschlossen (Bear-ATR-Chronologie, NLS-TypeError, LVN-Overhead-Gate, Quick-Scan-RVOL-Richtung, Tracker-Cache-TTL) plus M9-Ausschlüsse/Symbol-Kollision, N6–N11, M16, H3-`failed_fetch_days`, L8-Purge, Kleinfixes; +22 Regressionstests. Offen aus den roten Blockern: M9-Perp-Match-Plausibilisierung und die M12/M13/M15-Regressionstests (siehe 19.8-Restliste 3/9). |
+| `2247aff` | Codex-Abschlussschicht (Abschnitt 19.9) | frühere Restliste erneut gegen Code, Mathematik und Verhalten geprüft; deterministisch behebbare Daten-, Identitäts-, Frische-, Tracker-, Broker-, Biotech-, Markt-Kontext- und VRVP-Probleme geschlossen; vollständiger Code- und Teststand mit 985 Tests in 69 Testdateien verifiziert |
 
-Der eingecheckte Referenzstand umfasst 937 bestandene Tests und ein verifiziertes Frontend-Bundle; das uncommittete Nachaudit-Fixpaket ergänzt 21 Tests. Ob derselbe Commit bereits auf Produktion aktiv ist, muss weiterhin serverseitig nachgewiesen werden.
+Der aktuelle Abschluss umfasst `b397f26`, den committed Code-Abschluss `2247aff`, 985 bestandene Tests in 69 Testdateien und ein verifiziertes Frontend-Bundle. Nach dem finalen Push muss `origin/main` auf den finalen Branch-HEAD zeigen; ob derselbe Stand auf Produktion aktiv ist, muss weiterhin separat nachgewiesen werden.
 
 ---
 
-**Letzter Hinweis:** Alte Auditberichte dokumentieren wichtige historische Fehler, aber der Code ist seitdem weiterentwickelt worden. Sie sind Ursachen- und Regressionreferenz, nicht automatisch der aktuelle Fehlerstand. Der aktuelle lokale Code, die aktuelle Testsuite und dieses Handbuch haben Vorrang. **Ausnahme:** Die Restliste in Abschnitt 19.8 (Nachaudit 21.07.) ist der aktuelle offene Fehlerstand und nicht „historisch".
+**Letzter Hinweis:** Alte Auditberichte dokumentieren wichtige historische Fehler, aber der Code ist seitdem weiterentwickelt worden. Sie sind Ursachen- und Regressionreferenz, nicht automatisch der aktuelle Fehlerstand. Der aktuelle lokale Code, die aktuelle Testsuite und dieses Handbuch haben Vorrang. Für die frühere Restliste aus Abschnitt 19.8 gilt der Abschlussstatus aus Abschnitt 19.9; empirisch noch nicht beweisbare Restgrenzen sind dort ausdrücklich genannt.
