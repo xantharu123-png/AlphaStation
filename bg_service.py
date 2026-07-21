@@ -1313,6 +1313,41 @@ def _tracker_crypto_fetcher(ticker):
             return None
         with open(_CG_MARKETS_CACHE_FILE, "r") as f:
             payload = json.load(f)
+        # NACHAUDIT M18 (v2, re-audit-korrigiert): Cache-Alter pruefen, sonst
+        # bewertet der Tracker Stops/TPs gegen stunden- bis tagealte Preise.
+        # ACHTUNG: Diese Datei hat ZWEI Writer mit UNTERSCHIEDLICHEM Zeitfeld —
+        # bg (_cg_markets_cache_payload) schreibt "ts" (float epoch),
+        # api.py (_fetch_coingecko_markets) schreibt "cached_at" (ISO-String).
+        # Der erste Fix las nur "ts" -> nach jedem api-Scan war das Feld None
+        # -> Tracker lieferte dauerhaft None (stille Abschaltung). Jetzt werden
+        # beide Felder gelesen, ISO wird geparst, und als letzter Anker dient
+        # die Datei-mtime. TTL 3h > langsamster legitimer Refresh (2h-Divergenz-
+        # Scan) und faengt trotzdem eine tote Pipeline ab.
+        _cache_epoch = None
+        if isinstance(payload, dict):
+            _raw_ts = payload.get("ts")
+            if isinstance(_raw_ts, (int, float)):
+                _cache_epoch = float(_raw_ts)
+            else:
+                _raw_iso = payload.get("cached_at")
+                if _raw_iso:
+                    try:
+                        _cache_epoch = datetime.fromisoformat(
+                            str(_raw_iso).replace("Z", "+00:00")
+                        ).timestamp()
+                    except (TypeError, ValueError):
+                        _cache_epoch = None
+        if _cache_epoch is None:
+            # Letzter Anker: Datei-Schreibzeit (immer ein echtes Signal).
+            try:
+                _cache_epoch = os.path.getmtime(_CG_MARKETS_CACHE_FILE)
+            except OSError:
+                _cache_epoch = None
+        _cache_age = (time.time() - _cache_epoch) if _cache_epoch is not None else None
+        _MAX_MARKETS_CACHE_AGE = 10800  # 3h
+        if _cache_age is None or _cache_age < 0 or _cache_age > _MAX_MARKETS_CACHE_AGE:
+            log.debug(f"[SignalTracker] Markets-Cache zu alt/unbekannt (age={_cache_age}) — kein Preis fuer {ticker}")
+            return None
         coins = payload.get("coins", []) if isinstance(payload, dict) else payload
         for c in coins or []:
             if not isinstance(c, dict):

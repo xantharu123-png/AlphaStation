@@ -1809,7 +1809,11 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     # ═══════════════════════════════════════════════════════════════════════
     component_availability = {
         "pump": (20, True),
-        "volume_decline": (20, vol_first > 0),
+        # NACHAUDIT N2: vol_first/vol_second sind Optional[float] aus
+        # historical_volume_baseline — `None > 0` war ein TypeError, der
+        # genau die duennsten (juengsten) Listings still aus der Analyse
+        # geworfen hat. bool() deckt beide Messwerte ab.
+        "volume_decline": (20, bool(vol_first and vol_second)),
         "momentum_decay": (15, momentum_available),
         "wick_rejection": (15, bool(upper_wicks)),
         "price_position": (15, True),
@@ -2727,6 +2731,11 @@ def cleanup_monitoring(monitoring):
     to_remove = []
     for sym, data in monitoring.items():
         try:
+            # NACHAUDIT L8: bereits abgelaufene/invalidierte Eintraege nicht
+            # erneut markieren — sonst wird expired_at bei jedem Lauf auf
+            # "jetzt" gesetzt und der 7-Tage-Purge unten greift nie.
+            if data.get("status") in ("expired", "invalidated"):
+                continue
             is_pump = data.get("source") == "pump_detection"
             if is_pump:
                 age_basis = data.get("detected_at")
@@ -2743,8 +2752,41 @@ def cleanup_monitoring(monitoring):
             pass
     for sym in to_remove:
         monitoring[sym]["status"] = "expired"
+        monitoring[sym].setdefault("expired_at", now.isoformat())
         source = monitoring[sym].get("source", "new_listing")
         log.info(f"⏰ P&D: {sym} ({source}) — Monitoring abgelaufen")
+
+    # NACHAUDIT L8: expired/invalidated-Eintraege nach 7 Tagen endgueltig
+    # entfernen, sonst waechst nls_monitoring.json unbegrenzt.
+    purge_cutoff = now - timedelta(days=7)
+    for sym in list(monitoring.keys()):
+        data = monitoring.get(sym)
+        if not isinstance(data, dict):
+            continue
+        if data.get("status") not in ("expired", "invalidated"):
+            continue
+        basis = (
+            data.get("expired_at")
+            or data.get("invalidated_at")
+            or data.get("listing_time")
+            or data.get("detected_at")
+        )
+        try:
+            basis_dt = datetime.fromisoformat(str(basis).replace("Z", "+00:00"))
+            # NACHAUDIT (re-audit): naive Zeitstempel tz-aware machen, sonst
+            # wirft `basis_dt < purge_cutoff` (aware) TypeError und bricht
+            # cleanup_monitoring fuer ALLE Symbole des Laufs ab.
+            if basis_dt.tzinfo is None:
+                basis_dt = basis_dt.replace(tzinfo=timezone.utc)
+            expired_and_old = basis_dt < purge_cutoff
+        except Exception:
+            # Kein parsbarer Zeitstempel: Purge-Anker jetzt setzen, damit der
+            # Eintrag beim uebernaechsten Cleanup sicher entfernt werden kann.
+            data.setdefault("expired_at", now.isoformat())
+            expired_and_old = False
+        if expired_and_old:
+            monitoring.pop(sym, None)
+            log.info(f"🧹 P&D: {sym} — expired-Eintrag nach 7 Tagen entfernt")
     return monitoring
 
 

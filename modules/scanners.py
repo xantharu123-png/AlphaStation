@@ -2676,7 +2676,9 @@ def _biotech_technical_score(poly_key, ticker):
             details["chart_health_label"] = " Kritisch"
 
         details["price"] = current_price
-        details["avg_vol"] = int(avg_vol_20)
+        # NACHAUDIT N11: avg_vol_20 kann None sein (Baseline fail-closed) —
+        # int(None) wuerde den kompletten Technik-Score still auf 0 werfen.
+        details["avg_vol"] = int(avg_vol_20 or 0)
         details["high_90d"] = high_90d
         details["low_90d"] = low_90d
 
@@ -2925,7 +2927,10 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
         regulatory_risk += 10
         risk_flags.append("multiple_negative_news_flags")
 
-    pos_90d = tech_details.get("pos_90d", 50) or 50
+    # NACHAUDIT: kein `or 50` — pos_90d = 0.0 (Kurs exakt am 90d-Low) ist ein
+    # legitimer Messwert und darf nicht zum Neutralwert 50 werden.
+    pos_90d = tech_details.get("pos_90d")
+    pos_90d = 50 if pos_90d is None else pos_90d
     range_10d = tech_details.get("range_10d%", 0) or 0
     rvol = tech_details.get("RVOL", 0) or 0
     rvol_up_day = tech_details.get("rvol_up_day", True)
@@ -3031,11 +3036,13 @@ def _biotech_news_momentum(news_items):
             score += 8
         elif pos_ratio >= 0.6:
             score += 6
-        elif pos_ratio >= 0.4:
-            score += 4
         elif neg / total >= 0.6:
             # V68: Überwiegend negative News = aktiver Penalty statt nur 0
+            # NACHAUDIT: Negativ-Check VOR dem 40%-Positiv-Zweig — sonst bekam
+            # 2 positive / 3 negative News (+40%/60%) faelschlich +4 statt -4.
             score -= 4  # Warnsignal: 60%+ negativ
+        elif pos_ratio >= 0.4:
+            score += 4
         else:
             score += 0  # Neutral/gemischt = kein Signal, kein Bonus
 
@@ -3775,7 +3782,11 @@ def _biotech_quick_scan(poly_key):
                         technical_score=old.get("Technical_Score", 0),
                         risk_score=old.get("Risk_Score", 0),
                         news_momentum_score=momentum_score,
-                        rvol=old.get("RVOL", 0)
+                        rvol=old.get("RVOL", 0),
+                        # NACHAUDIT H7: Ohne diesen Parameter bekam ein
+                        # Distribution-Tag (Down-Day) beim 2h-News-Refresh
+                        # wieder den vollen RVOL-Bonus (bis +8, Grade-Flip).
+                        rvol_direction=(old.get("Tech_Details") or {}).get("rvol_up_day", True),
                     )
 
                     # Gleiche Qualitätslogik wie Full Scan: Chart-Health und schwache Technik
@@ -3896,7 +3907,13 @@ def _biotech_quick_scan(poly_key):
 def _compute_biotech_technical_from_bars(bars):
     """
     Berechnet den BioTech Technical Score aus einem Bar-Fenster (offline, kein API-Call).
-    Identisch zur Logik in _biotech_technical_score(), aber nutzt lokale Bars.
+
+    NACHAUDIT: Diese Backtest-Variante ist NICHT identisch mit dem Live-Score
+    _biotech_technical_score(): RVOL-Punkte ohne Up/Down-Richtungscheck, keine
+    -3-Penalties (RVOL<0.5, Downtrend), kein Candle-Bonus. Backtest-Ergebnisse
+    auf Distribution-/Low-Volume-Tagen fallen dadurch bis ~6 Punkte zu gut aus —
+    Kalibrierungen gegen Live-Schwellen entsprechend konservativ interpretieren
+    (oder beide Pfade auf eine gemeinsame Bars-Funktion zusammenfuehren).
 
     Returns: dict mit technical_score (max 20), rvol, details
     """

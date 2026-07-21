@@ -1,6 +1,6 @@
 # Alpha Station - Projekthandbuch und Claude-Übergabe
 
-**Stand:** 18. Juli 2026
+**Stand:** 21. Juli 2026 (inkl. unabhängigem Nachaudit und Nachaudit-Fixpaket)
 **Repository:** `C:\Users\miros\Desktop\TradingBot`
 **Produktname:** Alpha Station
 **Zweck dieses Dokuments:** Belastbare Übergabe an Claude oder einen anderen Senior-Entwickler, ohne den gesamten Chatverlauf erneut rekonstruieren zu müssen.
@@ -25,13 +25,16 @@ Der aktuelle technische Stand ist weit fortgeschritten:
 - Produktions-Deployment mit nginx, TLS-Prüfung, systemd-Hardening, Preflight-Tests und Rollback
 - Umfangreiche Regressionstests
 
-Der letzte eingecheckte Commit ist aktuell:
+Der aktuell eingecheckte und zu GitHub synchronisierte Referenzstand ist:
 
 ```text
-3efcfed Harden penny stock execution scanner
+Branch: main
+HEAD / origin/main: e004194 Clarify BI scanner trade states
 ```
 
-Der lokale Arbeitsbaum enthält danach jedoch eine große, noch nicht eingecheckte kommerzielle Härtung. Dieser lokale Stand wurde zuletzt mit **887 bestandenen Tests**, Frontend-Bundle-Prüfung, Python-Compile-Checks, Shell-Syntaxprüfung, Browser-Smoke-Test und `pip-audit` ohne bekannte Paket-Schwachstellen verifiziert. Vor jeder Übergabe oder Bereinigung muss dieser Stand zuerst gesichert und bewusst committed werden.
+Der eingecheckte Referenzstand (`e004194`) wurde mit **937 bestandenen Tests in 64 Testdateien**, Python-Compile-Checks und erfolgreicher Frontend-Bundle-Verifikation geprüft (Bundle-Quellhash `6a89182fa949`). **Achtung:** Der lokale Arbeitsbaum ist seit dem 21.07. NICHT mehr sauber — er enthält das bewusst uncommittete Nachaudit-Fixpaket (Abschnitt 19.8) plus die drei Audit-Reports. Details und Dateiliste stehen in 19.8 und 22.2.
+
+Seit der vorherigen Handbuchfassung wurden insbesondere der vollständige Scanner- und Mathematik-Audit, die Laufzeit- und Scheduler-Härtung, die Breakout-Qualitätskalibrierung, die Cache-Versionierung, die rotierende Penny-Abdeckung und die verständliche BI-Zustandslogik eingecheckt. Der Git-/GitHub-Stand darf trotzdem nicht still mit dem tatsächlich auf dem Server deployten Stand gleichgesetzt werden; die Serverrevision muss nach jedem Deployment separat geprüft werden.
 
 ## 2. Produktvision
 
@@ -326,10 +329,20 @@ Historisch war dies eine der größten UX-Fehlerquellen.
 | Fakeout-Risk | Risiko eines nicht haltenden Ausbruchs |
 | Chase-Risk | Risiko, zu weit nach dem idealen Entry einzusteigen |
 | Market Risk | allgemeines Marktumfeld, nicht identisch mit Trade-Risiko |
+| Breakout-/Durchzug-Qualität | modellierte Bestätigungsqualität eines Ausbruchs; keine Gewinnwahrscheinlichkeit |
 
 Ein hoher Score und `MEDIUM` Risk sind möglich: Der Coin oder die Aktie kann strukturell stark sein, aber der aktuelle Einstieg noch riskant. Die UI muss diese Unterscheidung erklären, ohne widersprüchliche Handlungsanweisungen zu erzeugen.
 
 Score-Schwellen sind scannerabhängig und müssen kalibriert werden. Sie dürfen nicht so gewählt werden, dass fast jede Row 90+ erhält. Cup & Handle wurde deshalb bereits per Backtest und Walk-Forward nachkalibriert.
+
+Beim BI-Scanner werden zwei Ebenen bewusst getrennt:
+
+- Der **Basis-Setup-Grade** beschreibt, wie vollständig die mehrfaktorielle BI-Idee ist.
+- Der **Trade-Score und finale Zustand** beschreiben, ob der aktuelle Entry die strengeren Trade- und Mail-Gates besteht.
+
+Ein hoher BI-Basisgrad ist daher kein automatischer Trade. Die Kundenoberfläche zeigt keine internen Reason-Codes oder das unscharfe Label `KANDIDAT` mehr, sondern einen eindeutigen Zustand: `JETZT HANDELN`, `TRIGGER ABWARTEN`, `RETEST ABWARTEN`, `NOCH NICHT` oder `NICHT HANDELN`, jeweils mit einem konkreten Grund.
+
+Die Momentum-Breakout-Qualität wurde neu kalibriert. Fehlende oder nicht unabhängig messbare Faktoren dürfen weder neutral aufgefüllt noch automatisch mit Maximalpunkten bewertet werden. Ein Wert von `100/100` ist nur zulässig, wenn alle dafür vorgesehenen Komponenten tatsächlich gemessen und erfüllt wurden. Nach Änderungen am Scoremodell muss eine Modell-/Cache-Revision alte Ergebnisse invalidieren, damit keine historischen 100er-Scores mit neuer Logik angezeigt werden.
 
 ## 13. Alerts und E-Mails
 
@@ -492,7 +505,7 @@ Danach muss ein normaler Chrome- oder Edge-Smoke-Test erfolgen. Kein Codex-Brows
 
 ## 18. Tests und Definition of Done
 
-Aktuell existieren 63 `test_*.py`-Dateien. Der zuletzt verifizierte lokale Gesamtstand bestand **887 Tests**.
+Aktuell existieren 65 `test_*.py`-Dateien (inkl. `test_nachaudit_fixes.py`, +22 Tests). Der zuletzt vollständig verifizierte eingecheckte Stand (`e004194`) bestand **937 Tests**; nach dem Nachaudit-Fixpaket ist vor dem Commit ein neuer voller Lauf Pflicht (erwartet: 959).
 
 Für jede fachliche Änderung gilt mindestens:
 
@@ -571,6 +584,97 @@ Ein grüner Testlauf beweist nur das getestete Verhalten. Tests dürfen keine fa
 - Preflight plus automatischer Rollback
 - Secrets- und Abhängigkeitsprüfung
 
+### 19.5 Vollständiger Scanner-, Mathematik- und Datenqualitätsaudit
+
+> **Wichtige Einordnung (Nachaudit 21.07.2026):** Die folgende Liste stammt aus dem Codex-Fixstatus vom 20.07. Ein unabhängiges Nachaudit (`AUDIT_NACHAUDIT_CODEX_2026-07-21.md`) hat jeden der 49 Befunde einzeln verifiziert. Das Ergebnis in einem Satz: Codex hat gut, aber nicht fertig gearbeitet — 34 von 49 Befunden waren sauber behoben (darunter alle Schwergewichte: Krypto-Zeitskala, MEXC-Einheiten, Tracker-Fill-Logik, AutoTrader-Order, RVOL-Normierung, patterns-Crash, Retest-Pfad), 12 nur teilweise, 2 gar nicht, 1 ohne produktiven Aufrufer (n. a.) — die ursprüngliche Aussage „alle Befunde behoben" war damit nachweislich zu optimistisch. Der Großteil der roten Blocker wurde am 21.07. mit dem Nachaudit-Fixpaket (Abschnitt 19.8) geschlossen; welche Reste offen bleiben, steht in der Restliste von 19.8. Diese Liste ist also erst **zusammen mit 19.8** der ehrliche Stand.
+
+Zu den wichtigsten abgeschlossenen Korrekturen gehören:
+
+- echte UTC-Tagesgrenzen für 24/7-Krypto statt lokaler oder indexbasierter Tageszuordnung
+- datumssynchrone BTC-/Aktien-/Krypto-Vergleiche statt Arrayindex-Vergleiche
+- korrekte MEXC-Volumen- und Open-Interest-Normalisierung unter Einbezug von `amount24` und `contractSize`
+- Wilder-ATR und eine einheitliche ATR-Definition in den relevanten Signalpfaden
+- frische Live-R:R-Berechnung inklusive Stopzustand, aktuellem Preis, Kosten und Datenalter
+- fail-closed Verhalten bei fehlenden 5m-, BTC-, Asset-, Referenz-, Preis- oder Liquiditätsdaten
+- Venue-Liquidität statt CoinGecko-Gesamtvolumen als Execution-Grundlage
+- klare Trennung zwischen echtem RVOL und Market-Cap-Turnover
+- chronologische Backtests ohne Look-ahead, mit Gap-Fills, Dedupe, vollständiger Historie und ehrlichen Datenfehlern
+- Signal-Tracker mit `NO_FILL`, Gap-R, ET-Handelstag, Cache-TTL und vollständigem Signalsnapshot
+- projected US RVOL für Intraday-Bear-/Crash-/Turtle-Kontext statt unbereinigtem Tagesvolumen
+- Partial-Bar-Entfernung bei AutoTrader, Biotech und weiteren zeitkritischen Pfaden
+- New-Listing-Normalisierung, Listing-Startpriorität, Ablaufregeln und Partial-List-Erkennung
+- korrekt gerichtete Krypto-Exhaustion-Z-Scores, Funding-, Depth- und BTC-Gates
+- VRVP nur aus ausreichend belastbaren, volumen-gewichteten Strukturbins
+- bestätigte Retests bleiben erhalten und werden nicht durch generische Statuslogik überschrieben
+- harte Long-/Short-Geometrie, Mindest-Risiko, Zielreihenfolge, Präzision und verpasste Targets
+- ORB nur mit vollständigen Bars, aktuellem Volumen und eindeutiger Entry-/No-Trade-Trennung
+- inverse ETFs, ETPs, Warrants und andere Nicht-Aktien werden assetbasiert statt über endlose Symbol-Blacklists gefiltert
+
+### 19.8 Nachaudit 21.07.2026: Fixpaket, Re-Audit und ehrliche Restliste
+
+Nach der Codex-Fixrunde vom 20.07. wurde ein unabhängiges Nachaudit durchgeführt (`AUDIT_NACHAUDIT_CODEX_2026-07-21.md`, mit Runtime-Repros und Zeilenbelegen). Ergebnis in einem Satz: **Codex hat gut, aber nicht fertig gearbeitet — 34 von 49 Befunden waren sauber behoben (darunter alle Schwergewichte: Krypto-Zeitskala, MEXC-Einheiten, Tracker-Fill-Logik, AutoTrader-Order, RVOL-Normierung, patterns-Crash, Retest-Pfad), 12 nur teilweise, 2 gar nicht, 1 ohne produktiven Aufrufer (n. a.).** Der frühere Codex-Fixstatus-Satz „alle Befunde behoben" war damit nachweislich zu optimistisch. Zusätzlich fand das Nachaudit drei neue mittelschwere Fehler, die aus der Codex-Fixrunde selbst stammten.
+
+Daraufhin wurde am 21.07. das folgende Fixpaket umgesetzt und anschließend **selbst noch einmal adversarial re-auditiert** (der Re-Audit fand drei Fehler *in diesen Fixes*, die im selben Zug nachgebessert wurden — siehe „Re-Audit-Korrekturen" unten). Regressionstests: `test_nachaudit_fixes.py`, 22 Tests, alle grün.
+
+Geänderte Dateien: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `modules/new_listing_scanner.py`, `modules/scanners.py`, `modules/backtests.py`, neu `test_nachaudit_fixes.py`.
+
+**Umgesetzte Fixes:**
+
+- **N1 (Bear-ATR-Chronologie):** Bear-VRVP-ATR rechnete auf absteigend sortierten Polygon-Bars (`sort=desc`) → Wilder-Glättung zeitlich invertiert, ATR im Crash-Fall ~0,45×. Bars werden vor der Berechnung mit `list(reversed(...))` chronologisiert; `calculate_wilder_atr` (`modules/vrvp_levels.py`) sortiert zusätzlich defensiv nach Timestamp, wenn alle Bars numerische Zeitstempel tragen (Backtest-Bars mit reinem `date`-String lösen den Sort bewusst nicht aus und bleiben unverändert).
+- **N2 (NLS-TypeError):** `calculate_listing_exhaustion` verglich `vol_first > 0`, obwohl `vol_first`/`vol_second` aus `historical_volume_baseline` `None` sein können → TypeError, den der Sammel-try/except still verschluckte, und genau die jüngsten/dünnsten Listings fielen aus. Jetzt `bool(vol_first and vol_second)` (zählt „nicht messbar" korrekt nicht in `available_max`).
+- **N3 (H10-Restpfad):** `_annotate_early_mover_overhead_resistance` und die Level-Auswahl in `_apply_early_mover_vrvp_targets` akzeptierten LVN-Kanten (Volumen-Vakuum) als Overhead-Barriere und downgradeten valide Long-Setups auf `WAIT_FOR_BREAK_RECLAIM`. LVN-Level (`source` beginnt mit `vrvp_lvn`) sind an beiden Stellen ausgeschlossen.
+- **H7-Rest (Biotech-Quick-Scan):** Der 2h-News-Refresh ruft `_calculate_biotech_catalyst_score` jetzt mit `rvol_direction=(Tech_Details).rvol_up_day` — ein Distribution-Tag bekommt nicht mehr den vollen RVOL-Bonus (bis +8, Grade-Flip).
+- **M9 (Ausschlüsse + Symbol-Kollision):** `JITOSOL/MSOL/BNSOL/JUPSOL/RLUSD/SOLVBTC` in `EXCLUDED_CRYPTO_SYMBOLS`, Textterms `staked sol / staked solana / liquid staking / restaked / ripple usd`. `seen_symbol_ids` verhindert, dass zwei verschiedene CoinGecko-Coins mit gleichem Ticker zu einer Row mergen (fail-safe: abweichende ODER fehlende ID → nicht mergen; identische ID = gewollte Konfluenz).
+- **M18-Rest (Tracker-Cache-TTL):** `_tracker_crypto_fetcher` (`bg_service.py`) prüft jetzt das Cache-Alter. **Wichtig:** die Cache-Datei `/tmp/coingecko_markets_cache.json` hat ZWEI Writer mit unterschiedlichem Zeitfeld — `bg` schreibt `ts` (float epoch), `api.py` schreibt `cached_at` (ISO-String). Der Fetcher liest beide, parst ISO, und nutzt als letzten Anker die Datei-mtime. TTL = 3h (> langsamster legitimer Refresh = 2h-Divergenz-Scan; fängt trotzdem eine tote Pipeline ab).
+- **M16-Rest (Decay-Warnung):** greift jetzt auch für 1x-Short- und VIX-Produkte (`short`/`vix` in der Beschreibung); die `decay_note` beschriftet 1x-Produkte nicht mehr fälschlich als „1.0x Hebel".
+- **N6/N7 (Downgrade-Konsistenz):** `_downgrade_expired_crypto_triggers` setzt `entry_status` mit auf `WAIT_FOR_TRIGGER`; `get_early_movers` zählt `trade_now_count` NACH dem Downgrade.
+- **N8 (Projektions-Guard):** Der 15-Minuten-Guard (keine RVOL-Projektion in Minute 1–14, Premarket-Volumen im Zähler) sitzt jetzt zentral in `_us_equity_expected_volume_fraction` und gilt damit für ALLE Projektions-Callsites (Strategy-Scan, Volume-Spikes, Bear/Turtle, ORB) — nicht mehr nur im Bear/Turtle-Pfad.
+- **N10 (Mikro-Preis-Toleranz):** Level-Dedupe-Floor `1e-12` statt `1e-9` (Sub-Nano-Coins kollabierten sonst auf ein Level).
+- **N11 (int(None)):** `int(avg_vol_20 or 0)` gegen stillen Technik-Score-Ausfall (nur dieser Teil des N11-Sammelbefunds; die übrigen N11-Punkte stehen in der Restliste).
+- **H3-Rest (failed_fetch_days):** hart gescheiterte Grouped-Fetch-Tage (`fetch_grouped_daily → None`) werden in allen drei Backtest-Funktionen gezählt und im Summary (`failed_fetch_days`) bzw. als Warnung ausgewiesen.
+- **L8 (Monitoring-Purge):** `cleanup_monitoring` purgt expired/invalidated-Einträge nach 7 Tagen endgültig; bereits-expired-Einträge werden nicht erneut markiert (sonst würde der Purge-Anker ewig zurückgesetzt).
+- **Kleinfixes:** Biotech-News-Reihenfolge (2↑/3↓ ergibt jetzt korrekt −4 statt +4), `pos_90d`-or-Falle entfernt (0.0 am 90d-Low bleibt erhalten), ehrlicher Docstring am Backtest-Technikscore (Parität mit dem Live-Score besteht NICHT).
+
+**Re-Audit-Korrekturen (Fehler, die IM Fixpaket selbst gefunden und sofort behoben wurden):**
+
+- Der erste M18-Fix las nur `ts` und lieferte nach jedem api-seitigen Krypto-Scan (Feld `cached_at`) dauerhaft `None` → hätte den Krypto-Tracker still abgeschaltet. Korrigiert: beide Felder + mtime-Fallback, TTL von 30 Min auf 3 h angehoben.
+- Der erste L8-Fix verglich `basis_dt < purge_cutoff` außerhalb des try/except → ein naiver (tz-loser) persistierter Zeitstempel hätte `cleanup_monitoring` per TypeError für den gesamten Lauf abgebrochen. Korrigiert: Vergleich im try, naive Zeitstempel werden tz-aware normalisiert.
+- Der erste N8-Guard saß nur im Bear/Turtle-Helfer; die Direkt-Projektions-Callsites (Strategy-Scan, Volume-Spikes) blieben ungeschützt. Korrigiert: Guard zentral in die Fraction-Funktion verlegt.
+
+**Bewusst noch offen (nicht launchblockierend, aber vor Kalibrier-Entscheidungen zu erledigen):**
+
+1. H6-Rest: kein Kerzenzeit-Anker fürs Listing-Alter, kein Re-Anker bei nachträglich bekanntem Launch-Timestamp, `listing_age_source_override`-Label kann falsch etikettieren. (Entschärfung: Crypto.com hat keinen Announcement-Fetcher, der Haupt-Angriffsweg ist zu.)
+2. H10-Rest: LVN-Bins werden nicht zu Void-Zonen gemergt — TP-Ziele können weiter auf Binraster-Kanten statt am Volumen-Wiederanstieg liegen.
+3. M9-Rest: Perp-Matching (`perp_data.get(symbol)`) prüft weiterhin nicht die Preisplausibilität des Kontrakts (der 2%-Guard fängt nur den Trigger, nicht die Funding/OI-Scores).
+4. M11-Rest: Krypto-Swing-Mails ohne erfolgreichen 5m-Check tragen die Preisbasis vom Scan-Beginn; ein einzelner Ticker-Call unmittelbar vor der Trade-Mail fehlt (Penny hat ihn).
+5. M21-Rest: Coverage-Cap-Klippe (eine zusätzlich fehlende Dimension auf Crypto.com ⇒ Hard-Cap 79).
+6. L11: BPIQ-Teilpagination als 4h-Cache, v=0-Bars-Cache, stille 90-Tage-Kappung, 4H-Aggregation ohne Session-Alignment (`modules/data_fetchers.py`).
+7. Kalibrierung: Netto-R:R-Schwellen (`HARD_MIN_RR`/`PREFERRED_MIN_RR`) und BI-Grade-Schwellen wurden nach den Modelländerungen (Kosten; BI-Maximum 183→173/168) nicht rekalibriert; Signal 11 hat weiterhin keinen echten Benchmark-Vergleich; die Biotech-OVERDUE-Neugewichtung existiert nur in der toten Funktion `_check_clinical_trials`, der BPIQ-Live-Pfad scort Überfälliges unverändert.
+8. Restklasse H3: `_project_us_equity_rvol`-Guard deckt jetzt alle Projektionen, aber der `if not day_data: continue`-Pfad ohne None-Unterscheidung existiert weiterhin im BI-AutoTrader-History-Aufbau (`modules/scanners.py`) und in ORB/bg-Callsites.
+9. Testlücken aus der Codex-Runde: für M12–M15 (ORB/Turtle/Bear-Frische), H6 und M21 existieren weiterhin keine gezielten Regressionstests. Von den 22 Nachaudit-Tests sind zudem 8 reine Source-String-Asserts (prüfen Textvorkommen, nicht Verhalten).
+10. Bewusste Verhaltensänderungen aus der Codex-Fixrunde, die als solche im Blick bleiben müssen (kein Bug, aber Erwartungsmanagement): Wyckoff/Harmonics liefern ohne ausreichende Volumendaten keine bzw. gemalusterte Signale; Penny blockt „Dead-Tape-Ignitions" (≥3 von 12 Baseline-Bars mit 0-Volumen); Netto-R:R zieht Round-Trip-Kosten ab und bestraft Spread doppelt (Liquiditäts-Säule + Netto-R:R).
+11. Niedrig/Rest: Tracker bucht Gap-Exits vor dem Fill zu pessimistisch (N4); `_normalize_crypto_bars`-Dedup könnte den Cadence-Validator bei künftig falschem Exchange-Mapping maskieren (N5); market_context-Proxy rechnet bei komplett fehlenden Marktdaten mit Default-Werten (N9); BI-Short-Bonus kann `BI_MaxScore` übersteigen (Anzeige); `_tracker_crypto_fetcher` matcht weiterhin nur per Symbol (erster Treffer gewinnt); `invalidated_at` wird in `cleanup_monitoring` gelesen, aber nirgends geschrieben (Fallback nutzt `detected_at`).
+
+### 19.6 Scheduler, Health und Scanner-Laufzeit
+
+- jeder Scannerlauf besitzt eine eindeutige Lauf-ID
+- ein nach Timeout noch lebender Thread darf niemals parallel erneut gestartet werden
+- Timeout beziehungsweise Hänger werden als Laufproblem sichtbar und nicht als falscher Cachefehler ausgegeben
+- leichte Scanner blockieren die zentrale Scheduler-Schleife nicht mehr
+- schwere Scanner können unabhängig laufen, ohne Aktien-, Krypto- und Mail-Jobs gegenseitig vollständig aufzuhalten
+- der Penny-Scanner besitzt ein hartes Laufzeitbudget, prüft offene Positionen zuerst und deckt den Rest rotierend ab
+- nur tatsächlich live revalidierte Penny-Zeilen dürfen eine Kaufmail erzeugen
+- System Health unterscheidet aktive, überfällige, hängende, stale und fehlerhafte Zustände ehrlicher
+
+### 19.7 UI-Zustände, Cachemodelle und Produktionskompatibilität
+
+- alte Breakout-Qualitätscaches werden nach Modelländerungen invalidiert
+- Momentum-Breakout-Follow-through wurde kalibriert und gegen künstliche 100/100-Scores abgesichert
+- Penny-Scan-Abdeckung zeigt Volluniversum, Qualitätsblock und rotierend geprüften Anteil getrennt
+- eine leere Penny-Trade-Liste bedeutet "kein bestätigter Entry/Exit" und nicht automatisch "Scanner kaputt"
+- BI-interne Begriffe und maschinelle Reason-Codes wurden durch klare Nutzeraktionen und konkrete Gründe ersetzt
+- Frontend/API-Kompatibilität nach Runtime-Härtungen wurde wiederhergestellt und per Bundle-Verifikation abgesichert
+
 ## 20. Die größten Schwierigkeiten und ihre Ursachen
 
 ### 20.1 Monolith und doppelte Logik
@@ -619,6 +723,10 @@ Historisch existierten falsche Service-Namen, falsche Verzeichnisse, Streamlit-R
 
 Ein Verlusttrade beweist nicht automatisch einen Codefehler, aber ein widersprüchlicher, stale, illiquider oder falsch gemappter Trade schon. Jede Reklamation muss deshalb gegen den damaligen exakten Payload, Candle-Zeitpunkt, Venue, Trigger und Mail-Log reproduziert werden.
 
+### 20.11 Scheduler-Hänger und falsche Parallelstarts
+
+Ein langsamer Penny-Scan wurde früher nach einem Watchdog-Timeout nur im sichtbaren Status zurückgesetzt, während sein Thread tatsächlich weiterlief. Danach konnte ein zweiter Lauf starten und der zentrale Scheduler wartete gleichzeitig auf denselben schweren Scan. Die Folgen waren `System prüfen`, verspätete Folge-Scans und ausbleibende Mail-Auswertungen. Die Ursache wurde mit Lauf-IDs, Live-Thread-Überlappungsschutz, nicht blockierender Planung und einem begrenzten Penny-Arbeitsbudget behoben.
+
 ## 21. Historische Fehler, die nicht wieder eingeführt werden dürfen
 
 - `_get_ib_state()` darf nicht bei jedem Zugriff einen neuen Zustand erzeugen.
@@ -646,49 +754,33 @@ Ein Verlusttrade beweist nicht automatisch einen Codefehler, aber ein widersprü
 - API-Reference-Fehler dürfen bei Asset-Validierung nicht automatisch fail-open sein.
 - SMTP-Cooldown darf erst nach erfolgreichem Versand gesetzt werden.
 - Ein API-Key, Passwort oder Secret darf niemals in Chat, Git oder UI ausgegeben werden.
+- Bars aus APIs müssen vor jeder Indikator-Berechnung chronologisch vorliegen; `sort=desc`-Antworten (Polygon `limit`+`sort`) drehen sonst Wilder-/EMA-Glättungen zeitlich um.
+- Optional-/None-Werte aus Baseline-Helfern (`historical_volume_baseline` u.ä.) dürfen nie ungeprüft verglichen werden (`None > 0` ist ein TypeError, der in Sammel-try/excepts still Symbole verschluckt).
+- Fix-Empfehlungen und Fix-Claims brauchen eine vollständige Callsite-Liste (`grep`), sonst überlebt der Fehler in einem vergessenen Parallelpfad (Beispiel: LVN-Gate im Modul gefixt, im Early-Mover-api-Pfad vergessen).
+- Ein Fixstatus-Dokument darf nur Behauptungen enthalten, die im Code nachweisbar sind; „behoben" ohne Diff-Beleg ist verboten.
+- Ein Watchdog darf einen noch lebenden Scannerthread nicht als beendet markieren oder parallel neu starten.
+- Ein schwerer Scanner darf die gesamte Scheduler-Schleife und alle Mailpfade nicht blockieren.
+- Fehlende Teilfaktoren dürfen keinen künstlichen Breakout-Qualitätswert von `100/100` erzeugen.
+- Alte Score-Caches dürfen nach einer Modelländerung nicht ohne Revisionsprüfung weiter angezeigt werden.
+- Interne Labels wie `KANDIDAT` und rohe Reason-Codes dürfen nicht als primäre Nutzeranweisung erscheinen.
+- Eine leere aktive Signalansicht darf nicht verschweigen, wie viel vom Universum tatsächlich frisch geprüft wurde.
 
 ## 22. Aktueller Git- und Arbeitsstand
 
-### 22.1 Eingecheckter Stand
+### 22.1 Referenzstand vor dieser Dokumentationsänderung
 
 ```text
 Branch: main
-HEAD: 3efcfed Harden penny stock execution scanner
-origin/main: 3efcfed
+HEAD: e004194 Clarify BI scanner trade states
+origin/main: e004194
+Synchronisation: main...origin/main, kein Rückstand
 ```
 
-### 22.2 Lokaler, noch nicht eingecheckter Stand
+### 22.2 Lokaler Arbeitsstand
 
-Der Arbeitsbaum ist umfangreich verändert. Darin liegen unter anderem:
+Der lokale Arbeitsbaum enthält seit dem 21.07.2026 das **Nachaudit-Fixpaket** (Abschnitt 19.8) als bewusst noch nicht committete Differenz: `api.py`, `bg_service.py`, `modules/vrvp_levels.py`, `modules/new_listing_scanner.py`, `modules/scanners.py`, `modules/backtests.py`, neu `test_nachaudit_fixes.py`, dieses Handbuch sowie die Audit-Reports `AUDIT_SCANNER_VOLLAUDIT_2026-07-19.md`, `AUDIT_SCANNER_FIXSTATUS_2026-07-20.md` und `AUDIT_NACHAUDIT_CODEX_2026-07-21.md`. Commit erst nach ausdrücklichem Betreiberauftrag und einem vollen lokalen Pytest-Lauf.
 
-- kommerzielle Produktions-ENV-Vorlage
-- Commercial Launch Checklist
-- Auth-/Cookie-Härtung
-- nginx-, systemd- und Safe-Deploy-Härtung
-- Scanner-, Trade-Health-, Level-, VRVP- und Backtest-Fixes
-- Frontend-Bundle und Bootloader
-- atomisches E-Mail-Dedupe
-- zusätzliche Runtime-Safety- und Security-Tests
-
-Wichtige neue, derzeit untracked Dateien:
-
-```text
-deploy/verify_commercial_edge.sh
-frontend/app.bundle.js
-frontend/boot.js
-modules/email_dedupe.py
-pytest.ini
-scripts/build_frontend_bundle.js
-scripts/verify_frontend_bundle.py
-test_auth_session_security.py
-test_email_dedupe_atomic.py
-test_premarket_tracker_math.py
-test_strategy_scan_runtime_safety.py
-```
-
-`AGENTS.md` ist eine lokale Agentenanweisung und darf nicht automatisch mit dem Produktcommit vermischt werden.
-
-Es existieren außerdem bewusst gelöschte alte Backups, Legacy-Units und veraltete Auditdateien. Vor dem Commit Diff einzeln prüfen, nicht pauschal zurückholen.
+Der auf dem Server aktive Commit ist damit nicht automatisch bewiesen. Vor einer Aussage über Produktion sind auf dem Server mindestens `git log -1 --oneline`, `/api/health`, `/api/system-health`, Mailstatus und die Scannerzustände zu prüfen.
 
 ## 23. Aktueller Verifikationsstand
 
@@ -696,16 +788,13 @@ Zuletzt lokal verifiziert:
 
 | Check | Ergebnis |
 |---|---|
-| vollständige Pytest-Suite | 887 bestanden |
-| kritische Python-Dateien | Compile OK |
-| Deploy-Shellskripte | `bash -n` OK |
-| Frontend-Bundle | Hash und Verifikation OK |
-| Chrome Headless Smoke | Login-UI geladen, kein Boot-/Scriptfehler |
-| `git diff --check` | keine inhaltlichen Whitespace-Fehler |
-| `pip-audit` | keine bekannten Schwachstellen in installierten Requirements |
-| Secret-Scan aktueller tracked Stand | keine erkannten aktiven Provider-Keys oder Private Keys |
+| vollständige Pytest-Suite | 937 bestanden in 64 Testdateien |
+| `api.py`, `bg_service.py` und kritische Tradingmodule | Compile OK |
+| Frontend-Bundle | Verifikation OK, Quellhash `6a89182fa949` |
+| Git/GitHub vor Handbuchänderung | `main` sauber und synchron auf `e004194` |
+| letzte breite Auditabdeckung | Scanner, Mathematik, Datenqualität, Backtest, Mail- und Runtime-Safety |
 
-Diese Verifikation gilt für den lokalen Arbeitsstand vom 18. Juli 2026, nicht automatisch für GitHub oder Server.
+Die 937 Tests und der Bundle-Hash gelten für den eingecheckten Referenzstand `e004194`. Das Nachaudit-Fixpaket vom 21.07. wurde zusätzlich verifiziert mit: `python -m compileall` über alle geänderten Dateien, `test_nachaudit_fixes.py` (21/21) und den betroffenen Bestands-Suiten (~330 Tests grün in der Audit-Umgebung; Abweichungen dort ausschließlich fehlende Frontend-/Gitignore-Dateien der Prüf-Kopie). Vor dem Commit muss der Betreiber den vollen Pytest-Lauf lokal wiederholen. Ein normaler Chrome-/Edge-Smoke-Test und die Server-Healthchecks müssen beim nächsten Deployment erneut durchgeführt werden. Lokale Prüfung, GitHub und Produktion bleiben drei getrennte Nachweise.
 
 ## 24. Kommerzielle Freigabe
 
@@ -715,8 +804,8 @@ Diese Verifikation gilt für den lokalen Arbeitsstand vom 18. Juli 2026, nicht a
 
 ### 24.2 Harte Blocker vor Verkauf
 
-- lokalen Abschlussstand bewusst committen und pushen
-- exakt diese Revision auf Staging beziehungsweise Produktion deployen
+- gewünschte Release-Revision bewusst auswählen und exakt diese Revision deployen
+- auf dem Server Revision, Health, Scanner-Ownership, Mailstatus und Frontend-Auslieferung nachweisen
 - alle jemals in Git-History oder Chat offengelegten Secrets widerrufen und ersetzen
 - Repository-Sichtbarkeit, Collaborators, Deploy Keys und PATs prüfen
 - `HISTORICAL_SECRETS_ROTATED=1` erst nach realer Rotation
@@ -744,20 +833,24 @@ Private interne Nutzung oder geschlossene Beta ist technisch früher möglich, a
 8. Datenprovider-Limits und gemeinsames Budget zwischen Prozessen bleiben betriebskritisch.
 9. Browser-Push ist weniger robust als E-Mail und muss pro Browserberechtigung getestet werden.
 10. Mobile UX braucht weiterhin reale Geräte- und One-Hand-Tests.
+11. API- und Background-Prozess teilen fachliche Verantwortung; Scanner-Ownership und gemeinsamer Runtime-State sollten weiter vereinfacht werden.
+12. Das Penny-Volluniversum wird wegen Laufzeitbudgets rotierend statt vollständig alle fünf Minuten tief geprüft; diese Abdeckung muss sichtbar und messbar bleiben.
+13. Breakout-, BI-, Penny- und Krypto-Scores benötigen trotz technischer Korrektheit weitere Forward-Kalibrierung mit ausreichender Stichprobe.
+14. Der aktuelle Teststand ersetzt keine reale Ausführungsprüfung mit Spread, Slippage, Halt, LULD und begrenzter Orderbuchtiefe.
+15. Öffentliche Vermarktung bleibt von externer Rechts-, Steuer-, Datenlizenz-, Domain- und Stripe-Live-Freigabe abhängig.
 
 ## 26. Empfohlene nächste Schritte für Claude
 
-### Schritt 1: Arbeitsstand sichern
+### Schritt 1: Referenzstand und Produktionsdrift prüfen
 
 ```powershell
 git status --short --branch
-git diff --stat
-git diff --name-status
+git log -3 --oneline --decorate
 ```
 
-Keine Datei zurücksetzen. Keine fremden oder sachfremden Änderungen verwerfen.
+Erwarteter eingecheckter Referenzstand dieser Handbuchfassung ist `e004194` auf `main`. Bei Abweichungen zuerst Diff und Historie lesen. Keine Datei zurücksetzen und keine fremden Änderungen verwerfen.
 
-### Schritt 2: Aktuellen lokalen Abschluss erneut verifizieren
+### Schritt 2: Zielrevision vollständig verifizieren
 
 ```powershell
 python -m compileall -q api.py bg_service.py modules
@@ -775,22 +868,15 @@ python scripts\verify_frontend_bundle.py
 
 ### Schritt 3: Diff fachlich aufteilen und committen
 
-Empfohlene Commitgruppen:
-
-1. Commercial/Auth/Deployment Hardening
-2. Scanner/Trade-Level/Runtime Safety
-3. Frontend Prebuild/Boot und UX
-4. Tests und Dokumentation
-
-Wenn die Änderungen zu eng gekoppelt sind, ist ein sauber erklärter Release-Commit besser als künstliches Cherry-Picking mit kaputtem Zwischenstand.
+Nur die tatsächlich beauftragten Änderungen committen. Dokumentation, Scannerlogik und sachfremde Dateien nicht still vermischen. Commit und Push nur nach ausdrücklichem Betreiberauftrag.
 
 ### Schritt 4: Secrets und externe Freigaben erledigen
 
 Diese Aufgaben sind Betreiberaufgaben. Claude darf Flags nicht einfach auf `1` setzen, ohne dass die reale Rotation oder Prüfung erfolgt ist.
 
-### Schritt 5: Staging-Deploy
+### Schritt 5: Staging- beziehungsweise Produktionsdeploy
 
-Zielrevision deployen, Health, Readiness, Login, Checkout-Testmodus, alle Haupttabs und exemplarische Scanner prüfen.
+Zielrevision per Fast-Forward deployen. Danach Revision, API-Health, System-Health, Login, Mailstatus, Scheduler, Frontend-Hash, Checkout-Testmodus, Haupttabs und exemplarische Aktien-/Krypto-/Penny-Scanner prüfen.
 
 ### Schritt 6: Forward-Validation
 
@@ -854,17 +940,39 @@ Das Produkt soll den Trader unterstützen, nicht sein Urteilsvermögen ersetzen.
 ## 30. Startprompt für Claude
 
 ```text
-Lies zuerst PROJEKTHANDBUCH_CLAUDE.md, COMMERCIAL_LAUNCH_CHECKLIST.md,
-deploy/safe_deploy.sh und den aktuellen git status. Der lokale Arbeitsbaum
-enthält einen noch nicht eingecheckten kommerziellen Abschlussstand; nichts
-zurücksetzen. Prüfe jede Aufgabe gegen die kanonischen Signalzustände und die
+Lies zuerst PROJEKTHANDBUCH_CLAUDE.md (bes. Abschnitt 19.8),
+AUDIT_NACHAUDIT_CODEX_2026-07-21.md, COMMERCIAL_LAUNCH_CHECKLIST.md,
+deploy/safe_deploy.sh, den aktuellen git status und die letzten Commits.
+AUDIT_SCANNER_FIXSTATUS_2026-07-20.md nur mit der Einordnung aus 19.5 lesen —
+seine "alles behoben"-Aussage wurde vom Nachaudit widerlegt. Erwarteter
+eingecheckter Referenzstand ist e004194 auf main plus das uncommittete
+Nachaudit-Fixpaket (19.8); bei Abweichungen zuerst die Historie prüfen und
+nichts zurücksetzen. Prüfe jede Aufgabe gegen die kanonischen Signalzustände und die
 Invarianten für Datenfrische, Entry/Stop/TP-Geometrie, Setup-vs-Execution,
 Swing-vs-Intraday und UI/Mail-Parität. Ändere keine Schwelle pauschal und
 versprich keine Gewinne. Nach Codeänderungen gezielte Tests, Full Pytest,
 Compile, Frontend-Bundle-Verifikation und bei UI/Auth einen normalen
-Chrome/Edge-Smoke-Test ausführen. Vor Commit oder Push den Betreiber fragen.
+Chrome/Edge-Smoke-Test ausführen. 937 Tests sind der eingecheckte Referenzwert
+(e004194) bzw. 959 mit dem uncommitteten Nachaudit-Fixpaket,
+nicht eine unveränderliche Sollzahl. Vor Commit oder Push den Betreiber fragen.
 ```
+
+## 31. Änderungsjournal seit der Handbuchfassung vom 18. Juli 2026
+
+| Commit | Inhalt | Ergebnis |
+|---|---|---|
+| `8e28962` | vollständiger Scanner-Audit und Production Safety | breite Fehlerbehebung in Scanner-, Daten-, Backtest- und Safety-Pfaden |
+| `8338f2c` | Scanner-Mathematik und Audit-Härtung | R:R, ATR, RVOL, Chronologie, Datenfrische und Fail-closed-Regeln vereinheitlicht |
+| `dccb018` | Scheduler-Stalls und Health-Sichtbarkeit | Doppelstarts verhindert, schwere Scans entkoppelt, Hänger ehrlich sichtbar |
+| `8064521` | Frontend-/API-Kompatibilität | Legacy-Frontend-Kommunikation nach Runtime-Härtung wiederhergestellt |
+| `9bdb994` | Breakout-Bestätigungsqualität | Follow-through-Modell kalibriert, künstliche Maximalscores reduziert |
+| `06f3c61` | Cache-Revision | veraltete Breakout-Qualitätscaches ungültig gemacht |
+| `bbce55c` | Penny-Abdeckung | Volluniversum, Qualitätsblock und Rotation transparent getrennt |
+| `e004194` | BI-Handelszustände | interne Kandidatenbegriffe entfernt, klare Aktionen und Gründe eingeführt |
+| *(uncommitted, 21.07.)* | Nachaudit-Fixpaket (Abschnitt 19.8) | 5 der 7 roten Nachaudit-Blocker vollständig geschlossen (Bear-ATR-Chronologie, NLS-TypeError, LVN-Overhead-Gate, Quick-Scan-RVOL-Richtung, Tracker-Cache-TTL) plus M9-Ausschlüsse/Symbol-Kollision, N6–N11, M16, H3-`failed_fetch_days`, L8-Purge, Kleinfixes; +22 Regressionstests. Offen aus den roten Blockern: M9-Perp-Match-Plausibilisierung und die M12/M13/M15-Regressionstests (siehe 19.8-Restliste 3/9). |
+
+Der eingecheckte Referenzstand umfasst 937 bestandene Tests und ein verifiziertes Frontend-Bundle; das uncommittete Nachaudit-Fixpaket ergänzt 21 Tests. Ob derselbe Commit bereits auf Produktion aktiv ist, muss weiterhin serverseitig nachgewiesen werden.
 
 ---
 
-**Letzter Hinweis:** Alte Auditberichte dokumentieren wichtige historische Fehler, aber der Code ist seitdem weiterentwickelt worden. Sie sind Ursachen- und Regressionreferenz, nicht automatisch der aktuelle Fehlerstand. Der aktuelle lokale Code, die aktuelle Testsuite und dieses Handbuch haben Vorrang.
+**Letzter Hinweis:** Alte Auditberichte dokumentieren wichtige historische Fehler, aber der Code ist seitdem weiterentwickelt worden. Sie sind Ursachen- und Regressionreferenz, nicht automatisch der aktuelle Fehlerstand. Der aktuelle lokale Code, die aktuelle Testsuite und dieses Handbuch haben Vorrang. **Ausnahme:** Die Restliste in Abschnitt 19.8 (Nachaudit 21.07.) ist der aktuelle offene Fehlerstand und nicht „historisch".

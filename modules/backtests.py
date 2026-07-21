@@ -124,6 +124,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     # ============================================================
     ticker_history = {}  # ticker → list of bars (chronologisch)
     total_tickers_seen = set()
+    failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
     
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -133,6 +134,12 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
             )
         
         day_data = fetch_grouped_daily(poly_key, date_str)
+        if day_data is None:
+            # NACHAUDIT H3-Rest: None = Fetch nach Retries hart gescheitert
+            # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
+            # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
+            failed_fetch_days += 1
+            continue
         if not day_data:
             continue
         
@@ -178,6 +185,12 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
                 ticker_history[ticker] = []
             ticker_history[ticker].append(bar)
     
+    if failed_fetch_days:
+        # NACHAUDIT H3-Rest: Ergebnis-Shape (Tuple) nicht brechen — aber der
+        # Lauf darf nicht so tun, als waere die Historie vollstaendig.
+        print(f"[Backtest] WARNUNG: {failed_fetch_days} Handelstag(e) ohne Daten "
+              f"(Fetch nach Retries gescheitert) — Stop-/TP-Treffer dieser Tage fehlen.")
+
     # ============================================================
     # PASS 2: Signale erkennen + Trades simulieren
     # (Jetzt hat jeder Ticker seine VOLLSTÄNDIGE History)
@@ -283,6 +296,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     # ============================================================
     ticker_history = {}
     total_tickers_seen = set()
+    failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
 
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -292,6 +306,12 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             )
 
         day_data = fetch_grouped_daily(poly_key, date_str)
+        if day_data is None:
+            # NACHAUDIT H3-Rest: None = Fetch nach Retries hart gescheitert
+            # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
+            # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
+            failed_fetch_days += 1
+            continue
         if not day_data:
             continue
 
@@ -840,6 +860,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "max_drawdown": round(max_dd, 2),
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
+        "failed_fetch_days": failed_fetch_days,
         "n_midcap": len(sorted_midcap),
         "n_largecap": len(sorted_largecap),
         "direction": direction,
@@ -912,6 +933,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     # ============================================================
     ticker_history = {}
     total_tickers_seen = set()
+    failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
 
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -921,6 +943,12 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             )
 
         day_data = fetch_grouped_daily(poly_key, date_str)
+        if day_data is None:
+            # NACHAUDIT H3-Rest: None = Fetch nach Retries hart gescheitert
+            # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
+            # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
+            failed_fetch_days += 1
+            continue
         if not day_data:
             continue
 
@@ -1257,6 +1285,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         "max_drawdown": round(max_dd, 2),
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
+        "failed_fetch_days": failed_fetch_days,
         "n_biotech_universe": len(biotech_set),
         "months": months,
     }

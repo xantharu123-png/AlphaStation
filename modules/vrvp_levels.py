@@ -85,7 +85,25 @@ def calculate_wilder_atr(
     except (TypeError, ValueError):
         period = 14
 
-    source = (bars or [])[-lookback:] if lookback and lookback > 0 else (bars or [])
+    # NACHAUDIT N1 (defensiv): Wilder-ATR setzt chronologische Bars voraus.
+    # APIs liefern teils sort=desc (neueste zuerst) — dann laeuft die
+    # Glaettung rueckwaerts und previous_close ist der Folgetag. Wenn
+    # Timestamps vorhanden sind, wird deshalb VOR dem Lookback-Slice
+    # aufsteigend sortiert.
+    raw_bars = [bar for bar in (bars or []) if isinstance(bar, dict)]
+
+    def _bar_sort_ts(bar: Dict[str, Any]) -> Optional[float]:
+        for key in ("t", "timestamp", "time", "ts"):
+            value = bar.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    ts_values = [_bar_sort_ts(bar) for bar in raw_bars]
+    if len(raw_bars) >= 2 and all(ts is not None for ts in ts_values):
+        raw_bars = [bar for _, bar in sorted(zip(ts_values, raw_bars), key=lambda pair: pair[0])]
+
+    source = raw_bars[-lookback:] if lookback and lookback > 0 else raw_bars
     parsed: List[Dict[str, float]] = []
     for bar in source:
         if not isinstance(bar, dict):
@@ -124,7 +142,9 @@ def _dedupe_levels(levels: List[Dict[str, Any]], entry: float) -> List[Dict[str,
         return []
     # Treat levels inside 0.12% as the same zone. That keeps penny crypto and
     # larger stocks both stable without a fixed cent threshold.
-    tolerance = max(entry * 0.0012, 1e-9)
+    # NACHAUDIT N10: Floor relativ statt absolut — 1e-9 war bei Sub-Nano-
+    # Coins ~45% des Preises und kollabierte alle Level zu einem.
+    tolerance = max(entry * 0.0012, 1e-12)
     merged: List[Dict[str, Any]] = []
     for level in sorted(levels, key=lambda x: _safe_float(x.get("price"), 0.0) or 0.0):
         price = _safe_float(level.get("price"))

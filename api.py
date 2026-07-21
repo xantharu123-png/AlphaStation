@@ -1348,6 +1348,16 @@ def _us_equity_expected_volume_fraction(now_utc: Optional[datetime] = None) -> f
         minutes_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
         if minutes_open <= 0 or minutes_open >= 390:
             return 1.0
+        # NACHAUDIT N8 (re-audit): In den ersten 15 Handelsminuten NICHT
+        # projizieren. Polygons Tagesvolumen enthaelt Premarket-Prints, die
+        # U-Kurve modelliert nur die Regular Session — sonst manufacturiert
+        # ein PM-lastiger Mover in Minute 1-14 riesige projizierte RVOL. Diese
+        # Regel gehoert hier in die zentrale Fraction-Funktion, damit sie fuer
+        # ALLE Projektions-Callsites gilt (Strategy-Scan, Volume-Spikes, Bear/
+        # Turtle via _project_us_equity_rvol, ORB laeuft ohnehin erst ab Min 15).
+        # Gleiches Muster wie der bereits vorhandene Penny-Guard.
+        if minutes_open < 15:
+            return 1.0
 
         anchors = (
             (0.0, 0.0),
@@ -1371,7 +1381,12 @@ def _us_equity_expected_volume_fraction(now_utc: Optional[datetime] = None) -> f
 
 
 def _project_us_equity_rvol(raw_rvol: Any, now_utc: Optional[datetime] = None) -> float:
-    """Project partial-session US volume to a full-session RVOL pace."""
+    """Project partial-session US volume to a full-session RVOL pace.
+
+    Der 15-Minuten-Guard (keine Projektion in Minute 1-14) sitzt zentral in
+    `_us_equity_expected_volume_fraction`, damit er fuer alle Projektions-
+    Callsites gilt. Hier wird nur noch delegiert.
+    """
     try:
         value = max(0.0, float(raw_rvol or 0.0))
     except (TypeError, ValueError):
@@ -4005,12 +4020,16 @@ def _annotate_early_mover_overhead_resistance(
     if price is None or price <= entry:
         return
 
+    source = str(level.get("source") or "vrvp_resistance")
+    # NACHAUDIT N3: defensiv auch hier — LVN-Kanten nie als Barriere werten.
+    if source.startswith("vrvp_lvn"):
+        return
+
     distance_pct = ((price - entry) / entry) * 100
     distance_r = (price - entry) / risk
     if distance_pct > 2.5 and distance_r > 1.0:
         return
 
-    source = str(level.get("source") or "vrvp_resistance")
     rounded_price = _round_crypto_price(price)
     resistance = {
         "price": rounded_price,
@@ -4063,7 +4082,16 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
     if not levels:
         return
 
-    _annotate_early_mover_overhead_resistance(row, levels[0], entry, risk)
+    # NACHAUDIT N3 (H10-Restpfad): LVN-Kanten sind Volumen-Vakuum
+    # (Beschleunigungszonen), keine Widerstaende. Nur strukturelle Level
+    # (POC/VAH/VAL/HVN) duerfen als Overhead-Barriere ein
+    # WAIT_FOR_BREAK_RECLAIM ausloesen.
+    structural_levels = [
+        level for level in levels
+        if not str(level.get("source") or "").startswith("vrvp_lvn")
+    ]
+    if structural_levels:
+        _annotate_early_mover_overhead_resistance(row, structural_levels[0], entry, risk)
 
     valid_tp1 = [level for level in levels if (_alert_float(level.get("price")) or 0) >= min_tp1]
     if not valid_tp1:
@@ -12881,9 +12909,15 @@ def _bear_scan_wrapper() -> None:
                 }
 
                 # Add decay warning for leveraged/inverse ETFs
-                if leverage > 1.0 or "inverse" in desc.lower():
+                # NACHAUDIT M16: Auch 1x-Short- und VIX-Produkte haben
+                # Rebalancing-/Contango-Decay — "inverse" allein stand in
+                # keiner einzigen Beschreibung (toter Code).
+                if leverage > 1.0 or "short" in desc_lower or "vix" in desc_lower or "inverse" in desc_lower:
                     item["decay_warning"] = True
-                    item["decay_note"] = f"{leverage:.1f}x Hebel — Langfristig Wertverlust durch tägliches Rebalancing"
+                    if leverage > 1.0:
+                        item["decay_note"] = f"{leverage:.1f}x Hebel — Langfristig Wertverlust durch tägliches Rebalancing"
+                    else:
+                        item["decay_note"] = "Inverse/Short-Produkt — Pfadabhängiger Wertverlust durch tägliches Rebalancing"
                 else:
                     item["decay_warning"] = False
 
@@ -13012,7 +13046,11 @@ def _bear_scan_wrapper() -> None:
                             resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
                             if resp.status_code == 200:
                                 bars = resp.json().get("results", [])
-                                history_bars = bars if isinstance(bars, list) else []
+                                # NACHAUDIT N1: Polygon liefert hier sort=desc (neueste zuerst).
+                                # Wilder-ATR und alle Indikatoren brauchen chronologische Bars,
+                                # sonst laeuft die Glaettung zeitlich rueckwaerts (ATR im
+                                # Crash-Fall ~0.45x zu klein -> Stops/TPs zu eng).
+                                history_bars = list(reversed(bars)) if isinstance(bars, list) else []
                                 if len(bars) >= 21:
                                     has_history = True
                                     ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
@@ -17663,6 +17701,9 @@ EXCLUDED_CRYPTO_SYMBOLS = {
     "USDY", "USDX", "EURC", "EUROC", "WBTC", "CBTC", "TBTC", "LBTC", "WETH",
     "WBNB", "STETH", "WSTETH", "RETH", "CBETH", "WBETH", "WEETH", "EZETH",
     "METH", "RSETH", "SFRXETH", "FRXETH", "PAXG", "XAUT",
+    # NACHAUDIT M9: Solana-LSDs, neue Stables und BTC-Wrapper — Beta-Vehikel,
+    # keine direktionalen Mover.
+    "JITOSOL", "MSOL", "BNSOL", "JUPSOL", "RLUSD", "SOLVBTC",
 }
 EXCLUDED_CRYPTO_TEXT_TERMS = (
     "stablecoin", "stable coin", "wrapped ", "bridged ", "liquid staked",
@@ -17670,6 +17711,9 @@ EXCLUDED_CRYPTO_TEXT_TERMS = (
     "staked btc", "staking ether", "staking eth", "tether", "usd coin",
     "paypal usd", "binance usd", "frax", "ethena usde", "pax gold",
     "tether gold", "tokenized gold", "gold-backed", "gold backed",
+    # NACHAUDIT M9: SOL-Staking-Derivate und Restaking-Wrapper.
+    "staked sol", "staked solana", "liquid staking", "restaked",
+    "ripple usd",
 )
 PERP_OI_HISTORY_CACHE = "/tmp/early_movers_perp_oi_history.json"
 
@@ -19047,6 +19091,7 @@ def fetch_early_movers(_prefetched_perps=None):
     # UNIFIED LIST: Alle 3 Strategien → eine Liste mit Phase-Klassifikation
     # ═══════════════════════════════════════════════════════════════════
     seen_symbols = {}  # Deduplizierung: Symbol → bester Eintrag
+    seen_symbol_ids = {}  # NACHAUDIT M9: Symbol → CoinGecko-ID des Erst-Treffers
 
     # BTC 24h Change für Alpha-Berechnung in Phase-Klassifikation
     btc_24h = 0
@@ -19169,10 +19214,25 @@ def fetch_early_movers(_prefetched_perps=None):
                 "scanner_note": "Early Movers liefert Beobachten- oder Jetzt-Traden-Signale. Kein Entry ohne bestaetigten adaptiven Execution-Trigger.",
             })
 
+            # NACHAUDIT M9: Zwei verschiedene CoinGecko-Coins mit identischem
+            # Ticker duerfen nicht zu einer Row verschmelzen (falsche
+            # Cross-Coin-Konfluenz, falsches Perp-/Chart-Mapping). Der erste
+            # Treffer (hoechste MarketCap, CG-sortiert) gewinnt; das andere
+            # Asset wird uebersprungen statt gemerged.
+            # Re-audit: fail-safe — verschiedene ODER unbekannte Identitaet
+            # nie mergen. Identische ID (gleicher Coin aus mehreren Source-
+            # Listen) ist die gewollte Konfluenz und wird gemerged; abweichende
+            # oder fehlende ID (leerer String) wird uebersprungen.
+            _this_coin_id = str(entry.get("ID") or "").strip().lower()
+            _seen_coin_id = seen_symbol_ids.get(sym)
+            if sym in seen_symbols and _this_coin_id != _seen_coin_id:
+                continue
+
             # Dedup: Behalte den mit höherem Score, aber merke ALLE Quellen
             if sym not in seen_symbols:
                 unified_entry["sources"] = [source_name]
                 seen_symbols[sym] = unified_entry
+                seen_symbol_ids[sym] = _this_coin_id
             else:
                 # Quelle hinzufügen (Multi-Signal = stärkere Konfluenz)
                 if source_name not in seen_symbols[sym].get("sources", []):
@@ -19463,7 +19523,20 @@ def get_early_movers():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_early_mover_results(results, cache_age)
-    _downgrade_expired_crypto_triggers(_flatten_early_mover_rows(decorated), cache_age)
+    downgraded_rows = _downgrade_expired_crypto_triggers(_flatten_early_mover_rows(decorated), cache_age)
+    # NACHAUDIT N7: Statistik erst NACH dem Downgrade zaehlen, damit
+    # trade_now_count zu den tatsaechlich ausgelieferten Rows passt
+    # (crypto_explosion macht es bereits so).
+    try:
+        fresh_trade_now = sum(
+            1 for r in downgraded_rows
+            if isinstance(r, dict) and r.get("trade_signal") == "JETZT_TRADEN"
+        )
+        for payload_item in (decorated if isinstance(decorated, list) else [decorated]):
+            if isinstance(payload_item, dict) and isinstance(payload_item.get("stats"), dict):
+                payload_item["stats"]["trade_now_count"] = fresh_trade_now
+    except Exception as stats_exc:
+        print(f"[Early Movers] post-downgrade stats sync skipped: {stats_exc}")
     quality = _scan_quality_payload("early_movers", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
@@ -20140,6 +20213,10 @@ def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Op
             row["trigger_expired"] = True
             row["trigger_state"] = "EXPIRED"
             row["trigger_state_label"] = "Trigger expired; wait for fresh 5m breakout"
+            # NACHAUDIT N6: entry_status muss denselben Downgrade zeigen,
+            # sonst widersprechen sich Felder derselben Row.
+            if str(row.get("entry_status") or "") in {"JETZT_TRADEN", "LONG_NOW", "JETZT_LONG"}:
+                row["entry_status"] = "WAIT_FOR_TRIGGER"
     return rows
 
 
