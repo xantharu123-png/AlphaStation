@@ -636,7 +636,7 @@ def test_failed_scan_does_not_refresh_old_cache(monkeypatch, tmp_path):
     assert cached_after == cached_before
 
 
-def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
+def test_deep_selection_includes_every_candidate_and_active_outside_band():
     import api
 
     candidates = []
@@ -647,28 +647,54 @@ def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
         candidates.append((100.0 - index, snapshot, {"eligible": True, "broad_score": 100.0 - index}))
     normalized["ACTIVE"] = dict(_snapshot(), ticker="ACTIVE", price=5.40)
 
-    first, cursor, stats = api._penny_select_deep_candidates(
+    selected = api._penny_select_deep_candidates(
         candidates,
         normalized,
         {"ACTIVE"},
-        {"rotation_cursor": 0},
-        core_limit=2,
-        rotation_limit=3,
     )
-    second, _, _ = api._penny_select_deep_candidates(
-        candidates,
-        normalized,
-        {"ACTIVE"},
-        {"rotation_cursor": cursor},
-        core_limit=2,
-        rotation_limit=3,
-    )
-    assert [item[1]["ticker"] for item in first] == ["ACTIVE", "T0", "T1", "T2", "T3", "T4"]
-    assert [item[1]["ticker"] for item in second] == ["ACTIVE", "T0", "T1", "T5", "T6", "T7"]
-    assert stats["rotating_planned"] == 3
+    assert [item[1]["ticker"] for item in selected] == [
+        "ACTIVE", "T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9",
+    ]
 
 
-def test_priority_block_is_diversified_beyond_composite_score():
+def test_deep_selection_includes_broad_rejected_penny_stocks():
+    import api
+
+    eligible = dict(_snapshot(), ticker="LIQUID", price=1.25, dollar_volume=2_000_000)
+    rejected = dict(
+        _snapshot(),
+        ticker="THIN",
+        price=0.45,
+        dollar_volume=20_000,
+        projected_dollar_volume=80_000,
+        spread_bps=800,
+    )
+    eligible_broad = {"eligible": True, "broad_score": 80.0}
+
+    selected = api._penny_select_deep_candidates(
+        [(80.0, eligible, eligible_broad)],
+        {"LIQUID": eligible, "THIN": rejected},
+        set(),
+    )
+
+    assert [item[1]["ticker"] for item in selected] == ["LIQUID", "THIN"]
+    assert selected[1][2]["eligible"] is False
+
+
+def test_deep_selection_has_no_hidden_candidate_cap():
+    import api
+
+    normalized = {
+        f"P{index}": dict(_snapshot(), ticker=f"P{index}", price=1.0)
+        for index in range(500)
+    }
+    selected = api._penny_select_deep_candidates([], normalized, set())
+
+    assert len(selected) == 500
+    assert {item[1]["ticker"] for item in selected} == set(normalized)
+
+
+def test_deep_selection_does_not_drop_lower_ranked_candidates():
     import api
 
     candidates = []
@@ -685,41 +711,33 @@ def test_priority_block_is_diversified_beyond_composite_score():
         normalized[snapshot["ticker"]] = snapshot
         candidates.append((100.0 - index, snapshot, {"eligible": True, "broad_score": 100.0 - index}))
 
-    selected, _, stats = api._penny_select_deep_candidates(
+    selected = api._penny_select_deep_candidates(
         candidates,
         normalized,
         set(),
-        {"rotation_cursor": 0},
-        core_limit=8,
-        rotation_limit=0,
     )
     symbols = [item[1]["ticker"] for item in selected]
 
     assert symbols[:2] == ["T0", "T1"]
     assert "T11" in symbols
-    assert stats["priority_planned"] == 8
+    assert len(symbols) == len(candidates)
 
 
-def test_penny_coverage_reports_completed_rotation_not_planned_rotation():
+def test_penny_coverage_reports_incomplete_full_scan():
     import api
 
     stats = api._penny_scan_coverage_stats(
         {"ACTIVE", "TOP1", "TOP2", "ROT1"},
-        {"ROT1", "ROT2", "ROT3"},
         selected_count=6,
-        rotation_planned=3,
         budget_exhausted=True,
     )
 
     assert stats == {
         "deep_checked": 4,
         "deep_planned": 6,
-        "core_checked": 3,
-        "core_planned": 3,
-        "rotating_checked": 1,
-        "rotating_planned": 3,
         "budget_exhausted": True,
         "deep_completed": False,
+        "deep_missing": 2,
     }
 
 
@@ -728,14 +746,12 @@ def test_penny_coverage_marks_fully_completed_batch():
 
     stats = api._penny_scan_coverage_stats(
         {"TOP1", "TOP2", "ROT1", "ROT2"},
-        {"ROT1", "ROT2"},
         selected_count=4,
-        rotation_planned=2,
         budget_exhausted=False,
     )
 
-    assert stats["core_checked"] == 2
-    assert stats["rotating_checked"] == 2
+    assert stats["deep_checked"] == 4
+    assert stats["deep_missing"] == 0
     assert stats["deep_completed"] is True
 
 

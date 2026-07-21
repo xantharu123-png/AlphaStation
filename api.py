@@ -13900,7 +13900,7 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_trade_signals": 30, "crypto_explosion": 25, "penny_stocks": 12}
+_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_trade_signals": 30, "crypto_explosion": 25, "penny_stocks": 20}
 
 def _run_scan_safe(name, func, timeout_min=None):
     """Start exactly one non-blocking worker for a scanner.
@@ -22678,12 +22678,13 @@ def _penny_select_deep_candidates(
     broad_candidates: List[Tuple[float, Dict[str, Any], Dict[str, Any]]],
     normalized: Dict[str, Dict[str, Any]],
     active_symbols: set,
-    state_payload: Dict[str, Any],
-    *,
-    core_limit: int,
-    rotation_limit: int,
-) -> Tuple[List[Tuple[float, Dict[str, Any], Dict[str, Any]]], int, Dict[str, Any]]:
-    """Select active positions, a diversified priority block and a rotating block."""
+) -> List[Tuple[float, Dict[str, Any], Dict[str, Any]]]:
+    """Return the complete penny universe, with active positions first.
+
+    The broad screen controls processing order and later tradeability, not scan
+    inclusion. Otherwise an illiquid-looking snapshot can hide a fresh 5-minute
+    liquidity expansion until a later run.
+    """
     selected: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
     selected_symbols = set()
 
@@ -22695,109 +22696,51 @@ def _penny_select_deep_candidates(
             selected.append((100.0, snapshot, score_broad_penny_candidate(snapshot)))
             selected_symbols.add(symbol)
 
-    # Keep the strongest broad candidates, but do not let one composite score
-    # monopolize the expensive 5m checks. Separate liquidity, RVOL, close
-    # strength and early-move lanes catch different valid penny-stock setups.
-    core_added = 0
-    anchor_target = min(core_limit, max(2, core_limit // 4))
+    # Check the most promising symbols first so active signals are found early,
+    # but never stop after this prequalified group.
     for candidate in broad_candidates:
-        if core_added >= anchor_target:
-            break
         symbol = candidate[1]["ticker"]
         if symbol in selected_symbols:
             continue
         selected.append(candidate)
         selected_symbols.add(symbol)
-        core_added += 1
 
-    def _metric(candidate: Tuple[float, Dict[str, Any], Dict[str, Any]], key: str) -> float:
-        return _alert_float(candidate[1].get(key), 0.0) or 0.0
-
-    discovery_lanes = [
-        sorted(broad_candidates, key=lambda item: _metric(item, "rvol"), reverse=True),
-        sorted(broad_candidates, key=lambda item: _metric(item, "dollar_volume"), reverse=True),
-        sorted(broad_candidates, key=lambda item: _metric(item, "close_position"), reverse=True),
-        sorted(broad_candidates, key=lambda item: abs(_metric(item, "change_pct") - 7.0)),
-    ]
-    lane_offsets = [0] * len(discovery_lanes)
-    while core_added < core_limit:
-        added_this_round = False
-        for lane_index, lane in enumerate(discovery_lanes):
-            while lane_offsets[lane_index] < len(lane):
-                candidate = lane[lane_offsets[lane_index]]
-                lane_offsets[lane_index] += 1
-                symbol = candidate[1]["ticker"]
-                if symbol in selected_symbols:
-                    continue
-                selected.append(candidate)
-                selected_symbols.add(symbol)
-                core_added += 1
-                added_this_round = True
-                break
-            if core_added >= core_limit:
-                break
-        if not added_this_round:
-            break
-
-    remaining = [
-        candidate
-        for candidate in broad_candidates
-        if candidate[1]["ticker"] not in selected_symbols
-    ]
-    rotation_cursor = int(state_payload.get("rotation_cursor") or 0)
-    rotation_symbols: List[str] = []
-    if remaining:
-        rotation_cursor %= len(remaining)
-        take = min(rotation_limit, len(remaining))
-        for offset in range(take):
-            candidate = remaining[(rotation_cursor + offset) % len(remaining)]
-            symbol = candidate[1]["ticker"]
-            if symbol not in selected_symbols:
-                selected.append(candidate)
-                selected_symbols.add(symbol)
-                rotation_symbols.append(symbol)
-        next_cursor = (rotation_cursor + take) % len(remaining)
-    else:
-        take = 0
-        next_cursor = 0
-    return selected, next_cursor, {
-        "rotation_cursor": rotation_cursor,
-        "priority_planned": core_added,
-        "rotating_planned": len(rotation_symbols),
-        "rotation_pool_size": len(remaining),
-        "_rotation_symbols": rotation_symbols,
-    }
+    remaining: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
+    for symbol, snapshot in normalized.items():
+        if symbol in selected_symbols:
+            continue
+        broad = score_broad_penny_candidate(snapshot)
+        remaining.append((
+            _alert_float(broad.get("broad_score"), 0.0) or 0.0,
+            snapshot,
+            broad,
+        ))
+    remaining.sort(key=lambda entry: entry[0], reverse=True)
+    selected.extend(remaining)
+    return selected
 
 
 def _penny_scan_coverage_stats(
     processed_symbols: set,
-    rotation_symbols: set,
     *,
     selected_count: int,
-    rotation_planned: int,
     budget_exhausted: bool,
 ) -> Dict[str, Any]:
-    """Report completed deep checks, not merely the planned candidate batch."""
+    """Report whether the complete executable universe was checked."""
     processed = set(processed_symbols or set())
-    rotation = set(rotation_symbols or set())
-    rotating_checked = len(processed & rotation)
     deep_checked = len(processed)
     selected_total = max(0, int(selected_count or 0))
-    rotation_total = max(0, min(int(rotation_planned or 0), selected_total))
     return {
         "deep_checked": deep_checked,
         "deep_planned": selected_total,
-        "core_checked": max(0, deep_checked - rotating_checked),
-        "core_planned": max(0, selected_total - rotation_total),
-        "rotating_checked": rotating_checked,
-        "rotating_planned": rotation_total,
         "budget_exhausted": bool(budget_exhausted),
         "deep_completed": bool(not budget_exhausted and deep_checked == selected_total),
+        "deep_missing": max(0, selected_total - deep_checked),
     }
 
 
 def _penny_stock_scanner_wrapper() -> None:
-    """Scan every common-stock snapshot, then deeply validate liquid penny candidates."""
+    """Run a 5-minute screen over every common stock in the penny universe."""
     started_at = time.time()
     diagnostics: Dict[str, Any] = {
         "snapshot_total": 0,
@@ -22805,6 +22748,8 @@ def _penny_stock_scanner_wrapper() -> None:
         "broad_candidates": 0,
         "deep_checked": 0,
         "five_minute_screened": 0,
+        "five_minute_data_ok": 0,
+        "five_minute_data_missing": 0,
         "trigger_near_count": 0,
         "full_structure_checked": 0,
         "preflight_rejected_counts": {},
@@ -22863,25 +22808,19 @@ def _penny_stock_scanner_wrapper() -> None:
 
         broad_candidates.sort(key=lambda entry: entry[0], reverse=True)
         diagnostics["broad_candidates"] = len(broad_candidates)
-        core_limit = max(8, min(80, int(os.environ.get("PENNY_DEEP_CORE_LIMIT", "64"))))
-        rotation_limit = max(8, min(120, int(os.environ.get("PENNY_DEEP_ROTATION_LIMIT", "96"))))
-        scan_budget_seconds = max(90, min(600, int(os.environ.get("PENNY_SCAN_BUDGET_SECONDS", "240"))))
+        diagnostics["broad_rejected"] = max(
+            0,
+            diagnostics["common_penny_universe"] - diagnostics["broad_candidates"],
+        )
+        scan_budget_seconds = max(900, min(1_080, int(os.environ.get("PENNY_SCAN_BUDGET_SECONDS", "1080"))))
         scan_deadline = started_at + scan_budget_seconds
-        selected, next_rotation_cursor, rotation_stats = _penny_select_deep_candidates(
+        selected = _penny_select_deep_candidates(
             broad_candidates,
             normalized,
             active_symbols,
-            state_payload,
-            core_limit=core_limit,
-            rotation_limit=rotation_limit,
         )
-        diagnostics["deep_core_limit"] = core_limit
-        diagnostics["deep_rotation_limit"] = rotation_limit
         diagnostics["scan_budget_seconds"] = scan_budget_seconds
-        rotation_symbols = set(rotation_stats.pop("_rotation_symbols", []))
-        diagnostics.update(rotation_stats)
-        rotation_planned = int(rotation_stats.get("rotating_planned") or 0)
-        diagnostics["next_rotation_cursor"] = next_rotation_cursor
+        diagnostics["selection_policy"] = "all_common_penny_stocks_same_run"
         diagnostics["active_outside_price_band"] = sum(
             1
             for symbol in active_symbols
@@ -22922,6 +22861,10 @@ def _penny_stock_scanner_wrapper() -> None:
                 now_ts=candidate_now_ts,
             )
             diagnostics["five_minute_screened"] += 1
+            if intraday_preview.get("data_ok"):
+                diagnostics["five_minute_data_ok"] += 1
+            else:
+                diagnostics["five_minute_data_missing"] += 1
             preview_ready = bool(
                 intraday_preview.get("data_ok")
                 and intraday_preview.get("fresh")
@@ -23235,17 +23178,9 @@ def _penny_stock_scanner_wrapper() -> None:
         cache_rows = [*active_rows, *optional_rows[:_PENNY_OPTIONAL_ROW_LIMIT]]
         coverage = _penny_scan_coverage_stats(
             processed_symbols,
-            rotation_symbols,
             selected_count=len(selected),
-            rotation_planned=rotation_planned,
             budget_exhausted=budget_exhausted,
         )
-        processed_rotation = coverage["rotating_checked"]
-        if rotation_stats.get("rotation_pool_size"):
-            next_rotation_cursor = (
-                int(rotation_stats.get("rotation_cursor") or 0) + processed_rotation
-            ) % int(rotation_stats["rotation_pool_size"])
-        diagnostics["next_rotation_cursor"] = next_rotation_cursor
         diagnostics.update(coverage)
         diagnostics["buy_now"] = sum(1 for row in active_rows if row.get("trade_action") == "JETZT_KAUFEN")
         diagnostics["hold_now"] = sum(1 for row in active_rows if row.get("trade_action") == "HALTEN")
@@ -23258,7 +23193,6 @@ def _penny_stock_scanner_wrapper() -> None:
         save_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
         _penny_save_dict(PENNY_STOCKS_STATE, {
             "updated_at": now_ts,
-            "rotation_cursor": next_rotation_cursor,
             "tickers": ticker_state,
         })
         _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
@@ -23319,7 +23253,6 @@ def _penny_stock_scanner_wrapper() -> None:
         if state_changed_after_mail:
             _penny_save_dict(PENNY_STOCKS_STATE, {
                 "updated_at": now_ts,
-                "rotation_cursor": next_rotation_cursor,
                 "tickers": ticker_state,
             })
         with _scan_lock:
