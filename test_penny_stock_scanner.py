@@ -315,6 +315,16 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
         {"ticker": "EXIT", "trade_action": "JETZT_VERKAUFEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "BUILD", "trade_action": "BEOBACHTEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "WAIT", "trade_action": "TRIGGER_WARTEN", "trigger_timestamp": now_ts - 360},
+        {
+            "ticker": "NEAR",
+            "trade_action": "TRIGGER_WARTEN",
+            "trigger_timestamp": now_ts - 360,
+            "pump_potential_score": 70,
+            "entry_quality_score": 72,
+            "dump_risk_score": 30,
+            "hard_blockers": ["fresh_5m_breakout_or_retest_missing", "trade_score_below_80"],
+            "trade_setup": {"entry": 1.0, "stop_loss": 0.90, "tp1": 1.20, "tp2": 1.40},
+        },
         {"ticker": "STALE_WAIT", "trade_action": "TRIGGER_WARTEN", "trigger_timestamp": now_ts - 1_500},
         {"ticker": "NO", "trade_action": "NICHT_KAUFEN"},
     ]
@@ -324,6 +334,8 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     payload = api.get_penny_stock_results()
 
     assert [row["ticker"] for row in payload["data"]] == ["BUY", "HOLD", "EXIT"]
+    assert [row["ticker"] for row in payload["near_entries"]] == ["NEAR"]
+    assert payload["near_entries"][0]["near_entry_label"] == "ENTRY FAST BEREIT - 5M TRIGGER FEHLT"
 
     analysis_rows = api._penny_active_trade_rows(
         legacy_rows,
@@ -331,11 +343,29 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
         cache_age_seconds=60,
         now_ts=now_ts,
     )
-    assert [row["ticker"] for row in analysis_rows] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT"]
+    assert [row["ticker"] for row in analysis_rows] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT", "NEAR"]
 
     payload_with_watch = api.get_penny_stock_results(include_watch=True)
-    assert [row["ticker"] for row in payload_with_watch["data"]] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT"]
+    assert [row["ticker"] for row in payload_with_watch["data"]] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT", "NEAR"]
     assert payload_with_watch["include_watch"] is True
+
+
+def test_penny_near_entry_rows_reject_hard_liquidity_blocker():
+    import api
+
+    now_ts = time.time()
+    row = {
+        "ticker": "THIN",
+        "trade_action": "TRIGGER_WARTEN",
+        "trigger_timestamp": now_ts - 360,
+        "pump_potential_score": 80,
+        "entry_quality_score": 80,
+        "dump_risk_score": 20,
+        "hard_blockers": ["current_dollar_volume_below_500k"],
+        "trade_setup": {"entry": 1.0, "stop_loss": 0.90, "tp1": 1.20, "tp2": 1.40},
+    }
+
+    assert api._penny_near_entry_rows([row], cache_age_seconds=60, now_ts=now_ts) == []
 
 
 def test_penny_results_expire_old_trigger_and_stale_cache(monkeypatch):
@@ -636,6 +666,38 @@ def test_rotation_covers_non_top_candidates_and_keeps_active_outside_band():
     assert [item[1]["ticker"] for item in first] == ["ACTIVE", "T0", "T1", "T2", "T3", "T4"]
     assert [item[1]["ticker"] for item in second] == ["ACTIVE", "T0", "T1", "T5", "T6", "T7"]
     assert stats["rotating_planned"] == 3
+
+
+def test_priority_block_is_diversified_beyond_composite_score():
+    import api
+
+    candidates = []
+    normalized = {}
+    for index in range(12):
+        snapshot = dict(
+            _snapshot(),
+            ticker=f"T{index}",
+            rvol=1.0 + index,
+            dollar_volume=100_000 + index * 100_000,
+            close_position=0.55 + index * 0.02,
+            change_pct=float(index),
+        )
+        normalized[snapshot["ticker"]] = snapshot
+        candidates.append((100.0 - index, snapshot, {"eligible": True, "broad_score": 100.0 - index}))
+
+    selected, _, stats = api._penny_select_deep_candidates(
+        candidates,
+        normalized,
+        set(),
+        {"rotation_cursor": 0},
+        core_limit=8,
+        rotation_limit=0,
+    )
+    symbols = [item[1]["ticker"] for item in selected]
+
+    assert symbols[:2] == ["T0", "T1"]
+    assert "T11" in symbols
+    assert stats["priority_planned"] == 8
 
 
 def test_penny_coverage_reports_completed_rotation_not_planned_rotation():

@@ -22498,6 +22498,7 @@ _PENNY_OPTIONAL_ACTIONS = frozenset({"TRIGGER_WARTEN", "BEOBACHTEN"})
 _PENNY_TRIGGER_MAX_AGE_SECONDS = int(PENNY_TRIGGER_MAX_AGE_SECONDS)
 _PENNY_RESULT_CACHE_MAX_AGE_SECONDS = 720
 _PENNY_OPTIONAL_ROW_LIMIT = 25
+_PENNY_NEAR_ENTRY_ROW_LIMIT = 5
 
 
 def _penny_active_trade_rows(
@@ -22548,6 +22549,65 @@ def _penny_active_trade_rows(
             item["signal_age_seconds"] = max(0, int(cache_age_seconds or 0))
         visible.append(item)
     return visible
+
+
+def _penny_near_entry_rows(
+    rows: Any,
+    *,
+    cache_age_seconds: Optional[int] = None,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Return a small, explicitly non-actionable list of trigger-near setups."""
+    candidates = _penny_active_trade_rows(
+        rows,
+        include_watch=True,
+        cache_age_seconds=cache_age_seconds,
+        now_ts=now_ts,
+    )
+    allowed_pending_blockers = {
+        "fresh_5m_breakout_or_retest_missing",
+        "live_spread_unknown",
+        "sec_filing_risk_data_unavailable",
+        "pump_potential_below_70",
+        "entry_quality_below_75",
+        "trade_score_below_80",
+        "us_regular_session_closed",
+    }
+    near_rows: List[Dict[str, Any]] = []
+    for row in candidates:
+        if str(row.get("trade_action") or "").upper() != "TRIGGER_WARTEN":
+            continue
+        if _alert_float(row.get("pump_potential_score"), 0.0) < 62:
+            continue
+        if _alert_float(row.get("entry_quality_score"), 0.0) < 60:
+            continue
+        if _alert_float(row.get("dump_risk_score"), 100.0) > 55:
+            continue
+        setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        entry = _alert_float(setup.get("entry"), 0.0) or 0.0
+        stop = _alert_float(setup.get("stop_loss") or setup.get("stop"), 0.0) or 0.0
+        tp1 = _alert_float(setup.get("tp1"), 0.0) or 0.0
+        tp2 = _alert_float(setup.get("tp2"), 0.0) or 0.0
+        if not (0 < stop < entry < tp1 < tp2):
+            continue
+        unexpected_blockers = {
+            str(blocker)
+            for blocker in (row.get("hard_blockers") or [])
+            if str(blocker) not in allowed_pending_blockers
+        }
+        if unexpected_blockers:
+            continue
+        item = dict(row)
+        item["near_entry_label"] = "ENTRY FAST BEREIT - 5M TRIGGER FEHLT"
+        item["near_entry_note"] = "Noch nicht kaufen; erst ein frischer geschlossener 5m-Breakout oder Retest macht das Signal handelbar."
+        near_rows.append(item)
+
+    near_rows.sort(key=lambda row: (
+        -_alert_float(row.get("entry_quality_score"), 0.0),
+        -_alert_float(row.get("pump_potential_score"), 0.0),
+        _alert_float(row.get("dump_risk_score"), 100.0),
+    ))
+    return near_rows[:_PENNY_NEAR_ENTRY_ROW_LIMIT]
 
 
 def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
@@ -22623,7 +22683,7 @@ def _penny_select_deep_candidates(
     core_limit: int,
     rotation_limit: int,
 ) -> Tuple[List[Tuple[float, Dict[str, Any], Dict[str, Any]]], int, Dict[str, Any]]:
-    """Select a stable top block plus a rotating block and every active model position."""
+    """Select active positions, a diversified priority block and a rotating block."""
     selected: List[Tuple[float, Dict[str, Any], Dict[str, Any]]] = []
     selected_symbols = set()
 
@@ -22635,13 +22695,55 @@ def _penny_select_deep_candidates(
             selected.append((100.0, snapshot, score_broad_penny_candidate(snapshot)))
             selected_symbols.add(symbol)
 
-    for candidate in broad_candidates[:core_limit]:
+    # Keep the strongest broad candidates, but do not let one composite score
+    # monopolize the expensive 5m checks. Separate liquidity, RVOL, close
+    # strength and early-move lanes catch different valid penny-stock setups.
+    core_added = 0
+    anchor_target = min(core_limit, max(2, core_limit // 4))
+    for candidate in broad_candidates:
+        if core_added >= anchor_target:
+            break
         symbol = candidate[1]["ticker"]
-        if symbol not in selected_symbols:
-            selected.append(candidate)
-            selected_symbols.add(symbol)
+        if symbol in selected_symbols:
+            continue
+        selected.append(candidate)
+        selected_symbols.add(symbol)
+        core_added += 1
 
-    remaining = broad_candidates[core_limit:]
+    def _metric(candidate: Tuple[float, Dict[str, Any], Dict[str, Any]], key: str) -> float:
+        return _alert_float(candidate[1].get(key), 0.0) or 0.0
+
+    discovery_lanes = [
+        sorted(broad_candidates, key=lambda item: _metric(item, "rvol"), reverse=True),
+        sorted(broad_candidates, key=lambda item: _metric(item, "dollar_volume"), reverse=True),
+        sorted(broad_candidates, key=lambda item: _metric(item, "close_position"), reverse=True),
+        sorted(broad_candidates, key=lambda item: abs(_metric(item, "change_pct") - 7.0)),
+    ]
+    lane_offsets = [0] * len(discovery_lanes)
+    while core_added < core_limit:
+        added_this_round = False
+        for lane_index, lane in enumerate(discovery_lanes):
+            while lane_offsets[lane_index] < len(lane):
+                candidate = lane[lane_offsets[lane_index]]
+                lane_offsets[lane_index] += 1
+                symbol = candidate[1]["ticker"]
+                if symbol in selected_symbols:
+                    continue
+                selected.append(candidate)
+                selected_symbols.add(symbol)
+                core_added += 1
+                added_this_round = True
+                break
+            if core_added >= core_limit:
+                break
+        if not added_this_round:
+            break
+
+    remaining = [
+        candidate
+        for candidate in broad_candidates
+        if candidate[1]["ticker"] not in selected_symbols
+    ]
     rotation_cursor = int(state_payload.get("rotation_cursor") or 0)
     rotation_symbols: List[str] = []
     if remaining:
@@ -22660,6 +22762,7 @@ def _penny_select_deep_candidates(
         next_cursor = 0
     return selected, next_cursor, {
         "rotation_cursor": rotation_cursor,
+        "priority_planned": core_added,
         "rotating_planned": len(rotation_symbols),
         "rotation_pool_size": len(remaining),
         "_rotation_symbols": rotation_symbols,
@@ -22701,6 +22804,10 @@ def _penny_stock_scanner_wrapper() -> None:
         "common_penny_universe": 0,
         "broad_candidates": 0,
         "deep_checked": 0,
+        "five_minute_screened": 0,
+        "trigger_near_count": 0,
+        "full_structure_checked": 0,
+        "preflight_rejected_counts": {},
         "buy_now": 0,
         "hold_now": 0,
         "exit_now": 0,
@@ -22756,8 +22863,8 @@ def _penny_stock_scanner_wrapper() -> None:
 
         broad_candidates.sort(key=lambda entry: entry[0], reverse=True)
         diagnostics["broad_candidates"] = len(broad_candidates)
-        core_limit = max(8, min(80, int(os.environ.get("PENNY_DEEP_CORE_LIMIT", "16"))))
-        rotation_limit = max(8, min(120, int(os.environ.get("PENNY_DEEP_ROTATION_LIMIT", "16"))))
+        core_limit = max(8, min(80, int(os.environ.get("PENNY_DEEP_CORE_LIMIT", "64"))))
+        rotation_limit = max(8, min(120, int(os.environ.get("PENNY_DEEP_ROTATION_LIMIT", "96"))))
         scan_budget_seconds = max(90, min(600, int(os.environ.get("PENNY_SCAN_BUDGET_SECONDS", "240"))))
         scan_deadline = started_at + scan_budget_seconds
         selected, next_rotation_cursor, rotation_stats = _penny_select_deep_candidates(
@@ -22802,6 +22909,45 @@ def _penny_stock_scanner_wrapper() -> None:
             candidate_now_ts = time.time()
             symbol = snapshot["ticker"]
             processed_symbols.add(symbol)
+            previous = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
+            bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=72)
+            preview_spread_bps = (
+                (_alert_float(snapshot.get("spread_bps"), 0.0) or 0.0)
+                if snapshot.get("spread_known")
+                else 0.0
+            )
+            intraday_preview = analyze_penny_intraday(
+                bars_5m,
+                spread_bps=preview_spread_bps,
+                now_ts=candidate_now_ts,
+            )
+            diagnostics["five_minute_screened"] += 1
+            preview_ready = bool(
+                intraday_preview.get("data_ok")
+                and intraday_preview.get("fresh")
+                and (intraday_preview.get("trigger_confirmed") or intraday_preview.get("ignition"))
+            )
+            if not previous.get("active") and not preview_ready:
+                if not intraday_preview.get("data_ok"):
+                    preflight_reason = "closed_5m_data_missing"
+                elif not intraday_preview.get("fresh"):
+                    preflight_reason = "closed_5m_data_stale"
+                else:
+                    preflight_reason = "no_fresh_trigger_or_ignition"
+                diagnostics["preflight_rejected_counts"][preflight_reason] = (
+                    diagnostics["preflight_rejected_counts"].get(preflight_reason, 0) + 1
+                )
+                with _scan_lock:
+                    _scan_status["penny_stocks"]["progress"] = {
+                        "checked": index,
+                        "total": len(selected),
+                        "hits": len(rows),
+                        "detail": f"{symbol}: kein frischer 5m-Aufbau",
+                    }
+                continue
+            if not previous.get("active"):
+                diagnostics["trigger_near_count"] += 1
+            diagnostics["full_structure_checked"] += 1
             ref_entry = reference_cache.get(symbol) if isinstance(reference_cache.get(symbol), dict) else {}
             if candidate_now_ts - _alert_float(ref_entry.get("cached_at"), 0.0) > 24 * 3600:
                 details = get_ticker_details(POLYGON_KEY, symbol)
@@ -22846,9 +22992,7 @@ def _penny_stock_scanner_wrapper() -> None:
 
             snapshot = _penny_apply_robust_rvol(snapshot, daily_bars, volume_fraction)
 
-            bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=72)
             profile_levels = _penny_vrvp_resistances(bars_5m, daily_bars, snapshot["price"])
-            previous = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
             row = evaluate_penny_candidate(
                 snapshot,
                 bars_5m,
@@ -23222,6 +23366,10 @@ def get_penny_stock_results(include_watch: bool = False):
         include_watch=include_watch,
         cache_age_seconds=cache_age,
     )
+    near_entries = _penny_near_entry_rows(
+        cached_rows,
+        cache_age_seconds=cache_age,
+    )
     requested_actions = _PENNY_VISIBLE_ACTIONS | (_PENNY_OPTIONAL_ACTIONS if include_watch else frozenset())
     raw_visible_count = sum(
         1
@@ -23244,6 +23392,7 @@ def get_penny_stock_results(include_watch: bool = False):
     return {
         "status": "warning" if current_scan_error else "success",
         "data": rows,
+        "near_entries": near_entries,
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
         "include_watch": include_watch,
@@ -23253,6 +23402,7 @@ def get_penny_stock_results(include_watch: bool = False):
             "mail_interval_minutes": 5,
             "live_signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
             "optional_row_limit": _PENNY_OPTIONAL_ROW_LIMIT,
+            "near_entry_row_limit": _PENNY_NEAR_ENTRY_ROW_LIMIT,
             "buy_mail_requires": f"fresh closed 5m breakout/retest + live ask/spread <= {PENNY_EXECUTION_MAX_SPREAD_BPS:.0f}bps + 20d-median RVOL + SEC clear + structural stop/TP + trade score >= {PENNY_MIN_TRADE_SCORE:.0f}",
             "float_note": "Shares outstanding is a proxy, not exact free float.",
         },
