@@ -5,11 +5,14 @@ import modules.new_listing_scanner as new_listing_scanner
 from modules.new_listing_scanner import (
     _attach_announcement_contracts,
     _clean_listing_base_symbol,
+    _coverage_score_cap,
     _extract_listing_symbols_from_title,
+    _first_exchange_candle_anchor,
     _is_tradeable_short_signal,
     _monitor_key,
     _parse_mexc_listing_announcements_html,
     _pump_base_symbol,
+    add_to_monitoring,
     calculate_micro_crack_trigger,
     check_safety,
     cleanup_monitoring,
@@ -70,6 +73,52 @@ def _micro_crack_candles():
 
 def test_monitor_key_keeps_same_symbol_separate_by_exchange():
     assert _monitor_key("ABCUSDT", "mexc") != _monitor_key("ABCUSDT", "binance")
+
+
+def test_listing_candle_anchor_requires_fresh_complete_uncapped_history():
+    now = int(time.time())
+    complete = [
+        {"timestamp": now - ((48 - index) * 3600), "close": 1.0}
+        for index in range(49)
+    ]
+    anchor = _first_exchange_candle_anchor(complete, requested_count=50)
+    assert anchor is not None
+    assert datetime.fromisoformat(anchor).timestamp() == complete[0]["timestamp"]
+
+    capped = complete + [{"timestamp": now + 3600, "close": 1.0}]
+    assert _first_exchange_candle_anchor(capped, requested_count=50) is None
+
+    gapped = list(complete)
+    gapped[20] = {"timestamp": gapped[19]["timestamp"] + 3 * 3600, "close": 1.0}
+    assert _first_exchange_candle_anchor(gapped, requested_count=50) is None
+
+    stale = [dict(row, timestamp=row["timestamp"] - 24 * 3600) for row in complete]
+    assert _first_exchange_candle_anchor(stale, requested_count=50) is None
+
+
+def test_listing_monitor_reanchors_to_exchange_timestamp(tmp_path, monkeypatch):
+    path = tmp_path / "monitoring.json"
+    monkeypatch.setattr(new_listing_scanner, "MONITORING_FILE", path)
+    detected_ts = int(time.time()) - 1800
+    corrected_ts = detected_ts - 900
+
+    add_to_monitoring("ABCUSDT", "binance", detected_ts * 1000)
+    first = new_listing_scanner.load_monitoring_list()["binance:ABCUSDT"]
+    assert datetime.fromisoformat(first["listing_time"]).timestamp() == detected_ts
+
+    add_to_monitoring("ABCUSDT", "binance", corrected_ts * 1000)
+    updated = new_listing_scanner.load_monitoring_list()["binance:ABCUSDT"]
+    assert datetime.fromisoformat(updated["listing_time"]).timestamp() == corrected_ts
+    assert updated["listing_age_source_override"] == "exchange_timestamp"
+    assert updated["listing_time_confirmed_at"]
+
+
+def test_coverage_score_cap_is_bounded_and_has_no_threshold_jump():
+    samples = [_coverage_score_cap(value / 1000.0) for value in range(1001)]
+    assert samples == sorted(samples)
+    assert samples[0] == 49
+    assert samples[-1] == 100
+    assert max(right - left for left, right in zip(samples, samples[1:])) <= 1
 
 
 def test_listing_announcement_symbol_parser_keeps_crypto_and_blocks_stock_titles():

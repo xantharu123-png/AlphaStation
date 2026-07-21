@@ -1295,7 +1295,7 @@ def _tracker_stock_fetcher(ticker, since_iso_date):
         return None
 
 
-def _tracker_crypto_fetcher(ticker):
+def _tracker_crypto_fetcher(ticker, instrument_id=None, venue=None, contract_symbol=None):
     """Aktueller Crypto-Preis best-effort aus dem CoinGecko-Markets-Cache.
 
     Symbol-Match case-insensitive; Perp-/Quote-Suffixe (z.B. USDT) werden
@@ -1349,13 +1349,34 @@ def _tracker_crypto_fetcher(ticker):
             log.debug(f"[SignalTracker] Markets-Cache zu alt/unbekannt (age={_cache_age}) — kein Preis fuer {ticker}")
             return None
         coins = payload.get("coins", []) if isinstance(payload, dict) else payload
+        requested_id = str(instrument_id or "").strip().lower()
+        candidates = []
         for c in coins or []:
             if not isinstance(c, dict):
                 continue
-            if str(c.get("symbol", "")).strip().upper() == sym:
+            coin_id = str(c.get("id", "")).strip().lower()
+            if requested_id and coin_id == requested_id:
                 price = c.get("current_price")
-                if isinstance(price, (int, float)) and price > 0:
-                    return float(price)
+                return float(price) if isinstance(price, (int, float)) and price > 0 else None
+            if str(c.get("symbol", "")).strip().upper() == sym:
+                candidates.append(c)
+        if requested_id:
+            return None
+        unique_ids = {str(c.get("id", "")).strip().lower() for c in candidates}
+        unique_ids.discard("")
+        if len(candidates) != 1 or len(unique_ids) > 1:
+            if candidates:
+                log.warning(
+                    "[SignalTracker] Mehrdeutiges Crypto-Symbol %s (%s) ohne coin_id; "
+                    "Bewertung wird aus Sicherheitsgruenden uebersprungen",
+                    sym,
+                    ", ".join(sorted(unique_ids)) or "IDs unbekannt",
+                )
+            return None
+        if candidates:
+            price = candidates[0].get("current_price")
+            if isinstance(price, (int, float)) and price > 0:
+                return float(price)
         return None
     except Exception as exc:
         log.debug(f"[SignalTracker] Crypto-Fetcher {ticker} fehlgeschlagen: {exc}")

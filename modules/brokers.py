@@ -182,6 +182,20 @@ def ib_calc_shares(price, size_value, size_type="Shares"):
     return max(1, int(size_value))
 
 
+def split_take_profit_shares(shares, target_count=2):
+    """Split an integer position without creating zero-quantity child orders."""
+    try:
+        total = int(shares)
+        targets = int(target_count)
+    except (TypeError, ValueError):
+        return []
+    if total <= 0 or targets <= 0:
+        return []
+    targets = min(total, targets)
+    base, remainder = divmod(total, targets)
+    return [base + (1 if index < remainder else 0) for index in range(targets)]
+
+
 def ib_submit_bracket(ticker, entry, sl, tp_list, shares, direction, market_type, exchange="US"):
     """
     Submit bracket order to TWS with transmit=False.
@@ -266,31 +280,20 @@ def ib_submit_bracket(ticker, entry, sl, tp_list, shares, direction, market_type
             tp_trade = ib.placeOrder(contract, tp_order)
             order_ids.append(tp_trade.order.orderId)
         elif len(tp_clean) >= 2:
-            # Split shares between TP1 and TP2
-            tp1_shares = shares // 2
-            tp2_shares = shares - tp1_shares
-
-            tp1_order = Order(
-                action=exit_action,
-                orderType="LMT",
-                lmtPrice=round(tp_clean[0], 2),
-                totalQuantity=tp1_shares,
-                parentId=parent_id,
-                transmit=False
-            )
-            tp1_trade = ib.placeOrder(contract, tp1_order)
-            order_ids.append(tp1_trade.order.orderId)
-
-            tp2_order = Order(
-                action=exit_action,
-                orderType="LMT",
-                lmtPrice=round(tp_clean[1], 2),
-                totalQuantity=tp2_shares,
-                parentId=parent_id,
-                transmit=False
-            )
-            tp2_trade = ib.placeOrder(contract, tp2_order)
-            order_ids.append(tp2_trade.order.orderId)
+            # A one-share position gets TP1 only. IBKR rejects quantity zero,
+            # which otherwise leaves a broken bracket without valid exits.
+            allocations = split_take_profit_shares(shares, target_count=2)
+            for target_price, quantity in zip(tp_clean[:2], allocations):
+                tp_order = Order(
+                    action=exit_action,
+                    orderType="LMT",
+                    lmtPrice=round(target_price, 2),
+                    totalQuantity=quantity,
+                    parentId=parent_id,
+                    transmit=False,
+                )
+                tp_trade = ib.placeOrder(contract, tp_order)
+                order_ids.append(tp_trade.order.orderId)
 
         ib.sleep(0.3)  # Brief wait for TWS to process
 

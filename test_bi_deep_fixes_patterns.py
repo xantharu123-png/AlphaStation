@@ -12,6 +12,7 @@ Regressions-Tests fuer die BI-Scanner-Tiefen-Fixes (BI-Audit 2026-06-10):
 
 Synthetische, deterministische Serien — kein Netz, keine API.
 """
+import inspect
 import sys, os, random
 
 _dir = os.path.dirname(os.path.abspath(__file__))
@@ -356,6 +357,16 @@ def test_n_max_score_pinned_173():
                                        accum_bias=2.8, hl_drift=0.5)[-40:]
         r = analyze_breakout_imminent(b2, direction="long")
         assert r[1] <= r[2] and r[4] <= 100
+
+
+def test_score_is_capped_before_confidence_and_grade_are_derived():
+    source = inspect.getsource(analyze_breakout_imminent)
+
+    cap_index = source.index("score = max(0, min(score, max_score))")
+    confidence_index = source.index("direction_confidence =", cap_index)
+    grade_index = source.index("grade =", confidence_index)
+
+    assert cap_index < confidence_index < grade_index
 
 
 # ====================================================================

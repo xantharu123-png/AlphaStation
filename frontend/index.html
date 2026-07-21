@@ -5008,10 +5008,18 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         const label = item?.breakout_continuation_label ?? item?.Breakout_Continuation_Label;
         const risk = item?.breakout_fakeout_risk ?? item?.Breakout_Fakeout_Risk;
         if (score == null && !label && !risk) return null;
-        const s = Number(score || 0);
+        const rawScore = Number(score || 0);
+        const s = Number.isFinite(rawScore) ? Math.max(0, Math.min(96, rawScore)) : 0;
+        const legacyLabel = String(label || '').trim();
+        const normalizedLabel = ({
+            'Durchzug OK': 'Bestaetigung stark',
+            'Durchzug moeglich': 'Bestaetigung gemischt',
+            'Durchzug möglich': 'Bestaetigung gemischt',
+            'Durchzug schwach': 'Wick-Risiko',
+        })[legacyLabel] || legacyLabel || 'Breakout-Bestaetigung';
         const tone = risk === 'LOW' ? 'good' : (risk === 'MEDIUM' ? 'warn' : 'bad');
         const riskLabel = ({LOW: 'niedrig', MEDIUM: 'mittel', HIGH: 'hoch', CRITICAL: 'sehr hoch'})[risk] || '-';
-        return { score: s, label: label || 'Breakout-Bestaetigung', risk: riskLabel, tone };
+        return { score: s, label: normalizedLabel, risk: riskLabel, tone };
     };
     const breakoutQualityHelp = 'Qualitaetsbewertung, keine Gewinnwahrscheinlichkeit: Schlusskurslage, oberer Wick, RVOL, Halt des Breakout-Levels und Ueberdehnung.';
     const breakoutBadgeStyle = (tone) => ({

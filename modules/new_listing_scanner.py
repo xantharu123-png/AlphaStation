@@ -176,6 +176,54 @@ def _data_age_seconds(ts):
     return max(0, int(time.time()) - ts_sec)
 
 
+def _exchange_timestamp_iso(ts):
+    """Return a UTC ISO timestamp for a trustworthy exchange timestamp."""
+    ts_sec = _normalize_epoch_seconds(ts)
+    now_sec = int(time.time())
+    if ts_sec <= 0 or ts_sec > now_sec + 300:
+        return None
+    try:
+        return datetime.fromtimestamp(ts_sec, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _first_exchange_candle_anchor(candles, requested_count=50, timeframe_seconds=3600):
+    """Use the first candle as listing anchor only for complete, uncapped history."""
+    rows = [row for row in (candles or []) if isinstance(row, dict)]
+    if len(rows) < 3 or len(rows) >= int(requested_count):
+        return None
+    timestamps = sorted(
+        ts for ts in (_normalize_epoch_seconds(row.get("timestamp")) for row in rows)
+        if ts > 0
+    )
+    if len(timestamps) != len(rows):
+        return None
+    max_gap = max(
+        (right - left for left, right in zip(timestamps, timestamps[1:])),
+        default=0,
+    )
+    expected_span = max(1, len(timestamps) - 1) * int(timeframe_seconds)
+    actual_span = timestamps[-1] - timestamps[0]
+    if max_gap > int(timeframe_seconds * 1.5):
+        return None
+    if actual_span < expected_span * 0.80:
+        return None
+    last_age = _data_age_seconds(timestamps[-1])
+    if last_age is None or last_age > 7200:
+        return None
+    return _exchange_timestamp_iso(timestamps[0])
+
+
+def _coverage_score_cap(data_coverage):
+    """Return a smooth score cap for partially measured pump setups."""
+    try:
+        coverage = max(0.0, min(1.0, float(data_coverage)))
+    except (TypeError, ValueError):
+        coverage = 0.0
+    return int(round(max(49.0, min(100.0, 20.0 + (80.0 * coverage)))))
+
+
 def _parse_book_side(side):
     parsed = []
     for row in side or []:
@@ -1834,14 +1882,8 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     ]
     data_coverage = available_max / applicable_max if applicable_max > 0 else 0.0
     normalized = int(round(score / available_max * 100)) if available_max > 0 else 0
-    if data_coverage < 0.50:
-        score_cap = 59
-    elif data_coverage < 0.65:
-        score_cap = 69
-    elif data_coverage < 0.80:
-        score_cap = 79
-    else:
-        score_cap = 100
+    # Avoid discontinuous score jumps at arbitrary coverage thresholds.
+    score_cap = _coverage_score_cap(data_coverage)
     normalized = max(0, min(score_cap, normalized))
 
     pump_data["raw_score"] = score
@@ -2658,13 +2700,8 @@ def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source=
         monitoring[key]["symbol"] = symbol
         monitoring[key]["exchange"] = exchange
         save_monitoring_list(monitoring)
+    listing_time = _exchange_timestamp_iso(listing_ts_ms)
     if key not in monitoring:
-        listing_time = None
-        if listing_ts_ms:
-            try:
-                listing_time = datetime.fromtimestamp(int(listing_ts_ms) / 1000, tz=timezone.utc).isoformat()
-            except Exception:
-                listing_time = None
         monitoring[key] = {
             "symbol": symbol,
             "exchange": exchange,
@@ -2676,6 +2713,13 @@ def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source=
             "peak_exh_score": 0,
         }
         save_monitoring_list(monitoring)
+    elif listing_time:
+        current = monitoring[key]
+        if current.get("listing_time") != listing_time:
+            current["listing_time"] = listing_time
+            current["listing_age_source_override"] = "exchange_timestamp"
+            current["listing_time_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+            save_monitoring_list(monitoring)
         log.info(f"🆕 NLS: {symbol} zur Überwachung hinzugefügt")
     return monitoring
 
@@ -2734,7 +2778,7 @@ def cleanup_monitoring(monitoring):
             # NACHAUDIT L8: bereits abgelaufene/invalidierte Eintraege nicht
             # erneut markieren — sonst wird expired_at bei jedem Lauf auf
             # "jetzt" gesetzt und der 7-Tage-Purge unten greift nie.
-            if data.get("status") in ("expired", "invalidated"):
+            if data.get("status") in ("expired", "invalidated", "expired_dumped"):
                 continue
             is_pump = data.get("source") == "pump_detection"
             if is_pump:
@@ -2763,7 +2807,7 @@ def cleanup_monitoring(monitoring):
         data = monitoring.get(sym)
         if not isinstance(data, dict):
             continue
-        if data.get("status") not in ("expired", "invalidated"):
+        if data.get("status") not in ("expired", "invalidated", "expired_dumped"):
             continue
         basis = (
             data.get("expired_at")
@@ -3061,8 +3105,12 @@ def run_new_listing_scanner():
                 or nl.get("create_time")
                 or nl.get("launch_time")
             )
-            listing_ts = exchange_listing_ts or nl.get("announcement_release_ms")
-            monitoring = add_to_monitoring(nl["symbol"], nl.get("exchange", "crypto.com"), listing_ts_ms=listing_ts, source="new_listing")
+            monitoring = add_to_monitoring(
+                nl["symbol"],
+                nl.get("exchange", "crypto.com"),
+                listing_ts_ms=exchange_listing_ts,
+                source="new_listing",
+            )
             key = _monitor_key(nl["symbol"], nl.get("exchange", "crypto.com"))
             if key in monitoring and nl.get("announcement_source"):
                 announcement_listing_time = None
@@ -3074,17 +3122,24 @@ def run_new_listing_scanner():
                         ).isoformat()
                 except Exception:
                     announcement_listing_time = None
-                existing_listing_time = monitoring[key].get("listing_time")
+                legacy_age_source = monitoring[key].get("listing_age_source_override")
+                legacy_listing_time = monitoring[key].get("listing_time")
+                if not exchange_listing_ts and (
+                    legacy_age_source in ("announcement_time", "detected_at")
+                    or (
+                        announcement_listing_time
+                        and legacy_listing_time == announcement_listing_time
+                    )
+                ):
+                    monitoring[key]["listing_time"] = None
                 monitoring[key].update({
                     "source": "new_listing",
                     "status": "monitoring",
-                    # Never replace a real exchange launch with the earlier
-                    # announcement. Otherwise a five-minute-old market can look
-                    # 24-72 hours old and bypass the post-launch safety window.
-                    "listing_time": existing_listing_time or announcement_listing_time,
+                    # Announcement time is discovery metadata, never trading age.
+                    "announcement_time": announcement_listing_time,
                     "listing_detection": "exchange_announcement",
                     "listing_age_source_override": (
-                        "exchange_timestamp" if exchange_listing_ts else "announcement_time"
+                        "exchange_timestamp" if exchange_listing_ts else None
                     ),
                     "announcement_source": nl.get("announcement_source"),
                     "announcement_exchange": nl.get("announcement_exchange"),
@@ -3141,9 +3196,11 @@ def run_new_listing_scanner():
                         mon_data, None
                     )
                     if lifecycle_status == "expired":
+                        transition_at = datetime.now(timezone.utc).isoformat()
                         mon_data["status"] = lifecycle_status
                         mon_data["status_reason"] = lifecycle_reason
-                        mon_data["status_changed_at"] = datetime.now(timezone.utc).isoformat()
+                        mon_data["status_changed_at"] = transition_at
+                        mon_data["expired_at"] = transition_at
                         results["monitoring"].append({
                             "symbol": symbol,
                             "exchange": exchange,
@@ -3171,9 +3228,11 @@ def run_new_listing_scanner():
                         mon_data, ticker.get("price")
                     )
                     if lifecycle_status in ("invalidated", "expired"):
+                        transition_at = datetime.now(timezone.utc).isoformat()
                         mon_data["status"] = lifecycle_status
                         mon_data["status_reason"] = lifecycle_reason
-                        mon_data["status_changed_at"] = datetime.now(timezone.utc).isoformat()
+                        mon_data["status_changed_at"] = transition_at
+                        mon_data[f"{lifecycle_status}_at"] = transition_at
                         mon_data["price"] = _to_float(ticker.get("price"))
                         is_invalid = lifecycle_status == "invalidated"
                         results["monitoring"].append({
@@ -3201,6 +3260,17 @@ def run_new_listing_scanner():
                 candles = fetch_candles_for(symbol, exchange, "1h", 50)
                 time.sleep(0.3)
 
+                if mon_data.get("source") == "new_listing" and not mon_data.get("listing_time"):
+                    candle_anchor = _first_exchange_candle_anchor(
+                        candles,
+                        requested_count=50,
+                        timeframe_seconds=3600,
+                    )
+                    if candle_anchor:
+                        mon_data["listing_time"] = candle_anchor
+                        mon_data["listing_age_source_override"] = "first_exchange_candle"
+                        mon_data["listing_time_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+
                 # Orderbook nur für Crypto.com (MEXC/Bitget haben kein öffentliches Depth-API)
                 book = fetch_orderbook_for(symbol, exchange, 20)
                 if book and book.get("bids") and book.get("asks"):
@@ -3212,16 +3282,23 @@ def run_new_listing_scanner():
                 source = mon_data.get("source", "new_listing")
                 is_new_source = source == "new_listing"
                 if is_new_source:
-                    age_basis = mon_data.get("listing_time") or mon_data.get("detected_at")
-                    listing_age_source = (
-                        mon_data.get("listing_age_source_override")
-                        or ("exchange_timestamp" if mon_data.get("listing_time") else "detected_at")
-                    )
-                    try:
-                        age_dt = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
-                        listing_age_hours = max(0, (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600)
-                    except Exception:
-                        listing_age_hours = None
+                    age_basis = mon_data.get("listing_time")
+                    if age_basis:
+                        listing_age_source = (
+                            mon_data.get("listing_age_source_override")
+                            or "exchange_timestamp"
+                        )
+                        try:
+                            age_dt = datetime.fromisoformat(str(age_basis).replace("Z", "+00:00"))
+                            if age_dt.tzinfo is None:
+                                age_dt = age_dt.replace(tzinfo=timezone.utc)
+                            listing_age_hours = max(
+                                0,
+                                (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600,
+                            )
+                        except Exception:
+                            listing_age_hours = None
+                            listing_age_source = None
 
                 # Candle-Mindestanzahl prüfen
                 if not candles or len(candles) < 3:

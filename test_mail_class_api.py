@@ -29,6 +29,11 @@ def _isolate_email_state(monkeypatch, tmp_path):
     """Gleiches Isolations-Muster wie test_email_alert_audit.py."""
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    monkeypatch.setattr(
+        api,
+        "_revalidate_early_mover_mail_candidate",
+        lambda candidate, now_ts=None: {"ok": True, "candidate": candidate},
+    )
 
 
 def _early_mover_row(**overrides):

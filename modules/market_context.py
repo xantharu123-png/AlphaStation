@@ -443,15 +443,29 @@ def build_market_context(
     event_risk: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Combine crash/fear, headline and event risk into one trading context."""
-    crash_data = crash_data or {}
-    headline_risk = headline_risk or {"score": 0, "level": "LOW", "top_headlines": []}
-    event_risk = event_risk or {"score": 0, "level": "LOW", "upcoming_events": []}
+    crash_data = crash_data if isinstance(crash_data, dict) else {}
+    headline_risk = (
+        dict(headline_risk)
+        if isinstance(headline_risk, dict) and headline_risk
+        else missing_headline_risk("Headline data missing")
+    )
+    event_risk = (
+        dict(event_risk)
+        if isinstance(event_risk, dict) and event_risk
+        else missing_event_risk("Economic calendar missing")
+    )
 
     raw_fear_score = crash_data.get("fear_score")
     fear_score_available = raw_fear_score is not None and str(raw_fear_score).strip() != ""
     fear_score = _to_float(raw_fear_score, 50)
-    vix = _to_float((crash_data.get("vix") or {}).get("price"), 0)
+    raw_vix = (crash_data.get("vix") or {}).get("price")
+    vix_available = raw_vix is not None and str(raw_vix).strip() != ""
+    vix = _to_float(raw_vix, 0)
     breadth = crash_data.get("breadth") or {}
+    breadth_available = (
+        breadth.get("ad_ratio") is not None
+        and breadth.get("advancing_pct") is not None
+    )
     ad_ratio = _to_float(breadth.get("ad_ratio"), 1.0)
     advancing_pct = _to_float(breadth.get("advancing_pct"), 50)
 
@@ -462,15 +476,21 @@ def build_market_context(
     if not fear_score_available:
         # Fall back to direct market inputs only when the aggregate is missing.
         proxies = []
-        if vix > 0:
+        if vix_available and vix > 0:
             proxies.append(max(0.0, min(100.0, (vix - 12.0) / 23.0 * 100.0)))
-        if ad_ratio > 0:
+        if breadth_available and ad_ratio > 0:
             breadth_risk = max(0.0, min(100.0, (1.5 - ad_ratio) / 1.2 * 100.0))
             advancing_risk = max(0.0, min(100.0, (60.0 - advancing_pct) / 40.0 * 100.0))
             proxies.append((breadth_risk + advancing_risk) / 2.0)
-        market_risk = sum(proxies) / len(proxies) if proxies else 50.0
-        risk_basis = "direct_market_proxy" if proxies else "neutral_fallback"
+        market_risk = sum(proxies) / len(proxies) if proxies else 55.0
+        risk_basis = "direct_market_proxy" if proxies else "market_data_unknown"
     market_risk = max(0.0, min(100.0, market_risk))
+    if fear_score_available:
+        market_status = "ok"
+    elif vix_available or breadth_available:
+        market_status = "partial"
+    else:
+        market_status = "missing"
 
     headline_status = str(headline_risk.get("data_status", "ok")).lower()
     headline_score = _to_float(headline_risk.get("score"), 0)
@@ -520,12 +540,20 @@ def build_market_context(
         trade_mode = "AGGRESSIVE_SELECTIVE"
         size_multiplier = 1.00
 
-    if (headline_status not in {"ok", "fresh"} or event_status not in {"ok", "fresh"}) and regime == "RISK_ON":
+    if (
+        market_status != "ok"
+        or headline_status not in {"ok", "fresh"}
+        or event_status not in {"ok", "fresh"}
+    ) and regime == "RISK_ON":
         regime = "NEUTRAL"
         trade_mode = "SELECTIVE"
         size_multiplier = 0.75
 
     warnings = []
+    if market_status == "missing":
+        warnings.append("Marktdaten fehlen: defensiver Unknown-Modus statt erfundenem Neutralwert.")
+    elif market_status == "partial":
+        warnings.append("Marktdaten nur teilweise verfuegbar: Positionsgroesse defensiv behandeln.")
     if headline_status not in {"ok", "fresh"}:
         warnings.append("Headline-Daten unbekannt/fehlerhaft: defensiver Modus statt blind Risk-On.")
     if event_status not in {"ok", "fresh"}:
@@ -550,10 +578,11 @@ def build_market_context(
         "market_risk": {
             "score": int(round(market_risk)),
             "basis": risk_basis,
-            "fear_score": int(round(fear_score)),
+            "data_status": market_status,
+            "fear_score": int(round(fear_score)) if fear_score_available else None,
             "vix": vix or None,
-            "ad_ratio": ad_ratio,
-            "advancing_pct": advancing_pct,
+            "ad_ratio": ad_ratio if breadth_available else None,
+            "advancing_pct": advancing_pct if breadth_available else None,
         },
         "headline_risk": headline_risk,
         "event_risk": event_risk,
@@ -567,7 +596,8 @@ def build_market_context(
             "headline_status": headline_risk.get("data_status", "ok"),
             "event_level": event_risk.get("level", "LOW"),
             "event_status": event_risk.get("data_status", "ok"),
-            "fear_score": int(round(fear_score)),
+            "market_status": market_status,
+            "fear_score": int(round(fear_score)) if fear_score_available else None,
             "vix": vix or None,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),

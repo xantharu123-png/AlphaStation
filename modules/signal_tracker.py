@@ -43,6 +43,7 @@ praezise ueber Daily-OHLC-Bars der Folgetage ausgewertet.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import os
@@ -120,6 +121,15 @@ _GRADE_KEYS = ("grade", "Grade", "BI_Grade")
 _SCORE_KEYS = ("score", "Score", "BI_Score")
 _RVOL_KEYS = ("rvol", "RVOL")
 _DIRECTION_KEYS = ("direction", "Direction")
+_INSTRUMENT_ID_KEYS = ("coin_id", "CoinId", "CoinID", "ID", "instrument_id")
+_VENUE_KEYS = ("venue", "Venue", "exchange", "Exchange", "BestExchange", "PerpChartExchange")
+_CONTRACT_KEYS = (
+    "contract_symbol",
+    "ContractSymbol",
+    "contract",
+    "PerpChartSymbol",
+    "PerpMatchSymbol",
+)
 
 
 # ── Zeit- und Parsing-Helfer ─────────────────────────────────────────────────
@@ -204,6 +214,9 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
         "grade": None,
         "score": None,
         "rvol": None,
+        "instrument_id": None,
+        "venue": None,
+        "contract_symbol": None,
     }
     if not isinstance(row, dict):
         return out
@@ -224,6 +237,15 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
         out["grade"] = str(raw_grade).strip() if raw_grade is not None else None
         out["score"] = _to_float(_first_raw(row, _SCORE_KEYS))
         out["rvol"] = _to_float(_first_raw(row, _RVOL_KEYS))
+        for output_key, aliases in (
+            ("instrument_id", _INSTRUMENT_ID_KEYS),
+            ("venue", _VENUE_KEYS),
+            ("contract_symbol", _CONTRACT_KEYS),
+        ):
+            raw_value = _first_raw(row, aliases)
+            if raw_value is not None:
+                value = str(raw_value).strip()
+                out[output_key] = value or None
     except Exception as exc:  # pragma: no cover — reine Defensive
         logger.warning("extract_signal_fields: Row nicht lesbar: %s", exc)
     return out
@@ -266,12 +288,18 @@ CREATE TABLE IF NOT EXISTS signals (
     eval_fail_count INTEGER NOT NULL DEFAULT 0
     ,entry_filled_at TEXT
     ,entry_fill_price REAL
+    ,instrument_id TEXT
+    ,venue TEXT
+    ,contract_symbol TEXT
 )
 """
 
 _SCHEMA_MIGRATIONS = {
     "entry_filled_at": "TEXT",
     "entry_fill_price": "REAL",
+    "instrument_id": "TEXT",
+    "venue": "TEXT",
+    "contract_symbol": "TEXT",
 }
 
 _INDEXES = (
@@ -379,10 +407,27 @@ def record_alert_signals(
                                 scanner, ticker, entry, stop, direction,
                             )
                             continue
-                        exists = conn.execute(
-                            "SELECT 1 FROM signals WHERE scanner = ? AND ticker = ? AND status = ? LIMIT 1",
-                            (scanner, ticker, STATUS_OPEN),
-                        ).fetchone()
+                        instrument_id = fields.get("instrument_id")
+                        venue = fields.get("venue")
+                        contract_symbol = fields.get("contract_symbol")
+                        if asset_class == "crypto" and instrument_id:
+                            exists = conn.execute(
+                                "SELECT 1 FROM signals WHERE scanner = ? AND instrument_id = ? "
+                                "AND status = ? LIMIT 1",
+                                (scanner, instrument_id, STATUS_OPEN),
+                            ).fetchone()
+                        elif asset_class == "crypto" and venue and contract_symbol:
+                            exists = conn.execute(
+                                "SELECT 1 FROM signals WHERE scanner = ? AND venue = ? "
+                                "AND contract_symbol = ? AND status = ? LIMIT 1",
+                                (scanner, venue, contract_symbol, STATUS_OPEN),
+                            ).fetchone()
+                        else:
+                            exists = conn.execute(
+                                "SELECT 1 FROM signals WHERE scanner = ? AND ticker = ? "
+                                "AND status = ? LIMIT 1",
+                                (scanner, ticker, STATUS_OPEN),
+                            ).fetchone()
                         if exists:
                             continue
                         fill_at = None
@@ -401,15 +446,16 @@ def record_alert_signals(
                                 created_at, scanner, ticker, asset_class, direction,
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
                                 rvol, mail_class, channel, status, outcome_detail,
-                                entry_filled_at, entry_fill_price
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                entry_filled_at, entry_fill_price, instrument_id,
+                                venue, contract_symbol
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
                                 float(entry), float(stop), fields["tp1"], fields["tp2"],
                                 fields["price_at_alert"], fields["grade"], fields["score"],
                                 fields["rvol"], "trade", channel_norm, STATUS_OPEN, "",
-                                fill_at, fill_price,
+                                fill_at, fill_price, instrument_id, venue, contract_symbol,
                             ),
                         )
                         inserted += 1
@@ -659,9 +705,33 @@ def _evaluate_stock_signal(
     return updates, False
 
 
+def _fetch_crypto_price(fetcher: Callable[..., Any], sig: Dict[str, Any]) -> Any:
+    """Call legacy and identity-aware crypto fetchers without masking errors."""
+    ticker = sig["ticker"]
+    identity = {
+        "instrument_id": sig.get("instrument_id"),
+        "venue": sig.get("venue"),
+        "contract_symbol": sig.get("contract_symbol"),
+    }
+    try:
+        parameters = inspect.signature(fetcher).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_kwargs or any(key in parameters for key in identity):
+        supported = identity if accepts_kwargs else {
+            key: value for key, value in identity.items() if key in parameters
+        }
+        return fetcher(ticker, **supported)
+    return fetcher(ticker)
+
+
 def _evaluate_crypto_signal(
     sig: Dict[str, Any],
-    fetcher: Callable[[str], Any],
+    fetcher: Callable[..., Any],
     now_dt: datetime,
 ) -> Tuple[Dict[str, Any], bool]:
     """Crypto-Signal per Best-Effort-Spot-Check bewerten.
@@ -672,7 +742,7 @@ def _evaluate_crypto_signal(
     (120h) nach created_at, r_realized = R des letzten bekannten Preises.
     Stop/TP haben Vorrang vor dem Expiry-Check.
     """
-    price = _to_float(fetcher(sig["ticker"]))
+    price = _to_float(_fetch_crypto_price(fetcher, sig))
     if price is None or price <= 0:
         return _register_eval_failure(sig, now_dt), True
 
@@ -694,6 +764,20 @@ def _evaluate_crypto_signal(
     updates: Dict[str, Any] = {"last_eval_at": now_iso}
 
     if fill_price is None:
+        invalidated_before_fill = (
+            direction == "LONG"
+            and ((alert_price is not None and alert_price <= stop) or price <= stop)
+        ) or (
+            direction == "SHORT"
+            and ((alert_price is not None and alert_price >= stop) or price >= stop)
+        )
+        if invalidated_before_fill:
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": "entry_invalidated_before_fill",
+            })
+            return updates, False
         crossed_from_valid_side = (
             alert_price is not None
             and ((direction == "LONG" and alert_price < entry) or (direction == "SHORT" and alert_price > entry))
@@ -854,7 +938,7 @@ def _transition_record(
 
 def evaluate_open_signals(
     stock_daily_fetcher: Optional[Callable[[str, str], Any]] = None,
-    crypto_price_fetcher: Optional[Callable[[str], Any]] = None,
+    crypto_price_fetcher: Optional[Callable[..., Any]] = None,
     now: Optional[datetime] = None,
 ) -> dict:
     """Bewertet alle OPEN-Signale gegen Stop/TP1/TP2. Wirft nie.

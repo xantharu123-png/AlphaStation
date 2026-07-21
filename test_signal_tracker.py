@@ -185,6 +185,27 @@ def test_record_dedupe_open_signal_per_scanner_ticker(tracker):
     assert tracker.record_alert_signals("breakout", [_base_row()]) == 1
 
 
+def test_crypto_dedupe_uses_instrument_identity_not_ambiguous_symbol(tracker):
+    rows = [
+        _base_row(
+            Ticker="UP",
+            coin_id="superform",
+            venue="binance",
+            contract_symbol="UPUSDT",
+        ),
+        _base_row(
+            Ticker="UP",
+            coin_id="up-token",
+            venue="mexc",
+            contract_symbol="UP_USDT",
+        ),
+    ]
+    assert tracker.record_alert_signals("crypto_explosion", rows) == 2
+    stored = _db_rows()
+    assert {row["instrument_id"] for row in stored} == {"superform", "up-token"}
+    assert tracker.record_alert_signals("crypto_explosion", [rows[0]]) == 0
+
+
 def test_record_asset_class_crypto_vs_stock(tracker):
     for scanner in sorted(st.CRYPTO_SCANNERS):
         assert tracker.record_alert_signals(scanner, [_base_row(Ticker="C_" + scanner.upper())]) == 1
@@ -396,6 +417,48 @@ def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     assert pepe["status"] == "EXPIRED"
     assert pepe["outcome_detail"] == "tp1_then_expired"
     assert pepe["r_realized"] == pytest.approx(0.6)  # (103-100)/5
+
+
+def test_crypto_evaluation_passes_exact_instrument_identity(tracker):
+    row = _base_row(
+        Ticker="UP",
+        Preis=99.0,
+        coin_id="superform",
+        venue="binance",
+        contract_symbol="UPUSDT",
+    )
+    assert tracker.record_alert_signals("crypto_explosion", [row]) == 1
+    seen = {}
+
+    def fetcher(ticker, instrument_id=None, venue=None, contract_symbol=None):
+        seen.update({
+            "ticker": ticker,
+            "instrument_id": instrument_id,
+            "venue": venue,
+            "contract_symbol": contract_symbol,
+        })
+        return 101.0
+
+    result = tracker.evaluate_open_signals(crypto_price_fetcher=fetcher)
+    assert result["evaluated"] == 1
+    assert result["errors"] == 0
+    assert seen == {
+        "ticker": "UP",
+        "instrument_id": "superform",
+        "venue": "binance",
+        "contract_symbol": "UPUSDT",
+    }
+
+
+def test_crypto_signal_invalidated_before_entry_is_no_fill(tracker):
+    row = _base_row(Ticker="DOGE", Preis=99.0, coin_id="dogecoin")
+    assert tracker.record_alert_signals("crypto_explosion", [row]) == 1
+    result = tracker.evaluate_open_signals(crypto_price_fetcher=lambda _ticker: 94.0)
+    assert result["closed"] == 1
+    signal = _signal("DOGE")
+    assert signal["status"] == "NO_FILL"
+    assert signal["outcome_detail"] == "entry_invalidated_before_fill"
+    assert signal["entry_filled_at"] is None
 
 
 # ── load_performance_summary / get_signal_count ──────────────────────────────

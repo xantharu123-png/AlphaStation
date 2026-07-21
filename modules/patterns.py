@@ -2023,6 +2023,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     #   Summe Aktien             173
     #   Summe Krypto             168 (S20 wird nicht doppelt gewertet)
     max_score = 168 if crypto_mode else 173
+    # Confidence, grade and the returned score must use one identical basis.
+    # Clamp before deriving either value so no path can expose >100% confidence.
+    score = max(0, min(score, max_score))
 
     # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
     # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
@@ -2181,9 +2184,6 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     f" Recent-Bullish: letzte 2 Kerzen gruen, Close ${closes[-1]:.2f} "
                     f"> 102% von 5-Bar-Low ${recent_low:.2f} → Short nicht imminent"
                 )
-
-    # Cap score at max_score to prevent overflow
-    score = min(score, max_score)
 
     return is_valid, score, max_score, details, direction_confidence, grade, smart_money_fires, smart_money_hits
 

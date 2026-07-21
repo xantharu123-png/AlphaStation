@@ -298,3 +298,13 @@ def test_stale_market_context_cache_is_not_used_for_scanner_decisions(monkeypatc
     assert context["cache_status"] == "stale"
     assert context["summary"]["headline_level"] == "UNKNOWN"
     assert context["summary"]["regime"] != "RISK_ON"
+
+
+def test_missing_market_inputs_never_become_risk_on():
+    context = build_market_context({}, {}, {})
+
+    assert context["market_risk"]["data_status"] == "missing"
+    assert context["market_risk"]["basis"] == "market_data_unknown"
+    assert context["market_risk"]["score"] == 55
+    assert context["regime"] != "RISK_ON"
+    assert any("Marktdaten fehlen" in warning for warning in context["warnings"])

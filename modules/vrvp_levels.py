@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from modules.volume_analysis import calculate_volume_profile
+from modules.volume_analysis import calculate_volume_profile, merge_lvn_bins
 from modules.trade_levels import trade_geometry
 
 
@@ -144,7 +144,9 @@ def _dedupe_levels(levels: List[Dict[str, Any]], entry: float) -> List[Dict[str,
     # larger stocks both stable without a fixed cent threshold.
     # NACHAUDIT N10: Floor relativ statt absolut — 1e-9 war bei Sub-Nano-
     # Coins ~45% des Preises und kollabierte alle Level zu einem.
-    tolerance = max(entry * 0.0012, 1e-12)
+    # A fixed absolute floor can collapse distinct levels for ultra-low-priced
+    # tokens. math.ulp keeps the numerical floor relative to the actual value.
+    tolerance = max(entry * 0.0012, math.ulp(entry) * 16)
     merged: List[Dict[str, Any]] = []
     for level in sorted(levels, key=lambda x: _safe_float(x.get("price"), 0.0) or 0.0):
         price = _safe_float(level.get("price"))
@@ -213,8 +215,10 @@ def build_vrvp_structure(
             if level:
                 levels.append(level)
 
-    for lvn in profile.get("lvns") or []:
-        # LVN edges are often better targets than the low-volume center.
+    lvn_zones = profile.get("lvn_zones") or merge_lvn_bins(profile.get("lvns") or [])
+    for lvn in lvn_zones:
+        # A continuous void has only two meaningful boundaries. Internal raw
+        # bin edges are not support/resistance and must never become targets.
         for price, suffix in ((lvn.get("low"), "LVN lower edge"), (lvn.get("high"), "LVN upper edge")):
             level = _make_level(price, f"VRVP {suffix}", "LVN_EDGE", 1.05)
             if level:
@@ -236,6 +240,7 @@ def build_vrvp_structure(
         "supports": supports[:8],
         "resistances": resistances[:8],
         "levels": levels[:24],
+        "volume_voids": lvn_zones,
         "profile_quality": "ok" if len(ohlcv) >= max(min_bars, 30) else "thin",
         "source": "ohlcv_volume_profile",
     }

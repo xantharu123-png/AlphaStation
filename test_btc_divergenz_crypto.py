@@ -30,6 +30,7 @@ def test_btc_divergence_uses_crypto_coins_not_crypto_equities(monkeypatch):
             "best_contract_symbol": "AZTECUSDT",
             "best_chart_exchange": "binance",
             "best_exchange": "Binance",
+            "best_last_price": 0.0217,
             "volume24_usdt": 8_000_000,
         }
     })

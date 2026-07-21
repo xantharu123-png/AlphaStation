@@ -162,6 +162,46 @@ def test_bpiq_cache_paginates_past_legacy_800_row_limit(monkeypatch):
     assert "T849" in cache
 
 
+def test_bpiq_partial_pagination_never_replaces_last_complete_cache(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code, results=None):
+            self.status_code = status_code
+            self._results = results or []
+
+        def json(self):
+            return {"results": self._results}
+
+    prior_cache = {"KEEP": [{"drug_name": "Known complete row"}]}
+    first_page = [
+        {
+            "ticker": f"PART{idx}",
+            "drug_name": "Partial",
+            "stage_event": {"stage_label": "Phase 3"},
+            "catalyst_date": "2026-08-01",
+        }
+        for idx in range(200)
+    ]
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(200, first_page) if len(calls) == 1 else FakeResponse(429)
+
+    monkeypatch.setattr(df, "_get_config_value", lambda key: "test-key")
+    monkeypatch.setattr(df, "rate_limited_get", fake_get)
+    monkeypatch.setattr(df, "_BPIQ_CATALYST_CACHE", prior_cache)
+    monkeypatch.setattr(df, "_BPIQ_CACHE_TIMESTAMP", 0)
+
+    result = df._load_bpiq_catalyst_cache()
+
+    assert result is prior_cache
+    assert df._BPIQ_CATALYST_CACHE is prior_cache
+    assert df._BPIQ_CACHE_TIMESTAMP == 0
+    assert df._BPIQ_CATALYST_STATUS["partial_response_discarded"] is True
+    assert df._BPIQ_CATALYST_STATUS["using_stale_cache"] is True
+    assert df._BPIQ_CATALYST_STATUS["rows_loaded"] == 200
+
+
 def test_bpiq_watchlist_surfaces_api_warning(monkeypatch):
     monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {})
     monkeypatch.setattr(df, "_BPIQ_CATALYST_STATUS", {
@@ -236,3 +276,80 @@ def test_biotech_public_results_hide_provider_event_fields():
     assert "bpiq" not in payload.lower()
     assert sanitized[0]["catalyst_events"][0]["catalyst_score"] == 88
     assert sanitized[0]["readout_details"][0]["source"] == "Premium catalyst calendar"
+
+
+def test_bpiq_overdue_event_is_context_only_when_future_event_exists(monkeypatch):
+    monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {
+        "TEST": [
+            {
+                "category": "OVERDUE",
+                "phase_mult": 3.0,
+                "days_until": -5,
+                "full_label": "Phase 3 old readout",
+                "drug_name": "Old Drug",
+                "catalyst_date_text": "July 1, 2026",
+            },
+            {
+                "category": "IMMINENT",
+                "phase_mult": 3.0,
+                "days_until": 7,
+                "full_label": "Phase 3 future readout",
+                "drug_name": "Future Drug",
+                "catalyst_date_text": "July 28, 2026",
+            },
+        ]
+    })
+
+    result = df._get_bpiq_catalysts("TEST")
+
+    assert result["readout_score"] == 15
+    assert "future readout" in result["readout_label"]
+    assert result["overdue_count"] == 1
+    assert "overdue_catalyst_date_unconfirmed" in result["readout_risk_flags"]
+
+
+def test_bpiq_overdue_only_event_never_adds_positive_edge(monkeypatch):
+    monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {
+        "OLD": [{
+            "category": "OVERDUE",
+            "phase_mult": 3.0,
+            "days_until": -3,
+            "full_label": "Phase 3 readout",
+            "drug_name": "Old Drug",
+            "catalyst_date_text": "July 18, 2026",
+        }]
+    })
+
+    result = df._get_bpiq_catalysts("OLD")
+
+    assert result["readout_score"] == 0
+    assert "BERF" in result["readout_label"].upper()
+    assert result["readout_risk_flags"] == ["overdue_catalyst_date_unconfirmed"]
+
+
+def test_bpiq_watchlist_sorts_future_before_overdue(monkeypatch):
+    base = {
+        "company_name": "Test Therapeutics",
+        "drug_name": "Drug",
+        "stage_label": "Phase 3",
+        "event_label": "Readout",
+        "full_label": "Phase 3 readout",
+        "catalyst_date": "2026-08-01",
+        "catalyst_date_text": "August 1, 2026",
+        "phase_mult": 3.0,
+        "bpiq_score": 80,
+        "indications": "Oncology",
+    }
+    monkeypatch.setattr(df, "_load_bpiq_catalyst_cache", lambda: {
+        "OLD": [{**base, "days_until": -2, "category": "OVERDUE"}],
+        "NEXT": [{**base, "days_until": 14, "category": "IMMINENT"}],
+    })
+    monkeypatch.setattr(df, "_BPIQ_CATALYST_STATUS", {
+        "status": "success",
+        "rows_loaded": 2,
+        "ticker_count": 2,
+    })
+
+    result = df.get_bpiq_catalyst_watchlist(limit=10, window_days=30)
+
+    assert [row["ticker"] for row in result["data"]] == ["NEXT", "OLD"]

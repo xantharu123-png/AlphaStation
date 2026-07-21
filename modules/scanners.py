@@ -39,12 +39,20 @@ from modules.volume_metrics import historical_volume_baseline
 
 # AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
 try:
-    from modules.brokers import ib_is_connected, ib_calc_shares, _get_ib_state, ib_get_contract, Order
+    from modules.brokers import (
+        Order,
+        _get_ib_state,
+        ib_calc_shares,
+        ib_get_contract,
+        ib_is_connected,
+        split_take_profit_shares,
+    )
 except ImportError:
     def ib_is_connected(): return False
     def ib_calc_shares(*a, **kw): return 0
     def _get_ib_state(): return {}
     def ib_get_contract(*a, **kw): return None
+    def split_take_profit_shares(*a, **kw): return []
     Order = None
 
 # SPAC SIC Codes (für Biotech Scanner SPAC-Filter)
@@ -569,7 +577,10 @@ def autotrader_scan_once(poly_key, config=None):
     # Lade 55 Tage History über Grouped Daily
     # 50 completed analysis candles plus one separate trigger candle.
     window_size = 51
-    start_dt = datetime.now() - timedelta(days=window_size + 15)  # +Buffer für Wochenenden
+    # Convert required sessions to calendar days and include a holiday reserve.
+    # The old 66-day window contained fewer than 51 trading days in many runs.
+    history_calendar_days = math.ceil(window_size * 7 / 5) + 14
+    start_dt = datetime.now() - timedelta(days=history_calendar_days)
     trading_days = []
     current_d = start_dt
     while current_d <= datetime.now():
@@ -579,6 +590,8 @@ def autotrader_scan_once(poly_key, config=None):
 
     # Baue Ticker History
     ticker_history = {}
+    latest_snapshot = {}
+    failed_history_days = []
     _skip_prefixes = (
         "TQQQ","SQQQ","SOXL","SOXS","LABU","LABD","SPXL","SPXS",
         "UPRO","SPXU","UVXY","SVXY","NUGT","DUST","JNUG","JDST",
@@ -588,6 +601,9 @@ def autotrader_scan_once(poly_key, config=None):
 
     for date_str in trading_days:
         day_data = fetch_grouped_daily(poly_key, date_str)
+        if day_data is None:
+            failed_history_days.append(date_str)
+            continue
         if not day_data:
             continue
         for ticker, r in day_data.items():
@@ -595,20 +611,50 @@ def autotrader_scan_once(poly_key, config=None):
                 continue
             if any(ticker.upper().startswith(p) for p in _skip_prefixes):
                 continue
-            price = r.get("c", 0)
-            volume = r.get("v", 0)
-            if price < config.get("min_price", 5.0) or volume < config.get("min_volume", 200000):
+            try:
+                open_price = float(r.get("o", 0) or 0)
+                high = float(r.get("h", 0) or 0)
+                low = float(r.get("l", 0) or 0)
+                price = float(r.get("c", 0) or 0)
+                volume = float(r.get("v", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                min(open_price, high, low, price) <= 0
+                or high < max(open_price, price)
+                or low > min(open_price, price)
+                or high < low
+                or volume < 0
+            ):
                 continue
             bar = {
-                "date": date_str, "open": r.get("o", 0), "high": r.get("h", 0),
-                "low": r.get("l", 0), "close": price, "volume": volume, "time": date_str,
+                "date": date_str, "open": open_price, "high": high,
+                "low": low, "close": price, "volume": volume, "time": date_str,
             }
             if ticker not in ticker_history:
                 ticker_history[ticker] = []
             ticker_history[ticker].append(bar)
+            latest_snapshot[ticker] = {"price": price, "volume": volume, "date": date_str}
 
-    # Filtere auf Tickers mit genug History
-    valid_tickers = {t: bars for t, bars in ticker_history.items() if len(bars) >= window_size}
+    # Historical bars remain complete. Applying today's liquidity thresholds
+    # to every old bar hides crash/stop candles and creates artificial gaps.
+    min_price = float(config.get("min_price", 5.0) or 0)
+    min_volume = float(config.get("min_volume", 200000) or 0)
+    valid_tickers = {
+        ticker: bars
+        for ticker, bars in ticker_history.items()
+        if len(bars) >= window_size
+        and ticker in latest_snapshot
+        and latest_snapshot[ticker]["price"] >= min_price
+        and latest_snapshot[ticker]["volume"] >= min_volume
+    }
+    if failed_history_days:
+        message = (
+            f"Historische Marktdaten an {len(failed_history_days)} Tag(en) nicht verfuegbar; "
+            "betroffene Reihen gelten nicht als vollstaendig."
+        )
+        result["errors"].append(message)
+        _autotrader_log(message, "WARN")
 
     # Sortiere nach Volumen (Mid-Cap Prio)
     ticker_vol = {}
@@ -850,30 +896,20 @@ def autotrader_scan_once(poly_key, config=None):
             )
             ib.placeOrder(contract, stop_order)
 
-            # TP1: 50% der Shares
-            tp1_shares = shares // 2
-            tp2_shares = shares - tp1_shares
-
-            tp1_order = Order(
-                action=exit_action,
-                orderType="LMT",
-                lmtPrice=round(signal["tp1"], 2),
-                totalQuantity=tp1_shares,
-                parentId=parent_id,
-                transmit=False
-            )
-            ib.placeOrder(contract, tp1_order)
-
-            # TP2: Restliche Shares — transmit hängt vom Mode ab
-            tp2_order = Order(
-                action=exit_action,
-                orderType="LMT",
-                lmtPrice=round(signal["tp2"], 2),
-                totalQuantity=tp2_shares,
-                parentId=parent_id,
-                transmit=is_full_auto  # True = sofort aktiv, False = warten auf TWS-Bestätigung
-            )
-            ib.placeOrder(contract, tp2_order)
+            # Split exits without ever creating a zero-quantity child. A
+            # one-share position therefore receives TP1 only.
+            allocations = split_take_profit_shares(shares, target_count=2)
+            targets = (signal["tp1"], signal["tp2"])
+            for index, (target_price, quantity) in enumerate(zip(targets, allocations)):
+                tp_order = Order(
+                    action=exit_action,
+                    orderType="LMT",
+                    lmtPrice=round(target_price, 2),
+                    totalQuantity=quantity,
+                    parentId=parent_id,
+                    transmit=is_full_auto and index == len(allocations) - 1,
+                )
+                ib.placeOrder(contract, tp_order)
 
             ib.sleep(0.3)
 
@@ -1533,7 +1569,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     range_fail += 1
                     continue
 
-                _atr_bars = all_bars[-10:]
+                _atr_bars = _session_bars[-10:]
                 avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in _atr_bars if b["close"] > 0) / max(1, len(_atr_bars))
                 if avg_daily_range < 0.3:
                     atr_fail += 1
@@ -1623,7 +1659,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     candidate["tp2_source"] = "range_extension"
 
                 _vrvp = build_vrvp_structure(
-                    all_bars,
+                    _session_bars,
                     candidate.get("Entry"),
                     direction.upper(),
                     timeframe="1D",
@@ -1631,7 +1667,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     min_bars=30,
                     lookback=90,
                 )
-                _vrvp_atr = calculate_wilder_atr(all_bars, period=14, lookback=90) or atr_5
+                _vrvp_atr = calculate_wilder_atr(_session_bars, period=14, lookback=90) or atr_5
                 _setup = apply_vrvp_to_trade_setup(
                     {
                         "Entry": candidate.get("Entry"),
@@ -2446,9 +2482,8 @@ def _check_clinical_trials(company_name, ticker):
             else:
                 _phase_mult = 0.5
 
-            # Timing-Gewichtung: OVERDUE > IMMINENT > UPCOMING
-            # OVERDUE_STALE (180-365d): Nur minimaler Score — fragwürdige Daten
-            # Past completion dates are stale/unconfirmed metadata, not future catalysts.
+            # Vergangene Termine sind nur Warnkontext. Ausschliesslich bestaetigte
+            # zukuenftige Termine duerfen einen positiven Catalyst-Edge liefern.
             readout_score += _biotech_readout_timing_weight(_cat) * _phase_mult
 
         readout_score = min(15, int(readout_score))

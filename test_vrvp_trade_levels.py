@@ -7,6 +7,7 @@ from modules.vrvp_levels import (
     build_vrvp_structure,
     calculate_wilder_atr,
 )
+from modules.volume_analysis import merge_lvn_bins
 
 
 def _bars_with_nodes(low_node: float = 95.0, high_node: float = 112.0):
@@ -64,6 +65,39 @@ def test_vrvp_lifts_long_targets_to_structural_resistance():
     assert trade_geometry(
         enriched["entry"], enriched["stop"], enriched["tp1"], enriched["tp2"], "LONG"
     )["valid"] is True
+
+
+def test_adjacent_lvn_bins_form_one_void_with_only_outer_edges(monkeypatch):
+    raw_lvns = [
+        {"low": 101.0, "high": 102.0, "mid": 101.5, "volume": 10, "volume_pct": 20},
+        {"low": 102.0, "high": 103.0, "mid": 102.5, "volume": 8, "volume_pct": 16},
+        {"low": 103.0, "high": 104.0, "mid": 103.5, "volume": 9, "volume_pct": 18},
+    ]
+    zones = merge_lvn_bins(raw_lvns)
+    assert len(zones) == 1
+    assert zones[0]["low"] == 101.0
+    assert zones[0]["high"] == 104.0
+    assert zones[0]["bin_count"] == 3
+
+    profile = {
+        "poc": 98.0,
+        "vah": 99.0,
+        "val": 96.0,
+        "range_high": 110.0,
+        "range_low": 90.0,
+        "avg_volume": 100.0,
+        "hvns": [],
+        "lvns": raw_lvns,
+    }
+    monkeypatch.setattr("modules.vrvp_levels.calculate_volume_profile", lambda *_args, **_kwargs: profile)
+    bars = [
+        {"open": 99.0, "high": 100.0, "low": 98.0, "close": 99.0, "volume": 1000}
+        for _ in range(20)
+    ]
+    structure = build_vrvp_structure(bars, 100.0, "LONG", min_bars=20)
+    lvn_levels = [level for level in structure["levels"] if level["kind"] == "LVN_EDGE"]
+    assert [level["price"] for level in lvn_levels] == [101.0, 104.0]
+    assert structure["volume_voids"][0]["bin_count"] == 3
 
 
 def test_vrvp_short_targets_remain_below_entry_and_separate():
@@ -201,7 +235,7 @@ def test_structural_level_callsites_use_canonical_atr_before_fallbacks():
     listing_source = (root / "modules" / "new_listing_scanner.py").read_text(encoding="utf-8")
 
     assert api_source.count("calculate_wilder_atr(") >= 5
-    assert "calculate_wilder_atr(all_bars" in scanner_source
+    assert "calculate_wilder_atr(_session_bars" in scanner_source
     assert "calculate_wilder_atr(\n        pump_data.get(\"vrvp_bars\")" in listing_source
     assert "atr=max(0.00000001, ath - current" not in listing_source
 

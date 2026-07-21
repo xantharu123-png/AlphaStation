@@ -2919,14 +2919,28 @@ def _completed_candles_only(
     """
     if not bars:
         return []
+    ordered = list(bars)
+    if len(ordered) >= 2:
+        timestamped = [
+            (_candle_epoch_seconds(bar), index, bar)
+            for index, bar in enumerate(ordered)
+        ]
+        if all(timestamp is not None for timestamp, _, _ in timestamped):
+            ordered = [
+                bar
+                for _, _, bar in sorted(
+                    timestamped,
+                    key=lambda item: (item[0], item[1]),
+                )
+            ]
     seconds = _timeframe_seconds(timeframe)
     if not seconds:
-        return list(bars)
+        return ordered
     now_value = float(now_ts if now_ts is not None else time.time())
-    latest_ts = _candle_epoch_seconds(bars[-1])
+    latest_ts = _candle_epoch_seconds(ordered[-1])
     if latest_ts is not None and latest_ts + seconds > now_value:
-        return list(bars[:-1])
-    return list(bars)
+        return ordered[:-1]
+    return ordered
 
 
 def _crypto_candle_freshness(
@@ -2972,6 +2986,70 @@ def _crypto_contract_price_multiplier(symbol: Any, contract: Any) -> int:
         if contract_text == f"{multiplier}{base_symbol}":
             return multiplier
     return 1
+
+
+def _perp_reference_price(perp_info: Any) -> Optional[float]:
+    """Return the live price of the venue selected for the aggregate perp row."""
+    if not isinstance(perp_info, dict):
+        return None
+    direct = _alert_float(perp_info.get("best_last_price"))
+    if direct is not None and direct > 0:
+        return direct
+
+    venue = str(
+        perp_info.get("best_chart_exchange")
+        or perp_info.get("best_exchange")
+        or ""
+    ).lower()
+    venue = venue.replace("-", "_").replace(" ", "_")
+    selected = perp_info.get(venue)
+    if isinstance(selected, dict):
+        value = _alert_float(selected.get("last_price"))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def _select_price_validated_perp(
+    symbol: Any,
+    spot_price: Any,
+    perp_data: Any,
+    max_gap_pct: float = 12.0,
+) -> Tuple[Optional[str], Dict[str, Any], Optional[float]]:
+    """Match spot and perp identities only when their scaled prices agree.
+
+    Exchange symbols such as ``1000PEPE`` cannot safely be associated by name
+    alone.  The selected contract must also trade close to ``spot * unit``.
+    """
+    base = str(symbol or "").upper().strip()
+    spot = _alert_float(spot_price)
+    if not base or spot is None or spot <= 0 or not isinstance(perp_data, dict):
+        return None, {}, None
+
+    matches: List[Tuple[float, float, str, Dict[str, Any]]] = []
+    for multiplier in (1, 100, 1_000, 10_000, 100_000, 1_000_000):
+        key = base if multiplier == 1 else f"{multiplier}{base}"
+        info = perp_data.get(key)
+        if not isinstance(info, dict) or not info:
+            continue
+        contract = info.get("best_contract_symbol") or key
+        contract_multiplier = _crypto_contract_price_multiplier(base, contract)
+        if multiplier != 1 and contract_multiplier == 1:
+            contract_multiplier = multiplier
+        expected = spot * contract_multiplier
+        actual = _perp_reference_price(info)
+        if actual is None or expected <= 0:
+            continue
+        gap_pct = abs(actual - expected) / expected * 100.0
+        if gap_pct > max_gap_pct:
+            continue
+        liquidity = _alert_float(info.get("volume24_usdt"), 0) or 0
+        matches.append((gap_pct, -liquidity, key, info))
+
+    if not matches:
+        return None, {}, None
+    gap_pct, _negative_liquidity, key, info = min(matches, key=lambda item: (item[0], item[1]))
+    return key, info, round(gap_pct, 4)
 
 
 def _early_mover_execution_threshold(matched: List[str], profile: Dict[str, Any]) -> int:
@@ -4963,6 +5041,80 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
     return bool(sent)
 
 
+def _revalidate_early_mover_mail_candidate(
+    candidate: Dict[str, Any],
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fail closed unless the exact execution contract still supports the plan."""
+    item = dict(candidate or {})
+    venue = str(item.get("venue") or item.get("exchange") or "").lower().strip()
+    contract = str(item.get("contract_symbol") or "").upper().strip()
+    if not venue or not contract:
+        return {"ok": False, "reason": "final_exact_contract_missing"}
+
+    try:
+        bars = _fetch_exchange_candles_any(contract, venue, timeframe="5m", count=24)
+    except Exception:
+        bars = []
+    completed = _completed_candles_only(bars or [], "5m", now_ts=now_ts)
+    if len(completed) < 2:
+        return {"ok": False, "reason": "final_5m_data_missing"}
+    freshness = _crypto_candle_freshness(
+        completed,
+        "5m",
+        now_ts=now_ts,
+        max_age_bars=2,
+    )
+    if not freshness.get("known") or not freshness.get("fresh"):
+        return {"ok": False, "reason": "final_5m_data_stale"}
+
+    current = _alert_float(completed[-1].get("close"))
+    prior_price = _alert_float(item.get("price"))
+    entry = _alert_float(item.get("entry"))
+    stop = _alert_float(item.get("stop"))
+    tp1 = _alert_float(item.get("tp1"))
+    tp2 = _alert_float(item.get("tp2"))
+    if any(value is None for value in (current, entry, stop, tp1, tp2)):
+        return {"ok": False, "reason": "final_trade_levels_missing"}
+    if current <= 0 or prior_price is None or prior_price <= 0:
+        return {"ok": False, "reason": "final_price_invalid"}
+    price_gap_pct = abs(current - prior_price) / prior_price * 100.0
+    if price_gap_pct > 12.0:
+        return {"ok": False, "reason": "final_contract_price_mismatch"}
+    if not (stop < current < tp1 < tp2):
+        if current >= tp1:
+            return {"ok": False, "reason": "final_tp1_already_reached"}
+        if current <= stop:
+            return {"ok": False, "reason": "final_stop_already_breached"}
+        return {"ok": False, "reason": "final_level_geometry_invalid"}
+
+    plan_risk = entry - stop
+    live_risk = current - stop
+    if plan_risk <= 0 or live_risk <= 0:
+        return {"ok": False, "reason": "final_risk_invalid"}
+    live_rr = (0.5 * (tp1 - current) + 0.5 * (tp2 - current)) / live_risk
+    distance_r = abs(current - entry) / plan_risk
+    if live_rr < _EARLY_MOVER_MIN_ALERT_RR:
+        return {"ok": False, "reason": "final_live_rr_too_low"}
+    if distance_r > _EARLY_MOVER_VISIBLE_MAX_DISTANCE_R:
+        return {"ok": False, "reason": "final_entry_distance_too_far"}
+    if (
+        str(item.get("action") or "").upper() == "WAIT_FOR_RETEST"
+        and distance_r > _EARLY_MOVER_RETEST_MAX_DISTANCE_R
+    ):
+        return {"ok": False, "reason": "final_retest_distance_too_far"}
+
+    item.update({
+        "price": current,
+        "live_rr": round(live_rr, 3),
+        "distance_r": round(distance_r, 3),
+        "final_quote_source": f"{venue}:{contract}:5m_close",
+        "final_quote_age_seconds": freshness.get("age_seconds"),
+        "final_quote_price_gap_pct": round(price_gap_pct, 3),
+    })
+    return {"ok": True, "candidate": item}
+
+
 def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     """Mail swing Early-Mover long/retest candidates; no-chase rows stay UI-only."""
     now = time.time()
@@ -5054,7 +5206,26 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "execution_score": trigger_check.get("execution_score"),
             "execution_timeframe": trigger_check.get("timeframe"),
             "horizon": "SWING" if swing_mode else "INTRADAY",
+            "coin_id": row.get("ID", row.get("coin_id")),
+            "venue": row.get(
+                "PerpChartExchange",
+                row.get("BestExchange", row.get("Exchange", "")),
+            ),
+            "contract_symbol": row.get(
+                "PerpChartSymbol",
+                row.get("PerpMatchSymbol"),
+            ),
         })
+
+    revalidated_candidates = []
+    for candidate in candidates:
+        validation = _revalidate_early_mover_mail_candidate(candidate, now_ts=now)
+        if not validation.get("ok"):
+            reason = str(validation.get("reason") or "final_revalidation_failed")
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
+        revalidated_candidates.append(validation["candidate"])
+    candidates = revalidated_candidates
 
     if not candidates:
         if suppressed:
@@ -16728,14 +16899,28 @@ def get_crypto_chart(
 ):
     """Get OHLCV chart data for crypto coins via CoinGecko."""
     try:
+        requested_days = max(2, int(days or 30))
+        max_history_days = 90
+        if requested_days > max_history_days:
+            return {
+                "ticker": coin_id,
+                "timeframe": "1D",
+                "candles": [],
+                "volume": [],
+                "ema": {},
+                "error": "history_limit",
+                "requested_days": requested_days,
+                "max_supported_days": max_history_days,
+                "partial_history": False,
+            }
         # ── Cache Check ──
-        _cc_key = f"{coin_id}:{days}"
+        _cc_key = f"{coin_id}:{requested_days}"
         if _cc_key in _CRYPTO_CHART_CACHE:
             _cached = _CRYPTO_CHART_CACHE[_cc_key]
             if time.time() - _cached["ts"] < _CRYPTO_CHART_TTL:
                 return _cached["data"]
 
-        bars = fetch_daily_candles_crypto(coin_id, days=min(days, 90))
+        bars = fetch_daily_candles_crypto(coin_id, days=requested_days)
         if not bars or len(bars) < 2:
             # Leere Antwort statt 404 → Frontend kann "Retry" anbieten
             return {
@@ -16744,27 +16929,37 @@ def get_crypto_chart(
                 "candles": [],
                 "volume": [],
                 "ema": {},
-                "error": "rate_limited",
+                "error": "data_unavailable",
+                "requested_days": requested_days,
+                "partial_history": False,
             }
 
         # Convert to TradingView Lightweight Charts format
         candles = []
         vol_data = []
+        volume_available = any(bool(bar.get("volume_available", bar.get("v", 0) > 0)) for bar in bars)
+        data_quality = str(bars[-1].get("data_quality") or "aggregated_intraday_ohlcv_estimate")
+        sample_interval_hours = bars[-1].get("source_sample_interval_hours")
+
+        def _chart_number(value):
+            return float(f"{float(value):.12g}")
+
         for bar in bars:
             ts = int(bar.get("t", 0) / 1000) if bar.get("t", 0) > 1e10 else int(bar.get("t", 0))
             candle = {
                 "time": ts,
-                "open": round(bar["o"], 6),
-                "high": round(bar["h"], 6),
-                "low": round(bar["l"], 6),
-                "close": round(bar["c"], 6),
+                "open": _chart_number(bar["o"]),
+                "high": _chart_number(bar["h"]),
+                "low": _chart_number(bar["l"]),
+                "close": _chart_number(bar["c"]),
             }
             candles.append(candle)
-            vol_data.append({
-                "time": ts,
-                "value": int(bar.get("v", 0)),
-                "color": "rgba(16,185,129,0.3)" if bar["c"] >= bar["o"] else "rgba(220,38,38,0.3)"
-            })
+            if volume_available:
+                vol_data.append({
+                    "time": ts,
+                    "value": int(bar.get("v", 0)),
+                    "color": "rgba(16,185,129,0.3)" if bar["c"] >= bar["o"] else "rgba(220,38,38,0.3)"
+                })
 
         # Simple EMA overlays
         closes = [c["close"] for c in candles]
@@ -16778,7 +16973,7 @@ def get_crypto_chart(
                     start = len(times) - len(ema_vals)
                     for i, val in enumerate(ema_vals):
                         if val is not None:
-                            ema_data.append({"time": times[start + i], "value": round(val, 6)})
+                            ema_data.append({"time": times[start + i], "value": _chart_number(val)})
                     if ema_data:
                         ema_overlays[f"ema{period}"] = ema_data
                 except Exception:
@@ -16790,9 +16985,16 @@ def get_crypto_chart(
             "candles": candles,
             "volume": vol_data,
             "ema": ema_overlays,
+            "requested_days": requested_days,
+            "available_days": len(candles),
+            "partial_history": len(candles) < max(2, requested_days - 1),
+            "volume_available": volume_available,
+            "data_quality": data_quality,
+            "source_sample_interval_hours": sample_interval_hours,
         }
         # ── Cache speichern ──
-        _CRYPTO_CHART_CACHE[_cc_key] = {"data": _result, "ts": time.time()}
+        if volume_available:
+            _CRYPTO_CHART_CACHE[_cc_key] = {"data": _result, "ts": time.time()}
         if len(_CRYPTO_CHART_CACHE) > 80:
             oldest = sorted(_CRYPTO_CHART_CACHE.items(), key=lambda x: x[1]["ts"])[:20]
             for k, _ in oldest:
@@ -18289,6 +18491,7 @@ def fetch_mexc_funding_oi():
                 "oi_usdt": oi_usdt,
                 "oi_ratio": round(oi_ratio, 2),
                 "oi_data_status": "ok" if contract_size > 0 else "missing_contract_size",
+                "last_price": last_price,
             }
         return result
     except Exception:
@@ -18442,6 +18645,7 @@ def fetch_multi_exchange_perps():
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
             "volume24_usdt": max(mexc_vol, bitget_vol, binance_vol),
+            "best_last_price": best_data.get("last_price"),
             "binance": bn,
             "mexc": m,
             "bitget": b,
@@ -18619,17 +18823,13 @@ def fetch_early_movers(_prefetched_perps=None):
             high_24h = coin.get("high_24h") or price
             low_24h = coin.get("low_24h") or price
 
-            # Perp-Match: Direkt oder mit 1000-Prefix (Börsen listen z.B. 1000PEPE, 1000SHIB)
-            perp_match_symbol = symbol
-            perp_info = perp_data.get(symbol, {})
-            if not perp_info:
-                perp_match_symbol = f"1000{symbol}"
-                perp_info = perp_data.get(perp_match_symbol, {})
-            if not perp_info:
-                perp_match_symbol = f"10000{symbol}"
-                perp_info = perp_data.get(perp_match_symbol, {})
-            if not perp_info:
-                perp_match_symbol = symbol
+            # Name alone is unsafe (e.g. COIN vs 1000COIN).  Require a live,
+            # scaled price match before perp data can influence a signal.
+            perp_match_symbol, perp_info, perp_price_gap_pct = _select_price_validated_perp(
+                symbol,
+                price,
+                perp_data,
+            )
             has_perp = bool(perp_info)
             funding_rate = perp_info.get("funding_rate", 0)
             oi_ratio = perp_info.get("oi_ratio", 0)
@@ -18669,6 +18869,7 @@ def fetch_early_movers(_prefetched_perps=None):
                 "PerpOI": perp_info.get("oi_usdt", 0) if perp_info else 0,
                 "BestExchange": best_exchange,
                 "PerpMatchSymbol": perp_match_symbol if has_perp else None,
+                "PerpMatchPriceGapPct": perp_price_gap_pct,
                 "PerpChartSymbol": chart_contract,
                 "PerpChartExchange": perp_info.get("best_chart_exchange") if perp_info else None,
                 "ContractPriceMultiplier": contract_multiplier,
@@ -20349,7 +20550,11 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
             alpha_14d = round(change_14d - btc_14d, 2)
             vol_mcap = round((volume / mcap * 100), 2) if mcap > 0 else 0
 
-            perp_lookup = perp_data.get(symbol) or perp_data.get(f"1000{symbol}") or perp_data.get(f"10000{symbol}") or {}
+            perp_match_symbol, perp_lookup, perp_price_gap_pct = _select_price_validated_perp(
+                symbol,
+                price,
+                perp_data,
+            )
             has_perp = bool(perp_lookup)
             contract = str(perp_lookup.get("best_contract_symbol") or (f"{symbol}USDT" if has_perp else ""))
             exchange = str(perp_lookup.get("best_chart_exchange") or perp_lookup.get("best_exchange") or "").lower()
@@ -25950,9 +26155,11 @@ def _normalize_crypto_bars(raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any
             "close": c,
             "volume": _bt_float(bar.get("volume", bar.get("v"))),
         }
-        # A duplicate UTC date is not a valid daily series. Keeping the last
-        # exchange row is deterministic and the cadence validator below will
-        # still reject mixed intraday data.
+        # Multiple rows for one UTC date mean this is not a trustworthy daily
+        # series (usually mixed intraday candles). Reject instead of silently
+        # inventing a daily close by overwriting earlier rows.
+        if date_key in by_date:
+            return []
         by_date[date_key] = normalized
     return [by_date[key] for key in sorted(by_date)]
 

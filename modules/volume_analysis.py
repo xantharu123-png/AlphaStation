@@ -6,6 +6,49 @@ Volume Profile, Volume Voids, VWAP-basierte Analysen.
 import math
 
 
+def merge_lvn_bins(lvns):
+    """Merge adjacent low-volume bins into continuous volume-void zones."""
+    parsed = []
+    for node in lvns or []:
+        if not isinstance(node, dict):
+            continue
+        try:
+            low = float(node.get("low"))
+            high = float(node.get("high"))
+            volume = max(0.0, float(node.get("volume", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(low) or not math.isfinite(high) or low <= 0 or high <= low:
+            continue
+        parsed.append({
+            "low": low,
+            "high": high,
+            "volume": volume,
+            "volume_pct": float(node.get("volume_pct", 0) or 0),
+            "bin_count": 1,
+        })
+    parsed.sort(key=lambda node: (node["low"], node["high"]))
+
+    zones = []
+    for node in parsed:
+        tolerance = max(abs(node["low"]) * 1e-9, 1e-12)
+        if zones and node["low"] <= zones[-1]["high"] + tolerance:
+            zone = zones[-1]
+            previous_count = zone["bin_count"]
+            zone["high"] = max(zone["high"], node["high"])
+            zone["volume"] += node["volume"]
+            zone["volume_pct"] = (
+                (zone["volume_pct"] * previous_count) + node["volume_pct"]
+            ) / (previous_count + 1)
+            zone["bin_count"] += 1
+        else:
+            zones.append(dict(node))
+
+    for zone in zones:
+        zone["mid"] = (zone["low"] + zone["high"]) / 2.0
+    return zones
+
+
 def calculate_volume_profile(ohlcv_data, num_bins=20):
     """
     Berechnet Volume Profile aus historischen OHLCV Daten.
@@ -130,6 +173,8 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
                     'volume_pct': (bin['volume'] / avg_volume * 100) if avg_volume > 0 else 0
                 })
         
+        lvn_zones = merge_lvn_bins(lvns)
+
         # Identifiziere HVNs (High Volume Nodes) - Bins mit > 150% des Durchschnitts
         hvn_threshold = avg_volume * 1.50
         hvns = []
@@ -150,6 +195,7 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
             'vah': vah,
             'val': val,
             'lvns': lvns,
+            'lvn_zones': lvn_zones,
             'hvns': hvns,
             'range_high': range_high,
             'range_low': range_low,
@@ -175,7 +221,7 @@ def find_volume_voids(current_price, volume_profile, min_void_size_pct=1.0):
     if not volume_profile or not volume_profile.get('lvns'):
         return None
     
-    lvns = volume_profile['lvns']
+    lvns = volume_profile.get('lvn_zones') or merge_lvn_bins(volume_profile['lvns'])
     range_size = volume_profile['range_high'] - volume_profile['range_low']
     
     if range_size <= 0:

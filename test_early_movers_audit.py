@@ -54,6 +54,7 @@ def _perp(symbol="TVOL", volume=10_000_000):
             "best_exchange": "Bitget",
             "best_contract_symbol": f"{symbol.upper()}USDT",
             "best_chart_exchange": "bitget",
+            "best_last_price": 1.0,
             "exchanges": ["Bitget"],
             "oi_change_pct": 5.0,
         }
@@ -410,6 +411,7 @@ def test_early_mover_perp_positioning_marks_snapshot_only(monkeypatch):
             "best_exchange": "MEXC",
             "best_contract_symbol": "WHALE_USDT",
             "best_chart_exchange": "mexc",
+            "best_last_price": 1.0,
             "exchanges": ["MEXC", "Bitget"],
             "oi_change_pct": None,
         }

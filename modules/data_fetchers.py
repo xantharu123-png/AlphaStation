@@ -25,6 +25,7 @@ _api_call_window_start = 0
 # Candle analysis cache (in-memory, resets on restart)
 _CANDLE_ANALYSIS_CACHE = {}
 _CANDLE_CACHE_TTL = 300  # 5 Minuten
+_COINGECKO_INTRADAY_MAX_DAYS = 90
 
 # BPIQ catalyst cache — fetches from BPIQ API if key is available
 import os as _os
@@ -146,14 +147,16 @@ def _load_bpiq_catalyst_cache():
         }
         return {}
 
-    # Cache noch gültig? (4h = 14400s)
+    # Use one central TTL so status text and actual refresh behavior cannot drift.
     now = time.time()
-    if _BPIQ_CATALYST_CACHE and (now - _BPIQ_CACHE_TIMESTAMP) < 14400:
+    if _BPIQ_CATALYST_CACHE and (now - _BPIQ_CACHE_TIMESTAMP) < _BPIQ_CACHE_TTL:
         return _BPIQ_CATALYST_CACHE
 
     try:
+        prior_cache = _BPIQ_CATALYST_CACHE
         all_drugs = []
         api_error_status = None
+        response_complete = False
         offset = 0
         page_limit = 200
         max_rows = 3000
@@ -178,13 +181,36 @@ def _load_bpiq_catalyst_cache():
             data = resp.json()
             results = data.get("results", [])
             if not results:
+                response_complete = True
                 break
             all_drugs.extend(results)
             if len(results) < page_limit:
+                response_complete = True
                 break
             if "next" in data and not data.get("next"):
+                response_complete = True
                 break
             offset += page_limit
+
+        # Never replace a complete cache with a rate-limited or truncated page set.
+        if not response_complete:
+            reason = (
+                f"BPIQ returned HTTP {api_error_status}"
+                if api_error_status is not None
+                else f"BPIQ pagination exceeded safety limit ({max_rows} rows)"
+            )
+            _BPIQ_CATALYST_STATUS = {
+                "status": "warning",
+                "http_status": api_error_status,
+                "error": reason,
+                "rows_loaded": len(all_drugs),
+                "ticker_count": len(prior_cache),
+                "partial_response_discarded": True,
+                "using_stale_cache": bool(prior_cache),
+                "timestamp": datetime.now().isoformat(),
+            }
+            print(f"[CatalystData] Incomplete response discarded: {reason}")
+            return prior_cache or {}
 
         # Gruppiere nach Ticker mit vollständiger Daten-Aufbereitung
         cache = {}
@@ -290,34 +316,44 @@ def _load_bpiq_catalyst_cache():
                 cache[ticker] = []
             cache[ticker].append(entry)
 
-        # Sortiere pro Ticker: OVERDUE/IMMINENT zuerst, dann nach Datum
-        cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
+        # Future readouts are actionable context. Past estimated dates are
+        # retained as warnings, but must never outrank a confirmed future date.
+        cat_order = {"IMMINENT": 0, "UPCOMING": 1, "LATER": 2, "OVERDUE": 8, "": 9}
         for ticker in cache:
             cache[ticker].sort(key=lambda x: (
                 cat_order.get(x["category"], 9),
-                x["days_until"] if x["days_until"] is not None else 9999
+                (
+                    abs(x["days_until"])
+                    if x["category"] == "OVERDUE" and x["days_until"] is not None
+                    else x["days_until"] if x["days_until"] is not None else 9999
+                ),
             ))
+
+        if not cache:
+            _BPIQ_CATALYST_STATUS = {
+                "status": "warning",
+                "http_status": 200,
+                "error": "BPIQ returned no catalyst rows",
+                "rows_loaded": len(all_drugs),
+                "ticker_count": len(prior_cache),
+                "partial_response_discarded": False,
+                "using_stale_cache": bool(prior_cache),
+                "timestamp": datetime.now().isoformat(),
+            }
+            return prior_cache or {}
 
         _BPIQ_CATALYST_CACHE = cache
         _BPIQ_CACHE_TIMESTAMP = now
-        if api_error_status is not None:
-            _BPIQ_CATALYST_STATUS = {
-                "status": "warning",
-                "http_status": api_error_status,
-                "error": f"BPIQ returned HTTP {api_error_status}",
-                "rows_loaded": len(all_drugs),
-                "ticker_count": len(cache),
-                "timestamp": datetime.now().isoformat(),
-            }
-        else:
-            _BPIQ_CATALYST_STATUS = {
-                "status": "success" if cache else "warning",
-                "http_status": 200,
-                "error": None if cache else "BPIQ returned no catalyst rows",
-                "rows_loaded": len(all_drugs),
-                "ticker_count": len(cache),
-                "timestamp": datetime.now().isoformat(),
-            }
+        _BPIQ_CATALYST_STATUS = {
+            "status": "success",
+            "http_status": 200,
+            "error": None,
+            "rows_loaded": len(all_drugs),
+            "ticker_count": len(cache),
+            "partial_response_discarded": False,
+            "using_stale_cache": False,
+            "timestamp": datetime.now().isoformat(),
+        }
         print(f"[CatalystData] Cache geladen: {len(all_drugs)} Drugs, {len(cache)} Tickers")
         return cache
 
@@ -432,10 +468,14 @@ def get_bpiq_catalyst_watchlist(limit=85, window_days=None):
                 "is_new": bool(drug.get("is_new")),
             })
 
-    cat_order = {"OVERDUE": 0, "IMMINENT": 1, "UPCOMING": 2, "LATER": 3, "": 9}
+    cat_order = {"IMMINENT": 0, "UPCOMING": 1, "LATER": 2, "OVERDUE": 8, "": 9}
     rows.sort(key=lambda x: (
         cat_order.get(x.get("category", ""), 9),
-        x.get("days_until") if x.get("days_until") is not None else 9999,
+        (
+            abs(x.get("days_until"))
+            if x.get("category") == "OVERDUE" and x.get("days_until") is not None
+            else x.get("days_until") if x.get("days_until") is not None else 9999
+        ),
         -float(x.get("catalyst_score") or 0),
         x.get("ticker", ""),
     ))
@@ -706,15 +746,20 @@ def fetch_daily_candles_crypto(coin_id, days=30):
     """
     import time as _t
 
-    cache_key = f"crypto_{coin_id}_{days}"
+    try:
+        requested_days = max(2, int(days or 30))
+    except (TypeError, ValueError):
+        return []
+    if requested_days > _COINGECKO_INTRADAY_MAX_DAYS:
+        return []
+
+    cache_key = f"crypto_{coin_id}_{requested_days}"
     cached = _CANDLE_ANALYSIS_CACHE.get(cache_key)
     if cached and (_t.time() - cached["ts"]) < _CANDLE_CACHE_TTL:
         return cached["data"]
 
     try:
         from datetime import datetime as _dt
-
-        requested_days = max(2, min(int(days or 30), 90))
 
         def _fetch_json(url, params):
             resp = None
@@ -773,12 +818,19 @@ def fetch_daily_candles_crypto(coin_id, days=30):
         daily_volume = {}
         for entry in volumes or []:
             if isinstance(entry, (list, tuple)) and len(entry) > 1:
-                day_key = _dt.utcfromtimestamp(entry[0] / 1000).strftime("%Y-%m-%d")
-                daily_volume[day_key] = float(entry[1] or 0)
+                day_key = _dt.fromtimestamp(entry[0] / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+                try:
+                    volume = float(entry[1] or 0)
+                except (TypeError, ValueError):
+                    continue
+                if volume >= 0:
+                    daily_volume[day_key] = volume
+
+        volume_available = any(value > 0 for value in daily_volume.values())
 
         daily = {}
         for ts, price in valid_price_samples:
-            day_key = _dt.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+            day_key = _dt.fromtimestamp(ts / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
             if day_key not in daily:
                 daily[day_key] = {
                     "t": ts,
@@ -788,6 +840,12 @@ def fetch_daily_candles_crypto(coin_id, days=30):
                     "c": price,
                     "v": daily_volume.get(day_key, 0),
                     "volume_is_estimate": True,
+                    "volume_available": volume_available,
+                    "data_quality": (
+                        "aggregated_intraday_ohlcv_estimate"
+                        if volume_available
+                        else "aggregated_intraday_price_only"
+                    ),
                     "source": "coingecko_market_chart_aggregated",
                     "source_timeframe": "1D",
                     "source_sample_interval_hours": round(median_gap_hours, 3),
@@ -804,7 +862,10 @@ def fetch_daily_candles_crypto(coin_id, days=30):
 
         if len(bars) < 2:
             return []
-        _CANDLE_ANALYSIS_CACHE[cache_key] = {"data": bars, "ts": _t.time()}
+        # A price-only response can render a chart, but must be retried instead
+        # of being cached as complete OHLCV data.
+        if volume_available:
+            _CANDLE_ANALYSIS_CACHE[cache_key] = {"data": bars, "ts": _t.time()}
         return bars
     except Exception:
         return []
@@ -896,7 +957,13 @@ def fetch_historical_data_crypto(coin_id, days):
     from datetime import datetime as _dt
 
     # CoinGecko gibt stündliche Daten nur für days ≤ 90
-    fetch_days = min(days, 90)
+    try:
+        fetch_days = max(2, int(days or 30))
+    except (TypeError, ValueError):
+        return None
+    # Never silently return a shorter history than the caller requested.
+    if fetch_days > _COINGECKO_INTRADAY_MAX_DAYS:
+        return None
 
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
@@ -1410,6 +1477,8 @@ def _get_bpiq_catalysts(ticker):
             "readout_label": "",
             "catalyst_readouts": [],
             "bpiq_available": False,
+            "overdue_count": 0,
+            "readout_risk_flags": [],
         }
 
     # Score berechnen: Gewichtet nach Kategorie und Phase
@@ -1420,27 +1489,33 @@ def _get_bpiq_catalysts(ticker):
         cat = drug["category"]
         pm = drug["phase_mult"]
 
-        if cat == "OVERDUE":
-            readout_score += 4 * pm
-        elif cat == "IMMINENT":
+        if cat == "IMMINENT":
             readout_score += 5 * pm   # BPIQ-IMMINENT ist stärker als CT.gov (kuratiert!)
         elif cat == "UPCOMING":
             readout_score += 2 * pm
         elif cat == "LATER":
             readout_score += 0.5 * pm
 
-        # N-b (Biotech-Audit 10.06.): LATER scored (0.5*pm) → erscheint jetzt
-        # auch in catalyst_readouts (Konsistenz: was scored, ist sichtbar).
-        # Cache-Sortierung haelt OVERDUE/IMMINENT/UPCOMING weiter vorn.
+        # Past dates stay visible as stale/unconfirmed context, but add no edge.
         if cat in ("OVERDUE", "IMMINENT", "UPCOMING", "LATER"):
             catalyst_readouts.append(drug)
 
     readout_score = min(15, int(readout_score))
+    future_readouts = [
+        drug for drug in catalyst_readouts
+        if drug.get("category") in ("IMMINENT", "UPCOMING", "LATER")
+    ]
+    overdue_count = sum(
+        1 for drug in catalyst_readouts if drug.get("category") == "OVERDUE"
+    )
+    readout_risk_flags = (
+        ["overdue_catalyst_date_unconfirmed"] if overdue_count else []
+    )
 
-    # Label: Bestes (nächstes) Event
+    # Label: nearest future event; overdue-only data is explicitly a warning.
     readout_label = ""
     if catalyst_readouts:
-        top = catalyst_readouts[0]
+        top = future_readouts[0] if future_readouts else catalyst_readouts[0]
         days = top["days_until"]
         stage = top["full_label"]
         drug_name = top["drug_name"][:25]
@@ -1472,6 +1547,8 @@ def _get_bpiq_catalysts(ticker):
         "readout_label": readout_label,
         "catalyst_readouts": catalyst_readouts[:5],
         "bpiq_available": True,
+        "overdue_count": overdue_count,
+        "readout_risk_flags": readout_risk_flags,
     }
 
 
@@ -1584,6 +1661,69 @@ def _fetch_historical_yahoo(ticker, days):
         return None
 
 
+def _aggregate_session_bars(
+    raw_bars,
+    *,
+    bars_per_bucket=4,
+    timestamp_in_ms=False,
+    timezone_name="UTC",
+    expected_interval_seconds=3600,
+):
+    """Aggregate only contiguous intraday bars from the same local session."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        timezone = ZoneInfo(str(timezone_name or "UTC"))
+    except Exception:
+        timezone = dt.timezone.utc
+
+    def _seconds(bar):
+        value = float(bar.get("t", 0) or 0)
+        return value / 1000.0 if timestamp_in_ms else value
+
+    ordered = sorted(
+        (bar for bar in (raw_bars or []) if isinstance(bar, dict) and bar.get("t")),
+        key=_seconds,
+    )
+    aggregated = []
+    chunk = []
+    session_date = None
+    previous_ts = None
+    max_gap = max(float(expected_interval_seconds) * 1.75, float(expected_interval_seconds) + 60.0)
+
+    def _flush():
+        nonlocal chunk
+        if not chunk:
+            return
+        aggregated.append({
+            "t": chunk[0]["t"],
+            "o": chunk[0]["o"],
+            "h": max(float(item["h"]) for item in chunk),
+            "l": min(float(item["l"]) for item in chunk),
+            "c": chunk[-1]["c"],
+            "v": sum(float(item.get("v", 0) or 0) for item in chunk),
+            "source_bar_count": len(chunk),
+            "partial_source_bar": len(chunk) < int(bars_per_bucket),
+        })
+        chunk = []
+
+    for bar in ordered:
+        timestamp = _seconds(bar)
+        current_date = datetime.fromtimestamp(timestamp, tz=timezone).date()
+        discontinuous = previous_ts is not None and (timestamp - previous_ts) > max_gap
+        if chunk and (current_date != session_date or discontinuous):
+            _flush()
+        if not chunk:
+            session_date = current_date
+        chunk.append(bar)
+        previous_ts = timestamp
+        if len(chunk) >= int(bars_per_bucket):
+            _flush()
+
+    _flush()
+    return aggregated
+
+
 def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
     """Yahoo Finance OHLCV für internationale Aktien, Forex, Futures, Krypto."""
     try:
@@ -1617,6 +1757,7 @@ def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
             return None
         
         timestamps = chart[0].get("timestamp", [])
+        exchange_timezone = chart[0].get("meta", {}).get("exchangeTimezoneName") or "UTC"
         indicators = chart[0].get("indicators", {}).get("quote", [{}])[0]
         
         opens = indicators.get("open", [])
@@ -1647,19 +1788,12 @@ def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
         
         # Für 4H: Aggregiere 1H Bars zu 4H
         if timeframe == "4H":
-            aggregated = []
-            for i in range(0, len(raw_bars), 4):
-                chunk = raw_bars[i:i+4]
-                if chunk:
-                    aggregated.append({
-                        "t": chunk[0]["t"],
-                        "o": chunk[0]["o"],
-                        "h": max(c["h"] for c in chunk),
-                        "l": min(c["l"] for c in chunk),
-                        "c": chunk[-1]["c"],
-                        "v": sum(c.get("v", 0) for c in chunk)
-                    })
-            raw_bars = aggregated
+            raw_bars = _aggregate_session_bars(
+                raw_bars,
+                bars_per_bucket=4,
+                timestamp_in_ms=False,
+                timezone_name=exchange_timezone,
+            )
         
         # Formatiere für Lightweight Charts
         effective_bars = min(max_bars, len(raw_bars))
@@ -1729,19 +1863,12 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
 
         # Für 4H: Aggregiere 1H Bars zu 4H
         if timeframe == "4H":
-            aggregated = []
-            for i in range(0, len(results), 4):
-                chunk = results[i:i+4]
-                if len(chunk) >= 1:
-                    aggregated.append({
-                        "t": chunk[0]["t"],
-                        "o": chunk[0]["o"],
-                        "h": max(c["h"] for c in chunk),
-                        "l": min(c["l"] for c in chunk),
-                        "c": chunk[-1]["c"],
-                        "v": sum(c.get("v", 0) for c in chunk)
-                    })
-            results = aggregated
+            results = _aggregate_session_bars(
+                results,
+                bars_per_bucket=4,
+                timestamp_in_ms=True,
+                timezone_name="America/New_York",
+            )
         
         effective_bars = min(max_bars, len(results))
         ohlcv = []

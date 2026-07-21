@@ -2135,6 +2135,15 @@ def _early_mover_row(**overrides):
     return row
 
 
+def _allow_final_early_mover_revalidation(monkeypatch):
+    """Keep mail-policy tests independent from the separately tested live venue gate."""
+    monkeypatch.setattr(
+        api,
+        "_revalidate_early_mover_mail_candidate",
+        lambda candidate, now_ts=None: {"ok": True, "candidate": candidate},
+    )
+
+
 def test_early_mover_alert_audit_flattens_coins_and_allows_long_trigger(tmp_path):
     api._EMAIL_COOLDOWN.clear()
     cache_file = tmp_path / "early_movers.json"
@@ -2327,6 +2336,7 @@ def test_early_mover_blocks_extreme_turnover_without_alpha():
 
 def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    _allow_final_early_mover_revalidation(monkeypatch)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
@@ -2347,6 +2357,7 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
 
 def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    _allow_final_early_mover_revalidation(monkeypatch)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -2370,6 +2381,7 @@ def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch)
 
 def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    _allow_final_early_mover_revalidation(monkeypatch)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -2431,6 +2443,7 @@ def test_early_mover_email_blocks_1m_only_trigger(tmp_path, monkeypatch):
 
 def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
+    _allow_final_early_mover_revalidation(monkeypatch)
     monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {

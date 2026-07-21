@@ -164,6 +164,11 @@ def test_bi_alert_send_failure_records_nothing(tmp_path, monkeypatch):
 def test_early_mover_digest_records_only_trade_rows(monkeypatch):
     sent = []
     monkeypatch.setattr(
+        api,
+        "_revalidate_early_mover_mail_candidate",
+        lambda candidate, now_ts=None: {"ok": True, "candidate": candidate},
+    )
+    monkeypatch.setattr(
         api, "_send_email_alert",
         lambda subject, body, **kwargs: sent.append(kwargs.get("mail_class")) or True,
     )
