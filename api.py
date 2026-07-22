@@ -7858,6 +7858,10 @@ class ScanResultsResponse(BaseModel):
     exclusion_policy: Optional[List[str]] = None
     scan_running: Optional[bool] = None
     scan_error: Optional[str] = None
+    partial: Optional[bool] = None
+    checked: Optional[int] = None
+    total: Optional[int] = None
+    progress_detail: Optional[str] = None
 
 
 # ── Utility Functions ──
@@ -9422,6 +9426,65 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
                 except OSError:
                     pass
             raise
+
+
+def _partial_cache_path(filepath: str) -> str:
+    """Return the isolated cache path used for in-progress scan results."""
+    return f"{filepath}.partial"
+
+
+def _remove_partial_cache(filepath: str) -> None:
+    """Remove a scanner's transient cache without touching its final cache."""
+    with _cache_lock:
+        try:
+            Path(_partial_cache_path(filepath)).unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"[Cache] Could not remove partial cache for {filepath}: {exc}")
+
+
+def save_partial_cache_file(
+    filepath: str,
+    data: List[Dict],
+    *,
+    checked: Optional[int] = None,
+    total: Optional[int] = None,
+    detail: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Publish display-only scan progress in a cache separate from final signals."""
+    partial_meta = dict(metadata or {})
+    partial_meta.update({
+        "partial": True,
+        "checked": checked,
+        "total": total,
+        "detail": detail,
+    })
+    save_cache_file(_partial_cache_path(filepath), data, metadata=partial_meta)
+
+
+def finalize_cache_file(
+    filepath: str,
+    data: List[Dict],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Atomically publish a completed scan, then discard its transient cache."""
+    save_cache_file(filepath, data, metadata=metadata)
+    _remove_partial_cache(filepath)
+
+
+def load_live_cache_file(
+    filepath: str,
+    *,
+    running: bool = False,
+) -> tuple[List[Dict], Optional[str], Dict[str, Any], bool]:
+    """Load a partial cache only while its owning scanner is actively running."""
+    selected_path = filepath
+    partial_path = _partial_cache_path(filepath)
+    if running and Path(partial_path).exists():
+        selected_path = partial_path
+    results, cached_at = load_cache_file(selected_path)
+    metadata = load_cache_metadata(selected_path)
+    return results, cached_at, metadata, selected_path == partial_path
 
 
 def _serialize_json(obj):
@@ -12025,6 +12088,7 @@ def _biotech_scan_wrapper() -> None:
 def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[Dict[str, Any]]:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
+    _strat_cache = _strategy_cache_path(strategy_name)
     try:
         strat = STRATEGIES.get(strategy_name)
         if not strat:
@@ -12043,6 +12107,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         min_dollar_vol = strat.get("min_dollar_volume", 200_000)
         _has_gap_filter = "Gap %" in filters
         _has_vortag_filter = "Vortag %" in filters
+        max_results = int(strat.get("max_results", 50) or 50)
 
         print(f"[Strategy Scan] {strategy_name}: Change {change_min}..{change_max}%, Preis ${price_min}..${price_max}")
 
@@ -12089,7 +12154,39 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             stages = scan_diag.setdefault("stage_counts", {})
             stages[name] = int(stages.get(name, 0)) + 1
 
-        for t in _all_snapshot_tickers:
+        _remove_partial_cache(_strat_cache)
+        _last_partial_publish = 0.0
+
+        def _publish_partial(checked: int, force: bool = False) -> None:
+            nonlocal _last_partial_publish
+            now = time.monotonic()
+            if not force and now - _last_partial_publish < 1.5:
+                return
+            preview = sorted(
+                (dict(row) for row in results if isinstance(row, dict)),
+                key=lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0))),
+            )[:max_results]
+            partial_diag = dict(scan_diag)
+            partial_diag["checked"] = checked
+            partial_diag["final_results"] = len(preview)
+            partial_diag["scan_in_progress"] = True
+            save_partial_cache_file(
+                _strat_cache,
+                preview,
+                checked=checked,
+                total=len(_all_snapshot_tickers),
+                detail=f"{checked}/{len(_all_snapshot_tickers)} Aktien geprueft",
+                metadata={
+                    "cache_version": STOCK_STRATEGY_CACHE_VERSION,
+                    "diagnostics": partial_diag,
+                },
+            )
+            _last_partial_publish = now
+
+        _publish_partial(0, force=True)
+
+        for checked, t in enumerate(_all_snapshot_tickers, start=1):
+                _publish_partial(checked)
                 try:
                     ticker = str(t.get("ticker", "")).upper().strip()
                     day = t.get("day", {}) or {}
@@ -12536,6 +12633,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         strategy_row["entry_quality"] = "SWING_SETUP"
                         strategy_row["swing_timeframe"] = "daily_swing"
                     results.append(strategy_row)
+                    _publish_partial(checked, force=len(results) == 1)
                 except Exception as item_err:
                     print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
                     _reject("exception")
@@ -12545,7 +12643,6 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
-        max_results = int(strat.get("max_results", 50) or 50)
         scan_diag["max_results"] = max_results
         results = results[:max_results]
         scan_diag["final_results"] = len(results)
@@ -12558,9 +12655,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         )[:8]
 
         # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
-        _strat_cache = _strategy_cache_path(strategy_name)
         _metadata = {"cache_version": STOCK_STRATEGY_CACHE_VERSION, "diagnostics": scan_diag}
-        save_cache_file(_strat_cache, results, metadata=_metadata)
+        finalize_cache_file(_strat_cache, results, metadata=_metadata)
         save_cache_file(STRATEGY_SCAN_CACHE, results, metadata=_metadata)  # Fallback für alte Clients
         print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         if send_email:
@@ -12568,6 +12664,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         return results
 
     except Exception as e:
+        _remove_partial_cache(_strat_cache)
         print(f"[Strategy Scan] Fehler: {e}")
         import traceback
         traceback.print_exc()
@@ -12614,6 +12711,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
 
 def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
     """CoinGecko-basierter Scanner fuer generische Crypto-Strategien."""
+    _strat_cache = _strategy_cache_path(strategy_name, "crypto")
     try:
         strat = CRYPTO_STRATEGIES.get(strategy_name)
         if not strat:
@@ -12640,7 +12738,40 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 btc_7d = coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0
                 break
 
-        for coin in coins:
+        _remove_partial_cache(_strat_cache)
+        _last_partial_publish = 0.0
+
+        def _publish_partial(checked: int, force: bool = False) -> None:
+            nonlocal _last_partial_publish
+            now = time.monotonic()
+            if not force and now - _last_partial_publish < 1.5:
+                return
+            preview = sorted(
+                (dict(row) for row in results if isinstance(row, dict)),
+                key=lambda row: (-row.get("score", 0), -abs(row.get("change_pct", 0))),
+            )[:80]
+            save_partial_cache_file(
+                _strat_cache,
+                preview,
+                checked=checked,
+                total=len(coins),
+                detail=f"{checked}/{len(coins)} Coins geprueft",
+                metadata={
+                    "diagnostics": {
+                        "strategy": strategy_name,
+                        "market_type": "crypto",
+                        "checked": checked,
+                        "final_results": len(preview),
+                        "scan_in_progress": True,
+                    }
+                },
+            )
+            _last_partial_publish = now
+
+        _publish_partial(0, force=True)
+
+        for checked, coin in enumerate(coins, start=1):
+            _publish_partial(checked)
             try:
                 cid = str(coin.get("id", "") or "")
                 symbol = str(coin.get("symbol", "") or "").upper()
@@ -12769,16 +12900,17 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "scanner_note": "Crypto-Strategie-Score ist Beobachtung, kein Entry. JETZT_TRADEN braucht einen frischen Micro-/Execution-Trigger.",
                     "volume_model": "turnover_intensity=(24h_volume/market_cap_pct)/10; not_historical_rvol",
                 })
+                _publish_partial(checked, force=len(results) == 1)
             except Exception as item_err:
                 print(f"[Crypto Strategy] skip {coin.get('symbol', '?')} ({item_err})")
 
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("change_pct", 0))))
         results = results[:80]
-        _strat_cache = _strategy_cache_path(strategy_name, "crypto")
-        save_cache_file(_strat_cache, results)
+        finalize_cache_file(_strat_cache, results)
         print(f"[Crypto Strategy] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         _send_strategy_scan_alerts(strategy_name, results, "crypto")
     except Exception as e:
+        _remove_partial_cache(_strat_cache)
         print(f"[Crypto Strategy] Fehler: {e}")
         import traceback
         traceback.print_exc()
@@ -17650,7 +17782,7 @@ def get_scan_results(
         else:
             # V2.2: Generische Strategie — versuche zuerst strategie-spezifischen Cache
             _strat_cache = _strategy_cache_path(resolved_strategy, market_type)
-            if os.path.exists(_strat_cache):
+            if os.path.exists(_strat_cache) or os.path.exists(_partial_cache_path(_strat_cache)):
                 cache_file = _strat_cache
             elif market_type != "stocks":
                 cache_file = _strat_cache
@@ -17666,20 +17798,6 @@ def get_scan_results(
         # Default to BI long if neither is specified
         cache_file = BI_CACHE_LONG
         normalize_map = _BI_KEY_MAP
-
-    cache_meta = load_cache_metadata(cache_file) if cache_file else {}
-    diagnostics = cache_meta.get("diagnostics") if isinstance(cache_meta.get("diagnostics"), dict) else None
-    results, cached_at = load_cache_file(cache_file)
-    if normalize_map:
-        results = _normalize_keys(results, normalize_map)
-
-    cache_age = None
-    if cached_at:
-        try:
-            cached_dt = datetime.fromisoformat(cached_at)
-            cache_age = int((datetime.now() - cached_dt).total_seconds())
-        except Exception as e:
-            print(f"[Warning] {e}")
 
     scanner_name = "strategy_scan"
     if direction:
@@ -17707,6 +17825,40 @@ def get_scan_results(
             scanner_name = "orb"
         elif "turtle" in sl:
             scanner_name = "turtle"
+
+        elif "volume" in sl or "spike" in sl:
+            scanner_name = "volume_spikes"
+        elif "penny" in sl:
+            scanner_name = "penny_stocks"
+        elif "crash" in sl:
+            scanner_name = "crash_monitor"
+        elif "money" in sl or "flow" in sl:
+            scanner_name = "money_flow"
+
+    scan_state: Dict[str, Any] = {}
+    status_key = scanner_name
+    if strategy and resolved_strategy and scanner_name in {"strategy_scan", "crypto_strategy"}:
+        status_market = "crypto" if scanner_name == "crypto_strategy" else "stocks"
+        status_key = _strategy_scan_status_key(resolved_strategy, status_market)
+    if status_key:
+        with _scan_lock:
+            scan_state = dict(_scan_status.get(status_key, {}))
+
+    results, cached_at, cache_meta, is_partial = load_live_cache_file(
+        cache_file,
+        running=bool(scan_state.get("running")),
+    )
+    diagnostics = cache_meta.get("diagnostics") if isinstance(cache_meta.get("diagnostics"), dict) else None
+    if normalize_map:
+        results = _normalize_keys(results, normalize_map)
+
+    cache_age = None
+    if cached_at:
+        try:
+            cached_dt = datetime.fromisoformat(cached_at)
+            cache_age = int((datetime.now() - cached_dt).total_seconds())
+        except Exception as e:
+            print(f"[Warning] {e}")
 
     is_generic_stock_strategy = bool(strategy and market_type == "stocks" and scanner_name == "strategy_scan")
     stale_strategy_cache = (
@@ -17739,12 +17891,6 @@ def get_scan_results(
     if stale_strategy_cache:
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
 
-    scan_state: Dict[str, Any] = {}
-    if strategy and resolved_strategy and scanner_name in {"strategy_scan", "crypto_strategy"}:
-        status_market = "crypto" if scanner_name == "crypto_strategy" else "stocks"
-        status_key = _strategy_scan_status_key(resolved_strategy, status_market)
-        with _scan_lock:
-            scan_state = dict(_scan_status.get(status_key, {}))
     scan_error = scan_state.get("last_error")
     if scan_error:
         warnings.insert(0, f"Letzter Scan fehlgeschlagen: {scan_error}")
@@ -17762,6 +17908,10 @@ def get_scan_results(
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")) if scan_state else None,
         scan_error=scan_error,
+        partial=is_partial,
+        checked=cache_meta.get("checked"),
+        total=cache_meta.get("total"),
+        progress_detail=cache_meta.get("detail"),
     )
 
 
@@ -17791,21 +17941,13 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
 
     cache_file = BI_CACHE_LONG if direction == "long" else BI_CACHE_SHORT
-    cache_meta = {}
-    try:
-        if Path(cache_file).exists():
-            with open(cache_file, "r") as f:
-                raw_cache = json.load(f)
-            if isinstance(raw_cache, dict):
-                cache_meta = {
-                    "partial": bool(raw_cache.get("partial", False)),
-                    "checked": raw_cache.get("checked"),
-                    "total": raw_cache.get("total"),
-                    "detail": raw_cache.get("detail", ""),
-                }
-    except Exception as e:
-        print(f"[Warning] BI cache metadata read failed: {e}")
-    results, cached_at = load_cache_file(cache_file)
+    scanner_name = f"bi_{direction}"
+    with _scan_lock:
+        scan_state = dict(_scan_status.get(scanner_name, {}))
+    results, cached_at, cache_meta, is_partial = load_live_cache_file(
+        cache_file,
+        running=bool(scan_state.get("running")),
+    )
     results = _normalize_keys(results, _BI_KEY_MAP)
 
     # RVOL Guard: Korrigiere Grades bei Auslieferung (Sicherheitsnetz)
@@ -17829,7 +17971,6 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         except Exception as e:
             print(f"[Warning] {e}")
 
-    scanner_name = f"bi_{direction}"
     pre_decorate_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)
     decorated_count = len(results or [])
@@ -17860,6 +18001,12 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         diagnostics=diagnostics,
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
+        scan_running=bool(scan_state.get("running")),
+        scan_error=scan_state.get("last_error"),
+        partial=is_partial,
+        checked=cache_meta.get("checked"),
+        total=cache_meta.get("total"),
+        progress_detail=cache_meta.get("detail"),
     )
 
 
@@ -17924,8 +18071,14 @@ def trigger_biotech_scan():
 @app.get("/api/biotech-results", response_model=ScanResultsResponse)
 def get_biotech_results():
     """Get cached biotech scan results."""
-    _enrich_biotech_alert_trade_levels()
-    results, cached_at = load_cache_file(BIOTECH_CACHE)
+    with _scan_lock:
+        scan_state = dict(_scan_status.get("biotech", {}))
+    if not scan_state.get("running"):
+        _enrich_biotech_alert_trade_levels()
+    results, cached_at, cache_meta, is_partial = load_live_cache_file(
+        BIOTECH_CACHE,
+        running=bool(scan_state.get("running")),
+    )
     results = _normalize_keys(results, _BIOTECH_KEY_MAP)
     results = _sanitize_biotech_public_results(results)
 
@@ -17950,6 +18103,12 @@ def get_biotech_results():
         data_quality=quality,
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
+        scan_running=bool(scan_state.get("running")),
+        scan_error=scan_state.get("last_error"),
+        partial=is_partial,
+        checked=cache_meta.get("checked"),
+        total=cache_meta.get("total"),
+        progress_detail=cache_meta.get("detail"),
     )
 
 
@@ -18857,7 +19016,7 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase, pe
     return "LOW", "#10b981", reasons
 
 
-def fetch_early_movers(_prefetched_perps=None):
+def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
     """Early Movers Scanner V4.0 — Phase-Klassifikation + Unified List
 
     4 strategies to find next 10x coins early:
@@ -19669,12 +19828,55 @@ def fetch_early_movers(_prefetched_perps=None):
     trigger_reason_counts = {}
     trigger_ok_examples = []
     trigger_pool = all_unified[:_EARLY_MOVER_TRIGGER_SCAN_LIMIT]
-    for item in trigger_pool:
+    last_progress_publish = 0.0
+
+    def _publish_early_progress(checked: int, detail: str, *, force: bool = False) -> None:
+        nonlocal last_progress_publish
+        if not callable(_progress_callback):
+            return
+        now_mono = time.monotonic()
+        if not force and checked > 1 and now_mono - last_progress_publish < 1.5:
+            return
+        last_progress_publish = now_mono
+        preview = sorted(
+            all_unified,
+            key=lambda x: (
+                0 if x.get("trade_signal") == "JETZT_TRADEN" else 1,
+                -int(x.get("entry_score") or 0),
+                1 if x.get("phase") in (2, 3) else 2,
+                -int(x.get("setup_score") or x.get("score") or 0),
+            ),
+        )[:_EARLY_MOVER_MAX_DISPLAY]
+        partial_stats = {
+            "total_coins": len(all_coins),
+            "unified_count": len(preview),
+            "total_found": len(all_unified),
+            "phase_1_count": sum(1 for coin in preview if coin.get("phase") == 1),
+            "phase_2_count": sum(1 for coin in preview if coin.get("phase") == 2),
+            "phase_3_count": sum(1 for coin in preview if coin.get("phase") == 3),
+            "intraday_trigger_checks": checked,
+            "intraday_trigger_scan_limit": len(trigger_pool),
+            "trade_now_count": sum(1 for coin in preview if coin.get("trade_signal") == "JETZT_TRADEN"),
+            "scan_partial": True,
+        }
+        try:
+            _progress_callback(
+                {"coins": preview, "stats": partial_stats},
+                checked,
+                len(trigger_pool),
+                detail,
+            )
+        except Exception as progress_exc:
+            print(f"[Early Movers] Partial publish skipped: {progress_exc}")
+
+    _publish_early_progress(0, "Kandidaten bewertet; Exchange-Trigger werden geprueft", force=True)
+    for trigger_index, item in enumerate(trigger_pool, start=1):
         contract = item.get("PerpChartSymbol") or item.get("PerpMatchSymbol")
         exchange = _normalize_crypto_exchange(item.get("PerpChartExchange") or item.get("BestExchange"))
         if not contract or not exchange:
             trigger_no_chart += 1
             _apply_early_mover_signal_state(item)
+            _publish_early_progress(trigger_index, f"{item.get('Symbol') or '?'}: kein Exchange-Chart")
             continue
         trigger_eligible += 1
         trigger_check = _verify_early_mover_intraday_trigger(item)
@@ -19690,6 +19892,11 @@ def fetch_early_movers(_prefetched_perps=None):
                 "timeframe": trigger_check.get("timeframe"),
             })
         _apply_early_mover_signal_state(item, trigger_check)
+        _publish_early_progress(
+            trigger_index,
+            f"{item.get('Symbol') or '?'}: 5m-Trigger geprueft",
+            force=trigger_index == len(trigger_pool),
+        )
 
     # Rebuild display selection after trigger checks so actionable rows can bubble up.
     all_unified = sorted(
@@ -19769,6 +19976,7 @@ def fetch_early_movers(_prefetched_perps=None):
 
 def _early_movers_wrapper() -> None:
     """Run Early Movers crypto scanner and save results."""
+    _remove_partial_cache(EARLY_MOVERS_CACHE)
     try:
         print("[Early Movers] Starting crypto scanner...")
 
@@ -19776,10 +19984,22 @@ def _early_movers_wrapper() -> None:
         perp_data = fetch_multi_exchange_perps()
 
         # Run full analysis
-        result = fetch_early_movers(_prefetched_perps=perp_data)
+        def _save_progress(payload, checked, total, detail):
+            save_partial_cache_file(
+                EARLY_MOVERS_CACHE,
+                [payload],
+                checked=checked,
+                total=total,
+                detail=detail,
+            )
+
+        result = fetch_early_movers(
+            _prefetched_perps=perp_data,
+            _progress_callback=_save_progress,
+        )
 
         # Save results
-        save_cache_file(EARLY_MOVERS_CACHE, [result])
+        finalize_cache_file(EARLY_MOVERS_CACHE, [result])
         s = result.get("stats", {})
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
               f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
@@ -19804,6 +20024,7 @@ def _early_movers_wrapper() -> None:
             print(f"[Early Movers] mail freshness prep skipped: {age_exc}")
         _send_early_mover_long_alerts(result)
     except Exception as e:
+        _remove_partial_cache(EARLY_MOVERS_CACHE)
         print(f"[Early Movers] Error: {e}")
         traceback.print_exc()
         raise
@@ -19817,7 +20038,12 @@ def trigger_early_movers():
 
 @app.get("/api/early-movers-results")
 def get_early_movers():
-    results, cached_at = load_cache_file(EARLY_MOVERS_CACHE)
+    with _scan_lock:
+        scan_state = dict(_scan_status.get("early_movers", {}))
+    results, cached_at, cache_meta, is_partial = load_live_cache_file(
+        EARLY_MOVERS_CACHE,
+        running=bool(scan_state.get("running")),
+    )
     cache_age = None
     if cached_at:
         try:
@@ -19840,7 +20066,20 @@ def get_early_movers():
     except Exception as stats_exc:
         print(f"[Early Movers] post-downgrade stats sync skipped: {stats_exc}")
     quality = _scan_quality_payload("early_movers", cache_age, decorated)
-    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
+    return {
+        "status": "success",
+        "data": decorated,
+        "cached_at": cached_at,
+        "cache_age_seconds": cache_age,
+        "scan_running": bool(scan_state.get("running")),
+        "partial": is_partial,
+        "checked": cache_meta.get("checked"),
+        "total": cache_meta.get("total"),
+        "progress_detail": cache_meta.get("detail"),
+        "data_quality": quality,
+        "warnings": quality["warnings"],
+        "exclusion_policy": quality["exclusion_policy"],
+    }
 
 
 # ── Crash Monitor (VIX + Market Breadth) + Fear Score ──
@@ -23364,6 +23603,7 @@ def _penny_scan_coverage_stats(
 def _penny_stock_scanner_wrapper() -> None:
     """Run complete Penny discovery; active positions have a separate monitor."""
     started_at = time.time()
+    _remove_partial_cache(PENNY_STOCKS_CACHE)
     diagnostics: Dict[str, Any] = {
         "snapshot_total": 0,
         "common_penny_universe": 0,
@@ -23468,8 +23708,52 @@ def _penny_stock_scanner_wrapper() -> None:
         trigger_pool_candidates: Dict[str, Dict[str, Any]] = {}
         processed_symbols = set()
         budget_exhausted = False
+        last_partial_publish = 0.0
+
+        def _publish_penny_progress(index: int, detail: str, *, force: bool = False) -> None:
+            nonlocal last_partial_publish
+            now_mono = time.monotonic()
+            if not force and index > 1 and now_mono - last_partial_publish < 1.5:
+                return
+            last_partial_publish = now_mono
+            partial_rows: List[Dict[str, Any]] = []
+            for source_row in rows:
+                visible_row = dict(source_row)
+                if isinstance(source_row.get("trade_setup"), dict):
+                    visible_row["trade_setup"] = dict(source_row["trade_setup"])
+                if str(visible_row.get("trade_action") or "").upper() == "JETZT_KAUFEN":
+                    visible_row.update({
+                        "trade_action": "TRIGGER_WARTEN",
+                        "trade_signal": "TRIGGER_WARTEN",
+                        "signal_label": "Kandidat gefunden - Live-Revalidierung laeuft",
+                        "execution_trigger_ok": False,
+                        "partial_revalidation_pending": True,
+                    })
+                    if isinstance(visible_row.get("trade_setup"), dict):
+                        visible_row["trade_setup"].update({
+                            "trade_action": "TRIGGER_WARTEN",
+                            "action_label": "Live-Revalidierung laeuft",
+                        })
+                partial_rows.append(visible_row)
+            partial_diagnostics = {
+                **diagnostics,
+                "deep_checked": index,
+                "deep_planned": len(selected),
+                "active_trade_ideas": len(partial_rows),
+                "scan_partial": True,
+            }
+            save_partial_cache_file(
+                PENNY_STOCKS_CACHE,
+                partial_rows,
+                checked=index,
+                total=len(selected),
+                detail=detail,
+                metadata={"diagnostics": partial_diagnostics},
+            )
+
         with _scan_lock:
             _scan_status["penny_stocks"]["progress"] = {"checked": 0, "total": len(selected), "hits": 0, "detail": "5m/1D/VRVP-Pruefung"}
+        _publish_penny_progress(0, "Pennystock-Universum vorbereitet", force=True)
 
         for index, (_, snapshot, broad) in enumerate(selected, start=1):
             candidate_now_ts = time.time()
@@ -23530,6 +23814,7 @@ def _penny_stock_scanner_wrapper() -> None:
                         "hits": len(rows),
                         "detail": f"{symbol}: kein frischer 5m-Aufbau",
                     }
+                _publish_penny_progress(index, f"{symbol}: 5m-Aufbau geprueft")
                 continue
             if not previous.get("active"):
                 diagnostics["trigger_near_count"] += 1
@@ -23734,6 +24019,11 @@ def _penny_stock_scanner_wrapper() -> None:
                     "hits": len(rows),
                     "detail": f"{symbol}: 5m/1D/VRVP",
                 }
+            _publish_penny_progress(
+                index,
+                f"{symbol}: 5m/1D/VRVP geprueft",
+                force=index == len(selected),
+            )
 
         # Revalidate every potential buy at the end of the scan. This is the
         # authoritative execution gate; stale rows are downgraded in-place so
@@ -23859,7 +24149,7 @@ def _penny_stock_scanner_wrapper() -> None:
             diagnostics["duration_seconds"] > soft_budget_seconds
         )
         diagnostics["universe_source"] = universe_source
-        save_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
+        finalize_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
         _penny_save_trigger_pool(trigger_pool_candidates, now_ts=now_ts)
         ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=now_ts)
         _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
@@ -24019,6 +24309,7 @@ def _penny_stock_scanner_wrapper() -> None:
             f"{len(active_rows)} active, {len(optional_rows)} optional, {diagnostics['buy_now']} buy"
         )
     except Exception as exc:
+        _remove_partial_cache(PENNY_STOCKS_CACHE)
         diagnostics["error"] = str(exc)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
         print(f"[Penny] scanner error: {exc}")
@@ -24790,9 +25081,13 @@ def trigger_penny_stock_scan():
 
 @app.get("/api/penny-stocks-results")
 def get_penny_stock_results(include_watch: bool = False):
-    cached_rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
+    with _scan_lock:
+        scan_state = dict(_scan_status.get("penny_stocks", {}))
+    cached_rows, cached_at, metadata, is_partial = load_live_cache_file(
+        PENNY_STOCKS_CACHE,
+        running=bool(scan_state.get("running")),
+    )
     monitor_rows, monitor_cached_at = load_cache_file(PENNY_STOCKS_MONITOR_CACHE)
-    metadata = load_cache_metadata(PENNY_STOCKS_CACHE)
     monitor_metadata = load_cache_metadata(PENNY_STOCKS_MONITOR_CACHE)
 
     def cache_age_seconds(value: Optional[str]) -> Optional[int]:
@@ -24807,9 +25102,13 @@ def get_penny_stock_results(include_watch: bool = False):
 
     cache_age = cache_age_seconds(cached_at)
     monitor_cache_age = cache_age_seconds(monitor_cached_at)
+    # During a running scan, expose already checked wait/trigger rows from the
+    # isolated partial cache so the UI can show real progress. These rows never
+    # enter the final cache or alert pipeline until final live revalidation.
+    effective_include_watch = bool(include_watch or is_partial)
     discovery_visible = _penny_active_trade_rows(
         cached_rows,
-        include_watch=include_watch,
+        include_watch=effective_include_watch,
         cache_age_seconds=cache_age,
     )
     monitor_visible = _penny_active_trade_rows(
@@ -24847,7 +25146,9 @@ def get_penny_stock_results(include_watch: bool = False):
         cached_rows,
         cache_age_seconds=cache_age,
     )
-    requested_actions = _PENNY_VISIBLE_ACTIONS | (_PENNY_OPTIONAL_ACTIONS if include_watch else frozenset())
+    requested_actions = _PENNY_VISIBLE_ACTIONS | (
+        _PENNY_OPTIONAL_ACTIONS if effective_include_watch else frozenset()
+    )
     raw_symbols = {
         str(row.get("ticker") or "").upper().strip()
         for source_rows in (cached_rows, monitor_rows)
@@ -24887,7 +25188,13 @@ def get_penny_stock_results(include_watch: bool = False):
         "cache_age_seconds": cache_age,
         "monitor_cached_at": monitor_cached_at,
         "monitor_cache_age_seconds": monitor_cache_age,
+        "scan_running": bool(scan_state.get("running")),
+        "partial": is_partial,
+        "checked": metadata.get("checked"),
+        "total": metadata.get("total"),
+        "progress_detail": metadata.get("detail"),
         "include_watch": include_watch,
+        "partial_watch_rows": bool(is_partial and not include_watch),
         "diagnostics": diagnostics,
         "policy": {
             "universe": f"active US common stocks ${PENNY_MIN_PRICE:.2f}-${PENNY_MAX_PRICE:.2f}",

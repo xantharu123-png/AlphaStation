@@ -2481,6 +2481,33 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     );
 }
 
+function LiveScanStatus({ active = false, partial = false, checked = null, total = null, detail = '', count = 0, itemLabel = 'Treffer' }) {
+    if (!active && !partial) return null;
+    const checkedNumber = Number(checked);
+    const totalNumber = Number(total);
+    const hasProgress = Number.isFinite(checkedNumber) && Number.isFinite(totalNumber) && totalNumber > 0;
+    const percent = hasProgress ? Math.max(0, Math.min(100, Math.round((checkedNumber / totalNumber) * 100))) : 0;
+    return (
+        <div className="-mt-4 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-800">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">
+                    Live-Zwischenstand: {hasProgress ? `${checkedNumber}/${totalNumber} geprueft` : 'Scan wird vorbereitet'}
+                </span>
+                <span>{count} {itemLabel} bereits sichtbar</span>
+            </div>
+            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100">
+                {hasProgress ? (
+                    <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{width: `${percent}%`}}></div>
+                ) : (
+                    <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-400 via-blue-600 to-blue-400 animate-pulse"></div>
+                )}
+            </div>
+            {detail && <div className="mt-1 text-[11px] text-blue-600">{detail}</div>}
+            <div className="mt-1 text-[10px] text-blue-500">Zwischenstand zur Vorpruefung; finale Freigaben und Alerts erst nach abgeschlossenem Scan.</div>
+        </div>
+    );
+}
+
 // DetailSidebar Component
 function DetailSidebar({ ticker, onClose, scannerData }) {
     const [tickerData, setTickerData] = useState(null);
@@ -4894,6 +4921,11 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             diagnostics: data?.diagnostics || null,
             warnings: data?.warnings || [],
             scan_error: data?.scan_error || null,
+            partial: !!data?.partial,
+            scan_running: !!data?.scan_running,
+            checked: data?.checked ?? data?.diagnostics?.checked ?? null,
+            total: data?.total ?? data?.diagnostics?.total ?? null,
+            progress_detail: data?.progress_detail || data?.diagnostics?.progress_detail || '',
         };
         setScanInfo(info);
         updateScanCache('scanner_info', info);
@@ -4941,9 +4973,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
             const response = await fetch(`${API}/api/scan`, { method: 'POST', body: JSON.stringify({ strategy, market_type: marketType }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
                 if (window.addToast) window.addToast('Scan gestartet...', 'info');
-                // Poll for results with increasing intervals
+                let sawLiveState = false;
                 const pollResults = async (attempts = 0) => {
-                    if (attempts > 60) {
+                    if (attempts > 900) {
                         setIsScanning(false);
                         updateScanCache('scanner_scanning', false);
                         if (window.addToast) window.addToast('Scan dauert länger...', 'info');
@@ -4957,18 +4989,19 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         if (res.ok) {
                             const data = await res.json();
                             const items = data.data || [];
+                            const running = !!(data.scan_running || data.partial);
+                            sawLiveState = sawLiveState || running;
+                            setResults(items);
+                            updateScanCache('scanner_results', items);
+                            rememberScanInfo(data);
                             if (data.scan_error && !data.scan_running) {
-                                rememberScanInfo(data);
                                 setIsScanning(false);
                                 updateScanCache('scanner_scanning', false);
                                 if (window.addToast) window.addToast(`Scan fehlgeschlagen: ${data.scan_error}`, 'error');
                                 return;
                             }
-                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
-                            if (isNewData) {
-                                setResults(items);
-                                updateScanCache('scanner_results', items);
-                                rememberScanInfo(data);
+                            const isNewFinal = !running && data.cached_at && data.cached_at !== prevCachedAt;
+                            if (isNewFinal || (sawLiveState && !running)) {
                                 setIsScanning(false);
                                 updateScanCache('scanner_scanning', false);
                                 if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
@@ -4976,9 +5009,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             }
                         }
                     } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
+                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 2000);
                 };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 3000); // Strategie-Scans sind schnell
+                pollTimeoutRef.current = setTimeout(() => pollResults(0), 500);
             } else {
                 setIsScanning(false);
                 updateScanCache('scanner_scanning', false);
@@ -5065,6 +5098,16 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
 
+            <LiveScanStatus
+                active={isScanning || scanInfo?.scan_running}
+                partial={scanInfo?.partial}
+                checked={scanInfo?.checked}
+                total={scanInfo?.total}
+                detail={scanInfo?.progress_detail}
+                count={results.length}
+                itemLabel="Treffer"
+            />
+
             {!isScanning && cacheAgeLabel && (
                 <div className={`-mt-4 px-1 text-right text-[11px] ${cacheIsStale ? 'text-amber-600' : 'text-gray-400'}`}>
                     {cacheAgeLabel}
@@ -5081,7 +5124,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <div className="md:hidden">
                     {sorted.length === 0 ? (
                         <div className="text-sm text-gray-500 text-center py-6">
-                            {isScanning ? 'Scan laeuft noch - Ergebnisse erscheinen automatisch, sobald der Cache aktualisiert ist.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
+                            {isScanning ? 'Scan laeuft - erste Treffer erscheinen hier sofort nach ihrer Pruefung.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
                         </div>
                     ) : (
                         sorted.map((item, idx) => (
@@ -5150,7 +5193,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.length === 0 && (
                             <tr>
                                 <td colSpan="8" className="py-8 text-center text-gray-500">
-                                    {isScanning ? 'Scan laeuft noch - Ergebnisse erscheinen automatisch, sobald der Cache aktualisiert ist.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
+                                    {isScanning ? 'Scan laeuft - erste Treffer erscheinen hier sofort nach ihrer Pruefung.' : 'Noch keine Scanner-Ergebnisse vorhanden.'}
                                 </td>
                             </tr>
                         )}
@@ -5192,58 +5235,78 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const [isScanning, setIsScanning] = useState(scanCache.bi_scanning || false);
     const [results, setResults] = useState(scanCache.bi_results || []);
     const [diagnostics, setDiagnostics] = useState(scanCache.bi_diagnostics || null);
+    const [liveInfo, setLiveInfo] = useState(scanCache.bi_live_info || null);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollRef = useRef(null);
 
     // Cleanup polling on unmount
     useEffect(() => {
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
+        return () => { if (pollRef.current) clearTimeout(pollRef.current); };
     }, []);
 
-    // V2.2: Live-Polling — lädt Zwischenergebnisse während Scan läuft
-    const startLivePolling = () => {
-        if (pollRef.current) clearInterval(pollRef.current);
-        pollRef.current = setInterval(async () => {
+    const applyBiPayload = (data) => {
+        const items = data?.data || [];
+        const info = {
+            cached_at: data?.cached_at || null,
+            partial: !!data?.partial,
+            scan_running: !!data?.scan_running,
+            checked: data?.checked ?? data?.diagnostics?.checked ?? null,
+            total: data?.total ?? data?.diagnostics?.total ?? null,
+            progress_detail: data?.progress_detail || data?.diagnostics?.progress_detail || '',
+        };
+        setResults(items);
+        setDiagnostics(data?.diagnostics || null);
+        setLiveInfo(info);
+        updateScanCache('bi_results', items);
+        updateScanCache('bi_diagnostics', data?.diagnostics || null);
+        updateScanCache('bi_live_info', info);
+        return { items, info };
+    };
+
+    const startLivePolling = ({ previousStamp = null, notify = true } = {}) => {
+        if (pollRef.current) clearTimeout(pollRef.current);
+        let sawLiveState = false;
+        const poll = async (attempt = 0) => {
+            if (attempt > 900) {
+                setIsScanning(false);
+                updateScanCache('bi_scanning', false);
+                return;
+            }
             try {
-                // Prüfe ob Scan noch läuft
-                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
-                const statusRes = await fetch(`${API}/api/scan-status`);
-                let scanRunning = true;
-                if (statusRes.ok) {
-                    const status = await statusRes.json();
-                    const s = status.scans?.[scanKey];
-                    scanRunning = s?.running || false;
-                }
-                // Lade aktuelle Ergebnisse (inkl. Zwischenergebnisse)
                 const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
                 if (res.ok) {
                     const data = await res.json();
-                    const items = data.data || [];
-                    setResults(items);
-                    setDiagnostics(data.diagnostics || null);
-                    updateScanCache('bi_results', items);
-                    updateScanCache('bi_diagnostics', data.diagnostics || null);
-                }
-                // Scan fertig → Polling stoppen
-                if (!scanRunning) {
-                    clearInterval(pollRef.current);
-                    pollRef.current = null;
-                    setIsScanning(false);
-                    updateScanCache('bi_scanning', false);
-                    if (window.addToast) window.addToast('Scan fertig', 'success');
+                    const { items } = applyBiPayload(data);
+                    const running = !!(data.scan_running || data.partial);
+                    sawLiveState = sawLiveState || running;
+                    const isNewFinal = !running && data.cached_at && data.cached_at !== previousStamp;
+                    if (isNewFinal || (sawLiveState && !running)) {
+                        pollRef.current = null;
+                        setIsScanning(false);
+                        updateScanCache('bi_scanning', false);
+                        if (notify && window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                        return;
+                    }
                 }
             } catch (e) { console.error(e); }
-        }, 8000); // Alle 8 Sekunden
+            pollRef.current = setTimeout(() => poll(attempt + 1), 2000);
+        };
+        pollRef.current = setTimeout(() => poll(0), 500);
     };
 
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('bi_scanning', true);
+        let previousStamp = liveInfo?.cached_at || null;
+        try {
+            const before = await fetch(`${API}/api/bi-results?direction=${direction}`);
+            if (before.ok) previousStamp = (await before.json()).cached_at || previousStamp;
+        } catch (error) {}
         try {
             const response = await fetch(`${API}/api/bi-scan`, { method: 'POST', body: JSON.stringify({ direction }), headers: { 'Content-Type': 'application/json' } });
             if (response.ok) {
                 if (window.addToast) window.addToast('Scan gestartet — Ergebnisse erscheinen live...', 'info');
-                startLivePolling();
+                startLivePolling({ previousStamp, notify: true });
             } else {
                 setIsScanning(false);
                 updateScanCache('bi_scanning', false);
@@ -5262,26 +5325,17 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
                 if (response.ok) {
                     const data = await response.json();
-                    const items = data.data || [];
-                    setResults(items);
-                    setDiagnostics(data.diagnostics || null);
-                    updateScanCache('bi_results', items);
-                    updateScanCache('bi_diagnostics', data.diagnostics || null);
-                }
-                // Auto-detect: Läuft gerade ein Scan? Dann Live-Polling starten
-                const scanKey = direction === 'long' ? 'bi_long' : 'bi_short';
-                const statusRes = await fetch(`${API}/api/scan-status`);
-                if (statusRes.ok) {
-                    const status = await statusRes.json();
-                    if (status.scans?.[scanKey]?.running) {
+                    applyBiPayload(data);
+                    if (data.scan_running || data.partial) {
                         setIsScanning(true);
-                        startLivePolling();
+                        updateScanCache('bi_scanning', true);
+                        startLivePolling({ previousStamp: data.cached_at || null, notify: false });
                     }
                 }
             } catch (err) { console.error('Error:', err); }
         };
         fetchResults();
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
+        return () => { if (pollRef.current) clearTimeout(pollRef.current); };
     }, [direction]);
 
     return (
@@ -5295,6 +5349,16 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
             </div>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} />
+
+            <LiveScanStatus
+                active={isScanning || liveInfo?.scan_running}
+                partial={liveInfo?.partial}
+                checked={liveInfo?.checked}
+                total={liveInfo?.total}
+                detail={liveInfo?.progress_detail}
+                count={results.length}
+                itemLabel="BI-Setups"
+            />
 
             <div className="flex flex-wrap items-center justify-end gap-3 px-1 text-xs text-gray-400">
                 <span>{results.length} Setups</span>
@@ -5378,6 +5442,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.biotech_scanning || false);
     const [results, setResults] = useState(scanCache.biotech_results || []);
+    const [liveInfo, setLiveInfo] = useState(scanCache.biotech_live_info || null);
     const [catalystWatchlist] = useState(null);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollTimeoutRef = useRef(null);
@@ -5387,79 +5452,105 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    const applyBiotechPayload = (data) => {
+        const items = data?.data || [];
+        const info = {
+            cached_at: data?.cached_at || null,
+            partial: !!data?.partial,
+            scan_running: !!data?.scan_running,
+            checked: data?.checked ?? null,
+            total: data?.total ?? null,
+            progress_detail: data?.progress_detail || '',
+        };
+        setResults(items);
+        setLiveInfo(info);
+        updateScanCache('biotech_results', items);
+        updateScanCache('biotech_live_info', info);
+        return { items, info };
+    };
+
+    const startLivePolling = ({ previousStamp = null, notify = true } = {}) => {
+        if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+        let sawLiveState = false;
+        const poll = async (attempt = 0) => {
+            if (attempt > 900) {
+                setIsScanning(false);
+                updateScanCache('biotech_scanning', false);
+                return;
+            }
+            try {
+                const response = await fetch(`${API}/api/biotech-results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const { items } = applyBiotechPayload(data);
+                    const running = !!(data.scan_running || data.partial);
+                    sawLiveState = sawLiveState || running;
+                    const isNewFinal = !running && data.cached_at && data.cached_at !== previousStamp;
+                    if (isNewFinal || (sawLiveState && !running)) {
+                        pollTimeoutRef.current = null;
+                        setIsScanning(false);
+                        updateScanCache('biotech_scanning', false);
+                        if (notify && window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
+                        return;
+                    }
+                }
+            } catch (error) { console.error(error); }
+            pollTimeoutRef.current = setTimeout(() => poll(attempt + 1), 2000);
+        };
+        pollTimeoutRef.current = setTimeout(() => poll(0), 500);
+    };
+
     const handleScan = async () => {
         setIsScanning(true);
         updateScanCache('biotech_scanning', true);
-        // Save current cached_at BEFORE scan starts
-        let prevCachedAt = null;
+        let previousStamp = liveInfo?.cached_at || null;
         try {
             const preCheck = await fetch(`${API}/api/biotech-results`);
-            if (preCheck.ok) {
-                const preData = await preCheck.json();
-                prevCachedAt = preData.cached_at || null;
-            }
-        } catch(e) {}
+            if (preCheck.ok) previousStamp = (await preCheck.json()).cached_at || previousStamp;
+        } catch (error) {}
         try {
             const response = await fetch(`${API}/api/biotech-scan`, { method: 'POST' });
-            if (response.ok) {
-                if (window.addToast) window.addToast('Scan gestartet...', 'info');
-                // Poll for results with increasing intervals
-                const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) { // Max 2 minutes (12 * 10s)
-                        setIsScanning(false);
-                        updateScanCache('biotech_scanning', false);
-                        if (window.addToast) window.addToast('Scan dauert länger...', 'info');
-                        return;
-                    }
-                    try {
-                        const res = await fetch(`${API}/api/biotech-results`);
-                        if (res.ok) {
-                            const data = await res.json();
-                            const items = data.data || [];
-                            const isNewData = data.cached_at && data.cached_at !== prevCachedAt;
-                            if (isNewData) {
-                                setResults(items);
-                                updateScanCache('biotech_results', items);
-                                setIsScanning(false);
-                                updateScanCache('biotech_scanning', false);
-                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Ergebnisse`, 'success');
-                                return;
-                            }
-                        }
-                    } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000); // Retry in 10s
-                };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000); // First poll after 5s
-            } else {
-                setIsScanning(false);
-                updateScanCache('biotech_scanning', false);
-            }
-        } catch (err) {
-            console.error('Error:', err);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (window.addToast) window.addToast('Scan gestartet - Ergebnisse erscheinen live...', 'info');
+            startLivePolling({ previousStamp, notify: true });
+        } catch (error) {
+            console.error('Error:', error);
             setIsScanning(false);
             updateScanCache('biotech_scanning', false);
         }
     };
 
-    // Always load latest results from server on mount
     useEffect(() => {
         const fetchResults = async () => {
             try {
                 const response = await fetch(`${API}/api/biotech-results`);
-                if (response.ok) {
-                    const data = await response.json();
-                    const items = data.data || [];
-                    setResults(items);
-                    updateScanCache('biotech_results', items);
+                if (!response.ok) return;
+                const data = await response.json();
+                applyBiotechPayload(data);
+                if (data.scan_running || data.partial) {
+                    setIsScanning(true);
+                    updateScanCache('biotech_scanning', true);
+                    startLivePolling({ previousStamp: data.cached_at || null, notify: false });
                 }
-            } catch (err) { console.error('Error:', err); }
+            } catch (error) { console.error('Error:', error); }
         };
         fetchResults();
+        return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="biotech" />
+
+            <LiveScanStatus
+                active={isScanning || liveInfo?.scan_running}
+                partial={liveInfo?.partial}
+                checked={liveInfo?.checked}
+                total={liveInfo?.total}
+                detail={liveInfo?.progress_detail}
+                count={results.length}
+                itemLabel="Biotech-Treffer"
+            />
 
             {false && catalystWatchlist && (
                 <div className="card border border-emerald-100 bg-emerald-50/60 p-5 rounded-lg">
@@ -5772,6 +5863,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [coins, setCoins] = useState(scanCache.em_coins || []);
     const [stats, setStats] = useState(scanCache.em_stats || null);
     const [isScanning, setIsScanning] = useState(false);
+    const [liveInfo, setLiveInfo] = useState(scanCache.em_live_info || null);
     const [phaseFilter, setPhaseFilter] = useState(0); // 0=alle, 1/2/3=Phase
     const { sorted, toggleSort, sortKey } = useSortable(coins, 'entry_score');
     const pollTimeoutRef = useRef(null);
@@ -5975,27 +6067,82 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         return () => { if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current); };
     }, []);
 
+    const applyEarlyPayload = (data, { force = false } = {}) => {
+        const em = (data?.data && data.data[0]) || {};
+        const nextCachedAt = data?.cached_at || null;
+        const running = !!(data?.scan_running || data?.partial);
+        if (!force && !running && nextCachedAt && lastLoadedCachedAtRef.current === nextCachedAt) return data;
+        const items = em.coins || [];
+        const info = {
+            cached_at: nextCachedAt,
+            partial: !!data?.partial,
+            scan_running: !!data?.scan_running,
+            checked: data?.checked ?? em?.stats?.intraday_trigger_checks ?? null,
+            total: data?.total ?? em?.stats?.intraday_trigger_scan_limit ?? null,
+            progress_detail: data?.progress_detail || '',
+        };
+        setCoins(items);
+        setStats(em.stats || null);
+        setLiveInfo(info);
+        lastLoadedCachedAtRef.current = nextCachedAt;
+        updateScanCache('em_coins', items);
+        updateScanCache('em_stats', em.stats);
+        updateScanCache('em_cached_at', nextCachedAt);
+        updateScanCache('em_live_info', info);
+        return data;
+    };
+
     const loadResults = async ({ force = false } = {}) => {
         try {
             const response = await fetch(`${API}/api/early-movers-results`);
-            if (response.ok) {
-                const data = await response.json();
-                const em = (data.data && data.data[0]) || {};
-                const nextCachedAt = data.cached_at || null;
-                if (!force && nextCachedAt && lastLoadedCachedAtRef.current === nextCachedAt) return;
-                const items = em.coins || [];
-                setCoins(items);
-                setStats(em.stats || null);
-                lastLoadedCachedAtRef.current = nextCachedAt;
-                updateScanCache('em_coins', items);
-                updateScanCache('em_stats', em.stats);
-                updateScanCache('em_cached_at', nextCachedAt);
-            }
+            if (!response.ok) return null;
+            return applyEarlyPayload(await response.json(), { force });
         } catch (err) { console.error('Error fetching early movers:', err); }
+        return null;
     };
 
-    // Load latest data on mount.
-    useEffect(() => { loadResults({ force: true }); }, []);
+    const startLivePolling = ({ previousStamp = null, notify = true } = {}) => {
+        if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+        let sawLiveState = false;
+        const poll = async (attempt = 0) => {
+            if (attempt > 900) {
+                setIsScanning(false);
+                return;
+            }
+            const data = await loadResults({ force: true });
+            if (data) {
+                const running = !!(data.scan_running || data.partial);
+                sawLiveState = sawLiveState || running;
+                const isNewFinal = !running && data.cached_at && data.cached_at !== previousStamp;
+                if (isNewFinal || (sawLiveState && !running)) {
+                    pollTimeoutRef.current = null;
+                    setIsScanning(false);
+                    const count = ((data.data && data.data[0]) || {}).coins?.length || 0;
+                    if (notify && window.addToast) window.addToast(`Scan fertig: ${count} Coins`, 'success');
+                    return;
+                }
+            }
+            pollTimeoutRef.current = setTimeout(() => poll(attempt + 1), 2000);
+        };
+        pollTimeoutRef.current = setTimeout(() => poll(0), 500);
+    };
+
+    // Load latest data on mount and join a scheduler scan already in progress.
+    useEffect(() => {
+        let cancelled = false;
+        const initialize = async () => {
+            const data = await loadResults({ force: true });
+            if (!cancelled && (data?.scan_running || data?.partial)) {
+                setIsScanning(true);
+                startLivePolling({ previousStamp: data.cached_at || null, notify: false });
+            }
+        };
+        initialize();
+        return () => {
+            cancelled = true;
+            if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+        };
+    }, []);
 
     // If the background scheduler finishes a new Early-Mover scan while this tab is open,
     // refresh the result table automatically. Otherwise the header says "last scan X min"
@@ -6008,37 +6155,16 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 
     const handleScan = async () => {
         setIsScanning(true);
-        let prevCachedAt = null;
+        let previousStamp = liveInfo?.cached_at || null;
         try {
             const preCheck = await fetch(`${API}/api/early-movers-results`);
-            if (preCheck.ok) { prevCachedAt = (await preCheck.json()).cached_at || null; }
+            if (preCheck.ok) previousStamp = (await preCheck.json()).cached_at || previousStamp;
         } catch(e) {}
         try {
             const response = await fetch(`${API}/api/early-movers-scan`, { method: 'POST' });
-            if (response.ok) {
-                if (window.addToast) window.addToast('Early Mover Scan gestartet...', 'info');
-                const pollResults = async (attempts = 0) => {
-                    if (attempts > 12) { setIsScanning(false); return; }
-                    try {
-                        const res = await fetch(`${API}/api/early-movers-results`);
-                        if (res.ok) {
-                            const data = await res.json();
-                            const em = (data.data && data.data[0]) || {};
-                            if (data.cached_at && data.cached_at !== prevCachedAt) {
-                                const items = em.coins || [];
-                                setCoins(items); setStats(em.stats || null);
-                                updateScanCache('em_coins', items);
-                                updateScanCache('em_stats', em.stats);
-                                setIsScanning(false);
-                                if (window.addToast) window.addToast(`Scan fertig: ${items.length} Coins`, 'success');
-                                return;
-                            }
-                        }
-                    } catch (e) { console.error(e); }
-                    pollTimeoutRef.current = setTimeout(() => pollResults(attempts + 1), 10000);
-                };
-                pollTimeoutRef.current = setTimeout(() => pollResults(0), 5000);
-            } else { setIsScanning(false); }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (window.addToast) window.addToast('Early Mover Scan gestartet - Ergebnisse erscheinen live...', 'info');
+            startLivePolling({ previousStamp, notify: true });
         } catch (err) {
             if (window.addToast) window.addToast('Scan-Fehler', 'error');
             setIsScanning(false);
@@ -6050,6 +6176,16 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
+
+            <LiveScanStatus
+                active={isScanning || liveInfo?.scan_running}
+                partial={liveInfo?.partial}
+                checked={liveInfo?.checked}
+                total={liveInfo?.total}
+                detail={liveInfo?.progress_detail}
+                count={coins.length}
+                itemLabel="Coins"
+            />
 
             {/* Phase-Filter Buttons */}
             <div className="flex gap-2 flex-wrap items-center">
@@ -8602,17 +8738,18 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [isScanning, setIsScanning] = useState(scanCache.penny_scanning || false);
     const [results, setResults] = useState(scanCache.penny_results || []);
     const [diagnostics, setDiagnostics] = useState(scanCache.penny_diagnostics || {});
+    const [liveInfo, setLiveInfo] = useState(scanCache.penny_live_info || null);
     const [showWatchRows, setShowWatchRows] = useState(false);
     const pollRef = useRef(null);
     const activeActions = new Set(['JETZT_KAUFEN', 'HALTEN', 'JETZT_VERKAUFEN']);
     const optionalActions = new Set(['TRIGGER_WARTEN', 'BEOBACHTEN']);
-    const isVisibleAction = item => {
+    const isVisibleAction = (item, allowOptional = showWatchRows) => {
         const action = String(item?.trade_action || '').toUpperCase();
         // A live model position must remain visible during a temporary data
         // gap even though its safe action is TRIGGER_WARTEN rather than HALTEN.
         return activeActions.has(action)
             || Boolean(item?.model_position_active)
-            || (showWatchRows && optionalActions.has(action));
+            || (allowOptional && optionalActions.has(action));
     };
 
     const loadResults = async () => {
@@ -8620,11 +8757,22 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             const response = await fetch(`${API}/api/penny-stocks-results?include_watch=${showWatchRows ? 'true' : 'false'}`);
             if (!response.ok) return null;
             const payload = await response.json();
-            const rows = (payload.data || []).filter(isVisibleAction);
+            const allowPartialRows = !!payload.partial;
+            const rows = (payload.data || []).filter(item => isVisibleAction(item, showWatchRows || allowPartialRows));
+            const info = {
+                cached_at: payload.cached_at || null,
+                partial: allowPartialRows,
+                scan_running: !!payload.scan_running,
+                checked: payload.checked ?? payload.diagnostics?.deep_checked ?? null,
+                total: payload.total ?? payload.diagnostics?.deep_planned ?? null,
+                progress_detail: payload.progress_detail || '',
+            };
             setResults(rows);
             setDiagnostics(payload.diagnostics || {});
+            setLiveInfo(info);
             updateScanCache('penny_results', rows);
             updateScanCache('penny_diagnostics', payload.diagnostics || {});
+            updateScanCache('penny_live_info', info);
             return payload;
         } catch (error) {
             console.error('Penny scanner load error:', error);
@@ -8643,10 +8791,47 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         return () => { cancelled = true; };
     }, []);
 
+    const startLivePolling = ({ previousStamp = null, notify = true } = {}) => {
+        if (pollRef.current) clearTimeout(pollRef.current);
+        let sawLiveState = false;
+        const poll = async (attempt = 0) => {
+            if (attempt > 900) {
+                setIsScanning(false);
+                updateScanCache('penny_scanning', false);
+                return;
+            }
+            const payload = await loadResults();
+            if (payload) {
+                const running = !!(payload.scan_running || payload.partial);
+                sawLiveState = sawLiveState || running;
+                const isNewFinal = !running && payload.cached_at && payload.cached_at !== previousStamp;
+                if (isNewFinal || (sawLiveState && !running)) {
+                    pollRef.current = null;
+                    setIsScanning(false);
+                    updateScanCache('penny_scanning', false);
+                    if (notify && window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} aktive Trading-Signale`, 'success');
+                    return;
+                }
+            }
+            pollRef.current = setTimeout(() => poll(attempt + 1), 2000);
+        };
+        pollRef.current = setTimeout(() => poll(0), 500);
+    };
+
     useEffect(() => {
-        loadResults();
-        const interval = setInterval(loadResults, 30000);
+        let cancelled = false;
+        const refresh = async () => {
+            const payload = await loadResults();
+            if (!cancelled && (payload?.scan_running || payload?.partial) && !pollRef.current) {
+                setIsScanning(true);
+                updateScanCache('penny_scanning', true);
+                startLivePolling({ previousStamp: payload.cached_at || null, notify: false });
+            }
+        };
+        refresh();
+        const interval = setInterval(refresh, 30000);
         return () => {
+            cancelled = true;
             clearInterval(interval);
             if (pollRef.current) clearTimeout(pollRef.current);
         };
@@ -8660,23 +8845,8 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         try {
             const response = await fetch(`${API}/api/penny-stocks-scan`, { method: 'POST' });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const poll = async (attempt = 0) => {
-                const payload = await loadResults();
-                if (payload?.cached_at && payload.cached_at !== previousStamp) {
-                    setIsScanning(false);
-                    updateScanCache('penny_scanning', false);
-                    if (window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} aktive Trading-Signale`, 'success');
-                    return;
-                }
-                if (attempt >= 120) {
-                    setIsScanning(false);
-                    updateScanCache('penny_scanning', false);
-                    if (window.addToast) window.addToast('Pennystock-Scan laeuft ungewoehnlich lange', 'info');
-                    return;
-                }
-                pollRef.current = setTimeout(() => poll(attempt + 1), 5000);
-            };
-            pollRef.current = setTimeout(() => poll(0), 5000);
+            if (window.addToast) window.addToast('Pennystock-Scan gestartet - Ergebnisse erscheinen live...', 'info');
+            startLivePolling({ previousStamp, notify: true });
         } catch (error) {
             console.error('Penny scanner start error:', error);
             setIsScanning(false);
@@ -8686,7 +8856,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     };
 
     const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2, TRIGGER_WARTEN: 3, BEOBACHTEN: 4 };
-    const sorted = results.filter(isVisibleAction).sort((a, b) => {
+    const sorted = results.filter(item => isVisibleAction(item, showWatchRows || liveInfo?.partial)).sort((a, b) => {
         const actionDiff = (actionOrder[a.trade_action] ?? 9) - (actionOrder[b.trade_action] ?? 9);
         if (actionDiff) return actionDiff;
         return Number(b.trade_score || b.score || 0) - Number(a.trade_score || a.score || 0)
@@ -8729,6 +8899,16 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     return (
         <div className="space-y-5">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="penny_stocks" />
+
+            <LiveScanStatus
+                active={isScanning || liveInfo?.scan_running}
+                partial={liveInfo?.partial}
+                checked={liveInfo?.checked}
+                total={liveInfo?.total}
+                detail={liveInfo?.progress_detail || (liveInfo?.partial ? 'Live-Revalidierung ausstehend' : '')}
+                count={results.length}
+                itemLabel="gepruefte Setups"
+            />
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
                 {[

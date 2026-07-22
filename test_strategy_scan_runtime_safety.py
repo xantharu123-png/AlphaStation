@@ -419,10 +419,52 @@ def test_new_listing_publishes_cache_before_sending_alerts(monkeypatch):
 
 def test_penny_scanner_publishes_final_state_before_trade_mails():
     source = inspect.getsource(api._penny_stock_scanner_wrapper)
-    publish_index = source.index("save_cache_file(PENNY_STOCKS_CACHE")
+    publish_index = source.index("finalize_cache_file(PENNY_STOCKS_CACHE")
 
     assert publish_index < source.index("_penny_buy_email(")
     assert publish_index < source.index("_penny_exit_email(")
+
+
+def test_partial_cache_is_visible_only_while_scan_is_running(tmp_path):
+    cache_path = str(tmp_path / "scanner.json")
+    api.save_cache_file(cache_path, [{"ticker": "FINAL_OLD"}])
+    api.save_partial_cache_file(
+        cache_path,
+        [{"ticker": "PARTIAL"}],
+        checked=25,
+        total=100,
+        detail="25/100 geprueft",
+    )
+
+    idle_rows, _, idle_meta, idle_is_partial = api.load_live_cache_file(
+        cache_path,
+        running=False,
+    )
+    live_rows, _, live_meta, live_is_partial = api.load_live_cache_file(
+        cache_path,
+        running=True,
+    )
+
+    assert idle_rows == [{"ticker": "FINAL_OLD"}]
+    assert idle_meta.get("partial") is not True
+    assert idle_is_partial is False
+    assert live_rows == [{"ticker": "PARTIAL"}]
+    assert live_meta["checked"] == 25
+    assert live_meta["total"] == 100
+    assert live_is_partial is True
+
+
+def test_finalizing_scan_replaces_final_cache_and_removes_partial(tmp_path):
+    cache_path = str(tmp_path / "scanner.json")
+    api.save_partial_cache_file(cache_path, [{"ticker": "PARTIAL"}], checked=1, total=2)
+
+    api.finalize_cache_file(cache_path, [{"ticker": "FINAL_NEW"}])
+
+    rows, _, metadata, is_partial = api.load_live_cache_file(cache_path, running=True)
+    assert rows == [{"ticker": "FINAL_NEW"}]
+    assert metadata.get("partial") is not True
+    assert is_partial is False
+    assert not Path(api._partial_cache_path(cache_path)).exists()
 
 
 def test_trade_geometry_rejects_duplicate_or_reversed_targets():
