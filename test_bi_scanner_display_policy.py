@@ -33,8 +33,8 @@ def test_bi_mail_gate_does_not_become_no_trade(monkeypatch):
     state = api._scanner_result_trade_state("bi_long", {"ticker": "RACE"})
 
     assert state["alertable_now"] is False
-    assert state["decision"] == "WATCH"
-    assert state["decision_label"] == "Noch nicht bestaetigt"
+    assert state["decision"] == "NOT_RELEASED"
+    assert state["decision_label"] == "Kein Einstieg"
     assert state["display_reasons"] == [
         "grade_below_alert_threshold",
         "score_below_alert_threshold",
@@ -57,8 +57,8 @@ def test_bi_trade_grade_uses_stricter_ladder(monkeypatch):
     api._apply_scanner_result_trade_state(row, "bi_long")
 
     assert row["grade"] == "B"
-    assert row["trade_action"] == "SETUP_NOT_CONFIRMED"
-    assert row["signal_label"] == "Noch nicht bestaetigt"
+    assert row["trade_action"] == "NOT_RELEASED"
+    assert row["signal_label"] == "Kein Einstieg"
     assert row["scanner_suppression_labels"] == [
         "Setup-Grade -; Freigabe erst ab A",
         "Trade-Score 74; Freigabe erst ab 80",
@@ -88,9 +88,11 @@ def test_bi_explains_setup_grade_and_trade_grade_separately(monkeypatch):
     }
     api._apply_scanner_result_trade_state(row, "bi_long")
 
-    assert row["grade"] == "S"
+    assert row["grade"] == "B"
+    assert row["trade_grade"] == "S"
+    assert row["release_grade"] == "B"
     assert row["setup_grade"] == "B"
-    assert row["trade_action"] == "SETUP_NOT_CONFIRMED"
+    assert row["trade_action"] == "NOT_RELEASED"
     assert row["scanner_suppression_labels"] == [
         "Setup-Grade B; Freigabe erst ab A",
         "RVOL 0.5x; benoetigt mindestens 0.7x",
@@ -118,4 +120,54 @@ def test_bi_frontend_uses_trader_facing_actions_only():
     assert "KANDIDAT =" not in source
     assert "Status / Kriterien" not in source
     assert "reasonLabels.slice(0, 2)" in source
-    assert "NOCH NICHT" in source
+    assert "'NOCH NICHT'" not in source
+    assert "KEIN EINSTIEG" in source
+    assert "Trade-Score" in source
+    assert "Freigabe" in source
+
+
+def test_bi_release_grade_never_overstates_a_weak_setup():
+    assert api._bi_release_grade("S", "C") == "C"
+    assert api._bi_release_grade("A", "B") == "B"
+    assert api._bi_release_grade("B", "A") == "B"
+    assert api._bi_release_grade("S", "") == "S"
+
+
+def test_bi_release_grade_keeps_original_setup_grade_after_redecoration(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_classify_alert_candidate",
+        lambda scanner_name, row, now=None: {
+            "score": 94,
+            "suppression_reasons": ["grade_below_alert_threshold"],
+        },
+    )
+    row = {
+        "ticker": "DMLP",
+        "grade": "S",
+        "trade_grade": "S",
+        "setup_grade": "C",
+        "raw_grade": "C",
+        "price": 27.33,
+    }
+
+    api._apply_scanner_result_trade_state(row, "bi_long")
+
+    assert row["trade_grade"] == "S"
+    assert row["release_grade"] == "C"
+    assert row["grade"] == "C"
+    assert row["trade_action"] == "NOT_RELEASED"
+
+
+def test_legacy_not_yet_label_is_normalized_for_cached_rows():
+    decision, label, source = api._canonical_trade_decision(
+        {
+            "trade_decision": "NOCH_NICHT",
+            "trade_decision_label": "Noch nicht bestaetigt",
+        },
+        "bi_long",
+    )
+
+    assert decision == "WATCH_ONLY"
+    assert label == "Keine Handelsfreigabe"
+    assert source == "trade_decision"

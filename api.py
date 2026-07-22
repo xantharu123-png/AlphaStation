@@ -1879,6 +1879,20 @@ def _bi_trade_grade_for_score(score_value: Any) -> Tuple[str, str]:
     return "D", "Schwach"
 
 
+def _bi_release_grade(trade_grade: Any, setup_grade: Any) -> str:
+    """Return the weaker of BI setup quality and current trade quality."""
+    grade_rank = {"D": 0, "C": 1, "B": 2, "A": 3, "A+": 4, "S": 5}
+    normalized_trade = str(trade_grade or "").strip().upper()
+    normalized_setup = str(setup_grade or "").strip().upper()
+    valid_trade = normalized_trade if normalized_trade in grade_rank else ""
+    valid_setup = normalized_setup if normalized_setup in grade_rank else ""
+    if not valid_setup:
+        return valid_trade or "D"
+    if not valid_trade:
+        return valid_setup
+    return valid_trade if grade_rank[valid_trade] <= grade_rank[valid_setup] else valid_setup
+
+
 def _alert_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -8552,7 +8566,7 @@ def _normalize_trade_decision(value: Any) -> str:
         return "WAIT_FOR_TRIGGER"
     if token in {
         "WATCH", "WATCH_ONLY", "BEOBACHTEN", "KANDIDAT", "CANDIDATE_REVIEW", "CANDIDATE",
-        "NOCH_NICHT", "SETUP_NOT_CONFIRMED", "MANUAL_REVIEW",
+        "NOCH_NICHT", "SETUP_NOT_CONFIRMED", "NOT_RELEASED", "NICHT_FREIGEGEBEN", "MANUAL_REVIEW",
     }:
         return "WATCH_ONLY"
     if token in {
@@ -8651,7 +8665,10 @@ def _canonical_trade_decision(item: Dict[str, Any], scanner_name: str) -> tuple[
 
     label, source = first_source({"WATCH_ONLY"})
     if source and not execution_confirmed:
-        return "WATCH_ONLY", label or "Noch nicht bestaetigt", source
+        legacy_label = str(label or "").strip().lower()
+        if legacy_label in {"noch nicht", "noch nicht bestaetigt"}:
+            label = "Keine Handelsfreigabe"
+        return "WATCH_ONLY", label or "Keine Handelsfreigabe", source
 
     active_intent = bool(
         execution_confirmed
@@ -8790,16 +8807,24 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     decision = _alert_decision_from_reasons(scanner_name, decision_reasons)
     if scanner_name in {"bi_long", "bi_short"} and display_reasons and not decision_reasons:
         decision = {
-            "decision": "WATCH",
-            "decision_label": "Noch nicht bestaetigt",
-            "decision_reason": "Mindestens eine Handelsbestaetigung fehlt",
+            "decision": "NOT_RELEASED",
+            "decision_label": "Kein Einstieg",
+            "decision_reason": "BI-Freigabekriterien sind nicht vollstaendig erfuellt",
         }
     tradeable_now = not display_reasons
     score = _alert_float(state.get("score"), 0) or 0
     if scanner_name in {"bi_long", "bi_short"}:
         trade_grade, trade_grade_label = _bi_trade_grade_for_score(score)
+        setup_grade = (
+            row.get("setup_grade")
+            or row.get("raw_grade")
+            or row.get("BI_Grade")
+            or _extract_alert_grade(row)
+        )
+        release_grade = _bi_release_grade(trade_grade, setup_grade)
     else:
         trade_grade, trade_grade_label = _score_grade_for_value(score)
+        release_grade = trade_grade
     return {
         **state,
         "alertable_now": tradeable_now,
@@ -8807,6 +8832,7 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
         "trade_score": int(score) if float(score).is_integer() else round(score, 2),
         "trade_grade": trade_grade,
         "trade_grade_label": trade_grade_label,
+        "release_grade": release_grade,
         **decision,
     }
 
@@ -8910,6 +8936,7 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
     state = _scanner_result_trade_state(scanner_name, item)
     trade_score = state["trade_score"]
     trade_grade = state["trade_grade"]
+    release_grade = state.get("release_grade") or trade_grade
     levels_for_direction = _alert_trade_levels(item)
     direction = str(
         item.get("direction")
@@ -8928,10 +8955,11 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
 
     item["score"] = trade_score
     item["Score"] = trade_score
-    item["grade"] = trade_grade
-    item["Grade"] = trade_grade
+    item["grade"] = release_grade
+    item["Grade"] = release_grade
     item["trade_score"] = trade_score
     item["trade_grade"] = trade_grade
+    item["release_grade"] = release_grade
     item["trade_grade_label"] = state.get("trade_grade_label")
     item["scanner_decision"] = state.get("decision")
     item["scanner_decision_label"] = state.get("decision_label")
@@ -8961,12 +8989,17 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
         item["entry_status"] = "NO_TRADE"
         item["trade_action"] = "NO_TRADE"
         item["signal_label"] = "Nicht traden"
+    elif state.get("decision") == "NOT_RELEASED":
+        item["trade_signal"] = "NICHT_FREIGEGEBEN"
+        item["entry_status"] = "NOT_RELEASED"
+        item["trade_action"] = "NOT_RELEASED"
+        item["signal_label"] = "Kein Einstieg"
     else:
         if scanner_name in {"bi_long", "bi_short"}:
-            item["trade_signal"] = "NOCH_NICHT"
-            item["entry_status"] = "SETUP_NOT_CONFIRMED"
-            item["trade_action"] = "SETUP_NOT_CONFIRMED"
-            item["signal_label"] = "Noch nicht bestaetigt"
+            item["trade_signal"] = "NICHT_FREIGEGEBEN"
+            item["entry_status"] = "NOT_RELEASED"
+            item["trade_action"] = "NOT_RELEASED"
+            item["signal_label"] = "Kein Einstieg"
         else:
             item["trade_signal"] = "BEOBACHTEN"
             item["entry_status"] = "BEOBACHTEN"
