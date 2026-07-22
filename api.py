@@ -4536,6 +4536,23 @@ def _reminder_iso(ts: Optional[float] = None) -> str:
     return datetime.fromtimestamp(ts or _reminder_now(), timezone.utc).isoformat()
 
 
+def _reminder_created_epoch(reminder: Dict[str, Any]) -> Optional[float]:
+    """Return the reminder creation time as UTC epoch seconds."""
+    created_epoch = _alert_float(reminder.get("created_at_epoch"), None)
+    if created_epoch is not None and created_epoch > 0:
+        return created_epoch
+    raw_created = reminder.get("created_at")
+    if not raw_created:
+        return None
+    try:
+        created = datetime.fromisoformat(str(raw_created).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_trade_reminders() -> List[Dict[str, Any]]:
     try:
         if not os.path.exists(_TRADE_REMINDERS_FILE):
@@ -4777,21 +4794,59 @@ def _stock_breakout_freshness_state(
 
 def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
     ticker = str(reminder.get("ticker", "")).upper()
-    direction = str(row.get("direction", row.get("Signal_Direction", "LONG")) or "LONG").upper()
-    entry = _alert_float(row.get("entry", row.get("Entry", row.get("entry_price"))))
-    stop = _alert_float(row.get("stop_loss", row.get("stop", row.get("Stop Loss"))))
+    direction = str(
+        row.get("direction")
+        or row.get("Signal_Direction")
+        or setup.get("direction")
+        or "LONG"
+    ).upper()
+    entry = _alert_float(
+        row.get("entry")
+        or row.get("Entry")
+        or row.get("entry_price")
+        or setup.get("entry")
+        or setup.get("main_entry"),
+        None,
+    )
+    stop = _alert_float(
+        row.get("stop_loss")
+        or row.get("stop")
+        or row.get("Stop Loss")
+        or setup.get("stop_loss")
+        or setup.get("stop"),
+        None,
+    )
+    tp1 = _alert_float(row.get("tp1") or row.get("TP1") or setup.get("tp1"), None)
+    tp2 = _alert_float(row.get("tp2") or row.get("TP2") or setup.get("tp2"), None)
+    live_rr = _alert_float(
+        row.get("live_rr_ratio")
+        or row.get("RiskReward")
+        or setup.get("live_rr")
+        or setup.get("rr_ratio"),
+        None,
+    )
     if not ticker or entry is None:
         return {"triggered": False, "reason": "missing_stock_entry"}
     bars = _fetch_recent_stock_5m_bars(ticker)
     if len(bars) < 4:
         return {"triggered": False, "reason": "not_enough_stock_5m_bars"}
     last = bars[-1]
+    created_epoch = _reminder_created_epoch(reminder)
+    last_bar_epoch = _candle_epoch_seconds(last)
+    if (
+        created_epoch is not None
+        and last_bar_epoch is not None
+        and last_bar_epoch + 300 <= created_epoch
+    ):
+        return {"triggered": False, "reason": "waiting_for_new_5m_candle"}
     prev = bars[-8:-1] if len(bars) >= 9 else bars[:-1]
     last_close = last["close"]
     last_open = last["open"]
     last_high = last["high"]
     last_low = last["low"]
+    previous_close = float(prev[-1].get("close", last_close) or last_close)
     median_vol = _median_float([b.get("volume", 0) for b in prev], max(last.get("volume", 1), 1))
     vol_ratio = last.get("volume", 0) / max(median_vol, 1)
     close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
@@ -4804,19 +4859,68 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     distance_r = abs(last_close - entry) / max(risk, 1e-9)
 
     if direction == "SHORT":
-        trigger = last_close <= entry and last_close < last_open and close_pos <= 0.45 and vol_ratio >= 1.1
-        near_retest = distance_r <= 0.25 and last_close <= entry * 1.003
+        crossed_now = previous_close > entry * 0.998 and last_close <= entry
+        trigger = crossed_now and last_close < last_open and close_pos <= 0.45 and vol_ratio >= 1.1 and distance_r <= 0.75
+        previously_below = any(float(bar.get("close", entry) or entry) <= entry * 0.998 for bar in prev[-6:])
+        near_retest = (
+            previously_below
+            and last_high >= entry * 0.995
+            and last_close <= entry * 1.002
+            and close_pos <= 0.45
+            and distance_r <= 0.25
+        )
+        continuation = (
+            last_close < min(float(bar.get("low", last_close) or last_close) for bar in prev[-3:])
+            and last_close < last_open
+            and close_pos <= 0.45
+            and vol_ratio >= 1.1
+            and distance_r <= 1.0
+        )
     else:
-        trigger = last_close >= entry and last_close > last_open and close_pos >= 0.55 and vol_ratio >= 1.1
-        near_retest = distance_r <= 0.25 and last_close >= entry * 0.997
+        crossed_now = previous_close < entry * 1.002 and last_close >= entry
+        trigger = crossed_now and last_close > last_open and close_pos >= 0.55 and vol_ratio >= 1.1 and distance_r <= 0.75
+        previously_above = any(float(bar.get("close", entry) or entry) >= entry * 1.002 for bar in prev[-6:])
+        near_retest = (
+            previously_above
+            and last_low <= entry * 1.005
+            and last_close >= entry * 0.998
+            and close_pos >= 0.55
+            and distance_r <= 0.25
+        )
+        continuation = (
+            last_close > max(float(bar.get("high", last_close) or last_close) for bar in prev[-3:])
+            and last_close > last_open
+            and close_pos >= 0.55
+            and vol_ratio >= 1.1
+            and distance_r <= 1.0
+        )
 
-    if trigger or near_retest:
+    condition = str(reminder.get("condition") or "trigger_or_retest").lower()
+    if condition == "retest":
+        reminder_ready = near_retest
+        reminder_reason = "retest_near_entry"
+    elif condition == "continuation":
+        reminder_ready = continuation
+        reminder_reason = "5m_continuation"
+    elif condition == "trigger":
+        reminder_ready = trigger
+        reminder_reason = "5m_trigger"
+    else:
+        reminder_ready = trigger or near_retest
+        reminder_reason = "5m_trigger" if trigger else "retest_near_entry"
+
+    if reminder_ready:
         return {
             "triggered": True,
-            "reason": "5m_trigger" if trigger else "retest_near_entry",
+            "reason": reminder_reason,
             "last_close": round(last_close, 6),
             "distance_to_entry_r": round(distance_r, 2),
             "volume_ratio": round(vol_ratio, 2),
+            "entry": entry,
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "live_rr": live_rr,
         }
     return {
         "triggered": False,
@@ -4833,10 +4937,32 @@ def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     if asset_type == "crypto":
         row = _find_early_mover_row(ticker)
         if not row:
-            return {"triggered": False, "reason": "coin_not_in_latest_scan"}
+            saved_row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+            if not saved_row:
+                return {"triggered": False, "reason": "missing_crypto_reminder_data"}
+            row = deepcopy(saved_row)
+            row.setdefault("Symbol", ticker.replace("USDT", ""))
+            row.setdefault("symbol", ticker.replace("USDT", ""))
         trigger_check = _verify_early_mover_intraday_trigger(row)
         _apply_early_mover_signal_state(row, trigger_check)
-        if trigger_check.get("ok"):
+        created_epoch = _reminder_created_epoch(reminder)
+        last_bar_epoch = _alert_float(
+            trigger_check.get("last_candle_timestamp") if isinstance(trigger_check, dict) else None,
+            None,
+        )
+        if (
+            created_epoch is not None
+            and last_bar_epoch is not None
+            and last_bar_epoch + 300 <= created_epoch
+        ):
+            return {"triggered": False, "reason": "waiting_for_new_5m_candle", "check": trigger_check}
+        condition = str(reminder.get("condition") or "trigger_or_retest").lower()
+        matched = set(trigger_check.get("matched") or []) if isinstance(trigger_check, dict) else set()
+        reason = str(trigger_check.get("reason") or "").lower() if isinstance(trigger_check, dict) else ""
+        condition_ready = bool(trigger_check.get("ok"))
+        if condition == "retest":
+            condition_ready = condition_ready and ("retest_hold" in matched or "retest" in reason)
+        if condition_ready:
             setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
             return {
                 "triggered": True,
@@ -4856,12 +4982,14 @@ def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
 def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> str:
     ticker = html.escape(str(reminder.get("ticker", "?")).upper())
     reason = html.escape(str(result.get("reason", "Trigger bereit")).replace("_", " "))
-    entry = _format_alert_price(result.get("entry") or (reminder.get("row") or {}).get("entry"))
-    stop = _format_alert_price(result.get("stop") or (reminder.get("row") or {}).get("stop_loss") or (reminder.get("row") or {}).get("stop"))
-    tp1 = _format_alert_price(result.get("tp1") or (reminder.get("row") or {}).get("tp1"))
-    tp2 = _format_alert_price(result.get("tp2") or (reminder.get("row") or {}).get("tp2"))
+    row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    entry = _format_alert_price(result.get("entry") or row.get("entry") or setup.get("entry") or setup.get("main_entry"))
+    stop = _format_alert_price(result.get("stop") or row.get("stop_loss") or row.get("stop") or setup.get("stop_loss") or setup.get("stop"))
+    tp1 = _format_alert_price(result.get("tp1") or row.get("tp1") or setup.get("tp1"))
+    tp2 = _format_alert_price(result.get("tp2") or row.get("tp2") or setup.get("tp2"))
     price = _format_alert_price(result.get("last_close"))
-    rr = result.get("live_rr") or (reminder.get("row") or {}).get("live_rr_ratio")
+    rr = result.get("live_rr") or row.get("live_rr_ratio") or setup.get("live_rr") or setup.get("rr_ratio")
     return f"""
     <html><body style="font-family:Arial,sans-serif;color:#111827">
     <h2 style="color:#059669">Reminder: {ticker} Trigger ist da</h2>
@@ -4873,9 +5001,81 @@ def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> 
       <tr><td>TP1 / TP2</td><td><b style="color:#059669">{tp1} / {tp2}</b></td></tr>
       <tr><td>Live R:R</td><td><b>{rr if rr is not None else '-'}</b></td></tr>
     </table>
-    <p style="font-size:12px;color:#64748b">Reminder wurde automatisch deaktiviert. Bitte Chart/Spread vor Entry kurz prüfen.</p>
+    <p style="font-size:12px;color:#64748b">Reminder wurde automatisch deaktiviert. Bitte Chart und Spread vor dem Entry kurz pruefen.</p>
     </body></html>
     """
+
+
+def _deliver_trade_reminder_email(
+    reminder: Dict[str, Any],
+    result: Dict[str, Any],
+    now: Optional[float] = None,
+) -> bool:
+    """Deliver a triggered reminder once, with bounded retries on SMTP failure."""
+    now = float(now if now is not None else _reminder_now())
+    channel = str(reminder.get("channel", "email_browser") or "email_browser").lower()
+    if "email" not in channel:
+        reminder["email_delivery_status"] = "not_requested"
+        return False
+    if reminder.get("email_sent_at"):
+        reminder["email_delivery_status"] = "sent"
+        return True
+
+    owner_email = str(reminder.get("owner_email") or "").strip().lower()
+    users = (_load_users() or {}).get("users", {}) if HAS_AUTH else {}
+    owner = users.get(owner_email, {}) if isinstance(users, dict) else {}
+    alert_email = str(owner.get("alert_email") or owner_email).strip().lower()
+    email_enabled = owner.get("email_alerts_enabled", True) is not False
+    if not email_enabled or "@" not in alert_email:
+        reminder["email_delivery_status"] = "disabled"
+        reminder["email_delivery_reason"] = "email_alerts_disabled_or_recipient_missing"
+        return False
+
+    attempts = int(reminder.get("email_attempts", 0) or 0)
+    if attempts >= 5:
+        reminder["email_delivery_status"] = "failed"
+        return False
+    next_attempt_at = float(reminder.get("next_email_attempt_at", 0) or 0)
+    if next_attempt_at > now:
+        return False
+
+    row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    signal_rows = [dict(
+        row,
+        ticker=str(reminder.get("ticker", "")).upper(),
+        entry=result.get("entry"),
+        stop=result.get("stop"),
+        tp1=result.get("tp1"),
+        tp2=result.get("tp2"),
+    )]
+    reason_label = str(result.get("reason") or "Trigger bereit").replace("_", " ").strip()
+    sent = _send_email_alert(
+        f"Reminder: {reminder.get('ticker', '').upper()} {reason_label}",
+        _format_reminder_email(reminder, result),
+        bypass_startup_cooldown=True,
+        trade_horizon="swing",
+        mail_class="trade",
+        recipient_emails=[alert_email],
+        telegram_text=_safe_format_telegram_rows(signal_rows),
+    )
+    attempts += 1
+    reminder["email_attempts"] = attempts
+    reminder["last_email_attempt_at"] = now
+    if sent:
+        reminder["email_sent_at"] = _reminder_iso(now)
+        reminder["email_delivery_status"] = "sent"
+        reminder.pop("next_email_attempt_at", None)
+        reminder.pop("email_delivery_reason", None)
+        _safe_record_alert_signals("trade_reminder", signal_rows)
+        return True
+
+    if attempts >= 5:
+        reminder["email_delivery_status"] = "failed"
+        reminder.pop("next_email_attempt_at", None)
+    else:
+        reminder["email_delivery_status"] = "retry_pending"
+        reminder["next_email_attempt_at"] = now + min(300, 60 * (2 ** (attempts - 1)))
+    return False
 
 
 def _process_trade_reminders_once() -> None:
@@ -4884,7 +5084,28 @@ def _process_trade_reminders_once() -> None:
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
         for reminder in reminders:
-            if reminder.get("status") != "active":
+            reminder_status = str(reminder.get("status") or "").lower()
+            if reminder_status == "triggered":
+                before_delivery = (
+                    reminder.get("email_delivery_status"),
+                    reminder.get("email_attempts"),
+                    reminder.get("next_email_attempt_at"),
+                    reminder.get("email_sent_at"),
+                )
+                _deliver_trade_reminder_email(
+                    reminder,
+                    reminder.get("trigger_result") if isinstance(reminder.get("trigger_result"), dict) else {},
+                    now,
+                )
+                after_delivery = (
+                    reminder.get("email_delivery_status"),
+                    reminder.get("email_attempts"),
+                    reminder.get("next_email_attempt_at"),
+                    reminder.get("email_sent_at"),
+                )
+                changed = changed or before_delivery != after_delivery
+                continue
+            if reminder_status != "active":
                 continue
             owner_email = str(reminder.get("owner_email") or "").strip().lower()
             if not owner_email or "@" not in owner_email:
@@ -4912,33 +5133,7 @@ def _process_trade_reminders_once() -> None:
                 reminder["status"] = "triggered"
                 reminder["triggered_at"] = _reminder_iso(now)
                 reminder["trigger_result"] = result
-                channel = str(reminder.get("channel", "email_browser"))
-                if "email" in channel:
-                    # Signal-Tracking: Row mit Entry/Stop/TP-Feldern (Tracker extrahiert tolerant)
-                    _reminder_row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
-                    _reminder_signal_rows = [dict(
-                        _reminder_row,
-                        ticker=str(reminder.get("ticker", "")).upper(),
-                        entry=result.get("entry"),
-                        stop=result.get("stop"),
-                        tp1=result.get("tp1"),
-                        tp2=result.get("tp2"),
-                    )]
-                    users = (_load_users() or {}).get("users", {}) if HAS_AUTH else {}
-                    owner = users.get(owner_email, {}) if isinstance(users, dict) else {}
-                    alert_email = str(owner.get("alert_email") or owner_email).strip().lower()
-                    email_enabled = owner.get("email_alerts_enabled", True) is not False
-                    _reminder_sent = bool(email_enabled and "@" in alert_email) and _send_email_alert(
-                        f"Reminder: {reminder.get('ticker', '').upper()} Trigger bereit",
-                        _format_reminder_email(reminder, result),
-                        bypass_startup_cooldown=True,
-                        trade_horizon="swing",  # AUDIT H-3: explizit (Reminder = Swing-Kontext)
-                        mail_class="trade",  # AUDIT H-2: Trigger bereit = handelbar
-                        recipient_emails=[alert_email],
-                        telegram_text=_safe_format_telegram_rows(_reminder_signal_rows),
-                    )
-                    if _reminder_sent:
-                        _safe_record_alert_signals("trade_reminder", _reminder_signal_rows)
+                _deliver_trade_reminder_email(reminder, result, now)
         if changed:
             _save_trade_reminders(reminders)
 
@@ -15932,23 +16127,31 @@ def create_trade_reminder(
     ticker = str(request.ticker or "").upper().strip()
     if not ticker:
         raise HTTPException(status_code=400, detail="Ticker fehlt")
+    asset_type = str(request.asset_type or "crypto").strip().lower()
+    if asset_type not in {"stock", "crypto"}:
+        raise HTTPException(status_code=400, detail="Asset-Typ muss stock oder crypto sein")
+    condition = str(request.condition or "trigger_or_retest").strip().lower()
+    if condition not in {"trigger", "retest", "continuation", "trigger_or_retest"}:
+        raise HTTPException(status_code=400, detail="Unbekannte Reminder-Bedingung")
     duration_hours = max(0.25, min(float(request.duration_hours or 6), _TRADE_REMINDER_MAX_HOURS))
     channel = str(request.channel or "email_browser").lower()
     if channel not in ("email", "browser", "email_browser"):
         channel = "email_browser"
     now = _reminder_now()
     row = request.row if isinstance(request.row, dict) else {}
+    normalized_ticker = ticker[:-4] if asset_type == "crypto" and ticker.endswith("USDT") else ticker
     reminder = {
         "id": uuid.uuid4().hex[:12],
         "owner_email": owner_email,
-        "ticker": ticker.replace("USDT", "") if request.asset_type.lower() == "crypto" else ticker,
-        "asset_type": str(request.asset_type or "crypto").lower(),
+        "ticker": normalized_ticker,
+        "asset_type": asset_type,
         "scanner": str(request.scanner or "early_movers"),
-        "condition": str(request.condition or "trigger_or_retest"),
+        "condition": condition,
         "channel": channel,
         "status": "active",
         "row": row,
         "created_at": _reminder_iso(now),
+        "created_at_epoch": now,
         "updated_at": _reminder_iso(now),
         "expires_at": now + duration_hours * 3600,
         "expires_at_iso": _reminder_iso(now + duration_hours * 3600),
@@ -15957,22 +16160,25 @@ def create_trade_reminder(
     }
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
-        # Replace older active reminder for same ticker/condition to avoid duplicate pings.
+        # One active reminder per user and instrument avoids duplicate trigger/retest mails.
         for old in reminders:
             if (
                 old.get("status") == "active"
                 and str(old.get("owner_email") or "").strip().lower() == owner_email
                 and str(old.get("ticker", "")).upper() == reminder["ticker"]
-                and str(old.get("condition", "")) == reminder["condition"]
+                and str(old.get("asset_type", "")).lower() == reminder["asset_type"]
             ):
                 old["status"] = "cancelled"
                 old["updated_at"] = _reminder_iso(now)
         reminders.append(reminder)
         _save_trade_reminders(reminders)
+    public_reminder = {k: v for k, v in reminder.items() if k != "row"}
+    public_reminder["expires_at"] = reminder["expires_at_iso"]
+    public_reminder["remaining_seconds"] = max(0, int(reminder["expires_at"] - now))
     return {
         "status": "ok",
         "message": f"Reminder fuer {reminder['ticker']} aktiv",
-        "reminder": {k: v for k, v in reminder.items() if k != "row"},
+        "reminder": public_reminder,
     }
 
 

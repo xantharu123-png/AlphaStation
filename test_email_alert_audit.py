@@ -2552,6 +2552,229 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
     assert sent and sent[0][2] is True
 
 
+def test_triggered_trade_reminder_retries_email_without_retriggering(tmp_path, monkeypatch):
+    reminder_file = tmp_path / "trade_reminders.json"
+    now = [1_000_000.0]
+    monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(reminder_file))
+    monkeypatch.setattr(api, "_reminder_now", lambda: now[0])
+    row = _early_mover_row(Symbol="RETRY")
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: row)
+    trigger_checks = []
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda candidate: trigger_checks.append(candidate) or {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "last_close": 1.31,
+        "volume_ratio": 1.7,
+    })
+    send_results = iter([False, True])
+    sent = []
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append(subject) or next(send_results))
+
+    api._save_trade_reminders([{
+        "id": "retry1",
+        "owner_email": "owner@example.com",
+        "ticker": "RETRY",
+        "asset_type": "crypto",
+        "scanner": "early_movers",
+        "condition": "trigger",
+        "channel": "email_browser",
+        "status": "active",
+        "row": row,
+        "created_at": api._reminder_iso(999_000.0),
+        "expires_at": 1_010_000.0,
+        "expires_at_iso": api._reminder_iso(1_010_000.0),
+        "last_checked_at": 0,
+    }])
+
+    api._process_trade_reminders_once()
+    first = api._load_trade_reminders()[0]
+    assert first["status"] == "triggered"
+    assert first["email_delivery_status"] == "retry_pending"
+    assert first["email_attempts"] == 1
+    assert len(trigger_checks) == 1
+    assert len(sent) == 1
+
+    now[0] += 30
+    api._process_trade_reminders_once()
+    assert len(trigger_checks) == 1
+    assert len(sent) == 1
+
+    now[0] += 31
+    api._process_trade_reminders_once()
+    final = api._load_trade_reminders()[0]
+    assert final["status"] == "triggered"
+    assert final["email_delivery_status"] == "sent"
+    assert final["email_attempts"] == 2
+    assert final["email_sent_at"]
+    assert len(trigger_checks) == 1
+    assert len(sent) == 2
+
+
+def test_stock_trade_reminder_reads_nested_trade_setup(monkeypatch):
+    bars = [
+        {"open": 9.80, "high": 9.90, "low": 9.75, "close": 9.85, "volume": 100}
+        for _ in range(7)
+    ]
+    bars.append({"open": 9.96, "high": 10.18, "low": 9.94, "close": 10.12, "volume": 180})
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        "row": {
+            "trade_setup": {
+                "direction": "LONG",
+                "entry": 10.0,
+                "stop_loss": 9.5,
+                "tp1": 10.8,
+                "tp2": 11.4,
+                "rr_ratio": 2.2,
+            },
+        },
+    })
+
+    assert result["triggered"] is True
+    assert result["reason"] == "5m_trigger"
+    assert result["entry"] == 10.0
+    assert result["stop"] == 9.5
+    assert result["tp1"] == 10.8
+    assert result["tp2"] == 11.4
+
+
+def test_stock_trade_reminder_does_not_alert_stale_breakout(monkeypatch):
+    bars = [
+        {"open": 10.08, "high": 10.20, "low": 10.04, "close": 10.14, "volume": 100}
+        for _ in range(7)
+    ]
+    bars.append({"open": 10.15, "high": 10.30, "low": 10.12, "close": 10.26, "volume": 180})
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "condition": "trigger",
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    })
+
+    assert result["triggered"] is False
+    assert result["reason"] == "stock_trigger_not_ready"
+
+
+def test_stock_trade_reminder_waits_for_candle_closed_after_activation(monkeypatch):
+    bars = [
+        {
+            "open": 9.80,
+            "high": 9.90,
+            "low": 9.75,
+            "close": 9.85,
+            "volume": 100,
+            "timestamp": 1_700_000_000_000,
+        }
+        for _ in range(7)
+    ]
+    bars.append({
+        "open": 9.96,
+        "high": 10.18,
+        "low": 9.94,
+        "close": 10.12,
+        "volume": 180,
+        "timestamp": 1_700_000_000_000,
+    })
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        "created_at_epoch": 1_700_000_600.0,
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    })
+
+    assert result == {"triggered": False, "reason": "waiting_for_new_5m_candle"}
+
+
+def test_stock_retest_reminder_rejects_falling_candle(monkeypatch):
+    bars = [
+        {"open": 10.08, "high": 10.20, "low": 10.04, "close": 10.12, "volume": 100}
+        for _ in range(7)
+    ]
+    bars.append({"open": 10.10, "high": 10.11, "low": 9.88, "close": 9.91, "volume": 180})
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "condition": "retest",
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    })
+
+    assert result["triggered"] is False
+
+
+def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypatch):
+    saved_row = _early_mover_row(Symbol="SAVED")
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: None)
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "last_close": 1.31,
+        "volume_ratio": 1.7,
+    })
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+
+    result = api._evaluate_trade_reminder({
+        "ticker": "SAVED",
+        "asset_type": "crypto",
+        "condition": "trigger",
+        "row": saved_row,
+    })
+
+    assert result["triggered"] is True
+    assert result["reason"] == "5m_breakout_volume_confirmed"
+
+
+def test_crypto_retest_reminder_requires_retest_hold(monkeypatch):
+    saved_row = _early_mover_row(Symbol="RETEST")
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: saved_row)
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "matched": ["breakout"],
+    })
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+
+    result = api._evaluate_trade_reminder({
+        "ticker": "RETEST",
+        "asset_type": "crypto",
+        "condition": "retest",
+        "row": saved_row,
+    })
+
+    assert result["triggered"] is False
+
+
+def test_crypto_trade_reminder_waits_for_candle_closed_after_activation(monkeypatch):
+    saved_row = _early_mover_row(Symbol="FRESH")
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: saved_row)
+    monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
+        "ok": True,
+        "reason": "5m_breakout_volume_confirmed",
+        "matched": ["breakout"],
+        "last_candle_timestamp": 1_700_000_000.0,
+    })
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+
+    result = api._evaluate_trade_reminder({
+        "ticker": "FRESH",
+        "asset_type": "crypto",
+        "condition": "trigger",
+        "created_at_epoch": 1_700_000_600.0,
+        "row": saved_row,
+    })
+
+    assert result["triggered"] is False
+    assert result["reason"] == "waiting_for_new_5m_candle"
+
+
 def test_legacy_ownerless_trade_reminder_is_cancelled_without_email(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(tmp_path / "trade_reminders.json"))
     monkeypatch.setattr(api, "_reminder_now", lambda: 1_000_000.0)

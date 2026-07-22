@@ -2521,6 +2521,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [timeframe, setTimeframe] = useState('4H');
     const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
     const [reminderBusy, setReminderBusy] = useState(false);
+    const [activeReminder, setActiveReminder] = useState(null);
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
@@ -2596,6 +2597,28 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         (isCrypto && scannerData?.HasPerp && cryptoPerpSymbol && cryptoPerpExchange)
     );
     const availableTimeframes = isCrypto && !hasCryptoIntradayChart ? ['1D'] : TIMEFRAMES;
+
+    useEffect(() => {
+        let cancelled = false;
+        const wantedTicker = String(ticker || '').toUpperCase().replace(/USDT$/, '');
+        setActiveReminder(null);
+        const loadActiveReminder = async () => {
+            try {
+                const res = await fetch(`${API}/api/trade-reminders?status=active`);
+                if (!res.ok) return;
+                const payload = await res.json();
+                const match = (payload.reminders || []).find(reminder => (
+                    String(reminder.ticker || '').toUpperCase().replace(/USDT$/, '') === wantedTicker
+                    && String(reminder.asset_type || '').toLowerCase() === (isCrypto ? 'crypto' : 'stock')
+                ));
+                if (!cancelled) setActiveReminder(match || null);
+            } catch (err) {
+                if (!cancelled) setActiveReminder(null);
+            }
+        };
+        loadActiveReminder();
+        return () => { cancelled = true; };
+    }, [ticker, isCrypto]);
 
     useEffect(() => {
         if (isCrypto && !hasCryptoIntradayChart && timeframe !== '1D') {
@@ -3508,23 +3531,62 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         if (action === 'LONG_TRIGGER') return 'Auf Entry-Bestaetigung oder Retest warten.';
         return 'Beobachten, noch kein Sofort-Entry.';
     })();
-    const reminderEligible = Boolean(
-        activeTradeSetup &&
-        !(tradeSignal === 'JETZT_TRADEN' && finalTradeable) &&
-        tradeSignal !== 'NICHT_TRADEN' &&
-        !finalNoTrade &&
-        !finalWatchOnly &&
-        !['NO_TRADE', 'NO_LONG_CHASE', 'BEOBACHTEN', 'WATCH_ONLY'].includes(normalizedSetupAction) &&
-        (
-            finalWaitRetest ||
-            finalWaitTrigger ||
-            finalWaitContinuation ||
-            normalizedSetupAction.includes('WAIT') ||
-            normalizedSetupAction.includes('TRIGGER') ||
-            normalizedSetupAction.includes('RETEST') ||
-            tradeSignal === 'WARTEN'
-        )
+    const reminderEntry = firstFiniteNumber(
+        activeTradeSetup?.entry,
+        activeTradeSetup?.main_entry,
+        cd.entry,
+        cd.Entry,
+        cd.entry_price,
+        d.entry,
+        d.Entry,
+        d.entry_price
     );
+    const reminderStop = firstFiniteNumber(
+        activeTradeSetup?.stop_loss,
+        activeTradeSetup?.stop,
+        cd.stop_loss,
+        cd.stop,
+        cd['Stop Loss'],
+        d.stop_loss,
+        d.stop,
+        d['Stop Loss']
+    );
+    const reminderTp1 = firstFiniteNumber(activeTradeSetup?.tp1, cd.tp1, cd.TP1, d.tp1, d.TP1);
+    const reminderTp2 = firstFiniteNumber(activeTradeSetup?.tp2, cd.tp2, cd.TP2, d.tp2, d.TP2);
+    const reminderStateText = [
+        finalTradeDecision,
+        normalizedSetupAction,
+        tradeSignal,
+        rawEntryStatus,
+        setupActionLabel,
+        cd.signal_label,
+        cd.action_label,
+        cd.status,
+        d.status,
+    ].filter(Boolean).join(' ').toUpperCase();
+    const explicitReminderWait = Boolean(
+        finalWaitRetest ||
+        finalWaitTrigger ||
+        finalWaitContinuation ||
+        tradeSignal === 'WARTEN' ||
+        /WAIT|WARTEN|TRIGGER|RETEST|CONTINUATION|FORTSETZUNG/.test(reminderStateText)
+    );
+    const hardReminderBlock = Boolean(
+        finalNoTrade ||
+        tradeSignal === 'NICHT_TRADEN' ||
+        ['NO_TRADE', 'NO_LONG_CHASE'].includes(normalizedSetupAction)
+    );
+    const reminderEligible = Boolean(
+        reminderEntry &&
+        explicitReminderWait &&
+        !hardReminderBlock &&
+        !(tradeSignal === 'JETZT_TRADEN' && finalTradeable)
+    );
+    const reminderCondition = (finalWaitRetest || reminderStateText.includes('RETEST'))
+        ? 'retest'
+        : (finalWaitContinuation || reminderStateText.includes('CONTINUATION') || reminderStateText.includes('FORTSETZUNG'))
+            ? 'continuation'
+            : 'trigger';
     const triggerChecklist = (() => {
         const raw = activeTradeSetup?.trigger_conditions || cd.trigger_conditions;
         const lines = Array.isArray(raw) && raw.length
@@ -3537,6 +3599,22 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3);
     })();
     const showTriggerChecklist = isCrypto && reminderEligible && triggerChecklist.length > 0;
+    const reminderDurationOptions = [
+        { hours: 1, label: '1h' },
+        { hours: 3, label: '3h' },
+        { hours: 6, label: '6h' },
+        { hours: 12, label: '12h' },
+        { hours: 24, label: '1 Tag' },
+    ];
+    const reminderExpiryValue = activeReminder?.expires_at_iso || activeReminder?.expires_at;
+    const reminderExpiryDate = reminderExpiryValue
+        ? new Date(typeof reminderExpiryValue === 'number' ? reminderExpiryValue * 1000 : reminderExpiryValue)
+        : null;
+    const reminderExpiryLabel = reminderExpiryDate && !Number.isNaN(reminderExpiryDate.getTime())
+        ? reminderExpiryDate.toLocaleString('de-CH', {
+            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        })
+        : '';
     const createTradeReminder = async (hours = 6, channel = 'email_browser') => {
         setReminderBusy(true);
         try {
@@ -3549,14 +3627,19 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 body: JSON.stringify({
                     ticker,
                     asset_type: isCrypto ? 'crypto' : 'stock',
-                    scanner: isCrypto ? 'early_movers' : 'stock',
-                    condition: 'trigger_or_retest',
+                    scanner: cd.scanner || cd.Scanner || cd.source_scanner || d.scanner || d.Scanner || (isCrypto ? 'crypto' : 'stock'),
+                    condition: reminderCondition,
                     duration_hours: hours,
                     channel,
                     row: {
                         ...d,
                         ...cd,
                         trade_setup: activeTradeSetup,
+                        direction: viewDirection || activeTradeSetup?.direction || cd.direction || d.direction || 'LONG',
+                        entry: reminderEntry,
+                        stop_loss: reminderStop,
+                        tp1: reminderTp1,
+                        tp2: reminderTp2,
                         chart_timeframe: chartData?.timeframe || timeframe,
                         chart_source: chartData?.source || 'chart',
                     },
@@ -3564,12 +3647,55 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht erstellt werden');
-            if (window.addToast) window.addToast(`Reminder aktiv: ${ticker} fuer ${hours}h`, 'success');
+            setActiveReminder(data.reminder || null);
+            const durationLabel = hours === 24 ? '1 Tag' : `${hours}h`;
+            if (window.addToast) window.addToast(`Reminder aktiv: ${ticker} fuer ${durationLabel}`, 'success');
         } catch (err) {
             if (window.addToast) window.addToast(err.message || 'Reminder Fehler', 'error');
         } finally {
             setReminderBusy(false);
         }
+    };
+    const cancelTradeReminder = async () => {
+        if (!activeReminder?.id) return;
+        setReminderBusy(true);
+        try {
+            const res = await fetch(`${API}/api/trade-reminders/${activeReminder.id}`, { method: 'DELETE' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht beendet werden');
+            setActiveReminder(null);
+            if (window.addToast) window.addToast(`Reminder fuer ${ticker} beendet`, 'success');
+        } catch (err) {
+            if (window.addToast) window.addToast(err.message || 'Reminder Fehler', 'error');
+        } finally {
+            setReminderBusy(false);
+        }
+    };
+    const renderReminderControls = () => {
+        if (!reminderEligible) return null;
+        return (
+            <div className="mt-3 border-t border-white/60 pt-2">
+                <div className="font-semibold">Mail-Reminder bei bestaetigtem {reminderCondition === 'retest' ? 'Retest' : 'Trigger'}</div>
+                <div className="text-xs opacity-75 mt-1 mb-2">Pruefung jede Minute. Mail und Browser-Hinweis werden einmalig gesendet.</div>
+                {activeReminder && (
+                    <div className="mb-2 flex items-center gap-2 flex-wrap text-xs">
+                        <span className="font-semibold text-emerald-700">Aktiv bis {reminderExpiryLabel || '-'}</span>
+                        <button disabled={reminderBusy} onClick={cancelTradeReminder}
+                            className="px-2 py-1 rounded bg-white/80 border border-red-200 text-red-700 font-semibold hover:bg-red-50 disabled:opacity-50">
+                            Beenden
+                        </button>
+                    </div>
+                )}
+                <div className="flex gap-2 flex-wrap">
+                    {reminderDurationOptions.map(option => (
+                        <button key={option.hours} disabled={reminderBusy} onClick={() => createTradeReminder(option.hours, 'email_browser')}
+                            className="px-2 py-1 rounded bg-white/80 border border-sky-200 text-sky-800 font-semibold hover:bg-sky-50 disabled:opacity-50">
+                            {option.label} Mail + Browser
+                        </button>
+                    ))}
+                </div>
+            </div>
+        );
     };
     const modeLabel = sidebarMode === 'normal' ? 'Normal' : sidebarMode === 'wide' ? 'Breit' : 'Vollbild';
 
@@ -3785,19 +3911,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         {(cd.risk_flags && cd.risk_flags.length > 0) && (
                             <div className="mt-2 text-amber-800">Hinweis: {compactRiskText(cd.risk_flags)}</div>
                         )}
-                        {reminderEligible && (
-                            <div className="mt-3 border-t border-white/60 pt-2">
-                                <div className="font-semibold mb-2">Reminder wenn Trigger/Retest kommt</div>
-                                <div className="flex gap-2 flex-wrap">
-                                    {[2, 6, 12, 24].map(h => (
-                                        <button key={h} disabled={reminderBusy} onClick={() => createTradeReminder(h, 'email_browser')}
-                                            className="px-2 py-1 rounded bg-white/80 border border-sky-200 text-sky-800 font-semibold hover:bg-sky-50 disabled:opacity-50">
-                                            {h}h Mail+Browser
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
+                        {renderReminderControls()}
                     </div>
                 )}
 
@@ -4200,19 +4314,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 {activeTradeSetup.notes.slice(0, 3).join(' | ')}
                             </div>
                         )}
-                        {reminderEligible && (
-                            <div className="mt-3 border-t border-white/60 pt-2">
-                                <div className="font-semibold mb-2">Reminder bei Entry-Zone/Retest</div>
-                                <div className="flex gap-2 flex-wrap">
-                                    {[2, 6, 12].map(h => (
-                                        <button key={h} disabled={reminderBusy} onClick={() => createTradeReminder(h, 'email_browser')}
-                                            className="px-2 py-1 rounded bg-white/80 border border-blue-200 text-blue-800 font-semibold hover:bg-blue-50 disabled:opacity-50">
-                                            {h}h Mail+Browser
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
+                        {renderReminderControls()}
                     </div>
                 )}
 

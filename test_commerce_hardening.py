@@ -175,6 +175,29 @@ def test_trade_reminders_are_scoped_to_the_authenticated_owner(monkeypatch, tmp_
     assert api.cancel_trade_reminder(first["id"], authorization="Bearer token-a")["status"] == "ok"
 
 
+def test_new_trade_reminder_replaces_existing_symbol_and_returns_iso_expiry(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(tmp_path / "trade_reminders.json"))
+    monkeypatch.setattr(api, "HAS_AUTH", True)
+    monkeypatch.setattr(api, "ADMIN_EMAILS", set())
+    monkeypatch.setattr(api, "verify_token", lambda token: {"email": "owner@example.com"})
+    monkeypatch.setattr(api, "_reminder_now", lambda: 1_700_000_000.0)
+
+    first = api.create_trade_reminder(
+        api.TradeReminderRequest(ticker="BTCUSDT", asset_type="crypto", condition="trigger"),
+        authorization="Bearer owner-token",
+    )["reminder"]
+    second = api.create_trade_reminder(
+        api.TradeReminderRequest(ticker="BTCUSDT", asset_type="crypto", condition="retest", duration_hours=3),
+        authorization="Bearer owner-token",
+    )["reminder"]
+
+    stored = api._load_trade_reminders()
+    assert first["ticker"] == "BTC"
+    assert first["expires_at"].endswith("+00:00")
+    assert second["remaining_seconds"] == 10_800
+    assert [row["status"] for row in stored] == ["cancelled", "active"]
+
+
 def test_strict_registration_requires_current_legal_consent(monkeypatch):
     monkeypatch.setattr(api, "HAS_AUTH", True)
     monkeypatch.setattr(api, "COMMERCIAL_STRICT_MODE", True)
