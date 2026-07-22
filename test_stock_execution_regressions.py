@@ -46,6 +46,7 @@ def test_intraday_rvol_is_normalized_against_expected_session_volume():
     assert metrics["rvol20_raw"] == 0.22
     assert metrics["rvol20"] == 1.0
     assert metrics["rvol_source"] == "20D_intraday_time_adjusted"
+    assert metrics["median_dollar_vol20"] == 1_000_000
 
 
 def test_mail_classifier_waits_below_unreclaimed_resistance(monkeypatch):
@@ -94,6 +95,53 @@ def test_momentum_mail_gate_fails_closed_when_breakout_metadata_is_missing():
 
     assert ok is False
     assert reason == "momentum_mail_blocked_missing_breakout_type"
+
+
+def _clean_momentum_mail_row():
+    return {
+        "Strategy": "Momentum Breakout Long",
+        "History_OK": True,
+        "MedianDollarVol20": 5_000_000,
+        "Momentum_Breakout_Type": "20D_HIGH_BREAKOUT",
+        "Breakout_Continuation_Status": "CONTINUATION_OK",
+        "Breakout_Continuation_Score": 92,
+        "Breakout_Fakeout_Risk": "LOW",
+        "Upper_Wick_Pct": 8,
+        "Close_Position": 0.92,
+        "RVOL": 2.2,
+        "Preis": 100,
+        "Day_High": 101,
+        "Day_Open": 98,
+        "Change_Pct": 2.5,
+        "TP1": 105,
+    }
+
+
+def test_momentum_mail_blocks_thin_historical_dollar_liquidity():
+    row = _clean_momentum_mail_row()
+    row["MedianDollarVol20"] = 750_000
+
+    ok, reason = api._stock_strategy_mail_quality_state(row)
+
+    assert ok is False
+    assert reason == "momentum_mail_blocked_thin_baseline_liquidity"
+
+
+def test_momentum_mail_blocks_missing_historical_liquidity():
+    row = _clean_momentum_mail_row()
+    row["History_OK"] = False
+
+    ok, reason = api._stock_strategy_mail_quality_state(row)
+
+    assert ok is False
+    assert reason == "momentum_mail_blocked_missing_liquidity_history"
+
+
+def test_momentum_mail_allows_sufficient_baseline_liquidity():
+    ok, reason = api._stock_strategy_mail_quality_state(_clean_momentum_mail_row())
+
+    assert ok is True
+    assert reason == ""
 
 
 def test_breakout_freshness_detects_recent_cross():

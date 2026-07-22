@@ -1564,6 +1564,8 @@ _ALERT_SUPPRESSION_LABELS = {
     "momentum_mail_blocked_late_intraday_chase": "Momentum-Mail: Tagesmove schon erweitert, kein sauberer frischer Breakout",
     "momentum_mail_blocked_tp1_already_touched_intraday": "Momentum-Mail: TP1 wurde intraday schon erreicht",
     "momentum_mail_blocked_spike_rejected_from_high": "Momentum-Mail: Spike vom Tageshoch wurde abverkauft",
+    "momentum_mail_blocked_missing_liquidity_history": "Momentum-Mail: historische Basis-Liquiditaet fehlt",
+    "momentum_mail_blocked_thin_baseline_liquidity": "Momentum-Mail: normale 20T-Dollar-Liquiditaet zu duenn",
     "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
     "invalid_trade_plan": "Entry/Stop/TP ungueltig",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
@@ -5836,6 +5838,9 @@ def _is_late_us_regular_session(
         return False
 
 
+_STOCK_MOMENTUM_MAIL_MIN_MEDIAN_DOLLAR_VOLUME_20D = 2_000_000.0
+
+
 def _stock_strategy_mail_quality_state(
     row: Dict[str, Any],
     *,
@@ -5852,6 +5857,25 @@ def _stock_strategy_mail_quality_state(
     strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
     if "momentum breakout long" not in strategy_name:
         return True, ""
+
+    # A single high-RVOL day must not make an ordinarily thin stock look safe
+    # enough for an automatic "trade now" mail. Production strategy rows carry
+    # completed-daily-history metadata; legacy/test rows without that metadata
+    # retain their existing behavior.
+    has_liquidity_history_metadata = any(
+        key in row
+        for key in ("History_OK", "MedianDollarVol20", "median_dollar_volume_20d")
+    )
+    if has_liquidity_history_metadata:
+        if not bool(row.get("History_OK")):
+            return False, "momentum_mail_blocked_missing_liquidity_history"
+        median_dollar_volume_20d = _alert_float(
+            row.get("MedianDollarVol20", row.get("median_dollar_volume_20d"))
+        )
+        if median_dollar_volume_20d is None or median_dollar_volume_20d <= 0:
+            return False, "momentum_mail_blocked_missing_liquidity_history"
+        if median_dollar_volume_20d < _STOCK_MOMENTUM_MAIL_MIN_MEDIAN_DOLLAR_VOLUME_20D:
+            return False, "momentum_mail_blocked_thin_baseline_liquidity"
 
     breakout_type = str(
         row.get("Momentum_Breakout_Type")
@@ -10702,6 +10726,17 @@ def _strategy_daily_history_metrics(
 
     vols20 = [b["volume"] for b in completed[-20:]]
     avg_vol20 = historical_volume_baseline(vols20, lookback=20, minimum_periods=10) or 0.0
+    dollar_vols20 = [
+        b["close"] * b["volume"]
+        for b in completed[-20:]
+        if b.get("close", 0) > 0 and b.get("volume", 0) > 0
+    ]
+    median_dollar_vol20 = historical_volume_baseline(
+        dollar_vols20,
+        lookback=20,
+        method="median",
+        minimum_periods=10,
+    ) or 0.0
     volume_fraction = _us_equity_expected_volume_fraction(now_utc)
     raw_rvol20 = completed_bar_rvol(day_volume, vols20, lookback=20, minimum_periods=10)
     rvol20 = min(round(project_partial_rvol(raw_rvol20, volume_fraction), 2), 50.0)
@@ -10779,6 +10814,7 @@ def _strategy_daily_history_metrics(
     return {
         "history_ok": len(completed) >= 20,
         "avg_vol20": avg_vol20,
+        "median_dollar_vol20": median_dollar_vol20,
         "rvol20": rvol20,
         "rvol20_raw": round(raw_rvol20, 2),
         "rvol_source": rvol_source,
@@ -12716,6 +12752,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "rvol": rvol,
                         "RVOL_Source": rvol_source,
                         "AvgVol20": round(history_metrics.get("avg_vol20") or 0),
+                        "MedianDollarVol20": round(history_metrics.get("median_dollar_vol20") or 0),
+                        "median_dollar_volume_20d": round(history_metrics.get("median_dollar_vol20") or 0),
                         "Dollar_Volume": round(projected_dollar_vol),
                         "Observed_Dollar_Volume": round(dollar_vol),
                         "Projected_Dollar_Volume": round(projected_dollar_vol),
