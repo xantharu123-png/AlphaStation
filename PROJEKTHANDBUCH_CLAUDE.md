@@ -683,7 +683,8 @@ Die Restliste aus 19.8 wurde anschließend erneut gegen produktiven Code, Datenf
 - Timeout beziehungsweise Hänger werden als Laufproblem sichtbar und nicht als falscher Cachefehler ausgegeben
 - leichte Scanner blockieren die zentrale Scheduler-Schleife nicht mehr
 - schwere Scanner können unabhängig laufen, ohne Aktien-, Krypto- und Mail-Jobs gegenseitig vollständig aufzuhalten
-- der Penny-Scanner besitzt ein hartes Laufzeitbudget, prüft offene Positionen zuerst und deckt den Rest rotierend ab
+- der 30-Minuten-Penny-Discovery-Lauf prueft das vollstaendige aktive US-Common-Stock-Penny-Universum; Liquiditaetsfilter bestimmen die Handelbarkeit, duerfen aber keine Symbole still aus der Abdeckung entfernen
+- der separate 5-Minuten-Penny-Monitor prueft aktive Modellpositionen und einen kurzlebigen Trigger-Pool; dadurch werden Entries und Exits zeitnah revalidiert, ohne den Volluniversum-Lauf zu duplizieren
 - nur tatsächlich live revalidierte Penny-Zeilen dürfen eine Kaufmail erzeugen
 - System Health unterscheidet aktive, überfällige, hängende, stale und fehlerhafte Zustände ehrlicher
 
@@ -691,10 +692,23 @@ Die Restliste aus 19.8 wurde anschließend erneut gegen produktiven Code, Datenf
 
 - alte Breakout-Qualitätscaches werden nach Modelländerungen invalidiert
 - Momentum-Breakout-Follow-through wurde kalibriert und gegen künstliche 100/100-Scores abgesichert
-- Penny-Scan-Abdeckung zeigt Volluniversum, Qualitätsblock und rotierend geprüften Anteil getrennt
+- Penny-Scan-Abdeckung zeigt Volluniversum, vollstaendig gepruefte Discovery-Symbole, Trigger-Pool und aktive Positionen getrennt
 - eine leere Penny-Trade-Liste bedeutet "kein bestätigter Entry/Exit" und nicht automatisch "Scanner kaputt"
 - BI-interne Begriffe und maschinelle Reason-Codes wurden durch klare Nutzeraktionen und konkrete Gründe ersetzt
 - Frontend/API-Kompatibilität nach Runtime-Härtungen wurde wiederhergestellt und per Bundle-Verifikation abgesichert
+
+### 19.10 Penny-Stock-Abnahme 22.07.2026
+
+- `Setup-Qualitaet`, `Entry-Qualitaet`, `Dump-Risiko` und finaler `Trade-Score` sind getrennte heuristische Bewertungen; keine davon ist eine Gewinnwahrscheinlichkeit.
+- Ein Kaufzustand benoetigt einen frischen, abgeschlossenen 5-Minuten-Breakout oder Retest, reale Common-Stock-Identitaet, aktuelle Quote, ausfuehrbaren Spread, ausreichendes Dollarvolumen, gemeldeten Float beziehungsweise einen transparenten Unknown-Status, SEC-/News-Safety sowie einen gueltigen Strukturplan.
+- Stop und Ziele werden aus technischer Invalidation, Tages-/Intraday-Struktur und VRVP-Barrieren gebaut. TP1 und TP2 muessen korrekt gerichtet, verschieden und nach geschaetzten Round-Trip-Kosten noch ausreichend weit entfernt sein.
+- Ein einzelnes Warnmerkmal wie hohes Dump-Risiko, schwaches Fortschrittsvolumen oder eine rote Kerze beendet keine aktive Position. Ein technischer Exit benoetigt einen bestaetigten Strukturbruch, zum Beispiel zwei abgeschlossene VWAP-Verluste oder Distribution nach mehrfach gescheitertem Ausbruch.
+- Kauf-, TP1- und Exit-Zustand werden erst nach erfolgreichem Mailversand mutiert. Ein Mailfehler darf weder eine Position eroeffnen noch eine aktive Position still schliessen.
+- Die Standardtabelle zeigt nur `JETZT_KAUFEN`, `HALTEN` und `JETZT_VERKAUFEN`. Vorstufen sind optional und werden nicht mehr als hervorgehobene Fast-Entry-Liste verkauft.
+- Replay wertet nur Kerzen nach dem Signal aus. Bei innerhalb einer OHLC-Kerze nicht aufloesbarer Reihenfolge gilt konservativ die fuer den Modelltrade unguenstigere Sequenz.
+- News- und SEC-Safety sind semantisch angeglichen: Eine Shelf-Registrierung ist eine Kapazitaetswarnung, waehrend Offering, ATM, Prospektverkauf oder Securities Purchase Agreement harte Finanzierungsrisiken bleiben.
+- Abnahme am 22.07.2026: `65` Penny-spezifische und `1019` projektweite Tests bestanden; Python-Compile sowie Frontend-Build/Bundle-Pruefung bestanden.
+- Die aktuellen Schwellen sind defensive Heuristiken und muessen vor einem Paid-Launch per Shadow-Run sowie Walk-forward-/Out-of-Sample-Auswertung nach realem Spread, Slippage und Teilfills kalibriert werden.
 
 ## 20. Die größten Schwierigkeiten und ihre Ursachen
 

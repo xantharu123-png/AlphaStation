@@ -116,15 +116,21 @@ from modules.vrvp_levels import (
     calculate_wilder_atr,
 )
 from modules.penny_stock_scanner import (
+    PENNY_DEFAULT_SLIPPAGE_BPS,
     PENNY_EXECUTION_MAX_SPREAD_BPS,
+    PENNY_MAX_ENTRY_DRIFT_R,
     PENNY_MIN_PRICE,
     PENNY_MAX_PRICE,
+    PENNY_MIN_NET_EFFECTIVE_RR,
+    PENNY_MIN_NET_TP1_RR,
     PENNY_MIN_TRADE_SCORE,
     PENNY_TRIGGER_MAX_AGE_SECONDS,
     analyze_penny_intraday,
+    estimate_penny_execution_costs,
     evaluate_penny_candidate,
     evaluate_penny_signal_outcome,
     score_broad_penny_candidate,
+    summarize_penny_rth_volume,
 )
 
 # Signal-Tracking + Telegram-Spiegel (fester Modul-Kontrakt, Parallel-Team).
@@ -7888,6 +7894,7 @@ SCAN_DATA_SOURCES = {
     "new_listing": "Exchange PERP listings + orderbook/safety checks",
     "volume_spikes": "Polygon US stock gainers/losers snapshots",
     "penny_stocks": "Polygon full US stock snapshots + closed 5m bars + daily/VRVP structure + recent headline risk",
+    "penny_positions": "Short-lived Penny trigger pool + open model positions + closed 5m bars + live execution/structure checks",
     "orb": "Polygon intraday bars + official market hours",
     "turtle": "Polygon daily bars + Turtle breakout logic",
 }
@@ -7909,9 +7916,15 @@ SCAN_EXCLUSION_POLICIES = {
     ],
     "penny_stocks": [
         "Only active US common stocks between $0.20 and $5.00; ETFs/ETPs are excluded by reference universe.",
-        "A high pump score is watch context, not a buy; live mail requires a fresh closed 5m breakout/retest.",
+        "Setup quality alone is not a buy; live mail also requires entry quality, acceptable dump risk and a fresh closed 5m breakout/retest.",
         "Block wide/unknown spreads, thin dollar volume, stale candles, close overhead resistance and recent offering/reverse-split risk.",
         "Stop and both targets must come from verifiable 5m/daily/VRVP structure.",
+    ],
+    "penny_positions": [
+        "Recheck only the short-lived internal discovery pool for new entries; it is not a user watchlist or a trade signal.",
+        "Open a model position only after a fresh closed-5m trigger passes the full asset, SEC/news, liquidity, structure, execution-cost and net-R:R model and the buy alert succeeds.",
+        "Keep positions visible during data gaps and never mark an exit complete before the exit alert succeeds.",
+        "Use closed 5m bars and the original structural invalidation for hold, partial-profit and exit decisions.",
     ],
     "crypto_trade_signals": [
         "Return one visible decision per coin: LONG, SHORT, WAIT or NO_TRADE.",
@@ -13669,6 +13682,8 @@ _scheduler_running = False
 CRYPTO_EXPLOSION_CACHE = "/tmp/crypto_explosion_cache.json"
 CRYPTO_TRADE_SIGNALS_CACHE = "/tmp/crypto_trade_signals_cache.json"
 PENNY_STOCKS_CACHE = "/tmp/penny_stock_scanner_cache.json"
+PENNY_STOCKS_MONITOR_CACHE = "/tmp/penny_stock_monitor_cache.json"
+PENNY_STOCKS_TRIGGER_POOL_CACHE = "/tmp/penny_stock_trigger_pool.json"
 PENNY_STOCKS_STATE = "/tmp/penny_stock_scanner_state.json"
 PENNY_STOCKS_REFERENCE_CACHE = "/tmp/penny_stock_reference_cache.json"
 PENNY_STOCKS_DAILY_CACHE = "/tmp/penny_stock_daily_cache.json"
@@ -13688,7 +13703,10 @@ _scan_status = {
     "money_flow": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
     "new_listing": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
     "volume_spikes": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
-    "penny_stocks": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
+    # Full-market discovery needs several minutes at the provider rate limit.
+    # Active model positions are monitored independently every five minutes.
+    "penny_stocks": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "penny_positions": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
@@ -13708,6 +13726,7 @@ SCAN_CACHE_MAP = {
     "new_listing": "/tmp/new_listing_scanner.json",
     "volume_spikes": "/tmp/volume_spikes_cache.json",
     "penny_stocks": PENNY_STOCKS_CACHE,
+    "penny_positions": PENNY_STOCKS_MONITOR_CACHE,
     "orb": "/tmp/orb_scan_results.json",
     "turtle": "/tmp/turtle_scan_cache.json",
     "strategy_scan": "/tmp/strategy_scan_cache.json",
@@ -13900,7 +13919,17 @@ def _init_scan_status_from_cache():
 
 _init_scan_status_from_cache()
 
-_SCAN_TIMEOUTS = {"bi_long": 45, "bi_short": 45, "biotech": 45, "bear": 20, "early_movers": 25, "crypto_trade_signals": 30, "crypto_explosion": 25, "penny_stocks": 20}
+_SCAN_TIMEOUTS = {
+    "bi_long": 45,
+    "bi_short": 45,
+    "biotech": 45,
+    "bear": 20,
+    "early_movers": 25,
+    "crypto_trade_signals": 30,
+    "crypto_explosion": 25,
+    "penny_stocks": 45,
+    "penny_positions": 5,
+}
 
 def _run_scan_safe(name, func, timeout_min=None):
     """Start exactly one non-blocking worker for a scanner.
@@ -14034,6 +14063,7 @@ def _scheduler_loop():
         ("market_context", _market_context_wrapper),
         ("btc_divergenz", _btc_divergenz_wrapper),
         ("volume_spikes", _volume_spikes_wrapper),
+        ("penny_positions", _penny_position_monitor_wrapper),
         ("penny_stocks", _penny_stock_scanner_wrapper),
         ("money_flow", _money_flow_wrapper),
         ("orb", _orb_scanner_wrapper),
@@ -22005,6 +22035,11 @@ def get_crypto_trade_signals_results():
     }
 
 
+_penny_state_lock = threading.RLock()
+_penny_trigger_pool_lock = threading.RLock()
+_PENNY_TRIGGER_POOL_TTL_SECONDS = 45 * 60
+
+
 def _penny_load_dict(path: str) -> Dict[str, Any]:
     try:
         if not os.path.exists(path):
@@ -22037,13 +22072,264 @@ def _penny_save_dict(path: str, payload: Dict[str, Any]) -> None:
                 pass
 
 
+def _penny_trigger_pool_eligibility(
+    snapshot: Dict[str, Any],
+    broad: Dict[str, Any],
+    intraday: Dict[str, Any],
+) -> Tuple[bool, str]:
+    """Return whether a setup deserves closed-5m rechecks until the next sweep.
+
+    This is an internal workload queue, not a user-facing watchlist and not a
+    trade score.  Every condition is deliberately structural: executable
+    liquidity from the broad screen, fresh RTH data, proximity to the current
+    range high, and no obvious distribution/reversal signature.
+    """
+    if not broad.get("eligible"):
+        return False, "broad_liquidity_screen_failed"
+    if not intraday.get("data_ok"):
+        return False, "closed_5m_data_missing"
+    if not intraday.get("fresh"):
+        return False, "closed_5m_data_stale"
+
+    warnings = {str(value) for value in (intraday.get("warnings") or [])}
+    severe_warnings = {
+        "extended_green_streak",
+        "far_above_vwap",
+        "repeated_failed_highs",
+        "record_volume_without_price_progress",
+        "large_upper_wick",
+        "high_volume_red_reversal",
+    }
+    if warnings & severe_warnings:
+        return False, "distribution_or_extension_warning"
+    if intraday.get("vwap_lost") or intraday.get("heavy_red_bar"):
+        return False, "intraday_structure_lost"
+
+    price = _alert_float(intraday.get("price"), 0.0) or 0.0
+    vwap = _alert_float(intraday.get("vwap"), 0.0) or 0.0
+    ema9 = _alert_float(intraday.get("ema9"), 0.0) or 0.0
+    ema20 = _alert_float(intraday.get("ema20"), 0.0) or 0.0
+    distance = _alert_float(intraday.get("distance_to_breakout_pct"), None)
+    volume_ratio = _alert_float(intraday.get("volume_ratio"), 0.0) or 0.0
+    close_position = _alert_float(intraday.get("close_position"), 0.0) or 0.0
+    if not price or not vwap or distance is None:
+        return False, "intraday_structure_incomplete"
+    if not (-1.25 <= distance <= 5.0):
+        return False, "outside_trigger_neighborhood"
+    if price < vwap * 0.985:
+        return False, "below_vwap_neighborhood"
+    if ema9 <= 0 or ema20 <= 0 or ema9 < ema20 * 0.985:
+        return False, "intraday_trend_not_ready"
+    if volume_ratio < 0.50:
+        return False, "intraday_participation_too_low"
+    if close_position < 0.40:
+        return False, "weak_closed_bar_location"
+    return True, "technical_trigger_neighborhood"
+
+
+def _penny_load_trigger_pool(*, now_ts: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
+    """Load only live internal trigger candidates; stale pools fail closed."""
+    now_value = float(now_ts if now_ts is not None else time.time())
+    with _penny_trigger_pool_lock:
+        payload = _penny_load_dict(PENNY_STOCKS_TRIGGER_POOL_CACHE)
+    expires_at = _alert_float(payload.get("expires_at"), 0.0) or 0.0
+    if expires_at <= now_value:
+        return {}
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), dict) else {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for raw_symbol, raw_candidate in candidates.items():
+        if not isinstance(raw_candidate, dict):
+            continue
+        symbol = str(raw_symbol or "").upper().strip()
+        snapshot = raw_candidate.get("snapshot")
+        if not symbol or not isinstance(snapshot, dict):
+            continue
+        candidate_expires = _alert_float(raw_candidate.get("expires_at"), expires_at) or expires_at
+        if candidate_expires <= now_value:
+            continue
+        result[symbol] = dict(raw_candidate)
+    return result
+
+
+def _penny_save_trigger_pool(
+    candidates: Dict[str, Dict[str, Any]],
+    *,
+    now_ts: Optional[float] = None,
+) -> None:
+    """Atomically replace the internal trigger queue after a complete sweep."""
+    now_value = float(now_ts if now_ts is not None else time.time())
+    expires_at = now_value + _PENNY_TRIGGER_POOL_TTL_SECONDS
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw_symbol, raw_candidate in (candidates or {}).items():
+        if not isinstance(raw_candidate, dict):
+            continue
+        symbol = str(raw_symbol or "").upper().strip()
+        snapshot = raw_candidate.get("snapshot")
+        if not symbol or not isinstance(snapshot, dict):
+            continue
+        normalized[symbol] = {
+            **raw_candidate,
+            "ticker": symbol,
+            "expires_at": expires_at,
+        }
+    with _penny_trigger_pool_lock:
+        _penny_save_dict(PENNY_STOCKS_TRIGGER_POOL_CACHE, {
+            "updated_at": now_value,
+            "expires_at": expires_at,
+            "ttl_seconds": _PENNY_TRIGGER_POOL_TTL_SECONDS,
+            "candidates": normalized,
+        })
+
+
+def _penny_load_state_tickers() -> Dict[str, Dict[str, Any]]:
+    """Return a detached snapshot of Penny model state."""
+    with _penny_state_lock:
+        payload = _penny_load_dict(PENNY_STOCKS_STATE)
+        tickers = payload.get("tickers") if isinstance(payload.get("tickers"), dict) else {}
+        return {
+            str(symbol).upper(): dict(state)
+            for symbol, state in tickers.items()
+            if isinstance(state, dict)
+        }
+
+
+def _penny_merge_state_tickers(
+    updates: Dict[str, Dict[str, Any]],
+    *,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Atomically merge Penny state without overwriting newer monitor data.
+
+    Discovery and position monitoring intentionally run independently.  The
+    per-symbol ``last_seen`` timestamp is therefore the conflict clock: an old
+    discovery result must never reactivate, deactivate, or move the stop of a
+    position already updated by the five-minute monitor.
+    """
+    saved_at = float(now_ts if now_ts is not None else time.time())
+    with _penny_state_lock:
+        payload = _penny_load_dict(PENNY_STOCKS_STATE)
+        current = payload.get("tickers") if isinstance(payload.get("tickers"), dict) else {}
+        merged: Dict[str, Dict[str, Any]] = {
+            str(symbol).upper(): dict(state)
+            for symbol, state in current.items()
+            if isinstance(state, dict)
+        }
+        for raw_symbol, raw_update in (updates or {}).items():
+            if not isinstance(raw_update, dict):
+                continue
+            symbol = str(raw_symbol or "").upper().strip()
+            if not symbol:
+                continue
+            existing = merged.get(symbol, {})
+            existing_seen = _alert_float(existing.get("last_seen"), 0.0) or 0.0
+            incoming_seen = _alert_float(raw_update.get("last_seen"), 0.0) or 0.0
+            if existing_seen > incoming_seen > 0:
+                continue
+
+            existing_active = bool(existing.get("active"))
+            incoming_active = bool(raw_update.get("active"))
+            existing_position_id = _penny_event_token(existing.get("position_event_id"))
+            incoming_position_id = _penny_event_token(raw_update.get("position_event_id"))
+            incoming_action = str(raw_update.get("last_action") or "").upper()
+            explicit_exit = (
+                not incoming_active
+                and raw_update.get("exit_email_sent") is True
+                and incoming_action == "JETZT_VERKAUFEN"
+                and (
+                    not existing_position_id
+                    or incoming_position_id == existing_position_id
+                )
+            )
+            explicit_entry = (
+                incoming_active
+                and raw_update.get("buy_email_sent") is True
+                and incoming_action == "JETZT_KAUFEN"
+                and (
+                    not existing_position_id
+                    or incoming_position_id != existing_position_id
+                    or not existing.get("exit_email_sent")
+                )
+            )
+
+            # Discovery may finish after the five-minute monitor. Only a
+            # successful mail lifecycle event may open or close a position.
+            if existing_active and not incoming_active and not explicit_exit:
+                continue
+            if (
+                not existing_active
+                and existing.get("exit_email_sent") is True
+                and incoming_active
+                and not explicit_entry
+            ):
+                continue
+            merged[symbol] = {**existing, **raw_update}
+
+        merged = {
+            symbol: state
+            for symbol, state in merged.items()
+            if state.get("active")
+            or saved_at - (_alert_float(state.get("last_seen"), 0.0) or 0.0) <= 7 * 86400
+        }
+        _penny_save_dict(PENNY_STOCKS_STATE, {
+            "updated_at": saved_at,
+            "tickers": merged,
+        })
+        return {symbol: dict(state) for symbol, state in merged.items()}
+
+
+def _penny_market_timestamp_seconds(
+    payload: Any,
+    keys: Tuple[str, ...],
+) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(timestamp) or timestamp <= 0:
+            continue
+        if timestamp > 1_000_000_000_000_000:
+            timestamp /= 1_000_000_000.0
+        elif timestamp > 10_000_000_000:
+            timestamp /= 1000.0
+        return timestamp
+    return None
+
+
 def _penny_normalize_snapshot(raw: Dict[str, Any], volume_fraction: float) -> Optional[Dict[str, Any]]:
     symbol = str(raw.get("ticker") or "").upper().strip()
     day = raw.get("day") if isinstance(raw.get("day"), dict) else {}
     prev = raw.get("prevDay") if isinstance(raw.get("prevDay"), dict) else {}
     last_trade = raw.get("lastTrade") if isinstance(raw.get("lastTrade"), dict) else {}
     last_quote = raw.get("lastQuote") if isinstance(raw.get("lastQuote"), dict) else {}
-    price = _alert_float(day.get("c") or last_trade.get("p"), 0.0) or 0.0
+    now_ts = time.time()
+    trade_price = _alert_float(last_trade.get("p"), 0.0) or 0.0
+    day_price = _alert_float(day.get("c"), 0.0) or 0.0
+    last_trade_ts = _penny_market_timestamp_seconds(
+        last_trade,
+        ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
+    )
+    snapshot_ts = _penny_market_timestamp_seconds(
+        raw,
+        ("updated", "timestamp", "t"),
+    )
+    last_trade_age_seconds = (
+        max(0.0, now_ts - last_trade_ts) if last_trade_ts is not None else None
+    )
+    snapshot_age_seconds = (
+        max(0.0, now_ts - snapshot_ts) if snapshot_ts is not None else None
+    )
+    trade_price_fresh = bool(
+        trade_price > 0
+        and last_trade_age_seconds is not None
+        and last_trade_age_seconds <= 90
+    )
+    price = trade_price if trade_price_fresh else (day_price or trade_price)
     if not symbol or price <= 0:
         return None
     prev_close = _alert_float(prev.get("c"), 0.0) or 0.0
@@ -22068,12 +22354,11 @@ def _penny_normalize_snapshot(raw: Dict[str, Any], volume_fraction: float) -> Op
         or last_quote.get("ask"),
         None,
     )
-    quote_ts = _alert_float(last_quote.get("t") or last_quote.get("timestamp"), None)
-    if quote_ts and quote_ts > 1_000_000_000_000_000:
-        quote_ts /= 1_000_000_000.0
-    elif quote_ts and quote_ts > 10_000_000_000:
-        quote_ts /= 1000.0
-    quote_age_seconds = max(0.0, time.time() - quote_ts) if quote_ts else None
+    quote_ts = _penny_market_timestamp_seconds(
+        last_quote,
+        ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
+    )
+    quote_age_seconds = max(0.0, now_ts - quote_ts) if quote_ts is not None else None
     spread_known = bool(bid and ask and ask >= bid and quote_age_seconds is not None and quote_age_seconds <= 30)
     if spread_known:
         midpoint = (bid + ask) / 2.0
@@ -22083,6 +22368,19 @@ def _penny_normalize_snapshot(raw: Dict[str, Any], volume_fraction: float) -> Op
         # mail gate below fails closed through spread_known=False.
         spread_bps = 250.0
 
+    price_age_seconds = (
+        last_trade_age_seconds
+        if trade_price_fresh
+        else snapshot_age_seconds
+    )
+    price_reliable = bool(
+        price > 0
+        and (
+            trade_price_fresh
+            or spread_known
+            or (snapshot_age_seconds is not None and snapshot_age_seconds <= 90)
+        )
+    )
     dollar_volume = price * volume
     projected_dollar_volume = dollar_volume / max(volume_fraction, 0.01)
     return {
@@ -22103,6 +22401,15 @@ def _penny_normalize_snapshot(raw: Dict[str, Any], volume_fraction: float) -> Op
         "spread_bps": spread_bps,
         "spread_known": spread_known,
         "quote_age_seconds": round(quote_age_seconds, 1) if quote_age_seconds is not None else None,
+        "last_trade_age_seconds": (
+            round(last_trade_age_seconds, 1)
+            if last_trade_age_seconds is not None
+            else None
+        ),
+        "price_age_seconds": (
+            round(price_age_seconds, 1) if price_age_seconds is not None else None
+        ),
+        "price_reliable": price_reliable,
         "bid": bid,
         "ask": ask,
     }
@@ -22197,7 +22504,7 @@ def _penny_revalidate_buy_candidate(
     if spread_bps > PENNY_EXECUTION_MAX_SPREAD_BPS:
         return None, "live_spread_too_wide"
 
-    bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=72)
+    bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=96)
     intraday = analyze_penny_intraday(bars_5m, spread_bps=spread_bps, now_ts=now_value)
     if not intraday.get("trigger_confirmed") or not intraday.get("fresh"):
         return None, "fresh_closed_5m_trigger_missing"
@@ -22221,22 +22528,71 @@ def _penny_revalidate_buy_candidate(
     if planned_entry <= stop or planned_risk <= 0:
         return None, "planned_risk_invalid"
     entry_drift_r = (live_entry - planned_entry) / planned_risk
-    if entry_drift_r > 0.35:
+    if entry_drift_r > PENNY_MAX_ENTRY_DRIFT_R:
         return None, "live_entry_chased"
 
     geometry = trade_geometry(live_entry, stop, tp1, tp2, "LONG")
     if not geometry.get("valid"):
         return None, "live_trade_geometry_invalid"
-    live_rr = _alert_float(geometry.get("rr"), 0.0) or 0.0
-    if live_rr < 1.5:
-        return None, "live_rr_below_1_5"
+
+    execution_costs = estimate_penny_execution_costs(
+        entry=live_entry,
+        spread_bps=spread_bps,
+        atr5=_alert_float(intraday.get("atr5"), 0.0) or 0.0,
+        dollar_volume=_alert_float(row.get("dollar_volume"), 0.0) or 0.0,
+        projected_dollar_volume=(
+            _alert_float(row.get("projected_dollar_volume"), 0.0) or 0.0
+        ),
+    )
+    max_order_notional = _alert_float(execution_costs.get("max_order_notional"), 0.0) or 0.0
+    if max_order_notional < 250.0:
+        return None, "live_executable_order_size_below_250_usd"
+
+    slippage_bps = (
+        _alert_float(execution_costs.get("slippage_bps"), PENNY_DEFAULT_SLIPPAGE_BPS)
+        or PENNY_DEFAULT_SLIPPAGE_BPS
+    )
+    round_trip_cost = live_entry * (
+        spread_bps + 2.0 * max(0.0, slippage_bps)
+    ) / 10_000.0
+    gross_risk = live_entry - stop
+    net_risk = gross_risk + round_trip_cost
+    if net_risk <= 0:
+        return None, "live_net_risk_invalid"
+    net_rr_tp1 = (tp1 - live_entry - round_trip_cost) / net_risk
+    net_rr_tp2 = (tp2 - live_entry - round_trip_cost) / net_risk
+    net_effective_rr = 0.5 * (net_rr_tp1 + net_rr_tp2)
+    if net_rr_tp1 < PENNY_MIN_NET_TP1_RR:
+        return None, "live_net_tp1_rr_below_minimum"
+    if net_effective_rr < PENNY_MIN_NET_EFFECTIVE_RR:
+        return None, "live_net_rr_below_minimum"
+
+    gross_rr = _alert_float(geometry.get("rr"), 0.0) or 0.0
+    gross_rr_tp1 = (tp1 - live_entry) / gross_risk
+    gross_rr_tp2 = (tp2 - live_entry) / gross_risk
 
     setup.update({
         "entry": live_entry,
-        "rr": round(live_rr, 2),
+        "risk": round(gross_risk, 8),
+        "net_risk": round(net_risk, 8),
+        "rr": round(net_effective_rr, 2),
+        "live_rr": round(net_effective_rr, 2),
+        "rr_tp1": round(net_rr_tp1, 2),
+        "rr_tp2": round(net_rr_tp2, 2),
+        "gross_rr": round(gross_rr, 2),
+        "gross_rr_tp1": round(gross_rr_tp1, 2),
+        "gross_rr_tp2": round(gross_rr_tp2, 2),
+        "round_trip_cost": round(round_trip_cost, 8),
+        "spread_bps": round(spread_bps, 1),
+        "slippage_bps": round(slippage_bps, 1),
+        "execution_cost_bps": execution_costs.get("execution_cost_bps"),
+        "max_order_notional": max_order_notional,
+        "cost_model": "spread plus estimated slippage on entry and exit",
         "entry_price_source": "live_ask_revalidated",
     })
     validated = dict(row)
+    trigger_event_id = _penny_event_token(intraday.get("trigger_timestamp")) or str(int(now_value))
+    position_event_id = f"{symbol}:{trigger_event_id}"
     validated.update({
         "price": live_entry,
         "live_entry_price": live_entry,
@@ -22245,11 +22601,20 @@ def _penny_revalidate_buy_candidate(
         "quote_age_seconds": quote.get("quote_age_seconds"),
         "trigger_type": intraday.get("trigger_type"),
         "trigger_timestamp": intraday.get("trigger_timestamp"),
+        "decision_timestamp": int(now_value),
+        "position_event_id": position_event_id,
         "signal_age_seconds": int(signal_age),
         "entry_drift_r": round(entry_drift_r, 2),
+        "execution_costs": execution_costs,
+        "slippage_bps": round(slippage_bps, 1),
+        "execution_cost_bps": execution_costs.get("execution_cost_bps"),
+        "max_order_notional": max_order_notional,
         "trade_setup": setup,
         "entry": live_entry,
-        "rr": round(live_rr, 2),
+        "rr": round(net_effective_rr, 2),
+        "live_rr": round(net_effective_rr, 2),
+        "rr_tp1": round(net_rr_tp1, 2),
+        "rr_tp2": round(net_rr_tp2, 2),
     })
     return validated, "ok"
 
@@ -22294,7 +22659,7 @@ def _penny_apply_robust_rvol(
     *,
     now_utc: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Replace one-day RVOL with projected volume / 20-day median volume."""
+    """Project completed current-RTH volume against a 20-session median."""
     from zoneinfo import ZoneInfo
 
     enriched = dict(snapshot)
@@ -22333,19 +22698,30 @@ def _penny_apply_robust_rvol(
     enriched["rvol"] = projected_volume / median_volume if median_volume > 0 else 0.0
     enriched["rvol_baseline_volume"] = round(median_volume)
     enriched["rvol_history_days"] = valid_history_days
-    enriched["rvol_source"] = "projected_volume_vs_20d_median"
+    enriched["rvol_source"] = "projected_rth_volume_vs_20d_median"
     return enriched
 
 
 def _penny_news_context(news_items: Any) -> Dict[str, Any]:
-    """Summarize recent exchange/provider news without treating headlines as filings."""
+    """Extract explicit, recent company events without scoring generic sentiment."""
     if not isinstance(news_items, list):
         news_items = []
     today = datetime.now(timezone.utc).date()
     positive: List[str] = []
     risks: List[str] = []
+    warnings: List[str] = []
     titles: List[str] = []
     newest_age_days: Optional[int] = None
+    strongest_confidence = 0.0
+    strongest_event_type = ""
+    catalyst_patterns = (
+        (r"\bfda\s+(?:approval|approved|clearance|cleared)\b", "regulatory_approval", 0.95),
+        (r"\b(?:phase\s*[23]|pivotal)\b.{0,80}\b(?:met|positive|successful|primary endpoint|results|data)\b", "clinical_readout", 0.90),
+        (r"\b(?:contract|order)\b.{0,80}\b(?:award(?:ed)?|secured|signed|wins?)\b|\bawarded\b.{0,80}\b(?:contract|order)\b", "contract_award", 0.85),
+        (r"\bdefinitive\s+(?:merger|acquisition|purchase)\s+agreement\b", "definitive_transaction", 0.85),
+        (r"\bstrategic\s+(?:partnership|collaboration)\b", "strategic_partnership", 0.70),
+        (r"\bpatent\s+(?:granted|issued)\b", "patent_grant", 0.62),
+    )
     for item in news_items[:8]:
         if not isinstance(item, dict):
             continue
@@ -22364,28 +22740,53 @@ def _penny_news_context(news_items: Any) -> Dict[str, Any]:
         risk_patterns = (
             (r"\bregistered\s+direct\s+offering\b|\bpublic\s+offering\b|\bprivate\s+placement\b", "offering"),
             (r"\bat[- ]the[- ]market\b|\b(?:atm)\s+offering\b", "at_the_market_offering"),
-            (r"\bshelf\s+registration\b|\bsecurities\s+purchase\s+agreement\b", "dilution_registration"),
+            (r"\bsecurities\s+purchase\s+agreement\b", "dilutive_financing_agreement"),
             (r"\breverse\s+(?:stock\s+)?split\b", "reverse_split"),
             (r"\bbankrupt(?:cy)?\b|\bchapter\s+(?:7|11)\b", "bankruptcy"),
             (r"\bdelist(?:ing|ed)?\b|\bgoing\s+concern\b", "listing_or_going_concern_risk"),
+        )
+        warning_patterns = (
+            # A shelf registration creates financing capacity, but is not
+            # evidence that shares have already been sold into the market.
+            (r"\bshelf\s+registration\b", "shelf_registration_capacity_not_executed"),
         )
         if age_days <= 30:
             for pattern, label in risk_patterns:
                 if re.search(pattern, searchable, flags=re.IGNORECASE):
                     risks.append(label)
-        if age_days <= 7 and (
-            sentiment == "positive"
-            or re.search(r"\b(contract|award|fda approval|acquisition|strategic partnership)\b", searchable)
-        ):
-            positive.append(catalyst.strip() or title[:60])
+            for pattern, label in warning_patterns:
+                if re.search(pattern, searchable, flags=re.IGNORECASE):
+                    warnings.append(label)
+        if age_days <= 7:
+            matched_explicit_event = False
+            for pattern, event_type, base_confidence in catalyst_patterns:
+                if not re.search(pattern, searchable, flags=re.IGNORECASE):
+                    continue
+                matched_explicit_event = True
+                age_factor = max(0.55, 1.0 - age_days * 0.07)
+                confidence = base_confidence * age_factor
+                positive.append(catalyst.strip() or title[:90])
+                if confidence > strongest_confidence:
+                    strongest_confidence = confidence
+                    strongest_event_type = event_type
+                break
+            if sentiment == "positive" and not matched_explicit_event:
+                warnings.append("positive_sentiment_without_recent_explicit_event")
+        elif sentiment == "positive":
+            # Sentiment is context only. It is never sufficient evidence for
+            # a tradable penny catalyst and receives no score.
+            warnings.append("positive_sentiment_without_recent_explicit_event")
     return {
         "status": "ok" if news_items else "unavailable_or_empty",
         "positive_catalysts": list(dict.fromkeys(positive)),
         "risk_flags": list(dict.fromkeys(risks)),
+        "warning_flags": list(dict.fromkeys(warnings)),
         "headline": titles[0] if titles else "",
+        "event_type": strongest_event_type or None,
+        "catalyst_confidence": round(strongest_confidence, 2),
         "newest_age_days": newest_age_days,
         "source": "recent_market_news_headlines",
-        "disclaimer": "Headline context; not an SEC filing/dilution database.",
+        "disclaimer": "Only explicit event headlines receive catalyst credit; sentiment alone does not.",
     }
 
 
@@ -22396,6 +22797,7 @@ def _penny_fetch_sec_filing_context(cik: Any) -> Dict[str, Any]:
         return {
             "status": "unavailable",
             "risk_flags": [],
+            "warning_flags": [],
             "source": "SEC EDGAR submissions",
             "error": "CIK missing",
         }
@@ -22414,6 +22816,7 @@ def _penny_fetch_sec_filing_context(cik: Any) -> Dict[str, Any]:
             return {
                 "status": "error",
                 "risk_flags": [],
+                "warning_flags": [],
                 "source": "SEC EDGAR submissions",
                 "http_status": response.status_code,
             }
@@ -22422,8 +22825,8 @@ def _penny_fetch_sec_filing_context(cik: Any) -> Dict[str, Any]:
         dates = recent.get("filingDate") or []
         accessions = recent.get("accessionNumber") or []
         today = datetime.now(timezone.utc).date()
-        risky_forms = {"S-1", "S-3", "F-1", "F-3", "EFFECT", "424B1", "424B2", "424B3", "424B4", "424B5"}
         flags: List[str] = []
+        warnings: List[str] = []
         recent_forms: List[Dict[str, Any]] = []
         for index, form_raw in enumerate(forms[:80]):
             form = str(form_raw or "").upper().strip()
@@ -22441,11 +22844,19 @@ def _penny_fetch_sec_filing_context(cik: Any) -> Dict[str, Any]:
                 "accession": accessions[index] if index < len(accessions) else "",
             }
             recent_forms.append(item)
-            if form in risky_forms or form.startswith(("S-1", "S-3", "F-1", "F-3", "424B")):
-                flags.append(f"recent_sec_{form.lower().replace('-', '_')}")
+            normalized_flag = f"recent_sec_{form.lower().replace('-', '_')}"
+            # A prospectus or a recent initial registration is much closer to
+            # executable dilution than a shelf registration by itself.
+            if (form.startswith("424B") and age_days <= 90) or (
+                form.startswith(("S-1", "F-1")) and age_days <= 120
+            ):
+                flags.append(normalized_flag)
+            elif form.startswith(("S-3", "F-3")) or form == "EFFECT" or form.startswith(("S-1", "F-1", "424B")):
+                warnings.append(normalized_flag)
         return {
             "status": "ok",
             "risk_flags": list(dict.fromkeys(flags)),
+            "warning_flags": list(dict.fromkeys(warnings)),
             "recent_forms": recent_forms[:20],
             "source": "SEC EDGAR submissions",
             "cik": cik_value,
@@ -22454,6 +22865,7 @@ def _penny_fetch_sec_filing_context(cik: Any) -> Dict[str, Any]:
         return {
             "status": "error",
             "risk_flags": [],
+            "warning_flags": [],
             "source": "SEC EDGAR submissions",
             "error": str(exc),
         }
@@ -22501,6 +22913,67 @@ _PENNY_OPTIONAL_ROW_LIMIT = 25
 _PENNY_NEAR_ENTRY_ROW_LIMIT = 5
 
 
+def _penny_event_token(value: Any) -> str:
+    """Return a stable JSON-safe identifier for a timestamp or event key."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if not math.isfinite(number):
+            return ""
+        return str(int(number)) if number.is_integer() else format(number, ".6f").rstrip("0").rstrip(".")
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    if not math.isfinite(number):
+        return ""
+    return str(int(number)) if number.is_integer() else format(number, ".6f").rstrip("0").rstrip(".")
+
+
+def _penny_trigger_event_id(row: Dict[str, Any]) -> str:
+    return (
+        _penny_event_token(row.get("trigger_timestamp"))
+        or _penny_event_token(row.get("decision_timestamp"))
+        or "unknown"
+    )
+
+
+def _penny_position_event_id(
+    row: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Identify one model position independently of later 5m candles."""
+    state = state if isinstance(state, dict) else {}
+    existing = (
+        _penny_event_token(row.get("position_event_id"))
+        or (
+            _penny_event_token(state.get("position_event_id"))
+            if state.get("active")
+            else ""
+        )
+        or (
+            _penny_event_token(state.get("signal_trigger"))
+            if state.get("active")
+            else ""
+        )
+        or (
+            _penny_event_token(state.get("last_buy_trigger"))
+            if state.get("active")
+            else ""
+        )
+    )
+    if existing:
+        return existing
+    ticker = str(row.get("ticker") or "UNKNOWN").upper()
+    return f"{ticker}:{_penny_trigger_event_id(row)}"
+
+
 def _penny_active_trade_rows(
     rows: Any,
     *,
@@ -22521,11 +22994,14 @@ def _penny_active_trade_rows(
         if not isinstance(row, dict):
             continue
         action = str(row.get("trade_action") or "").upper()
-        if action not in allowed_actions:
+        model_active = bool(row.get("model_position_active"))
+        if action not in allowed_actions and not (
+            model_active and action in _PENNY_OPTIONAL_ACTIONS
+        ):
             continue
 
         item = dict(row)
-        if action in {"JETZT_KAUFEN", "JETZT_VERKAUFEN"}:
+        if action == "JETZT_KAUFEN":
             trigger_ts = _alert_float(row.get("trigger_timestamp"), 0.0)
             if trigger_ts > 10_000_000_000:
                 trigger_ts /= 1000.0
@@ -22535,7 +23011,29 @@ def _penny_active_trade_rows(
             if signal_age > _PENNY_TRIGGER_MAX_AGE_SECONDS:
                 continue
             item["signal_age_seconds"] = int(signal_age)
+        elif action == "JETZT_VERKAUFEN":
+            decision_ts = _alert_float(row.get("decision_timestamp"), 0.0)
+            if decision_ts > 10_000_000_000:
+                decision_ts /= 1000.0
+            if decision_ts <= 0:
+                trigger_ts = _alert_float(row.get("trigger_timestamp"), 0.0)
+                if trigger_ts > 10_000_000_000:
+                    trigger_ts /= 1000.0
+                decision_ts = trigger_ts + 300.0 if trigger_ts > 0 else 0.0
+            if decision_ts <= 0:
+                continue
+            signal_age = max(0.0, now_value - decision_ts)
+            if signal_age > _PENNY_TRIGGER_MAX_AGE_SECONDS:
+                continue
+            item["signal_age_seconds"] = int(signal_age)
         elif action in _PENNY_OPTIONAL_ACTIONS:
+            if model_active:
+                # An open model position must remain visible when its latest
+                # 5m data is missing. Hiding it would silently remove risk
+                # management exactly when the monitor needs attention.
+                item["signal_age_seconds"] = max(0, int(cache_age_seconds or 0))
+                visible.append(item)
+                continue
             trigger_ts = _alert_float(row.get("trigger_timestamp"), 0.0)
             if trigger_ts > 10_000_000_000:
                 trigger_ts /= 1000.0
@@ -22568,7 +23066,7 @@ def _penny_near_entry_rows(
         "fresh_5m_breakout_or_retest_missing",
         "live_spread_unknown",
         "sec_filing_risk_data_unavailable",
-        "pump_potential_below_70",
+        "setup_quality_below_70",
         "entry_quality_below_75",
         "trade_score_below_80",
         "us_regular_session_closed",
@@ -22577,7 +23075,11 @@ def _penny_near_entry_rows(
     for row in candidates:
         if str(row.get("trade_action") or "").upper() != "TRIGGER_WARTEN":
             continue
-        if _alert_float(row.get("pump_potential_score"), 0.0) < 62:
+        setup_quality = _alert_float(
+            row.get("setup_quality_score", row.get("pump_potential_score")),
+            0.0,
+        )
+        if setup_quality < 62:
             continue
         if _alert_float(row.get("entry_quality_score"), 0.0) < 60:
             continue
@@ -22604,7 +23106,7 @@ def _penny_near_entry_rows(
 
     near_rows.sort(key=lambda row: (
         -_alert_float(row.get("entry_quality_score"), 0.0),
-        -_alert_float(row.get("pump_potential_score"), 0.0),
+        -_alert_float(row.get("setup_quality_score", row.get("pump_potential_score")), 0.0),
         _alert_float(row.get("dump_risk_score"), 100.0),
     ))
     return near_rows[:_PENNY_NEAR_ENTRY_ROW_LIMIT]
@@ -22619,14 +23121,19 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     table_rows = ""
     for row in rows[:5]:
         setup = row.get("trade_setup") or {}
+        setup_quality = row.get("setup_quality_score", row.get("pump_potential_score"))
+        float_value = _alert_float(row.get("float_m"), 0.0) or 0.0
+        float_label = f"{float_value:.1f}M" if float_value > 0 else "nicht gemeldet"
+        max_order = _alert_float(row.get("max_order_notional"), 0.0) or 0.0
+        cost_bps = _alert_float(row.get("execution_cost_bps"), 0.0) or 0.0
         table_rows += f"""
         <tr>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb"><b>{html.escape(str(row.get('ticker') or ''))}</b></td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('grade')} / {row.get('trade_score')}</td>
-          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('pump_potential_score')}</td>
+          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{setup_quality}<br><span style="color:#64748b">Float {float_label}</span></td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('entry_quality_score')}</td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('dump_risk_score')}</td>
-          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{_format_alert_price(setup.get('entry'))}<br><span style="color:#64748b">Live Ask, Spread {row.get('spread_bps')}bps</span><br><span style="color:#dc2626">Stop {_format_alert_price(setup.get('stop_loss'))}</span></td>
+          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{_format_alert_price(setup.get('entry'))}<br><span style="color:#64748b">Spread {row.get('spread_bps')}bps, Kosten ca. {cost_bps:.0f}bps</span><br><span style="color:#64748b">Modell-Limit ${max_order:,.0f}</span><br><span style="color:#dc2626">Stop {_format_alert_price(setup.get('stop_loss'))}</span></td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb;color:#059669">{_format_alert_price(setup.get('tp1'))}<br>{_format_alert_price(setup.get('tp2'))}</td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{html.escape(str(row.get('trigger_type') or ''))}<br>{setup.get('rr')}R<br>{row.get('signal_age_seconds')}s alt</td>
         </tr>"""
@@ -22634,13 +23141,41 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     <h2 style="color:#0f766e;margin-top:0">Pennystock - bestaetigter 5m Entry</h2>
     <p><b>Kein Pump-Potential allein:</b> Diese Mail wird nur nach einer abgeschlossenen 5m-Breakout-/Retest-Bestaetigung, Liquiditaetscheck und strukturellen Stop-/Zielpruefung versendet.</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <tr style="background:#ecfdf5"><th style="padding:9px;text-align:left">Ticker</th><th>Grade/Trade</th><th>Setup</th><th>Entry</th><th>Dump-Risiko</th><th>Live Entry / Stop</th><th>TP1 / TP2</th><th>Trigger</th></tr>
+      <tr style="background:#ecfdf5"><th style="padding:9px;text-align:left">Ticker</th><th>Grade/Trade</th><th>Setup-Qualitaet</th><th>Entry</th><th>Dump-Risiko</th><th>Live Entry / Stop</th><th>TP1 / TP2</th><th>Trigger</th></tr>
       {table_rows}
     </table>
-    <p style="font-size:12px;color:#64748b">Management: Teilgewinn am TP1; Rest unter dem letzten bestaetigten 5m-Higher-Low/EMA9 nachziehen. Bei hohem Volumen ohne Preisfortschritt, schwerem roten 5m-Reversal oder VWAP-Verlust aussteigen.</p>
+    <p style="font-size:12px;color:#64748b">Management: Teilgewinn am TP1; Rest unter dem letzten bestaetigten 5m-Higher-Low/EMA9 nachziehen. Ein einzelnes Warnmerkmal ist noch kein Exit. Verkaufen erst am Schutz-Stop/TP2 oder wenn der Scanner einen bestaetigten Strukturbruch als separates VERKAUFEN-Signal meldet.</p>
     """
     return _send_email_alert(
         f"Pennystock KAUFEN: {len(rows[:5])} bestaetigte Setup(s)",
+        body,
+        trade_horizon="intraday",
+        mail_class="trade",
+        telegram_text=_safe_format_telegram_rows(rows[:5]),
+    )
+
+
+def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
+    if not rows:
+        return False
+    allowed, _ = _stock_trade_email_allowed("penny_stocks_management")
+    if not allowed:
+        return False
+    items = "".join(
+        f"<li><b>{html.escape(str(row.get('ticker') or ''))}</b>: TP1 "
+        f"{_format_alert_price((row.get('trade_setup') or {}).get('tp1'))} erreicht. "
+        f"Modell: 50% Teilgewinn; Rest-Stop auf "
+        f"{_format_alert_price(row.get('active_stop') or row.get('entry'))}.</li>"
+        for row in rows[:5]
+    )
+    body = f"""
+    <h2 style="color:#0f766e;margin-top:0">Pennystock TP1 erreicht</h2>
+    <p>Das ist <b>kein neuer Kauf</b>, sondern Management eines zuvor per Kaufmail aktivierten Modelltrades.</p>
+    <ul>{items}</ul>
+    <p style="font-size:12px;color:#64748b">Der Scanner modelliert 50% Teilverkauf an TP1. Fuer den Rest gilt der angezeigte aktive Stop bis TP2 oder Exit-Signal.</p>
+    """
+    return _send_email_alert(
+        f"Pennystock TP1: {len(rows[:5])} Management-Signal(e)",
         body,
         trade_horizon="intraday",
         mail_class="trade",
@@ -22654,14 +23189,30 @@ def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
     allowed, _ = _stock_trade_email_allowed("penny_stocks_exit")
     if not allowed:
         return False
-    items = "".join(
-        f"<li><b>{html.escape(str(row.get('ticker') or ''))}</b> bei {_format_alert_price(row.get('price'))}: "
-        f"{html.escape(', '.join((row.get('warnings') or row.get('hard_blockers') or [])[:4]))}</li>"
-        for row in rows[:5]
-    )
+    reason_labels = {
+        "protective_stop_reached": "Schutz-Stop erreicht",
+        "tp2_reached": "TP2 erreicht",
+        "hard_company_risk_detected": "hartes Unternehmensrisiko erkannt",
+        "confirmed_two_bar_vwap_loss": "VWAP in zwei abgeschlossenen 5m-Kerzen verloren",
+        "high_volume_structure_break": "Strukturbruch mit starkem Verkaufsvolumen",
+        "repeated_failed_breakout_with_distribution": "mehrfach gescheiterter Ausbruch mit Distribution",
+        "high_dump_risk_with_structure_break": "hohes Dump-Risiko plus bestaetigter Strukturbruch",
+    }
+    items = ""
+    for row in rows[:5]:
+        raw_reasons = row.get("exit_reasons") or []
+        if not raw_reasons:
+            raw_reasons = row.get("hard_blockers") or row.get("warnings") or []
+        reasons = [reason_labels.get(str(reason), str(reason).replace("_", " ")) for reason in raw_reasons[:4]]
+        setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        items += (
+            f"<li><b>{html.escape(str(row.get('ticker') or ''))}</b> bei {_format_alert_price(row.get('price'))}: "
+            f"{html.escape(', '.join(reasons) or 'bestaetigte Invalidation')}. "
+            f"Aktiver Stop {_format_alert_price(row.get('active_stop') or setup.get('stop_loss'))}.</li>"
+        )
     body = f"""
     <h2 style="color:#dc2626;margin-top:0">Pennystock Exit-Signal</h2>
-    <p>Ein zuvor per Kaufmail bestaetigtes Setup zeigt jetzt Distribution/VWAP-Verlust oder ein schweres 5m-Reversal.</p>
+    <p>Ein zuvor per Kaufmail aktivierter Modelltrade hat jetzt einen konkreten Schutz-Stop, TP2 oder einen bestaetigten 5m-Strukturbruch erreicht. Einzelne Warnmerkmale loesen diese Mail nicht aus.</p>
     <ul>{items}</ul>
     <p style="font-size:12px;color:#64748b">Exit-Signale sind risikobasierte Invalidationen, keine Garantie fuer den naechsten Kurs.</p>
     """
@@ -22740,7 +23291,7 @@ def _penny_scan_coverage_stats(
 
 
 def _penny_stock_scanner_wrapper() -> None:
-    """Run a 5-minute screen over every common stock in the penny universe."""
+    """Run complete Penny discovery; active positions have a separate monitor."""
     started_at = time.time()
     diagnostics: Dict[str, Any] = {
         "snapshot_total": 0,
@@ -22751,6 +23302,8 @@ def _penny_stock_scanner_wrapper() -> None:
         "five_minute_data_ok": 0,
         "five_minute_data_missing": 0,
         "trigger_near_count": 0,
+        "trigger_pool_candidates": 0,
+        "trigger_pool_rejected_counts": {},
         "full_structure_checked": 0,
         "preflight_rejected_counts": {},
         "buy_now": 0,
@@ -22774,8 +23327,7 @@ def _penny_stock_scanner_wrapper() -> None:
         volume_fraction = _penny_expected_volume_fraction(datetime.now(timezone.utc))
         market_session = _stock_trade_email_status()
         diagnostics["market_session"] = market_session
-        state_payload = _penny_load_dict(PENNY_STOCKS_STATE)
-        ticker_state = state_payload.get("tickers") if isinstance(state_payload.get("tickers"), dict) else {}
+        ticker_state = _penny_load_state_tickers()
         active_symbols = {
             symbol
             for symbol, state in ticker_state.items()
@@ -22812,15 +23364,20 @@ def _penny_stock_scanner_wrapper() -> None:
             0,
             diagnostics["common_penny_universe"] - diagnostics["broad_candidates"],
         )
-        scan_budget_seconds = max(900, min(1_080, int(os.environ.get("PENNY_SCAN_BUDGET_SECONDS", "1080"))))
-        scan_deadline = started_at + scan_budget_seconds
-        selected = _penny_select_deep_candidates(
+        soft_budget_seconds = max(900, min(2_400, int(os.environ.get("PENNY_SCAN_SOFT_BUDGET_SECONDS", "1200"))))
+        selected_all = _penny_select_deep_candidates(
             broad_candidates,
             normalized,
             active_symbols,
         )
-        diagnostics["scan_budget_seconds"] = scan_budget_seconds
-        diagnostics["selection_policy"] = "all_common_penny_stocks_same_run"
+        selected = [
+            entry
+            for entry in selected_all
+            if str(entry[1].get("ticker") or "").upper() not in active_symbols
+        ]
+        diagnostics["soft_budget_seconds"] = soft_budget_seconds
+        diagnostics["selection_policy"] = "all_inactive_common_penny_stocks_same_run"
+        diagnostics["active_deferred_to_position_monitor"] = len(active_symbols)
         diagnostics["active_outside_price_band"] = sum(
             1
             for symbol in active_symbols
@@ -22835,21 +23392,20 @@ def _penny_stock_scanner_wrapper() -> None:
         now_ts = time.time()
         rows: List[Dict[str, Any]] = []
         buy_candidates: List[Dict[str, Any]] = []
+        management_candidates: List[Dict[str, Any]] = []
         exit_candidates: List[Dict[str, Any]] = []
+        trigger_pool_candidates: Dict[str, Dict[str, Any]] = {}
         processed_symbols = set()
         budget_exhausted = False
         with _scan_lock:
             _scan_status["penny_stocks"]["progress"] = {"checked": 0, "total": len(selected), "hits": 0, "detail": "5m/1D/VRVP-Pruefung"}
 
         for index, (_, snapshot, broad) in enumerate(selected, start=1):
-            if time.time() >= scan_deadline:
-                budget_exhausted = True
-                break
             candidate_now_ts = time.time()
             symbol = snapshot["ticker"]
             processed_symbols.add(symbol)
             previous = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
-            bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=72)
+            bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=96)
             preview_spread_bps = (
                 (_alert_float(snapshot.get("spread_bps"), 0.0) or 0.0)
                 if snapshot.get("spread_known")
@@ -22865,6 +23421,22 @@ def _penny_stock_scanner_wrapper() -> None:
                 diagnostics["five_minute_data_ok"] += 1
             else:
                 diagnostics["five_minute_data_missing"] += 1
+            pool_eligible, pool_reason = _penny_trigger_pool_eligibility(
+                snapshot,
+                broad,
+                intraday_preview,
+            )
+            if pool_eligible:
+                trigger_pool_candidates[symbol] = {
+                    "snapshot": dict(snapshot),
+                    "broad": dict(broad),
+                    "intraday": dict(intraday_preview),
+                    "discovered_at": candidate_now_ts,
+                    "reason": pool_reason,
+                }
+            else:
+                rejected_counts = diagnostics["trigger_pool_rejected_counts"]
+                rejected_counts[pool_reason] = rejected_counts.get(pool_reason, 0) + 1
             preview_ready = bool(
                 intraday_preview.get("data_ok")
                 and intraday_preview.get("fresh")
@@ -22933,6 +23505,19 @@ def _penny_stock_scanner_wrapper() -> None:
             else:
                 daily_bars = daily_entry.get("bars") if isinstance(daily_entry.get("bars"), list) else []
 
+            rth_summary = summarize_penny_rth_volume(bars_5m, now_ts=candidate_now_ts)
+            if rth_summary.get("data_ok"):
+                snapshot = dict(snapshot)
+                snapshot.update({
+                    "volume": rth_summary.get("session_volume"),
+                    "dollar_volume": rth_summary.get("session_dollar_volume"),
+                    "projected_dollar_volume": (
+                        (_alert_float(rth_summary.get("session_dollar_volume"), 0.0) or 0.0)
+                        / max(volume_fraction, 0.01)
+                    ),
+                    "volume_scope": "current_us_rth",
+                    "rth_session_bar_count": rth_summary.get("session_bar_count"),
+                })
             snapshot = _penny_apply_robust_rvol(snapshot, daily_bars, volume_fraction)
 
             profile_levels = _penny_vrvp_resistances(bars_5m, daily_bars, snapshot["price"])
@@ -23012,12 +23597,14 @@ def _penny_stock_scanner_wrapper() -> None:
                         row["trade_setup"]["trade_action"] = "TRIGGER_WARTEN"
                         row["trade_setup"]["action_label"] = "Spread fehlt - kein Live-Entry"
 
-            trigger_id = str(row.get("trigger_timestamp") or "unknown")
+            trigger_id = _penny_trigger_event_id(row)
+            position_event_id = _penny_position_event_id(row, previous)
             state_update = {
                 **previous,
                 "last_seen": candidate_now_ts,
                 "last_action": row.get("trade_action"),
                 "last_trigger": trigger_id,
+                "setup_quality_score": row.get("setup_quality_score"),
                 "pump_potential_score": row.get("pump_potential_score"),
                 "entry_quality_score": row.get("entry_quality_score"),
                 "dump_risk_score": row.get("dump_risk_score"),
@@ -23029,6 +23616,8 @@ def _penny_stock_scanner_wrapper() -> None:
                     "rvol": row.get("rvol"),
                 },
             }
+            if previous.get("active") or row.get("trade_action") == "JETZT_KAUFEN":
+                state_update["position_event_id"] = position_event_id
             if row.get("trade_action") == "JETZT_KAUFEN":
                 # A full-universe scan can take several minutes. Do not open
                 # the scanner-model position until the quote and the latest
@@ -23044,15 +23633,22 @@ def _penny_stock_scanner_wrapper() -> None:
                     buy_candidates.append(row)
             elif row.get("trade_action") == "JETZT_VERKAUFEN" and previous.get("active"):
                 state_update.update({
-                    "active": False,
-                    "exit_at": candidate_now_ts,
-                    "exit_trigger": trigger_id,
-                    "exit_email_sent": False,
+                    "active": True,
                 })
-                dedupe_key = f"penny_exit:{symbol}:{trigger_id}"
-                if previous.get("last_exit_trigger") != trigger_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=candidate_now_ts):
+                dedupe_key = f"penny_exit:{symbol}:{position_event_id}"
+                if previous.get("last_exit_event_id") != position_event_id and not _email_dedupe_active(dedupe_key, 6 * 3600, now=candidate_now_ts):
+                    state_update["pending_exit_notification"] = True
                     row["_dedupe_key"] = dedupe_key
                     exit_candidates.append(row)
+            elif (
+                previous.get("active")
+                and row.get("management_event") == "TP1_PARTIAL"
+                and not previous.get("tp1_realized")
+            ):
+                dedupe_key = f"penny_tp1:{symbol}:{position_event_id}"
+                if previous.get("last_management_event_id") != position_event_id and not _email_dedupe_active(dedupe_key, 24 * 3600, now=candidate_now_ts):
+                    row["_dedupe_key"] = dedupe_key
+                    management_candidates.append(row)
 
             row_action = str(row.get("trade_action") or "").upper()
             if row_action in (_PENNY_VISIBLE_ACTIONS | _PENNY_OPTIONAL_ACTIONS):
@@ -23074,11 +23670,7 @@ def _penny_stock_scanner_wrapper() -> None:
         revalidated_buy_candidates: List[Dict[str, Any]] = []
         revalidation_blocked: Dict[str, int] = {}
         for candidate in buy_candidates:
-            if time.time() >= scan_deadline:
-                validated, reason = None, "scan_budget_exhausted_before_revalidation"
-                budget_exhausted = True
-            else:
-                validated, reason = _penny_revalidate_buy_candidate(candidate, now_ts=time.time())
+            validated, reason = _penny_revalidate_buy_candidate(candidate, now_ts=time.time())
             symbol = str(candidate.get("ticker") or "").upper()
             state = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
             state.pop("pending_revalidation", None)
@@ -23097,33 +23689,34 @@ def _penny_stock_scanner_wrapper() -> None:
                         "trade_action": "TRIGGER_WARTEN",
                         "action_label": "Live-Revalidierung fehlgeschlagen",
                     })
-                state.update({"active": False, "last_action": "TRIGGER_WARTEN"})
+                state.update({
+                    "active": bool(state.get("active")),
+                    "last_action": "TRIGGER_WARTEN",
+                })
                 ticker_state[symbol] = state
                 continue
 
             candidate.clear()
             candidate.update(validated)
-            trigger_id = str(candidate.get("trigger_timestamp") or "unknown")
+            trigger_id = _penny_trigger_event_id(candidate)
+            position_event_id = _penny_position_event_id(candidate, state)
+            candidate["position_event_id"] = position_event_id
             dedupe_key = f"penny_buy:{symbol}:{trigger_id}"
             if state.get("last_buy_trigger") == trigger_id or _email_dedupe_active(dedupe_key, 6 * 3600, now=time.time()):
-                state.update({"active": False, "last_action": "TRIGGER_WARTEN"})
+                state.update({
+                    "active": bool(state.get("active")),
+                    "last_action": "TRIGGER_WARTEN",
+                })
                 ticker_state[symbol] = state
                 continue
             setup = candidate.get("trade_setup") if isinstance(candidate.get("trade_setup"), dict) else {}
             state.update({
-                "active": True,
-                "position_state_source": "scanner_model_not_broker",
-                "buy_entry": candidate.get("entry"),
-                "buy_at": time.time(),
-                "stop_loss": setup.get("stop_loss"),
-                "tp1": setup.get("tp1"),
-                "tp2": setup.get("tp2"),
-                "trade_setup": setup,
-                "signal_trigger": trigger_id,
+                "active": bool(state.get("active")),
+                "pending_buy_notification": True,
                 "last_trigger": trigger_id,
-                "last_action": "JETZT_KAUFEN",
+                "position_event_id": position_event_id,
+                "last_action": "ENTRY_BESTAETIGT_MAIL_AUSSTEHEND",
                 "last_seen": time.time(),
-                "buy_email_sent": False,
             })
             candidate["_dedupe_key"] = dedupe_key
             ticker_state[symbol] = state
@@ -23143,7 +23736,7 @@ def _penny_stock_scanner_wrapper() -> None:
         rows.sort(key=lambda row: (
             action_rank.get(str(row.get("trade_action") or ""), 9),
             -_alert_float(row.get("entry_quality_score"), 0.0),
-            -_alert_float(row.get("pump_potential_score"), 0.0),
+            -_alert_float(row.get("setup_quality_score", row.get("pump_potential_score")), 0.0),
         ))
 
         buy_candidates.sort(key=lambda row: (
@@ -23151,6 +23744,7 @@ def _penny_stock_scanner_wrapper() -> None:
             -_alert_float(row.get("entry_quality_score"), 0.0),
         ))
         exit_candidates.sort(key=lambda row: -_alert_float(row.get("dump_risk_score"), 0.0))
+        management_candidates.sort(key=lambda row: -_alert_float(row.get("trade_score"), 0.0))
 
         # Keep state bounded while preserving active positions.
         ticker_state = {
@@ -23188,13 +23782,15 @@ def _penny_stock_scanner_wrapper() -> None:
         diagnostics["active_trade_ideas"] = len(active_rows)
         diagnostics["optional_rows_available"] = len(optional_rows)
         diagnostics["optional_rows_cached"] = min(len(optional_rows), _PENNY_OPTIONAL_ROW_LIMIT)
+        diagnostics["trigger_pool_candidates"] = len(trigger_pool_candidates)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
+        diagnostics["soft_budget_exceeded"] = bool(
+            diagnostics["duration_seconds"] > soft_budget_seconds
+        )
         diagnostics["universe_source"] = universe_source
         save_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
-        _penny_save_dict(PENNY_STOCKS_STATE, {
-            "updated_at": now_ts,
-            "tickers": ticker_state,
-        })
+        _penny_save_trigger_pool(trigger_pool_candidates, now_ts=now_ts)
+        ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=now_ts)
         _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
         _penny_save_dict(PENNY_STOCKS_DAILY_CACHE, daily_cache)
         _penny_save_dict(PENNY_STOCKS_NEWS_CACHE, news_cache)
@@ -23210,21 +23806,93 @@ def _penny_stock_scanner_wrapper() -> None:
         ]
         try:
             buy_mail_sent = _penny_buy_email(claimed_buy_candidates)
-        except Exception:
+        except Exception as exc:
+            print(f"[Penny] buy email error: {exc}")
+            buy_mail_sent = False
             for row in claimed_buy_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-            raise
         if buy_mail_sent:
             _safe_record_alert_signals("penny_stocks", claimed_buy_candidates)
             for row in claimed_buy_candidates:
                 symbol = row["ticker"]
-                trigger_id = str(row.get("trigger_timestamp") or "unknown")
-                ticker_state[symbol]["last_buy_trigger"] = trigger_id
-                ticker_state[symbol]["buy_email_sent"] = True
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row)
+                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+                state = ticker_state.setdefault(symbol, {})
+                state.update({
+                    "active": True,
+                    "position_state_source": "scanner_model_not_broker",
+                    "buy_entry": row.get("entry"),
+                    "buy_at": time.time(),
+                    "stop_loss": setup.get("stop_loss"),
+                    "active_stop": setup.get("stop_loss"),
+                    "tp1": setup.get("tp1"),
+                    "tp2": setup.get("tp2"),
+                    "trade_setup": setup,
+                    "signal_trigger": trigger_id,
+                    "position_event_id": position_event_id,
+                    "last_trigger": trigger_id,
+                    "last_buy_trigger": trigger_id,
+                    "last_action": "JETZT_KAUFEN",
+                    "last_seen": time.time(),
+                    "buy_email_sent": True,
+                    "tp1_realized": False,
+                    "remaining_fraction": 1.0,
+                })
+                state.pop("pending_buy_notification", None)
                 _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
                 state_changed_after_mail = True
         else:
             for row in claimed_buy_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+                state = ticker_state.setdefault(str(row.get("ticker") or ""), {})
+                state.pop("pending_buy_notification", None)
+                state.update({
+                    "active": bool(state.get("active")),
+                    "last_action": "ENTRY_BESTAETIGT_MAIL_FEHLER",
+                    "buy_email_sent": False,
+                })
+                state_changed_after_mail = True
+
+        side_effect_now = time.time()
+        claimed_management_candidates = [
+            row for row in management_candidates[:5]
+            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=side_effect_now)
+        ]
+        try:
+            management_mail_sent = _penny_management_email(claimed_management_candidates)
+        except Exception as exc:
+            print(f"[Penny] management email error: {exc}")
+            management_mail_sent = False
+            for row in claimed_management_candidates:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+        if management_mail_sent:
+            for row in claimed_management_candidates:
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row, state)
+                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+                active_stop = row.get("active_stop") or state.get("buy_entry") or setup.get("entry")
+                state.update({
+                    "active": True,
+                    "tp1_realized": True,
+                    "remaining_fraction": 0.5,
+                    "active_stop": active_stop,
+                    "stop_loss": active_stop,
+                    "last_management_trigger": trigger_id,
+                    "last_management_event_id": position_event_id,
+                    "management_email_sent": True,
+                    "last_action": "HALTEN",
+                    "last_seen": time.time(),
+                })
+                if isinstance(state.get("trade_setup"), dict):
+                    state["trade_setup"]["stop_loss"] = active_stop
+                    state["trade_setup"]["stop"] = active_stop
+                _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_management_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
 
         side_effect_now = time.time()
@@ -23234,27 +23902,45 @@ def _penny_stock_scanner_wrapper() -> None:
         ]
         try:
             exit_mail_sent = _penny_exit_email(claimed_exit_candidates)
-        except Exception:
+        except Exception as exc:
+            print(f"[Penny] exit email error: {exc}")
+            exit_mail_sent = False
             for row in claimed_exit_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-            raise
         if exit_mail_sent:
             for row in claimed_exit_candidates:
                 symbol = row["ticker"]
-                trigger_id = str(row.get("trigger_timestamp") or "unknown")
-                ticker_state[symbol]["last_exit_trigger"] = trigger_id
-                ticker_state[symbol]["exit_email_sent"] = True
+                state = ticker_state.setdefault(symbol, {})
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row, state)
+                state.update({
+                    "active": False,
+                    "remaining_fraction": 0.0,
+                    "exit_at": time.time(),
+                    "exit_trigger": trigger_id,
+                    "last_exit_trigger": trigger_id,
+                    "last_exit_event_id": position_event_id,
+                    "exit_email_sent": True,
+                    "last_action": "JETZT_VERKAUFEN",
+                    "last_seen": time.time(),
+                })
+                state.pop("pending_exit_notification", None)
                 _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
                 state_changed_after_mail = True
         else:
             for row in claimed_exit_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+                state = ticker_state.setdefault(str(row.get("ticker") or ""), {})
+                state.pop("pending_exit_notification", None)
+                state.update({
+                    "active": True,
+                    "last_action": "EXIT_BESTAETIGT_MAIL_FEHLER",
+                    "exit_email_sent": False,
+                })
+                state_changed_after_mail = True
 
         if state_changed_after_mail:
-            _penny_save_dict(PENNY_STOCKS_STATE, {
-                "updated_at": now_ts,
-                "tickers": ticker_state,
-            })
+            ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=time.time())
         with _scan_lock:
             _scan_status.get("penny_stocks", {}).pop("last_error", None)
         print(
@@ -23276,6 +23962,753 @@ def _penny_stock_scanner_wrapper() -> None:
             _scan_status.get("penny_stocks", {}).pop("progress", None)
 
 
+def _penny_position_snapshot_from_state(
+    symbol: str,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build an explicitly untradeable quote fallback for an open model position."""
+    last_snapshot = state.get("last_snapshot") if isinstance(state.get("last_snapshot"), dict) else {}
+    setup = state.get("trade_setup") if isinstance(state.get("trade_setup"), dict) else {}
+    price = (
+        _alert_float(last_snapshot.get("price"), 0.0)
+        or _alert_float(state.get("buy_entry"), 0.0)
+        or _alert_float(setup.get("entry"), 0.0)
+        or 0.0
+    )
+    return {
+        "ticker": symbol,
+        "price": price,
+        "open": price,
+        "high": price,
+        "low": price,
+        "prev_close": price,
+        "volume": 0.0,
+        "prev_volume": 0.0,
+        "rvol": _alert_float(last_snapshot.get("rvol"), 0.0) or 0.0,
+        "rvol_raw": 0.0,
+        "change_pct": 0.0,
+        "close_position": 0.5,
+        "dollar_volume": 0.0,
+        "projected_dollar_volume": 0.0,
+        "spread_bps": 250.0,
+        "spread_known": False,
+        "quote_age_seconds": None,
+        "bid": None,
+        "ask": None,
+        "snapshot_missing": True,
+    }
+
+
+def _penny_evaluate_trigger_pool_symbol(
+    symbol: str,
+    snapshot: Dict[str, Any],
+    bars_5m: List[Dict[str, Any]],
+    *,
+    reference_cache: Dict[str, Any],
+    daily_cache: Dict[str, Any],
+    news_cache: Dict[str, Any],
+    sec_cache: Dict[str, Any],
+    volume_fraction: float,
+    market_session: Dict[str, Any],
+    now_ts: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Run the full Penny entry model for a fast trigger-pool candidate.
+
+    The five-minute worker is only faster because its symbol universe is
+    bounded.  It deliberately uses the same fundamental, dilution, structure,
+    liquidity and execution inputs as discovery so no second scoring system
+    can label a setup differently.
+    """
+    ref_entry = reference_cache.get(symbol) if isinstance(reference_cache.get(symbol), dict) else {}
+    if now_ts - (_alert_float(ref_entry.get("cached_at"), 0.0) or 0.0) > 24 * 3600:
+        details = get_ticker_details(POLYGON_KEY, symbol)
+        details = details if isinstance(details, dict) else {}
+        reference_cache[symbol] = {"cached_at": now_ts, "data": details}
+    else:
+        details = ref_entry.get("data") if isinstance(ref_entry.get("data"), dict) else {}
+
+    news_entry = news_cache.get(symbol) if isinstance(news_cache.get(symbol), dict) else {}
+    if now_ts - (_alert_float(news_entry.get("cached_at"), 0.0) or 0.0) > 30 * 60:
+        raw_news = get_ticker_news(POLYGON_KEY, symbol, limit=8)
+        if isinstance(raw_news, tuple):
+            raw_news = raw_news[0]
+        news_context = _penny_news_context(raw_news)
+        news_cache[symbol] = {"cached_at": now_ts, "context": news_context}
+    else:
+        news_context = news_entry.get("context") if isinstance(news_entry.get("context"), dict) else {}
+
+    sec_entry = sec_cache.get(symbol) if isinstance(sec_cache.get(symbol), dict) else {}
+    cached_sec_context = sec_entry.get("context") if isinstance(sec_entry.get("context"), dict) else {}
+    sec_ttl = 6 * 3600 if str(cached_sec_context.get("status") or "").lower() == "ok" else 10 * 60
+    if now_ts - (_alert_float(sec_entry.get("cached_at"), 0.0) or 0.0) > sec_ttl:
+        sec_context = _penny_fetch_sec_filing_context(details.get("cik"))
+        sec_cache[symbol] = {"cached_at": now_ts, "context": sec_context}
+    else:
+        sec_context = cached_sec_context
+    details = {
+        **details,
+        "news_context": news_context,
+        "sec_filing_context": sec_context,
+    }
+
+    daily_entry = daily_cache.get(symbol) if isinstance(daily_cache.get(symbol), dict) else {}
+    if now_ts - (_alert_float(daily_entry.get("cached_at"), 0.0) or 0.0) > 2 * 3600:
+        daily_bars = _penny_fetch_daily_bars(symbol)
+        daily_cache[symbol] = {"cached_at": now_ts, "bars": daily_bars}
+    else:
+        daily_bars = daily_entry.get("bars") if isinstance(daily_entry.get("bars"), list) else []
+
+    enriched_snapshot = dict(snapshot)
+    rth_summary = summarize_penny_rth_volume(bars_5m, now_ts=now_ts)
+    if rth_summary.get("data_ok"):
+        enriched_snapshot.update({
+            "volume": rth_summary.get("session_volume"),
+            "dollar_volume": rth_summary.get("session_dollar_volume"),
+            "projected_dollar_volume": (
+                (_alert_float(rth_summary.get("session_dollar_volume"), 0.0) or 0.0)
+                / max(volume_fraction, 0.01)
+            ),
+            "volume_scope": "current_us_rth",
+            "rth_session_bar_count": rth_summary.get("session_bar_count"),
+        })
+    enriched_snapshot = _penny_apply_robust_rvol(
+        enriched_snapshot,
+        daily_bars,
+        volume_fraction,
+    )
+    profile_levels = _penny_vrvp_resistances(
+        bars_5m,
+        daily_bars,
+        enriched_snapshot.get("price") or 0.0,
+    )
+    row = evaluate_penny_candidate(
+        enriched_snapshot,
+        bars_5m,
+        daily_bars,
+        details=details,
+        extra_resistances=profile_levels,
+        previous_active=False,
+        previous_position={},
+        now_ts=now_ts,
+    )
+
+    if not enriched_snapshot.get("spread_known"):
+        live_quote = _penny_fetch_live_spread(symbol)
+        if live_quote:
+            enriched_snapshot.update(live_quote)
+            row = evaluate_penny_candidate(
+                enriched_snapshot,
+                bars_5m,
+                daily_bars,
+                details=details,
+                extra_resistances=profile_levels,
+                previous_active=False,
+                previous_position={},
+                now_ts=now_ts,
+            )
+
+    row["market_session"] = market_session
+    if row.get("trade_action") == "JETZT_KAUFEN" and not market_session.get("allowed"):
+        row["hard_blockers"] = list(dict.fromkeys([
+            *(row.get("hard_blockers") or []),
+            "us_regular_session_closed",
+        ]))
+        row.update({
+            "trade_action": "TRIGGER_WARTEN",
+            "trade_signal": "TRIGGER_WARTEN",
+            "signal_label": "Markt geschlossen - neuen 5m Trigger abwarten",
+            "execution_trigger_ok": False,
+        })
+        if isinstance(row.get("trade_setup"), dict):
+            row["trade_setup"].update({
+                "trade_action": "TRIGGER_WARTEN",
+                "action_label": "Markt geschlossen - neuer 5m Trigger erforderlich",
+            })
+    if not enriched_snapshot.get("spread_known"):
+        row["hard_blockers"] = list(dict.fromkeys([
+            *(row.get("hard_blockers") or []),
+            "live_spread_unknown",
+        ]))
+        if row.get("trade_action") == "JETZT_KAUFEN":
+            row.update({
+                "trade_action": "TRIGGER_WARTEN",
+                "trade_signal": "TRIGGER_WARTEN",
+                "signal_label": "Spread fehlt - kein Live-Entry",
+                "execution_trigger_ok": False,
+            })
+            if isinstance(row.get("trade_setup"), dict):
+                row["trade_setup"].update({
+                    "trade_action": "TRIGGER_WARTEN",
+                    "action_label": "Spread fehlt - kein Live-Entry",
+                })
+    return row, enriched_snapshot
+
+
+def _penny_position_monitor_wrapper() -> None:
+    """Revalue positions and confirm internal Penny triggers every five minutes.
+
+    Discovery and position management intentionally have separate workers.
+    New entries may only originate from the short-lived discovery trigger pool
+    and must pass the complete live entry model plus end-of-loop revalidation.
+    """
+    started_at = time.time()
+    diagnostics: Dict[str, Any] = {
+        "active_positions": 0,
+        "positions_checked": 0,
+        "trigger_pool_size": 0,
+        "trigger_candidates_checked": 0,
+        "trigger_rejected_counts": {},
+        "new_buy_now": 0,
+        "snapshot_missing": 0,
+        "hold_now": 0,
+        "exit_now": 0,
+        "tp1_partial_now": 0,
+        "data_gap_now": 0,
+        "model": "penny_position_monitor_5m_v1",
+    }
+    try:
+        ticker_state = _penny_load_state_tickers()
+        active_states = {
+            symbol: state
+            for symbol, state in ticker_state.items()
+            if isinstance(state, dict) and state.get("active")
+        }
+        diagnostics["active_positions"] = len(active_states)
+        trigger_pool = {
+            symbol: candidate
+            for symbol, candidate in _penny_load_trigger_pool().items()
+            if symbol not in active_states
+        }
+        diagnostics["trigger_pool_size"] = len(trigger_pool)
+
+        previous_rows, _ = load_cache_file(PENNY_STOCKS_MONITOR_CACHE)
+        recent_exit_rows = [
+            row
+            for row in _penny_active_trade_rows(
+                previous_rows,
+                include_watch=False,
+                cache_age_seconds=0,
+            )
+            if str(row.get("trade_action") or "").upper() == "JETZT_VERKAUFEN"
+        ]
+
+        if not active_states and not trigger_pool:
+            diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
+            save_cache_file(
+                PENNY_STOCKS_MONITOR_CACHE,
+                recent_exit_rows,
+                metadata={"diagnostics": diagnostics},
+            )
+            with _scan_lock:
+                _scan_status.get("penny_positions", {}).pop("last_error", None)
+            return
+
+        response = rate_limited_get(
+            "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
+            params={"apiKey": POLYGON_KEY},
+            timeout=35,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Polygon stock snapshot HTTP {response.status_code}")
+        snapshots_raw = response.json().get("tickers", []) or []
+        volume_fraction = _penny_expected_volume_fraction(datetime.now(timezone.utc))
+        market_session = _stock_trade_email_status()
+        common_universe, universe_source = _load_common_stock_universe()
+        diagnostics["universe_source"] = universe_source
+        target_symbols = set(active_states) | set(trigger_pool)
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for raw in snapshots_raw:
+            symbol = str(raw.get("ticker") or "").upper().strip()
+            if symbol not in target_symbols:
+                continue
+            item = _penny_normalize_snapshot(raw, volume_fraction)
+            if item:
+                normalized[symbol] = item
+
+        reference_cache = _penny_load_dict(PENNY_STOCKS_REFERENCE_CACHE)
+        daily_cache = _penny_load_dict(PENNY_STOCKS_DAILY_CACHE)
+        news_cache = _penny_load_dict(PENNY_STOCKS_NEWS_CACHE)
+        sec_cache = _penny_load_dict(PENNY_STOCKS_SEC_CACHE)
+        state_updates: Dict[str, Dict[str, Any]] = {}
+        rows: List[Dict[str, Any]] = []
+        buy_candidates: List[Dict[str, Any]] = []
+        management_candidates: List[Dict[str, Any]] = []
+        exit_candidates: List[Dict[str, Any]] = []
+        with _scan_lock:
+            _scan_status["penny_positions"]["progress"] = {
+                "checked": 0,
+                "total": len(active_states) + len(trigger_pool),
+                "hits": 0,
+                "detail": "Positionen und frische Trigger",
+            }
+
+        for index, symbol in enumerate(sorted(active_states), start=1):
+            candidate_now_ts = time.time()
+            previous = dict(active_states[symbol])
+            snapshot = normalized.get(symbol)
+            if snapshot is None:
+                snapshot = _penny_position_snapshot_from_state(symbol, previous)
+                diagnostics["snapshot_missing"] += 1
+
+            bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=96)
+            ref_entry = reference_cache.get(symbol) if isinstance(reference_cache.get(symbol), dict) else {}
+            if candidate_now_ts - (_alert_float(ref_entry.get("cached_at"), 0.0) or 0.0) > 24 * 3600:
+                details = get_ticker_details(POLYGON_KEY, symbol)
+                details = details if isinstance(details, dict) else {}
+                reference_cache[symbol] = {"cached_at": candidate_now_ts, "data": details}
+            else:
+                details = ref_entry.get("data") if isinstance(ref_entry.get("data"), dict) else {}
+
+            news_entry = news_cache.get(symbol) if isinstance(news_cache.get(symbol), dict) else {}
+            if candidate_now_ts - (_alert_float(news_entry.get("cached_at"), 0.0) or 0.0) > 30 * 60:
+                raw_news = get_ticker_news(POLYGON_KEY, symbol, limit=8)
+                if isinstance(raw_news, tuple):
+                    raw_news = raw_news[0]
+                news_context = _penny_news_context(raw_news)
+                news_cache[symbol] = {"cached_at": candidate_now_ts, "context": news_context}
+            else:
+                news_context = news_entry.get("context") if isinstance(news_entry.get("context"), dict) else {}
+
+            sec_entry = sec_cache.get(symbol) if isinstance(sec_cache.get(symbol), dict) else {}
+            cached_sec_context = sec_entry.get("context") if isinstance(sec_entry.get("context"), dict) else {}
+            sec_ttl = 6 * 3600 if str(cached_sec_context.get("status") or "").lower() == "ok" else 10 * 60
+            if candidate_now_ts - (_alert_float(sec_entry.get("cached_at"), 0.0) or 0.0) > sec_ttl:
+                sec_context = _penny_fetch_sec_filing_context(details.get("cik"))
+                sec_cache[symbol] = {"cached_at": candidate_now_ts, "context": sec_context}
+            else:
+                sec_context = cached_sec_context
+            details = {
+                **details,
+                "news_context": news_context,
+                "sec_filing_context": sec_context,
+            }
+
+            daily_entry = daily_cache.get(symbol) if isinstance(daily_cache.get(symbol), dict) else {}
+            if candidate_now_ts - (_alert_float(daily_entry.get("cached_at"), 0.0) or 0.0) > 2 * 3600:
+                daily_bars = _penny_fetch_daily_bars(symbol)
+                daily_cache[symbol] = {"cached_at": candidate_now_ts, "bars": daily_bars}
+            else:
+                daily_bars = daily_entry.get("bars") if isinstance(daily_entry.get("bars"), list) else []
+
+            rth_summary = summarize_penny_rth_volume(bars_5m, now_ts=candidate_now_ts)
+            if rth_summary.get("data_ok"):
+                snapshot = dict(snapshot)
+                snapshot.update({
+                    "volume": rth_summary.get("session_volume"),
+                    "dollar_volume": rth_summary.get("session_dollar_volume"),
+                    "projected_dollar_volume": (
+                        (_alert_float(rth_summary.get("session_dollar_volume"), 0.0) or 0.0)
+                        / max(volume_fraction, 0.01)
+                    ),
+                    "volume_scope": "current_us_rth",
+                    "rth_session_bar_count": rth_summary.get("session_bar_count"),
+                })
+            snapshot = _penny_apply_robust_rvol(snapshot, daily_bars, volume_fraction)
+            profile_levels = _penny_vrvp_resistances(bars_5m, daily_bars, snapshot.get("price") or 0.0)
+            row = evaluate_penny_candidate(
+                snapshot,
+                bars_5m,
+                daily_bars,
+                details=details,
+                extra_resistances=profile_levels,
+                previous_active=True,
+                previous_position=previous,
+                now_ts=candidate_now_ts,
+            )
+            if not snapshot.get("spread_known"):
+                live_quote = _penny_fetch_live_spread(symbol)
+                if live_quote:
+                    snapshot.update(live_quote)
+                    row = evaluate_penny_candidate(
+                        snapshot,
+                        bars_5m,
+                        daily_bars,
+                        details=details,
+                        extra_resistances=profile_levels,
+                        previous_active=True,
+                        previous_position=previous,
+                        now_ts=candidate_now_ts,
+                    )
+            row["market_session"] = market_session
+            diagnostics["positions_checked"] += 1
+            action = str(row.get("trade_action") or "").upper()
+            if action == "JETZT_VERKAUFEN":
+                diagnostics["exit_now"] += 1
+            elif action == "HALTEN":
+                diagnostics["hold_now"] += 1
+            if str(row.get("lifecycle") or "").upper() == "DATENLUECKE":
+                diagnostics["data_gap_now"] += 1
+            if row.get("management_event") == "TP1_PARTIAL":
+                diagnostics["tp1_partial_now"] += 1
+
+            trigger_id = _penny_trigger_event_id(row)
+            if trigger_id == "unknown":
+                trigger_id = _penny_event_token(previous.get("last_trigger")) or "unknown"
+            position_event_id = _penny_position_event_id(row, previous)
+            state_update = {
+                **previous,
+                "active": True,
+                "last_seen": candidate_now_ts,
+                "last_action": action,
+                "last_trigger": trigger_id,
+                "position_event_id": position_event_id,
+                "setup_quality_score": row.get("setup_quality_score"),
+                "pump_potential_score": row.get("pump_potential_score"),
+                "entry_quality_score": row.get("entry_quality_score"),
+                "dump_risk_score": row.get("dump_risk_score"),
+                "trade_score": row.get("trade_score"),
+                "last_snapshot": {
+                    "price": row.get("price"),
+                    "bid": snapshot.get("bid"),
+                    "ask": snapshot.get("ask"),
+                    "rvol": row.get("rvol"),
+                },
+            }
+            if action == "JETZT_VERKAUFEN":
+                dedupe_key = f"penny_exit:{symbol}:{position_event_id}"
+                if previous.get("last_exit_event_id") != position_event_id and not _email_dedupe_active(
+                    dedupe_key, 6 * 3600, now=candidate_now_ts
+                ):
+                    row["_dedupe_key"] = dedupe_key
+                    state_update["pending_exit_notification"] = True
+                    exit_candidates.append(row)
+            elif row.get("management_event") == "TP1_PARTIAL" and not previous.get("tp1_realized"):
+                dedupe_key = f"penny_tp1:{symbol}:{position_event_id}"
+                if previous.get("last_management_event_id") != position_event_id and not _email_dedupe_active(dedupe_key, 24 * 3600, now=candidate_now_ts):
+                    row["_dedupe_key"] = dedupe_key
+                    management_candidates.append(row)
+
+            rows.append(row)
+            state_updates[symbol] = state_update
+            with _scan_lock:
+                _scan_status["penny_positions"]["progress"] = {
+                    "checked": index,
+                    "total": len(active_states) + len(trigger_pool),
+                    "hits": len(rows),
+                    "detail": f"{symbol}: Position pruefen",
+                }
+
+        for pool_index, symbol in enumerate(sorted(trigger_pool), start=1):
+            candidate_now_ts = time.time()
+            diagnostics["trigger_candidates_checked"] += 1
+            rejection_reason = ""
+            snapshot = normalized.get(symbol)
+            if snapshot is None:
+                rejection_reason = "current_snapshot_missing"
+            elif not (PENNY_MIN_PRICE <= (_alert_float(snapshot.get("price"), 0.0) or 0.0) <= PENNY_MAX_PRICE):
+                rejection_reason = "outside_penny_price_band"
+            else:
+                rejection_reason = _stock_alert_asset_exclusion_reason(
+                    symbol,
+                    common_stock_universe=common_universe,
+                    universe_source=universe_source,
+                    require_reference=common_universe is None,
+                ) or ""
+
+            broad: Dict[str, Any] = {}
+            bars_5m: List[Dict[str, Any]] = []
+            intraday: Dict[str, Any] = {}
+            if not rejection_reason and snapshot is not None:
+                broad = score_broad_penny_candidate(snapshot)
+                if not broad.get("eligible"):
+                    rejection_reason = "broad_liquidity_screen_failed"
+            if not rejection_reason and snapshot is not None:
+                bars_5m = _fetch_recent_stock_5m_bars(symbol, limit=96)
+                intraday = analyze_penny_intraday(
+                    bars_5m,
+                    spread_bps=(
+                        (_alert_float(snapshot.get("spread_bps"), 0.0) or 0.0)
+                        if snapshot.get("spread_known")
+                        else 0.0
+                    ),
+                    now_ts=candidate_now_ts,
+                )
+                pool_still_valid, pool_reason = _penny_trigger_pool_eligibility(
+                    snapshot,
+                    broad,
+                    intraday,
+                )
+                if not pool_still_valid:
+                    rejection_reason = pool_reason
+                elif not intraday.get("trigger_confirmed"):
+                    rejection_reason = "fresh_closed_5m_trigger_missing"
+
+            row: Optional[Dict[str, Any]] = None
+            evaluated_snapshot: Dict[str, Any] = snapshot or {}
+            if not rejection_reason and snapshot is not None:
+                row, evaluated_snapshot = _penny_evaluate_trigger_pool_symbol(
+                    symbol,
+                    snapshot,
+                    bars_5m,
+                    reference_cache=reference_cache,
+                    daily_cache=daily_cache,
+                    news_cache=news_cache,
+                    sec_cache=sec_cache,
+                    volume_fraction=volume_fraction,
+                    market_session=market_session,
+                    now_ts=candidate_now_ts,
+                )
+                if str(row.get("trade_action") or "").upper() != "JETZT_KAUFEN":
+                    blockers = row.get("hard_blockers") or []
+                    rejection_reason = str(blockers[0]) if blockers else "full_entry_model_not_tradeable"
+
+            if not rejection_reason and row is not None:
+                validated, validation_reason = _penny_revalidate_buy_candidate(
+                    row,
+                    now_ts=time.time(),
+                )
+                if validated is None:
+                    rejection_reason = validation_reason
+                else:
+                    row = validated
+
+            if rejection_reason or row is None:
+                reason_key = rejection_reason or "unknown_trigger_rejection"
+                rejected_counts = diagnostics["trigger_rejected_counts"]
+                rejected_counts[reason_key] = rejected_counts.get(reason_key, 0) + 1
+            else:
+                previous = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row, previous)
+                dedupe_key = f"penny_buy:{symbol}:{trigger_id}"
+                if previous.get("last_buy_trigger") == trigger_id or _email_dedupe_active(
+                    dedupe_key,
+                    6 * 3600,
+                    now=candidate_now_ts,
+                ):
+                    rejected_counts = diagnostics["trigger_rejected_counts"]
+                    rejected_counts["buy_trigger_already_processed"] = (
+                        rejected_counts.get("buy_trigger_already_processed", 0) + 1
+                    )
+                else:
+                    row["position_event_id"] = position_event_id
+                    row["scanner_path"] = "five_minute_trigger_pool"
+                    row["_dedupe_key"] = dedupe_key
+                    state_updates[symbol] = {
+                        **previous,
+                        "active": False,
+                        "pending_buy_notification": True,
+                        "last_seen": candidate_now_ts,
+                        "last_action": "ENTRY_BESTAETIGT_MAIL_AUSSTEHEND",
+                        "last_trigger": trigger_id,
+                        "position_event_id": position_event_id,
+                        "setup_quality_score": row.get("setup_quality_score"),
+                        "pump_potential_score": row.get("pump_potential_score"),
+                        "entry_quality_score": row.get("entry_quality_score"),
+                        "dump_risk_score": row.get("dump_risk_score"),
+                        "trade_score": row.get("trade_score"),
+                        "last_snapshot": {
+                            "price": row.get("price"),
+                            "bid": evaluated_snapshot.get("bid"),
+                            "ask": evaluated_snapshot.get("ask"),
+                            "rvol": row.get("rvol"),
+                        },
+                    }
+                    rows.append(row)
+                    buy_candidates.append(row)
+
+            with _scan_lock:
+                _scan_status["penny_positions"]["progress"] = {
+                    "checked": len(active_states) + pool_index,
+                    "total": len(active_states) + len(trigger_pool),
+                    "hits": len(rows),
+                    "detail": f"{symbol}: Trigger revalidieren",
+                }
+
+        current_symbols = {str(row.get("ticker") or "").upper() for row in rows}
+        rows.extend(
+            row for row in recent_exit_rows
+            if str(row.get("ticker") or "").upper() not in current_symbols
+        )
+        action_rank = {
+            "JETZT_VERKAUFEN": 0,
+            "JETZT_KAUFEN": 1,
+            "HALTEN": 2,
+            "TRIGGER_WARTEN": 3,
+        }
+        rows.sort(key=lambda row: (
+            action_rank.get(str(row.get("trade_action") or "").upper(), 9),
+            -(_alert_float(row.get("dump_risk_score"), 0.0) or 0.0),
+        ))
+        buy_candidates.sort(key=lambda row: (
+            -(_alert_float(row.get("trade_score"), 0.0) or 0.0),
+            -(_alert_float(row.get("entry_quality_score"), 0.0) or 0.0),
+        ))
+        diagnostics["new_buy_now"] = len(buy_candidates)
+        diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
+        save_cache_file(PENNY_STOCKS_MONITOR_CACHE, rows, metadata={"diagnostics": diagnostics})
+        ticker_state = _penny_merge_state_tickers(state_updates, now_ts=time.time())
+        _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
+        _penny_save_dict(PENNY_STOCKS_DAILY_CACHE, daily_cache)
+        _penny_save_dict(PENNY_STOCKS_NEWS_CACHE, news_cache)
+        _penny_save_dict(PENNY_STOCKS_SEC_CACHE, sec_cache)
+
+        state_changed_after_mail = False
+        claim_time = time.time()
+        claimed_buys = [
+            row for row in buy_candidates[:5]
+            if _email_dedupe_claim(
+                str(row.get("_dedupe_key") or ""),
+                6 * 3600,
+                now=claim_time,
+            )
+        ]
+        try:
+            buy_mail_sent = _penny_buy_email(claimed_buys)
+        except Exception as exc:
+            print(f"[Penny monitor] buy email error: {exc}")
+            buy_mail_sent = False
+        if buy_mail_sent:
+            _safe_record_alert_signals("penny_stocks", claimed_buys)
+            for row in claimed_buys:
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row, state)
+                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+                state.update({
+                    "active": True,
+                    "position_state_source": "scanner_model_not_broker",
+                    "buy_entry": row.get("entry"),
+                    "buy_at": time.time(),
+                    "stop_loss": setup.get("stop_loss"),
+                    "active_stop": setup.get("stop_loss"),
+                    "tp1": setup.get("tp1"),
+                    "tp2": setup.get("tp2"),
+                    "trade_setup": setup,
+                    "signal_trigger": trigger_id,
+                    "position_event_id": position_event_id,
+                    "last_trigger": trigger_id,
+                    "last_buy_trigger": trigger_id,
+                    "last_action": "JETZT_KAUFEN",
+                    "last_seen": time.time(),
+                    "buy_email_sent": True,
+                    "tp1_realized": False,
+                    "remaining_fraction": 1.0,
+                })
+                state.pop("pending_buy_notification", None)
+                _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_buys:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                state.pop("pending_buy_notification", None)
+                state.update({
+                    "active": bool(state.get("active")),
+                    "last_action": "ENTRY_BESTAETIGT_MAIL_FEHLER",
+                    "buy_email_sent": False,
+                    "last_seen": time.time(),
+                })
+                state_changed_after_mail = True
+
+        claim_time = time.time()
+        claimed_management = [
+            row for row in management_candidates[:5]
+            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=claim_time)
+        ]
+        try:
+            management_mail_sent = _penny_management_email(claimed_management)
+        except Exception as exc:
+            print(f"[Penny monitor] management email error: {exc}")
+            management_mail_sent = False
+        if management_mail_sent:
+            for row in claimed_management:
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                position_event_id = _penny_position_event_id(row, state)
+                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+                active_stop = row.get("active_stop") or state.get("buy_entry") or setup.get("entry")
+                state.update({
+                    "active": True,
+                    "tp1_realized": True,
+                    "remaining_fraction": 0.5,
+                    "active_stop": active_stop,
+                    "stop_loss": active_stop,
+                    "last_management_trigger": _penny_trigger_event_id(row),
+                    "last_management_event_id": position_event_id,
+                    "management_email_sent": True,
+                    "last_action": "HALTEN",
+                    "last_seen": time.time(),
+                })
+                if isinstance(state.get("trade_setup"), dict):
+                    state["trade_setup"]["stop_loss"] = active_stop
+                    state["trade_setup"]["stop"] = active_stop
+                _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_management:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+
+        claim_time = time.time()
+        claimed_exits = [
+            row for row in exit_candidates[:5]
+            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=claim_time)
+        ]
+        try:
+            exit_mail_sent = _penny_exit_email(claimed_exits)
+        except Exception as exc:
+            print(f"[Penny monitor] exit email error: {exc}")
+            exit_mail_sent = False
+        if exit_mail_sent:
+            _safe_record_alert_signals("penny_stocks", claimed_exits)
+            for row in claimed_exits:
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                trigger_id = _penny_trigger_event_id(row)
+                position_event_id = _penny_position_event_id(row, state)
+                state.update({
+                    "active": False,
+                    "remaining_fraction": 0.0,
+                    "exit_at": time.time(),
+                    "exit_trigger": trigger_id,
+                    "last_exit_trigger": trigger_id,
+                    "last_exit_event_id": position_event_id,
+                    "exit_email_sent": True,
+                    "last_action": "JETZT_VERKAUFEN",
+                    "last_seen": time.time(),
+                })
+                state.pop("pending_exit_notification", None)
+                _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
+                state_changed_after_mail = True
+        else:
+            for row in claimed_exits:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+                symbol = str(row.get("ticker") or "")
+                state = ticker_state.setdefault(symbol, {})
+                state.pop("pending_exit_notification", None)
+                state.update({
+                    "active": True,
+                    "last_action": "EXIT_BESTAETIGT_MAIL_FEHLER",
+                    "exit_email_sent": False,
+                    "last_seen": time.time(),
+                })
+                state_changed_after_mail = True
+
+        if state_changed_after_mail:
+            _penny_merge_state_tickers(ticker_state, now_ts=time.time())
+        with _scan_lock:
+            _scan_status.get("penny_positions", {}).pop("last_error", None)
+        print(
+            f"[Penny monitor] {diagnostics['positions_checked']} active checked, "
+            f"{diagnostics['trigger_candidates_checked']} trigger candidates, "
+            f"{diagnostics['new_buy_now']} buy, {diagnostics['hold_now']} hold, "
+            f"{diagnostics['exit_now']} exit"
+        )
+    except Exception as exc:
+        diagnostics["error"] = str(exc)
+        diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
+        print(f"[Penny monitor] error: {exc}")
+        traceback.print_exc()
+        with _scan_lock:
+            _scan_status.setdefault("penny_positions", {})["last_error"] = str(exc)
+        raise
+    finally:
+        with _scan_lock:
+            _scan_status.get("penny_positions", {}).pop("progress", None)
+
+
 @app.post("/api/penny-stocks-scan")
 def trigger_penny_stock_scan():
     if not POLYGON_KEY:
@@ -23287,32 +24720,76 @@ def trigger_penny_stock_scan():
 @app.get("/api/penny-stocks-results")
 def get_penny_stock_results(include_watch: bool = False):
     cached_rows, cached_at = load_cache_file(PENNY_STOCKS_CACHE)
+    monitor_rows, monitor_cached_at = load_cache_file(PENNY_STOCKS_MONITOR_CACHE)
     metadata = load_cache_metadata(PENNY_STOCKS_CACHE)
-    cache_age = None
-    if cached_at:
+    monitor_metadata = load_cache_metadata(PENNY_STOCKS_MONITOR_CACHE)
+
+    def cache_age_seconds(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
         try:
-            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
+            parsed = datetime.fromisoformat(value)
+            current = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+            return max(0, int((current - parsed).total_seconds()))
         except Exception:
-            cache_age = None
-    rows = _penny_active_trade_rows(
+            return None
+
+    cache_age = cache_age_seconds(cached_at)
+    monitor_cache_age = cache_age_seconds(monitor_cached_at)
+    discovery_visible = _penny_active_trade_rows(
         cached_rows,
         include_watch=include_watch,
         cache_age_seconds=cache_age,
+    )
+    monitor_visible = _penny_active_trade_rows(
+        monitor_rows,
+        include_watch=include_watch,
+        cache_age_seconds=monitor_cache_age,
+    )
+    # Monitor state is authoritative for a ticker already opened by a
+    # successful Penny buy mail. Replacing the value preserves the original
+    # discovery order while preventing duplicate or contradictory rows.
+    merged_by_ticker: Dict[str, Dict[str, Any]] = {}
+    for row in discovery_visible:
+        symbol = str(row.get("ticker") or "").upper().strip()
+        if symbol:
+            merged_by_ticker[symbol] = row
+    for row in monitor_visible:
+        symbol = str(row.get("ticker") or "").upper().strip()
+        if symbol:
+            merged_by_ticker[symbol] = row
+    action_rank = {
+        "JETZT_VERKAUFEN": 0,
+        "JETZT_KAUFEN": 1,
+        "HALTEN": 2,
+        "TRIGGER_WARTEN": 3,
+        "BEOBACHTEN": 4,
+    }
+    rows = sorted(
+        merged_by_ticker.values(),
+        key=lambda row: (
+            action_rank.get(str(row.get("trade_action") or "").upper(), 9),
+            -(_alert_float(row.get("trade_score"), 0.0) or 0.0),
+        ),
     )
     near_entries = _penny_near_entry_rows(
         cached_rows,
         cache_age_seconds=cache_age,
     )
     requested_actions = _PENNY_VISIBLE_ACTIONS | (_PENNY_OPTIONAL_ACTIONS if include_watch else frozenset())
-    raw_visible_count = sum(
-        1
-        for row in (cached_rows if isinstance(cached_rows, list) else [])
+    raw_symbols = {
+        str(row.get("ticker") or "").upper().strip()
+        for source_rows in (cached_rows, monitor_rows)
+        for row in (source_rows if isinstance(source_rows, list) else [])
         if isinstance(row, dict)
         and str(row.get("trade_action") or "").upper() in requested_actions
-    )
+        and str(row.get("ticker") or "").strip()
+    }
+    raw_visible_count = len(raw_symbols)
     diagnostics = dict(metadata.get("diagnostics") or {})
     with _scan_lock:
         current_scan_error = _scan_status.get("penny_stocks", {}).get("last_error")
+        current_monitor_error = _scan_status.get("penny_positions", {}).get("last_error")
     diagnostics.update({
         "signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
         "result_cache_max_age_seconds": _PENNY_RESULT_CACHE_MAX_AGE_SECONDS,
@@ -23321,23 +24798,35 @@ def get_penny_stock_results(include_watch: bool = False):
             cache_age is not None and cache_age > _PENNY_RESULT_CACHE_MAX_AGE_SECONDS
         ),
         "last_scan_error": current_scan_error,
+        "position_monitor": {
+            **dict(monitor_metadata.get("diagnostics") or {}),
+            "cached_at": monitor_cached_at,
+            "cache_age_seconds": monitor_cache_age,
+            "last_error": current_monitor_error,
+        },
+        "combined_buy_now": sum(1 for row in rows if row.get("trade_action") == "JETZT_KAUFEN"),
+        "combined_hold_now": sum(1 for row in rows if row.get("trade_action") == "HALTEN"),
+        "combined_exit_now": sum(1 for row in rows if row.get("trade_action") == "JETZT_VERKAUFEN"),
     })
     return {
-        "status": "warning" if current_scan_error else "success",
+        "status": "warning" if current_scan_error or current_monitor_error else "success",
         "data": rows,
         "near_entries": near_entries,
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
+        "monitor_cached_at": monitor_cached_at,
+        "monitor_cache_age_seconds": monitor_cache_age,
         "include_watch": include_watch,
         "diagnostics": diagnostics,
         "policy": {
             "universe": f"active US common stocks ${PENNY_MIN_PRICE:.2f}-${PENNY_MAX_PRICE:.2f}",
-            "mail_interval_minutes": 5,
+            "discovery_interval_minutes": 30,
+            "position_monitor_interval_minutes": 5,
             "live_signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
             "optional_row_limit": _PENNY_OPTIONAL_ROW_LIMIT,
             "near_entry_row_limit": _PENNY_NEAR_ENTRY_ROW_LIMIT,
             "buy_mail_requires": f"fresh closed 5m breakout/retest + live ask/spread <= {PENNY_EXECUTION_MAX_SPREAD_BPS:.0f}bps + 20d-median RVOL + SEC clear + structural stop/TP + trade score >= {PENNY_MIN_TRADE_SCORE:.0f}",
-            "float_note": "Shares outstanding is a proxy, not exact free float.",
+            "float_note": "Only reported free float is used. Missing float receives no score and is shown as unknown.",
         },
     }
 

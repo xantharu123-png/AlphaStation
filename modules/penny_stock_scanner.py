@@ -2,7 +2,7 @@
 
 The scanner deliberately separates three questions:
 
-* pump_potential_score: is unusual capital entering a liquid low-priced stock?
+* setup_quality_score: is unusual capital entering a liquid low-priced stock?
 * entry_quality_score: is there a fresh, closed 5-minute execution trigger now?
 * dump_risk_score: is the move already extended or distributing?
 
@@ -15,7 +15,9 @@ from __future__ import annotations
 import math
 import statistics
 import time
+from datetime import datetime, time as datetime_time, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 from modules.trade_levels import trade_geometry
 from modules.vrvp_levels import calculate_wilder_atr
@@ -32,6 +34,10 @@ PENNY_MAX_ENTRY_DRIFT_R = 0.35
 PENNY_DEFAULT_SLIPPAGE_BPS = 15.0
 PENNY_MIN_NET_TP1_RR = 1.0
 PENNY_MIN_NET_EFFECTIVE_RR = 1.5
+
+_NEW_YORK = ZoneInfo("America/New_York")
+_RTH_OPEN = datetime_time(9, 30)
+_RTH_CLOSE = datetime_time(16, 0)
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -126,6 +132,55 @@ def _completed_bars(
     return [completed[key] for key in sorted(completed)]
 
 
+def _current_rth_bars(
+    bars: Sequence[Dict[str, Any]],
+    *,
+    now_ts: float,
+) -> List[Dict[str, float]]:
+    """Return completed bars from the current US regular session only."""
+    completed = _completed_bars(bars, timeframe_seconds=300.0, now_ts=now_ts)
+    now_et = datetime.fromtimestamp(now_ts, tz=timezone.utc).astimezone(_NEW_YORK)
+    session_day = now_et.date()
+    result: List[Dict[str, float]] = []
+    for item in completed:
+        bar_et = datetime.fromtimestamp(item["timestamp"], tz=timezone.utc).astimezone(_NEW_YORK)
+        if bar_et.date() != session_day:
+            continue
+        if not (_RTH_OPEN <= bar_et.time().replace(tzinfo=None) < _RTH_CLOSE):
+            continue
+        result.append(item)
+    return result
+
+
+def summarize_penny_rth_volume(
+    bars: Sequence[Dict[str, Any]],
+    *,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Summarize executable cash-session volume without extended-hours prints."""
+    now_value = float(now_ts if now_ts is not None else time.time())
+    data = _current_rth_bars(bars, now_ts=now_value)
+    if not data:
+        return {
+            "data_ok": False,
+            "session_bar_count": 0,
+            "session_volume": 0.0,
+            "session_dollar_volume": 0.0,
+            "volume_scope": "current_us_rth",
+        }
+    session_volume = sum(item["volume"] for item in data)
+    session_dollar_volume = sum(item["close"] * item["volume"] for item in data)
+    session_day = datetime.fromtimestamp(data[-1]["timestamp"], tz=timezone.utc).astimezone(_NEW_YORK).date()
+    return {
+        "data_ok": True,
+        "session_bar_count": len(data),
+        "session_volume": session_volume,
+        "session_dollar_volume": session_dollar_volume,
+        "session_date": session_day.isoformat(),
+        "volume_scope": "current_us_rth",
+    }
+
+
 def grade_for_score(score: Any) -> str:
     value = _num(score)
     if value >= 88:
@@ -199,9 +254,9 @@ def analyze_penny_intraday(
     spread_bps: float = 0.0,
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Analyze only completed chronological 5-minute bars."""
+    """Analyze completed 5-minute bars from the current US cash session."""
     now_value = float(now_ts if now_ts is not None else time.time())
-    data = _completed_bars(bars, timeframe_seconds=300.0, now_ts=now_value)
+    data = _current_rth_bars(bars, now_ts=now_value)
     result: Dict[str, Any] = {
         "data_ok": False,
         "fresh": False,
@@ -210,6 +265,9 @@ def analyze_penny_intraday(
         "retest_confirmed": False,
         "ignition": False,
         "warnings": [],
+        "vwap_scope": "current_us_rth",
+        "volume_scope": "current_us_rth",
+        "session_bar_count": len(data),
     }
     if len(data) < 15:
         result["warnings"] = ["insufficient_closed_5m_history"]
@@ -246,6 +304,30 @@ def analyze_penny_intraday(
     ema20 = _ema(closes, 20)
 
     atr5 = calculate_wilder_atr(data, period=14) or latest["close"] * 0.02
+
+    baseline_high = max(item["high"] for item in baseline)
+    baseline_low = min(item["low"] for item in baseline)
+    baseline_range_pct = (
+        (baseline_high - baseline_low) / latest["close"] * 100.0
+        if latest["close"] > 0
+        else 0.0
+    )
+    structure_window = max(4, len(baseline) // 2)
+    early_structure = baseline[:structure_window]
+    recent_structure = baseline[-structure_window:]
+    early_range = max(item["high"] for item in early_structure) - min(
+        item["low"] for item in early_structure
+    )
+    recent_range = max(item["high"] for item in recent_structure) - min(
+        item["low"] for item in recent_structure
+    )
+    compression_ratio = recent_range / early_range if early_range > 0 else 1.0
+    touch_tolerance = max(breakout_level * 0.008, atr5 * 0.25)
+    breakout_touch_count = sum(
+        1
+        for item in baseline
+        if abs(breakout_level - item["high"]) <= touch_tolerance
+    )
 
     atr_pct = atr5 / latest["close"] * 100.0 if latest["close"] > 0 else 0.0
     spread_pct = max(0.0, _num(spread_bps)) / 100.0
@@ -345,6 +427,9 @@ def analyze_penny_intraday(
         "ema9": ema9,
         "ema20": ema20,
         "atr5": atr5,
+        "baseline_range_pct": round(baseline_range_pct, 2),
+        "compression_ratio": round(compression_ratio, 3),
+        "breakout_touch_count": breakout_touch_count,
         "swing_low": min(item["low"] for item in data[-5:]),
         "retest_low": min(latest["low"], previous["low"]),
         "green_streak": green_streak,
@@ -354,16 +439,35 @@ def analyze_penny_intraday(
         "vwap_lost": vwap_lost,
         "heavy_red_bar": heavy_red_bar,
         "warnings": warnings,
+        "session_bar_count": len(data),
+        "session_volume": round(cumulative_volume),
+        "session_dollar_volume": round(sum(item["close"] * item["volume"] for item in data)),
+        "session_date": datetime.fromtimestamp(latest["timestamp"], tz=timezone.utc).astimezone(_NEW_YORK).date().isoformat(),
+        "vwap_scope": "current_us_rth",
+        "volume_scope": "current_us_rth",
     })
     return result
 
 
-def _daily_resistance_levels(daily_bars: Sequence[Dict[str, Any]], entry: float) -> List[Dict[str, Any]]:
+def _daily_resistance_levels(
+    daily_bars: Sequence[Dict[str, Any]],
+    entry: float,
+    *,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     data = _valid_bars(daily_bars)
     if not data or entry <= 0:
         return []
-    # Exclude the live/current day from historical resistance pivots.
-    history = data[:-1] if len(data) > 1 else data
+    # Exclude only a demonstrably incomplete current-day candle. Previously
+    # the final *completed* daily candle was always discarded as well.
+    history = data
+    last_timestamp = _timestamp_seconds(data[-1].get("timestamp"))
+    if last_timestamp > 0 and len(data) > 1:
+        now_value = float(now_ts if now_ts is not None else time.time())
+        today_et = datetime.fromtimestamp(now_value, tz=timezone.utc).astimezone(_NEW_YORK).date()
+        last_day_et = datetime.fromtimestamp(last_timestamp, tz=timezone.utc).astimezone(_NEW_YORK).date()
+        if last_day_et >= today_et:
+            history = data[:-1]
     levels: List[Dict[str, Any]] = []
     for lookback, label, weight in ((20, "20D High", 1.6), (60, "60D High", 1.9), (120, "120D High", 2.1)):
         subset = history[-lookback:]
@@ -374,6 +478,92 @@ def _daily_resistance_levels(daily_bars: Sequence[Dict[str, Any]], entry: float)
         if price > max(history[idx - 1]["high"], history[idx - 2]["high"]) and price >= max(history[idx + 1]["high"], history[idx + 2]["high"]):
             levels.append({"price": price, "source": "Daily swing high", "weight": 1.5})
     return [level for level in levels if _num(level.get("price")) > entry]
+
+
+def _select_structural_stop(
+    candidates: Sequence[Dict[str, Any]],
+    *,
+    entry: float,
+    min_risk: float,
+    max_risk: float,
+) -> Optional[Dict[str, Any]]:
+    """Select a confluence-backed support, not simply the closest stop."""
+    valid = [
+        dict(item)
+        for item in candidates
+        if 0 < _num(item.get("price")) < entry
+        and min_risk <= entry - _num(item.get("price")) <= max_risk
+    ]
+    if not valid:
+        return None
+    tolerance = max(entry * 0.006, 0.000001)
+    clusters: List[Dict[str, Any]] = []
+    for item in sorted(valid, key=lambda value: _num(value.get("price")), reverse=True):
+        price = _num(item.get("price"))
+        target = next(
+            (cluster for cluster in clusters if abs(price - _num(cluster.get("price"))) <= tolerance),
+            None,
+        )
+        if target is None:
+            target = {"price": price, "weight": 0.0, "sources": [], "members": []}
+            clusters.append(target)
+        weight = max(0.25, _num(item.get("weight"), 1.0))
+        target["members"].append((price, weight))
+        target["weight"] += weight
+        target["sources"].append(str(item.get("source") or "structure"))
+        weighted_sum = sum(member_price * member_weight for member_price, member_weight in target["members"])
+        target["price"] = weighted_sum / max(target["weight"], 0.000001)
+
+    ideal_risk = entry * 0.045
+    for cluster in clusters:
+        risk = entry - _num(cluster.get("price"))
+        distance_penalty = abs(risk - ideal_risk) / max(ideal_risk, 0.000001)
+        cluster["selection_score"] = _num(cluster.get("weight")) - min(1.5, distance_penalty * 0.45)
+    selected = max(
+        clusters,
+        key=lambda item: (
+            _num(item.get("selection_score")),
+            _num(item.get("weight")),
+            _num(item.get("price")),
+        ),
+    )
+    unique_sources = list(dict.fromkeys(selected.get("sources") or []))
+    return {
+        "price": _num(selected.get("price")),
+        "source": " + ".join(unique_sources[:3]),
+        "weight": round(_num(selected.get("weight")), 2),
+        "confidence": "HIGH" if _num(selected.get("weight")) >= 3.5 else "MEDIUM",
+        "confluence_count": len(unique_sources),
+    }
+
+
+def estimate_penny_execution_costs(
+    *,
+    entry: float,
+    spread_bps: float,
+    atr5: float,
+    dollar_volume: float,
+    projected_dollar_volume: float,
+) -> Dict[str, Any]:
+    """Estimate two-sided execution friction and a conservative size cap."""
+    entry = max(0.0, _num(entry))
+    spread = max(0.0, _num(spread_bps))
+    atr_pct = _num(atr5) / entry * 100.0 if entry > 0 else 0.0
+    projected = max(0.0, _num(projected_dollar_volume))
+    current = max(0.0, _num(dollar_volume))
+    liquidity_penalty = _scale(7.0 - math.log10(max(projected, 1.0)), 0.0, 1.5, 45.0)
+    slippage_bps = _clamp(
+        8.0 + spread * 0.20 + atr_pct * 1.5 + liquidity_penalty,
+        15.0,
+        180.0,
+    )
+    max_order_notional = min(5_000.0, current * 0.0010, projected * 0.0005)
+    return {
+        "slippage_bps": round(slippage_bps, 1),
+        "execution_cost_bps": round(spread + 2.0 * slippage_bps, 1),
+        "max_order_notional": round(max(0.0, max_order_notional), 2),
+        "participation_model": "min(0.10% current RTH dollar volume, 0.05% projected RTH dollar volume, USD 5k)",
+    }
 
 
 def _dedupe_structure_levels(levels: Sequence[Dict[str, Any]], entry: float) -> List[Dict[str, Any]]:
@@ -399,6 +589,7 @@ def build_penny_trade_plan(
     entry_price: Optional[float] = None,
     spread_bps: float = 0.0,
     slippage_bps: float = PENNY_DEFAULT_SLIPPAGE_BPS,
+    now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Build stop and targets from actual invalidation/barrier structure."""
     entry = _num(entry_price, _num(intraday.get("price")))
@@ -410,12 +601,12 @@ def build_penny_trade_plan(
     buffer = max(entry * 0.003, atr5 * 0.12)
     min_risk = max(entry * 0.018, atr5 * 0.70)
     max_risk = entry * 0.12
-    stop_candidates = [
-        (breakout - buffer, "5m breakout/retest invalidation"),
-        (_num(intraday.get("retest_low")) - buffer, "5m retest low invalidation"),
-        (_num(intraday.get("vwap")) - buffer, "5m VWAP loss invalidation"),
-        (_num(intraday.get("ema20")) - buffer, "5m EMA20 structure invalidation"),
-        (_num(intraday.get("swing_low")) - buffer, "5m swing-low invalidation"),
+    stop_candidates: List[Dict[str, Any]] = [
+        {"price": breakout - buffer, "source": "5m breakout/retest", "weight": 2.0},
+        {"price": _num(intraday.get("retest_low")) - buffer, "source": "5m retest low", "weight": 2.2},
+        {"price": _num(intraday.get("vwap")) - buffer, "source": "RTH VWAP", "weight": 1.6},
+        {"price": _num(intraday.get("ema20")) - buffer, "source": "5m EMA20", "weight": 1.4},
+        {"price": _num(intraday.get("swing_low")) - buffer, "source": "5m swing low", "weight": 1.9},
     ]
     for level in extra_resistances or []:
         if not isinstance(level, dict):
@@ -423,18 +614,24 @@ def build_penny_trade_plan(
         level_price = _num(level.get("price"))
         level_weight = _num(level.get("weight"), 1.0)
         if 0 < level_price < entry and level_weight >= 1.40:
-            stop_candidates.append((level_price - buffer, f"{level.get('source') or 'profile support'} invalidation"))
-    valid_stops = sorted(
-        [(price, source) for price, source in stop_candidates if 0 < price < entry and min_risk <= entry - price <= max_risk],
-        key=lambda item: item[0],
-        reverse=True,
+            stop_candidates.append({
+                "price": level_price - buffer,
+                "source": str(level.get("source") or "profile support"),
+                "weight": level_weight,
+            })
+    selected_stop = _select_structural_stop(
+        stop_candidates,
+        entry=entry,
+        min_risk=min_risk,
+        max_risk=max_risk,
     )
-    if not valid_stops:
+    if not selected_stop:
         return {"valid": False, "blockers": ["no_structural_stop_in_valid_risk_band"]}
-    stop, stop_source = valid_stops[0]
+    stop = _num(selected_stop.get("price"))
+    stop_source = f"{selected_stop.get('source')} invalidation"
     risk = entry - stop
 
-    resistances = _daily_resistance_levels(daily_bars, entry)
+    resistances = _daily_resistance_levels(daily_bars, entry, now_ts=now_ts)
     resistances.extend(dict(level) for level in (extra_resistances or []) if isinstance(level, dict))
     resistances = _dedupe_structure_levels(resistances, entry)
     if not resistances:
@@ -504,8 +701,11 @@ def build_penny_trade_plan(
     round_trip_cost = entry * (
         max(0.0, _num(spread_bps)) + 2.0 * max(0.0, _num(slippage_bps))
     ) / 10_000.0
-    net_rr_tp1 = (tp1_price - entry - round_trip_cost) / risk
-    net_rr_tp2 = (tp2_price - entry - round_trip_cost) / risk
+    # Net R must compare the net reward with the net loss at the stop. Costs
+    # reduce target proceeds and increase the amount lost on an invalidation.
+    net_risk = risk + round_trip_cost
+    net_rr_tp1 = (tp1_price - entry - round_trip_cost) / net_risk
+    net_rr_tp2 = (tp2_price - entry - round_trip_cost) / net_risk
     net_effective_rr = net_rr_tp1 * 0.5 + net_rr_tp2 * 0.5
     cost_blockers: List[str] = []
     if net_rr_tp1 < PENNY_MIN_NET_TP1_RR:
@@ -521,6 +721,7 @@ def build_penny_trade_plan(
             "tp1": tp1_price,
             "tp2": tp2_price,
             "risk": _round_price(risk),
+            "net_risk": _round_price(net_risk),
             "gross_rr": round(gross_effective_rr, 2),
             "net_rr": round(net_effective_rr, 2),
             "gross_rr_tp1": round(rr_tp1, 2),
@@ -528,7 +729,7 @@ def build_penny_trade_plan(
             "net_rr_tp1": round(net_rr_tp1, 2),
             "net_rr_tp2": round(net_rr_tp2, 2),
             "round_trip_cost": _round_price(round_trip_cost),
-            "cost_model": "spread plus two-sided slippage",
+            "cost_model": "net reward and stop loss include spread plus two-sided slippage",
         }
     return {
         "valid": True,
@@ -540,6 +741,7 @@ def build_penny_trade_plan(
         "tp1": tp1_price,
         "tp2": tp2_price,
         "risk": _round_price(risk),
+        "net_risk": _round_price(net_risk),
         "rr": round(net_effective_rr, 2),
         "live_rr": round(net_effective_rr, 2),
         "rr_tp1": round(net_rr_tp1, 2),
@@ -550,8 +752,10 @@ def build_penny_trade_plan(
         "round_trip_cost": _round_price(round_trip_cost),
         "spread_bps": round(max(0.0, _num(spread_bps)), 1),
         "slippage_bps": round(max(0.0, _num(slippage_bps)), 1),
-        "cost_model": "spread plus two-sided slippage",
+        "cost_model": "net reward and stop loss include spread plus two-sided slippage",
         "stop_source": stop_source,
+        "stop_confidence": selected_stop.get("confidence"),
+        "stop_confluence_count": selected_stop.get("confluence_count"),
         "tp1_source": str(tp1.get("source") or "structural resistance"),
         "tp2_source": str(tp2.get("source") or "structural resistance"),
         "target_quality": "STRUCTURAL",
@@ -563,6 +767,67 @@ def build_penny_trade_plan(
             "distance_r": round(nearest_r, 2),
         },
     }
+
+
+def _actual_float_millions(details: Dict[str, Any]) -> Tuple[Optional[float], str]:
+    """Return reported free float only; shares outstanding is not a float proxy."""
+    for key in ("float_shares_millions", "free_float_millions", "public_float_millions"):
+        value = _num(details.get(key))
+        if value > 0:
+            return value, f"reported:{key}"
+    for key in ("float_shares", "free_float", "public_float"):
+        value = _num(details.get(key))
+        if value > 0:
+            return value / 1_000_000.0, f"reported:{key}"
+    return None, "unavailable_not_proxied"
+
+
+def _penny_technical_exit_reasons(
+    intraday: Dict[str, Any],
+    dump_risk: float,
+) -> List[str]:
+    """Require a confirmed momentum failure before closing an active model trade."""
+    price = _num(intraday.get("price"))
+    breakout_level = _num(intraday.get("breakout_level"))
+    ema20 = _num(intraday.get("ema20"))
+    below_breakout = bool(
+        price > 0
+        and breakout_level > 0
+        and price < breakout_level * 0.995
+    )
+    below_ema20 = bool(price > 0 and ema20 > 0 and price < ema20)
+    vwap_lost = bool(intraday.get("vwap_lost"))
+    heavy_red_bar = bool(intraday.get("heavy_red_bar"))
+    volume_no_progress = bool(intraday.get("volume_no_progress"))
+    failed_highs = int(_num(intraday.get("failed_highs")))
+    upper_wick_pct = _num(intraday.get("upper_wick_pct"))
+
+    repeated_failed_auction = bool(
+        failed_highs >= 2
+        and (volume_no_progress or upper_wick_pct >= 45.0)
+    )
+    high_volume_structure_break = bool(
+        heavy_red_bar
+        and (vwap_lost or below_breakout or below_ema20)
+    )
+    distribution_structure_break = bool(
+        dump_risk >= 65.0
+        and (
+            (below_breakout and below_ema20)
+            or repeated_failed_auction
+        )
+    )
+
+    reasons: List[str] = []
+    if vwap_lost:
+        reasons.append("confirmed_two_bar_vwap_loss")
+    if high_volume_structure_break:
+        reasons.append("high_volume_structure_break")
+    if repeated_failed_auction:
+        reasons.append("repeated_failed_breakout_with_distribution")
+    if distribution_structure_break:
+        reasons.append("high_dump_risk_with_structure_break")
+    return list(dict.fromkeys(reasons))
 
 
 def evaluate_penny_candidate(
@@ -579,9 +844,10 @@ def evaluate_penny_candidate(
     """Return an internal lifecycle decision for signal gating and persistence."""
     details = details or {}
     previous_position = previous_position or {}
-    broad = score_broad_penny_candidate(snapshot)
+    now_value = float(now_ts if now_ts is not None else time.time())
+    ticker = str(snapshot.get("ticker") or "").upper()
     spread_bps = _num(snapshot.get("spread_bps"), 9999.0)
-    intraday = analyze_penny_intraday(bars_5m, spread_bps=spread_bps, now_ts=now_ts)
+    intraday = analyze_penny_intraday(bars_5m, spread_bps=spread_bps, now_ts=now_value)
     trigger_price = _num(intraday.get("price"), _num(snapshot.get("price")))
     live_bid = _num(snapshot.get("bid"), _num(snapshot.get("price"), trigger_price))
     live_ask = _num(snapshot.get("ask"), _num(snapshot.get("price"), trigger_price))
@@ -592,51 +858,115 @@ def evaluate_penny_candidate(
     projected_dollar = _num(snapshot.get("projected_dollar_volume"))
     dollar_volume = _num(snapshot.get("dollar_volume"))
     shares_m = _num(details.get("shares_millions"))
+    actual_float_m, float_data_quality = _actual_float_millions(details)
     market_cap_m = _num(details.get("market_cap_millions"))
     news_context = details.get("news_context") if isinstance(details.get("news_context"), dict) else {}
     sec_context = details.get("sec_filing_context") if isinstance(details.get("sec_filing_context"), dict) else {}
     positive_catalysts = list(news_context.get("positive_catalysts") or [])
-    company_news_risks = list(dict.fromkeys([
+    company_hard_risks = list(dict.fromkeys([
         *(news_context.get("risk_flags") or []),
         *(sec_context.get("risk_flags") or []),
     ]))
+    company_warnings = list(dict.fromkeys([
+        *(news_context.get("warning_flags") or []),
+        *(sec_context.get("warning_flags") or []),
+    ]))
 
-    structure_score = 0.0
+    execution_costs = estimate_penny_execution_costs(
+        entry=execution_price,
+        spread_bps=spread_bps,
+        atr5=_num(intraday.get("atr5")),
+        dollar_volume=dollar_volume,
+        projected_dollar_volume=projected_dollar,
+    )
+
+    liquidity_score = (
+        _scale(dollar_volume, 250_000.0, 3_000_000.0, 12.0)
+        + _scale(projected_dollar, 1_000_000.0, 15_000_000.0, 13.0)
+    )
+    rvol_score = _scale(rvol, 1.0, 5.0, 20.0)
+    structure_components = {
+        "near_breakout": 0.0,
+        "ema_context": 0.0,
+        "vwap_context": 0.0,
+        "compression": 0.0,
+        "tested_level": 0.0,
+    }
     if intraday.get("data_ok"):
-        structure_score += _scale(2.8 - abs(_num(intraday.get("distance_to_breakout_pct"))), 0.0, 2.8, 8.0)
-        structure_score += 5.0 if _num(intraday.get("ema9")) >= _num(intraday.get("ema20")) else 0.0
-        structure_score += 5.0 if trigger_price >= _num(intraday.get("vwap")) else 0.0
-        structure_score += _scale(_num(intraday.get("volume_ratio")), 1.0, 3.0, 7.0)
-    float_score = 3.0
-    if 0 < shares_m <= 10:
-        float_score = 10.0
-    elif shares_m <= 25 and shares_m > 0:
-        float_score = 8.0
-    elif shares_m <= 50 and shares_m > 0:
-        float_score = 6.0
-    elif shares_m > 100:
-        float_score = 1.0
-    if 20 <= market_cap_m <= 350:
-        float_score = min(10.0, float_score + 2.0)
+        structure_components["near_breakout"] = _scale(
+            3.0 - abs(_num(intraday.get("distance_to_breakout_pct"))),
+            0.0,
+            3.0,
+            9.0,
+        )
+        structure_components["ema_context"] = (
+            4.0 if _num(intraday.get("ema9")) >= _num(intraday.get("ema20")) > 0 else 0.0
+        )
+        structure_components["vwap_context"] = (
+            4.0 if trigger_price >= _num(intraday.get("vwap")) > 0 else 0.0
+        )
+        structure_components["compression"] = _scale(
+            1.15 - _num(intraday.get("compression_ratio"), 1.15),
+            0.0,
+            0.65,
+            4.0,
+        )
+        structure_components["tested_level"] = _scale(
+            _num(intraday.get("breakout_touch_count")),
+            1.0,
+            4.0,
+            4.0,
+        )
+    structure_score = sum(structure_components.values())
+    if actual_float_m is None:
+        # Unknown float is uncertainty, not evidence of a tight supply.
+        supply_score = 0.0
+    elif actual_float_m <= 10:
+        supply_score = 10.0
+    elif actual_float_m <= 25:
+        supply_score = 8.0
+    elif actual_float_m <= 50:
+        supply_score = 6.0
+    elif actual_float_m <= 100:
+        supply_score = 3.0
+    else:
+        supply_score = 1.0
+    catalyst_confidence = _clamp(
+        _num(news_context.get("catalyst_confidence"), 0.65 if positive_catalysts else 0.0),
+        0.0,
+        1.0,
+    )
+    catalyst_score = 10.0 * catalyst_confidence if positive_catalysts else 0.0
+    spread_score = _scale(
+        PENNY_EXECUTION_MAX_SPREAD_BPS - spread_bps,
+        0.0,
+        PENNY_EXECUTION_MAX_SPREAD_BPS,
+        10.0,
+    )
+    setup_components = {
+        "liquidity": round(liquidity_score, 2),
+        "rvol": round(rvol_score, 2),
+        "structure": round(structure_score, 2),
+        "reported_float_supply": round(supply_score, 2),
+        "verified_catalyst": round(catalyst_score, 2),
+        "spread": round(spread_score, 2),
+    }
+    setup_quality = _clamp(sum(setup_components.values()))
 
-    catalyst_score = 6.0 if positive_catalysts else 0.0
-    pump_potential = _clamp(_num(broad.get("broad_score")) * 0.72 + structure_score + float_score + catalyst_score)
-
-    entry_quality = 0.0
-    if intraday.get("fresh"):
-        entry_quality += 15.0
+    entry_components = {
+        "fresh_closed_bar": 10.0 if intraday.get("fresh") else 0.0,
+        "execution_trigger": 0.0,
+        "close_quality": _scale(_num(intraday.get("close_position")), 0.45, 0.90, 15.0),
+        "trigger_volume": _scale(_num(intraday.get("volume_ratio")), 1.0, 3.0, 15.0),
+        "spread": spread_score,
+    }
     if intraday.get("breakout_confirmed"):
-        entry_quality += 30.0
+        entry_components["execution_trigger"] = 50.0
     elif intraday.get("retest_confirmed"):
-        entry_quality += 27.0
+        entry_components["execution_trigger"] = 47.0
     elif intraday.get("ignition"):
-        entry_quality += 12.0
-    entry_quality += _scale(_num(intraday.get("close_position")), 0.45, 0.90, 12.0)
-    entry_quality += _scale(_num(intraday.get("volume_ratio")), 1.0, 3.0, 13.0)
-    entry_quality += 8.0 if trigger_price >= _num(intraday.get("vwap")) > 0 else 0.0
-    entry_quality += 7.0 if _num(intraday.get("ema9")) >= _num(intraday.get("ema20")) > 0 else 0.0
-    entry_quality += _scale(180.0 - spread_bps, 0.0, 150.0, 15.0)
-    entry_quality = _clamp(entry_quality)
+        entry_components["execution_trigger"] = 12.0
+    entry_quality = _clamp(sum(entry_components.values()))
 
     dump_risk = 0.0
     dump_risk += _scale(change_pct, 12.0, 45.0, 20.0)
@@ -649,10 +979,12 @@ def evaluate_penny_candidate(
     dump_risk += _scale(spread_bps, 120.0, 350.0, 12.0)
     if _num(intraday.get("green_streak")) >= 5:
         dump_risk += 10.0
-    if 0 < shares_m <= 10:
+    if actual_float_m is not None and actual_float_m <= 10:
         dump_risk += 5.0
-    if company_news_risks:
+    if company_hard_risks:
         dump_risk += 25.0
+    if company_warnings:
+        dump_risk += 5.0
     dump_risk = _clamp(dump_risk)
 
     plan = build_penny_trade_plan(
@@ -661,8 +993,10 @@ def evaluate_penny_candidate(
         extra_resistances=extra_resistances,
         entry_price=execution_price,
         spread_bps=spread_bps,
+        slippage_bps=_num(execution_costs.get("slippage_bps"), PENNY_DEFAULT_SLIPPAGE_BPS),
+        now_ts=now_value,
     )
-    trade_score = _clamp(pump_potential * 0.35 + entry_quality * 0.45 + (100.0 - dump_risk) * 0.20)
+    trade_score = _clamp(setup_quality * 0.45 + entry_quality * 0.55 - dump_risk * 0.15)
     hard_blockers: List[str] = []
     if not intraday.get("data_ok"):
         hard_blockers.append("closed_5m_data_missing")
@@ -680,15 +1014,17 @@ def evaluate_penny_candidate(
         hard_blockers.append("live_spread_unknown")
     if spread_bps > PENNY_EXECUTION_MAX_SPREAD_BPS:
         hard_blockers.append("spread_above_execution_limit")
-    if pump_potential < 70:
-        hard_blockers.append("pump_potential_below_70")
+    if _num(execution_costs.get("max_order_notional")) < 250.0:
+        hard_blockers.append("executable_order_size_below_250_usd")
+    if setup_quality < 70:
+        hard_blockers.append("setup_quality_below_70")
     if entry_quality < 75:
         hard_blockers.append("entry_quality_below_75")
     if trade_score < PENNY_MIN_TRADE_SCORE:
         hard_blockers.append("trade_score_below_80")
     if dump_risk > 45:
         hard_blockers.append("dump_risk_above_45")
-    if company_news_risks:
+    if company_hard_risks:
         hard_blockers.append("recent_dilution_reverse_split_or_company_risk_filing")
     news_ok = str(news_context.get("status") or "").lower() == "ok"
     sec_ok = str(sec_context.get("status") or "").lower() == "ok"
@@ -711,6 +1047,21 @@ def evaluate_penny_candidate(
         hard_blockers.append("live_price_lost_retest_structure")
 
     model_active = bool(previous_active or previous_position.get("active"))
+    position_event_id = str(
+        previous_position.get("position_event_id")
+        or previous_position.get("signal_trigger")
+        or previous_position.get("last_buy_trigger")
+        or ""
+    ).strip()
+    if model_active and not position_event_id:
+        entered_at = int(_num(previous_position.get("buy_at")))
+        if entered_at > 0:
+            position_event_id = f"{ticker}:{entered_at}"
+        else:
+            legacy_setup = previous_position.get("trade_setup") if isinstance(previous_position.get("trade_setup"), dict) else {}
+            legacy_entry = _num(previous_position.get("buy_entry"), _num(legacy_setup.get("entry")))
+            entry_token = _round_price(legacy_entry) if legacy_entry > 0 else "unknown"
+            position_event_id = f"{ticker}:legacy:{entry_token}"
     persisted_setup = previous_position.get("trade_setup") if isinstance(previous_position.get("trade_setup"), dict) else {}
     if not persisted_setup and model_active:
         persisted_setup = {
@@ -720,42 +1071,91 @@ def evaluate_penny_candidate(
             "tp2": previous_position.get("tp2"),
             "direction": "LONG",
         }
+    position_entry = _num(persisted_setup.get("entry"), _num(previous_position.get("buy_entry")))
     original_stop = _num(persisted_setup.get("stop_loss", persisted_setup.get("stop")))
+    active_stop = _num(previous_position.get("active_stop"), original_stop)
     original_tp1 = _num(persisted_setup.get("tp1"))
     original_tp2 = _num(persisted_setup.get("tp2"))
     position_levels_ok = bool(original_stop > 0 and original_tp1 > 0 and original_tp2 > original_tp1)
-    data_reliable = bool(
-        intraday.get("data_ok")
-        and intraday.get("fresh")
-        and snapshot.get("spread_known")
+    spread_known = bool(snapshot.get("spread_known"))
+    if "price_reliable" in snapshot:
+        price_is_fresh = bool(snapshot.get("price_reliable"))
+    else:
+        # Compatibility for normalized fixtures/older caches: a fresh quote
+        # already proves that its bid is a current executable mark.
+        price_is_fresh = spread_known
+    price_reliable = bool(
+        price_is_fresh
         and mark_price > 0
         and (not model_active or position_levels_ok)
     )
-    stop_hit = bool(model_active and original_stop > 0 and mark_price <= original_stop)
-    tp1_hit = bool(model_active and original_tp1 > 0 and mark_price >= original_tp1)
-    tp2_hit = bool(model_active and original_tp2 > 0 and mark_price >= original_tp2)
+    quote_reliable = bool(spread_known and price_reliable)
+    intraday_reliable = bool(
+        price_reliable
+        and intraday.get("data_ok")
+        and intraday.get("fresh")
+    )
+    # Protective price levels may only fire from a fresh executable mark. A
+    # stale day close must never manufacture a stop or target event.
+    stop_hit = bool(
+        model_active and price_reliable and active_stop > 0 and mark_price <= active_stop
+    )
+    tp1_hit = bool(
+        model_active and price_reliable and original_tp1 > 0 and mark_price >= original_tp1
+    )
+    tp2_hit = bool(
+        model_active and price_reliable and original_tp2 > 0 and mark_price >= original_tp2
+    )
+    tp1_already_realized = bool(previous_position.get("tp1_realized"))
+    remaining_fraction = _clamp(_num(previous_position.get("remaining_fraction"), 1.0), 0.0, 1.0)
+    management_event: Optional[str] = None
 
-    exit_now = bool(model_active and data_reliable and (
-        stop_hit
-        or tp2_hit
-        or intraday.get("vwap_lost")
-        or intraday.get("heavy_red_bar")
-        or intraday.get("volume_no_progress")
-        or dump_risk >= 65
-        or bool(company_news_risks)
-    ))
+    hard_exit_reasons: List[str] = []
+    if stop_hit:
+        hard_exit_reasons.append("protective_stop_reached")
+    if tp2_hit:
+        hard_exit_reasons.append("tp2_reached")
+    company_risk_exit = bool(model_active and company_hard_risks)
+    if company_risk_exit:
+        hard_exit_reasons.append("hard_company_risk_detected")
+    technical_exit_reasons = (
+        _penny_technical_exit_reasons(intraday, dump_risk)
+        if model_active and intraday_reliable
+        else []
+    )
+    hard_price_exit = bool(stop_hit or tp2_hit)
+    technical_exit = bool(model_active and intraday_reliable and technical_exit_reasons)
+    exit_reasons = list(dict.fromkeys([*hard_exit_reasons, *technical_exit_reasons]))
+    exit_now = hard_price_exit or company_risk_exit or technical_exit
     if exit_now:
         lifecycle = "EXIT"
         trade_action = "JETZT_VERKAUFEN"
-        action_label = "JETZT VERKAUFEN - MODELLPOSITION INVALIDIERT"
-    elif model_active and not data_reliable:
+        if stop_hit:
+            action_label = "STOP ERREICHT - JETZT VERKAUFEN"
+        elif tp2_hit:
+            action_label = "TP2 ERREICHT - RESTPOSITION VERKAUFEN"
+        elif company_hard_risks:
+            action_label = "HARTES UNTERNEHMENSRISIKO - JETZT VERKAUFEN"
+        else:
+            action_label = "STRUKTUR GEBROCHEN - JETZT VERKAUFEN"
+    elif model_active and price_reliable and tp1_hit and not tp1_already_realized:
+        lifecycle = "TP1_PARTIAL"
+        trade_action = "HALTEN"
+        action_label = "TP1 ERREICHT - 50% TEILVERKAUF, REST HALTEN"
+        management_event = "TP1_PARTIAL"
+        tp1_already_realized = True
+        remaining_fraction = 0.5
+        round_trip_cost = _num(persisted_setup.get("round_trip_cost"))
+        breakeven_stop = position_entry + round_trip_cost if position_entry > 0 else original_stop
+        active_stop = max(original_stop, min(mark_price * 0.998, breakeven_stop))
+    elif model_active and not intraday_reliable:
         lifecycle = "DATENLUECKE"
         trade_action = "TRIGGER_WARTEN"
         action_label = "MODELLPOSITION: DATEN FEHLEN - KEIN BLINDES HALTEN"
     elif model_active:
         lifecycle = "FORTSETZUNG"
         trade_action = "HALTEN"
-        action_label = "MODELLPOSITION: TP1 ERREICHT / STOP NACHZIEHEN" if tp1_hit else "MODELLPOSITION HALTEN"
+        action_label = "RESTPOSITION HALTEN - STOP AUF KOSTEN-BREAK-EVEN" if tp1_already_realized else "MODELLPOSITION HALTEN"
     elif not hard_blockers:
         lifecycle = "ENTRY"
         trade_action = "JETZT_KAUFEN"
@@ -764,11 +1164,11 @@ def evaluate_penny_candidate(
         lifecycle = "DISTRIBUTION"
         trade_action = "NICHT_KAUFEN"
         action_label = "DISTRIBUTION / NICHT KAUFEN"
-    elif intraday.get("ignition") and pump_potential >= 62:
+    elif intraday.get("ignition") and setup_quality >= 62:
         lifecycle = "IGNITION"
         trade_action = "TRIGGER_WARTEN"
         action_label = "IGNITION - 5M TRIGGER WARTEN"
-    elif pump_potential >= 50:
+    elif setup_quality >= 50:
         lifecycle = "AUFBAU"
         trade_action = "BEOBACHTEN"
         action_label = "AUFBAU BEOBACHTEN"
@@ -777,21 +1177,35 @@ def evaluate_penny_candidate(
         trade_action = "NICHT_KAUFEN"
         action_label = "KEIN SETUP"
 
+    if trade_action == "JETZT_KAUFEN" and not position_event_id:
+        trigger_event_id = str(intraday.get("trigger_timestamp") or int(now_value))
+        position_event_id = f"{ticker}:{trigger_event_id}"
+
     trade_setup = dict(persisted_setup if model_active and persisted_setup else plan)
+    if model_active and active_stop > 0:
+        trade_setup["stop"] = _round_price(active_stop)
+        trade_setup["stop_loss"] = _round_price(active_stop)
     trade_setup.update({
         "direction": "LONG",
         "trade_action": trade_action,
         "action_label": action_label,
         "entry_status": lifecycle,
-        "risk_flags": list(dict.fromkeys([*(intraday.get("warnings") or []), *context_warnings, *hard_blockers])),
+        "risk_flags": list(dict.fromkeys([
+            *(intraday.get("warnings") or []),
+            *context_warnings,
+            *company_warnings,
+            *hard_blockers,
+            *exit_reasons,
+        ])),
         "notes": [
-            f"Trade {round(trade_score)} | Pump {round(pump_potential)} | Entry {round(entry_quality)} | Dump-Risiko {round(dump_risk)}",
+            f"Trade {round(trade_score)} | Setup {round(setup_quality)} | Entry {round(entry_quality)} | Dump-Risiko {round(dump_risk)}",
             f"Trigger: {intraday.get('trigger_type', 'none')}",
+            *([f"Exit bestaetigt: {', '.join(exit_reasons)}"] if exit_reasons else []),
         ],
     })
 
     return {
-        "ticker": str(snapshot.get("ticker") or "").upper(),
+        "ticker": ticker,
         "name": str(details.get("name") or snapshot.get("name") or ""),
         "asset_class": "penny_stock",
         "price": _round_price(mark_price),
@@ -807,25 +1221,41 @@ def evaluate_penny_candidate(
         "spread_known": bool(snapshot.get("spread_known")),
         "quote_age_seconds": snapshot.get("quote_age_seconds"),
         "shares_outstanding_m": round(shares_m, 1) if shares_m else None,
-        "float_data_quality": "shares_outstanding_proxy" if shares_m else "unknown",
+        "float_m": round(actual_float_m, 1) if actual_float_m is not None else None,
+        "float_data_quality": float_data_quality,
         "market_cap_m": round(market_cap_m, 1) if market_cap_m else None,
         "catalyst_context": {
             "positive": positive_catalysts,
-            "risk_flags": company_news_risks,
+            "risk_flags": company_hard_risks,
+            "warning_flags": company_warnings,
             "headline": news_context.get("headline"),
+            "event_type": news_context.get("event_type"),
+            "confidence": round(catalyst_confidence, 2),
             "data_status": news_context.get("status", "unavailable_or_empty"),
             "source": news_context.get("source", "recent_market_news_headlines"),
             "disclaimer": news_context.get("disclaimer", "Headline context; not a filing database."),
             "sec_status": sec_context.get("status", "unavailable"),
             "sec_source": sec_context.get("source", "SEC EDGAR submissions"),
         },
-        "pump_potential_score": round(pump_potential),
+        "setup_quality_score": round(setup_quality),
+        "pump_potential_score": round(setup_quality),
         "entry_quality_score": round(entry_quality),
         "dump_risk_score": round(dump_risk),
         "trade_score": round(trade_score),
         "score": round(trade_score),
         "grade": grade_for_score(trade_score),
-        "score_semantics": "trade_score=35% setup + 45% execution + 20% inverse dump risk; not a win probability",
+        "score_components": {
+            "setup": {
+                **setup_components,
+                "structure_detail": {
+                    key: round(value, 2)
+                    for key, value in structure_components.items()
+                },
+            },
+            "entry": {key: round(value, 2) for key, value in entry_components.items()},
+            "risk_penalty": round(dump_risk * 0.15, 2),
+        },
+        "score_semantics": "trade_score=45% setup context + 55% entry timing - 15% dump-risk penalty; heuristic ranking, not a win probability",
         "lifecycle": lifecycle,
         "trade_action": trade_action,
         "trade_signal": trade_action,
@@ -833,9 +1263,22 @@ def evaluate_penny_candidate(
         "execution_trigger_ok": trade_action == "JETZT_KAUFEN",
         "position_state_source": "scanner_model_not_broker" if model_active else "new_scan",
         "model_position_active": model_active,
+        "price_reliable": price_reliable,
+        "quote_reliable": quote_reliable,
+        "intraday_reliable": intraday_reliable,
+        "management_event": management_event,
+        "exit_reasons": exit_reasons,
+        "technical_exit_confirmed": technical_exit,
+        "tp1_realized": tp1_already_realized,
+        "remaining_fraction": round(remaining_fraction, 2),
+        "active_stop": _round_price(active_stop) if active_stop > 0 else None,
         "trigger_type": intraday.get("trigger_type"),
         "trigger_timestamp": intraday.get("trigger_timestamp"),
+        "decision_timestamp": int(now_value),
+        "position_event_id": position_event_id or None,
         "signal_age_seconds": intraday.get("age_seconds"),
+        "price_age_seconds": snapshot.get("price_age_seconds"),
+        "last_trade_age_seconds": snapshot.get("last_trade_age_seconds"),
         "breakout_level": _round_price(intraday.get("breakout_level")),
         "breakout_confirmation_level": _round_price(intraday.get("breakout_confirmation_level")),
         "breakout_clearance_pct": intraday.get("breakout_clearance_pct"),
@@ -843,10 +1286,14 @@ def evaluate_penny_candidate(
         "live_entry_price": _round_price(execution_price),
         "entry_price_source": "live_ask" if snapshot.get("spread_known") else "closed_5m_close_untradeable",
         "entry_drift_r": round(entry_drift_r, 2) if entry_drift_r is not None and math.isfinite(entry_drift_r) else None,
+        "execution_costs": execution_costs,
+        "slippage_bps": execution_costs.get("slippage_bps"),
+        "execution_cost_bps": execution_costs.get("execution_cost_bps"),
+        "max_order_notional": execution_costs.get("max_order_notional"),
         "vwap": _round_price(intraday.get("vwap")),
         "volume_acceleration": intraday.get("volume_ratio"),
         "hard_blockers": list(dict.fromkeys(hard_blockers)),
-        "warnings": list(dict.fromkeys([*(intraday.get("warnings") or []), *context_warnings])),
+        "warnings": list(dict.fromkeys([*(intraday.get("warnings") or []), *context_warnings, *company_warnings])),
         "trade_setup": trade_setup,
         "entry": trade_setup.get("entry"),
         "stop_loss": trade_setup.get("stop_loss"),
@@ -883,33 +1330,79 @@ def evaluate_penny_signal_outcome(
 
     round_trip_cost = entry * (max(0.0, spread_bps) + 2.0 * max(0.0, slippage_bps)) / 10_000.0
     tp1_seen = False
+    tp1_realized = False
+    realized_fraction = 0.0
+    realized_gross_profit = 0.0
+    remaining_fraction = 1.0
+    active_stop = stop
     exit_price = data[-1]["close"]
     outcome = "MARK_TO_MARKET"
     bars_held = len(data)
     for index, bar in enumerate(data, start=1):
-        if bar["low"] <= stop:
-            exit_price = stop
-            outcome = "STOP"
+        if bar["low"] <= active_stop:
+            # A gap below the stop cannot be filled at the untouched stop.
+            # Use the worse opening print to avoid optimistic penny backtests.
+            exit_price = min(active_stop, bar["open"]) if bar["open"] > 0 else active_stop
+            realized_gross_profit += remaining_fraction * (exit_price - entry)
+            realized_fraction += remaining_fraction
+            remaining_fraction = 0.0
+            outcome = "BREAKEVEN_STOP" if tp1_realized else "STOP"
             bars_held = index
             break
         if bar["high"] >= tp2:
             exit_price = tp2
+            if not tp1_realized:
+                tp1_seen = True
+                tp1_realized = True
+                realized_gross_profit += 0.5 * (tp1 - entry)
+                realized_fraction += 0.5
+                remaining_fraction = 0.5
+            realized_gross_profit += remaining_fraction * (tp2 - entry)
+            realized_fraction += remaining_fraction
+            remaining_fraction = 0.0
             outcome = "TP2"
             bars_held = index
             break
-        if bar["high"] >= tp1:
+        if bar["high"] >= tp1 and not tp1_realized:
             tp1_seen = True
+            tp1_realized = True
+            realized_gross_profit += 0.5 * (tp1 - entry)
+            realized_fraction += 0.5
+            remaining_fraction = 0.5
+            active_stop = max(stop, entry + round_trip_cost)
+            if bar["low"] <= active_stop:
+                # Once TP1 is reached the remaining stop becomes active. OHLC
+                # data cannot reveal whether the later low happened before or
+                # after TP1, so assume the adverse sequence for calibration.
+                exit_price = active_stop
+                realized_gross_profit += remaining_fraction * (exit_price - entry)
+                realized_fraction += remaining_fraction
+                remaining_fraction = 0.0
+                outcome = "BREAKEVEN_STOP"
+                bars_held = index
+                break
 
-    gross_r = (exit_price - entry) / risk
-    net_r = (exit_price - entry - round_trip_cost) / risk
+    if remaining_fraction > 0:
+        exit_price = data[-1]["close"]
+        realized_gross_profit += remaining_fraction * (exit_price - entry)
+        realized_fraction += remaining_fraction
+    net_risk = risk + round_trip_cost
+    gross_r = realized_gross_profit / risk
+    net_r = (realized_gross_profit - round_trip_cost) / net_risk
+    weighted_exit_price = entry + realized_gross_profit / max(realized_fraction, 0.000001)
     return {
         "valid": True,
         "outcome": outcome,
         "tp1_seen": tp1_seen,
+        "tp1_realized": tp1_realized,
+        "partial_exit_fraction": 0.5 if tp1_realized else 0.0,
+        "remaining_fraction": 0.0 if outcome in {"STOP", "BREAKEVEN_STOP", "TP2"} else remaining_fraction,
+        "active_stop_after_tp1": _round_price(max(stop, entry + round_trip_cost)) if tp1_realized else _round_price(stop),
         "bars_held": bars_held,
-        "exit_price": _round_price(exit_price),
+        "exit_price": _round_price(weighted_exit_price),
         "gross_r": round(gross_r, 3),
         "net_r": round(net_r, 3),
+        "net_risk": _round_price(net_risk),
         "round_trip_cost": _round_price(round_trip_cost),
-        "assumption": "same-bar ambiguity resolves stop-first; OHLC replay is not tick execution",
+        "assumption": "stop-first within each OHLC bar; net R uses cost-adjusted stop loss; TP1 realizes 50%, then an ambiguous same-bar or later retrace exits the remainder at cost break-even",
     }

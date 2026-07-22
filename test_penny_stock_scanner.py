@@ -2,16 +2,37 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from modules.penny_stock_scanner import (
+    _penny_technical_exit_reasons,
     analyze_penny_intraday,
     build_penny_trade_plan,
     evaluate_penny_candidate,
     evaluate_penny_signal_outcome,
     score_broad_penny_candidate,
+    summarize_penny_rth_volume,
 )
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_penny_trigger_pool(monkeypatch, tmp_path):
+    """Keep the short-lived production trigger pool out of every unit test."""
+    import api
+
+    monkeypatch.setattr(
+        api,
+        "PENNY_STOCKS_TRIGGER_POOL_CACHE",
+        str(tmp_path / "penny_trigger_pool.json"),
+    )
+
+
+def _market_now():
+    """Fixed Wednesday 11:30 ET so intraday tests never depend on wall time."""
+    return datetime(2026, 7, 22, 15, 30, tzinfo=timezone.utc).timestamp()
 
 
 def _bars(now_ts, *, upper_wick=False, stale=False):
@@ -24,7 +45,7 @@ def _bars(now_ts, *, upper_wick=False, stale=False):
             "high": 1.02 if idx == 10 else base + 0.008,
             "low": base - 0.008,
             "close": base + 0.002,
-            "volume": 1_000,
+            "volume": 400_000,
             "timestamp": start + idx * 300,
         })
     bars.append({
@@ -32,7 +53,7 @@ def _bars(now_ts, *, upper_wick=False, stale=False):
         "high": 1.018,
         "low": 1.000,
         "close": 1.012,
-        "volume": 1_150,
+        "volume": 460_000,
         "timestamp": start + 14 * 300,
     })
     bars.append({
@@ -40,13 +61,47 @@ def _bars(now_ts, *, upper_wick=False, stale=False):
         "high": 1.10 if upper_wick else 1.05,
         "low": 1.012,
         "close": 1.025 if upper_wick else 1.045,
-        "volume": 2_700,
+        "volume": 1_080_000,
         "timestamp": now_ts - 300,
     })
     if stale:
         for bar in bars:
             bar["timestamp"] -= 3_600
     return bars
+
+
+def _compressed_breakout_bars(now_ts):
+    """A realistic base: broad range, tight compression, then one closed breakout."""
+    start = now_ts - 16 * 300
+    candles = [
+        (0.990, 1.008, 0.980, 0.998, 360_000),
+        (0.998, 1.015, 0.985, 1.004, 370_000),
+        (1.004, 1.020, 0.972, 0.990, 390_000),
+        (0.990, 1.018, 0.978, 1.006, 410_000),
+        (1.006, 1.020, 0.984, 0.994, 400_000),
+        (0.994, 1.017, 0.982, 1.008, 405_000),
+        (1.008, 1.020, 0.988, 0.998, 395_000),
+        (0.998, 1.019, 0.990, 1.010, 410_000),
+        (1.010, 1.020, 1.000, 1.006, 380_000),
+        (1.006, 1.019, 1.001, 1.012, 390_000),
+        (1.012, 1.020, 1.003, 1.008, 385_000),
+        (1.008, 1.019, 1.004, 1.014, 400_000),
+        (1.014, 1.020, 1.005, 1.010, 395_000),
+        (1.010, 1.019, 1.006, 1.015, 405_000),
+        (1.012, 1.018, 1.006, 1.014, 460_000),
+        (1.015, 1.050, 1.013, 1.045, 1_080_000),
+    ]
+    return [
+        {
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "timestamp": start + idx * 300,
+        }
+        for idx, (open_price, high, low, close, volume) in enumerate(candles)
+    ]
 
 
 def _snapshot():
@@ -61,6 +116,9 @@ def _snapshot():
         "close_position": 0.86,
         "spread_bps": 45,
         "spread_known": True,
+        "price_reliable": True,
+        "price_age_seconds": 1.0,
+        "last_trade_age_seconds": 1.0,
         "bid": 1.044,
         "ask": 1.046,
     }
@@ -70,16 +128,23 @@ def _details():
     return {
         "name": "Pump Test Inc",
         "shares_millions": 18,
+        "float_shares_millions": 12,
         "market_cap_millions": 45,
-        "news_context": {"status": "ok", "risk_flags": [], "positive_catalysts": []},
-        "sec_filing_context": {"status": "ok", "risk_flags": []},
+        "news_context": {
+            "status": "ok",
+            "risk_flags": [],
+            "warning_flags": [],
+            "positive_catalysts": ["verified_contract_award"],
+            "catalyst_confidence": 1.0,
+        },
+        "sec_filing_context": {"status": "ok", "risk_flags": [], "warning_flags": []},
     }
 
 
 def _targets():
     return [
-        {"price": 1.090, "source": "4H/5m VRVP resistance", "weight": 1.8},
-        {"price": 1.145, "source": "Daily swing high", "weight": 2.0},
+        {"price": 1.120, "source": "4H/5m VRVP resistance", "weight": 1.8},
+        {"price": 1.210, "source": "Daily swing high", "weight": 2.0},
     ]
 
 
@@ -94,10 +159,10 @@ def test_broad_filter_checks_liquidity_and_spread():
 
 
 def test_closed_5m_breakout_can_become_buy_now_with_structure():
-    now_ts = time.time()
+    now_ts = _market_now()
     row = evaluate_penny_candidate(
         _snapshot(),
-        _bars(now_ts),
+        _compressed_breakout_bars(now_ts),
         [],
         details=_details(),
         extra_resistances=_targets(),
@@ -113,7 +178,7 @@ def test_closed_5m_breakout_can_become_buy_now_with_structure():
 
 
 def test_large_wick_is_not_a_buy_signal_even_with_high_setup_score():
-    now_ts = time.time()
+    now_ts = _market_now()
     row = evaluate_penny_candidate(
         _snapshot(),
         _bars(now_ts, upper_wick=True),
@@ -129,7 +194,7 @@ def test_large_wick_is_not_a_buy_signal_even_with_high_setup_score():
 
 
 def test_stale_breakout_never_becomes_buy_now():
-    now_ts = time.time()
+    now_ts = _market_now()
     row = evaluate_penny_candidate(
         _snapshot(),
         _bars(now_ts, stale=True),
@@ -143,7 +208,7 @@ def test_stale_breakout_never_becomes_buy_now():
 
 
 def test_unfinished_5m_candle_cannot_create_a_breakout_signal():
-    now_ts = time.time()
+    now_ts = _market_now()
     bars = _bars(now_ts)
     bars[-1].update({
         "open": 1.008,
@@ -169,7 +234,7 @@ def test_unfinished_5m_candle_cannot_create_a_breakout_signal():
 
 
 def test_missing_5m_volume_baseline_cannot_create_a_penny_trigger():
-    now_ts = time.time()
+    now_ts = _market_now()
     bars = _bars(now_ts)
     for bar in bars[2:12]:
         bar["volume"] = 0
@@ -182,7 +247,7 @@ def test_missing_5m_volume_baseline_cannot_create_a_penny_trigger():
 
 
 def test_recent_offering_or_reverse_split_news_blocks_buy_mail_state():
-    now_ts = time.time()
+    now_ts = _market_now()
     risky_details = {
         **_details(),
         "news_context": {
@@ -206,7 +271,7 @@ def test_recent_offering_or_reverse_split_news_blocks_buy_mail_state():
 
 
 def test_targets_must_be_distinct_verified_structure_levels():
-    now_ts = time.time()
+    now_ts = _market_now()
     intraday = analyze_penny_intraday(_bars(now_ts), now_ts=now_ts)
     plan = build_penny_trade_plan(
         intraday,
@@ -218,7 +283,7 @@ def test_targets_must_be_distinct_verified_structure_levels():
 
 
 def test_live_trade_plan_uses_cost_adjusted_not_gross_reward():
-    now_ts = time.time()
+    now_ts = _market_now()
     intraday = analyze_penny_intraday(_bars(now_ts), now_ts=now_ts)
     liquid = build_penny_trade_plan(
         intraday,
@@ -241,12 +306,18 @@ def test_live_trade_plan_uses_cost_adjusted_not_gross_reward():
     assert liquid["rr"] < liquid["gross_rr"]
     assert liquid["rr_tp1"] < liquid["gross_rr_tp1"]
     assert liquid["round_trip_cost"] > 0
+    expected_net_risk = liquid["risk"] + liquid["round_trip_cost"]
+    expected_tp1_rr = (
+        liquid["tp1"] - liquid["entry"] - liquid["round_trip_cost"]
+    ) / expected_net_risk
+    assert liquid["net_risk"] == pytest.approx(expected_net_risk, abs=0.0001)
+    assert liquid["rr_tp1"] == pytest.approx(expected_tp1_rr, abs=0.01)
     assert expensive["valid"] is False
     assert "net_effective_rr_below_cost_adjusted_minimum" in expensive["blockers"]
 
 
 def test_active_position_gets_exit_when_vwap_breaks_on_heavy_red_bar():
-    now_ts = time.time()
+    now_ts = _market_now()
     bars = _bars(now_ts)
     bars[-2].update({"open": 1.04, "high": 1.045, "low": 0.98, "close": 0.99, "volume": 3_000})
     bars[-1].update({"open": 0.99, "high": 0.995, "low": 0.93, "close": 0.94, "volume": 4_000})
@@ -264,10 +335,56 @@ def test_active_position_gets_exit_when_vwap_breaks_on_heavy_red_bar():
     )
     assert row["trade_action"] == "JETZT_VERKAUFEN"
     assert row["lifecycle"] == "EXIT"
+    assert row["technical_exit_confirmed"] is True
+    assert row["exit_reasons"]
+
+
+def test_high_dump_risk_without_structure_break_does_not_force_exit():
+    intraday = {
+        "price": 1.24,
+        "breakout_level": 1.05,
+        "ema20": 1.10,
+        "vwap_lost": False,
+        "heavy_red_bar": False,
+        "volume_no_progress": False,
+        "failed_highs": 0,
+        "upper_wick_pct": 12.0,
+    }
+    assert _penny_technical_exit_reasons(intraday, 92) == []
+
+
+def test_stalling_volume_alone_does_not_force_exit_without_failed_highs():
+    intraday = {
+        "price": 1.08,
+        "breakout_level": 1.05,
+        "ema20": 1.03,
+        "vwap_lost": False,
+        "heavy_red_bar": False,
+        "volume_no_progress": True,
+        "failed_highs": 0,
+        "upper_wick_pct": 20.0,
+    }
+    assert _penny_technical_exit_reasons(intraday, 70) == []
+
+
+def test_repeated_failed_breakout_with_distribution_confirms_exit():
+    intraday = {
+        "price": 1.07,
+        "breakout_level": 1.05,
+        "ema20": 1.03,
+        "vwap_lost": False,
+        "heavy_red_bar": False,
+        "volume_no_progress": True,
+        "failed_highs": 2,
+        "upper_wick_pct": 48.0,
+    }
+    reasons = _penny_technical_exit_reasons(intraday, 68)
+    assert "repeated_failed_breakout_with_distribution" in reasons
+    assert "high_dump_risk_with_structure_break" in reasons
 
 
 def test_active_position_does_not_emit_duplicate_buy_signal():
-    now_ts = time.time()
+    now_ts = _market_now()
     row = evaluate_penny_candidate(
         _snapshot(),
         _bars(now_ts),
@@ -284,13 +401,46 @@ def test_active_position_does_not_emit_duplicate_buy_signal():
     assert row["execution_trigger_ok"] is False
 
 
+def test_legacy_active_position_keeps_one_stable_event_id_across_candles():
+    now_ts = _market_now()
+    previous = {
+        "active": True,
+        "trade_setup": {"entry": 1.045, "stop_loss": 0.90, "tp1": 1.09, "tp2": 1.15},
+    }
+    first = evaluate_penny_candidate(
+        _snapshot(),
+        _bars(now_ts),
+        [],
+        details=_details(),
+        extra_resistances=_targets(),
+        previous_position=previous,
+        now_ts=now_ts,
+    )
+    second = evaluate_penny_candidate(
+        _snapshot(),
+        _bars(now_ts + 300),
+        [],
+        details=_details(),
+        extra_resistances=_targets(),
+        previous_position=previous,
+        now_ts=now_ts + 300,
+    )
+
+    assert first["position_event_id"] == second["position_event_id"]
+    assert first["position_event_id"].startswith("PUMP:legacy:")
+    assert first["decision_timestamp"] != second["decision_timestamp"]
+
+
 def test_penny_scanner_is_wired_to_scheduler_api_mail_and_pro_ui():
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
     frontend_source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
     auth_source = (ROOT / "modules" / "auth.py").read_text(encoding="utf-8")
 
     assert '"penny_stocks": {"running": False' in api_source
+    assert '"penny_positions": {"running": False' in api_source
     assert '("penny_stocks", _penny_stock_scanner_wrapper)' in api_source
+    assert '("penny_positions", _penny_position_monitor_wrapper)' in api_source
+    assert "PENNY_STOCKS_MONITOR_CACHE" in api_source
     assert '@app.post("/api/penny-stocks-scan")' in api_source
     assert '@app.get("/api/penny-stocks-results")' in api_source
     assert '@app.get("/api/penny-stocks/replay")' in api_source
@@ -302,7 +452,73 @@ def test_penny_scanner_is_wired_to_scheduler_api_mail_and_pro_ui():
     assert "Pennystock Signale" in frontend_source
     assert "Pennystock-Vorstufen anzeigen" in frontend_source
     assert "penny_show_watch_rows" in frontend_source
+    assert "Boolean(item?.model_position_active)" in frontend_source
+    assert "Entry fast bereit" not in frontend_source
+    assert "Maximal 5 triggernahe Setups" not in frontend_source
     assert '"penny-stocks"' in auth_source
+
+
+def test_penny_buy_mail_explains_confirmed_exit_policy(monkeypatch):
+    import api
+
+    captured = {}
+    monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda _scanner: (True, "ok"))
+
+    def _capture(subject, body, **kwargs):
+        captured.update(subject=subject, body=body, kwargs=kwargs)
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", _capture)
+    sent = api._penny_buy_email([{
+        "ticker": "PUMP",
+        "grade": "A",
+        "trade_score": 84,
+        "setup_quality_score": 81,
+        "entry_quality_score": 87,
+        "dump_risk_score": 21,
+        "spread_bps": 45,
+        "execution_cost_bps": 75,
+        "max_order_notional": 500,
+        "trigger_type": "breakout",
+        "signal_age_seconds": 60,
+        "trade_setup": {
+            "entry": 1.0,
+            "stop_loss": 0.94,
+            "tp1": 1.10,
+            "tp2": 1.18,
+            "rr": 2.0,
+        },
+    }])
+
+    assert sent is True
+    assert "bestaetigten Strukturbruch" in captured["body"]
+    assert "Ein einzelnes Warnmerkmal ist noch kein Exit" in captured["body"]
+
+
+def test_penny_exit_mail_names_only_confirmed_exit_reasons(monkeypatch):
+    import api
+
+    captured = {}
+    monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda _scanner: (True, "ok"))
+
+    def _capture(subject, body, **kwargs):
+        captured.update(subject=subject, body=body, kwargs=kwargs)
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", _capture)
+    sent = api._penny_exit_email([{
+        "ticker": "PUMP",
+        "price": 0.98,
+        "active_stop": 0.96,
+        "exit_reasons": ["confirmed_two_bar_vwap_loss"],
+        "warnings": ["volume_no_progress"],
+        "trade_setup": {"stop_loss": 0.94},
+    }])
+
+    assert sent is True
+    assert "VWAP in zwei abgeschlossenen 5m-Kerzen verloren" in captured["body"]
+    assert "volume no progress" not in captured["body"]
+    assert "Einzelne Warnmerkmale loesen diese Mail nicht aus" in captured["body"]
 
 
 def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
@@ -319,7 +535,7 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
             "ticker": "NEAR",
             "trade_action": "TRIGGER_WARTEN",
             "trigger_timestamp": now_ts - 360,
-            "pump_potential_score": 70,
+            "setup_quality_score": 70,
             "entry_quality_score": 72,
             "dump_risk_score": 30,
             "hard_blockers": ["fresh_5m_breakout_or_retest_missing", "trade_score_below_80"],
@@ -333,7 +549,7 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
 
     payload = api.get_penny_stock_results()
 
-    assert [row["ticker"] for row in payload["data"]] == ["BUY", "HOLD", "EXIT"]
+    assert [row["ticker"] for row in payload["data"]] == ["EXIT", "BUY", "HOLD"]
     assert [row["ticker"] for row in payload["near_entries"]] == ["NEAR"]
     assert payload["near_entries"][0]["near_entry_label"] == "ENTRY FAST BEREIT - 5M TRIGGER FEHLT"
 
@@ -346,19 +562,75 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     assert [row["ticker"] for row in analysis_rows] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT", "NEAR"]
 
     payload_with_watch = api.get_penny_stock_results(include_watch=True)
-    assert [row["ticker"] for row in payload_with_watch["data"]] == ["BUY", "HOLD", "EXIT", "BUILD", "WAIT", "NEAR"]
+    assert [row["ticker"] for row in payload_with_watch["data"]] == [
+        "EXIT", "BUY", "HOLD", "WAIT", "NEAR", "BUILD",
+    ]
     assert payload_with_watch["include_watch"] is True
+
+
+def test_active_position_data_gap_remains_visible_without_watch_toggle():
+    import api
+
+    row = {
+        "ticker": "OPEN",
+        "trade_action": "TRIGGER_WARTEN",
+        "model_position_active": True,
+        "lifecycle": "DATENLUECKE",
+    }
+
+    visible = api._penny_active_trade_rows(
+        [row],
+        include_watch=False,
+        cache_age_seconds=90,
+        now_ts=_market_now(),
+    )
+
+    assert len(visible) == 1
+    assert visible[0]["ticker"] == "OPEN"
+    assert visible[0]["signal_age_seconds"] == 90
+
+
+def test_position_monitor_replaces_stale_discovery_row(monkeypatch):
+    import api
+
+    cached_at = datetime.now(timezone.utc).isoformat()
+    discovery_rows = [{
+        "ticker": "OPEN",
+        "trade_action": "JETZT_KAUFEN",
+        "trigger_timestamp": time.time() - 360,
+        "trade_score": 92,
+    }]
+    monitor_rows = [{
+        "ticker": "OPEN",
+        "trade_action": "HALTEN",
+        "model_position_active": True,
+        "trade_score": 80,
+    }]
+
+    def load_rows(path):
+        if path == api.PENNY_STOCKS_MONITOR_CACHE:
+            return monitor_rows, cached_at
+        return discovery_rows, cached_at
+
+    monkeypatch.setattr(api, "load_cache_file", load_rows)
+    monkeypatch.setattr(api, "load_cache_metadata", lambda path: {"diagnostics": {}})
+
+    payload = api.get_penny_stock_results()
+
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["ticker"] == "OPEN"
+    assert payload["data"][0]["trade_action"] == "HALTEN"
 
 
 def test_penny_near_entry_rows_reject_hard_liquidity_blocker():
     import api
 
-    now_ts = time.time()
+    now_ts = _market_now()
     row = {
         "ticker": "THIN",
         "trade_action": "TRIGGER_WARTEN",
         "trigger_timestamp": now_ts - 360,
-        "pump_potential_score": 80,
+        "setup_quality_score": 80,
         "entry_quality_score": 80,
         "dump_risk_score": 20,
         "hard_blockers": ["current_dollar_volume_below_500k"],
@@ -371,7 +643,7 @@ def test_penny_near_entry_rows_reject_hard_liquidity_blocker():
 def test_penny_results_expire_old_trigger_and_stale_cache(monkeypatch):
     import api
 
-    now_ts = time.time()
+    now_ts = _market_now()
     rows = [
         {"ticker": "FRESH", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 360},
         {"ticker": "OLD", "trade_action": "JETZT_KAUFEN", "trigger_timestamp": now_ts - 1_500},
@@ -386,10 +658,28 @@ def test_penny_results_expire_old_trigger_and_stale_cache(monkeypatch):
     assert stale == []
 
 
-def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_path):
+def test_fresh_exit_uses_decision_time_not_the_old_entry_trigger():
     import api
 
-    now_ts = time.time()
+    now_ts = _market_now()
+    row = {
+        "ticker": "EXIT",
+        "trade_action": "JETZT_VERKAUFEN",
+        "trigger_timestamp": now_ts - 86_400,
+        "decision_timestamp": now_ts - 30,
+        "position_event_id": "EXIT:position-1",
+    }
+
+    visible = api._penny_active_trade_rows([row], cache_age_seconds=30, now_ts=now_ts)
+
+    assert [item["ticker"] for item in visible] == ["EXIT"]
+    assert visible[0]["signal_age_seconds"] == 30
+
+
+def test_api_wrapper_does_not_activate_position_when_buy_mail_fails(monkeypatch, tmp_path):
+    import api
+
+    now_ts = _market_now()
     snapshot_payload = {
         "tickers": [{
             "ticker": "PUMP",
@@ -422,14 +712,23 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     monkeypatch.setattr(api, "PENNY_STOCKS_NEWS_CACHE", str(news))
     monkeypatch.setattr(api, "PENNY_STOCKS_SEC_CACHE", str(sec))
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(dedupe))
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
     monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PUMP"}, "test"))
     monkeypatch.setattr(api, "_us_equity_expected_volume_fraction", lambda *args, **kwargs: 1.0)
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {"allowed": True, "session": "US_REGULAR"})
     monkeypatch.setattr(api, "get_ticker_details", lambda *args, **kwargs: _details())
-    monkeypatch.setattr(api, "get_ticker_news", lambda *args, **kwargs: [])
-    monkeypatch.setattr(api, "_penny_fetch_sec_filing_context", lambda *args, **kwargs: {"status": "ok", "risk_flags": []})
-    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *args, **kwargs: _bars(now_ts))
+    monkeypatch.setattr(api, "get_ticker_news", lambda *args, **kwargs: [{
+        "title": "Pump Test wins contract award",
+        "published": "2026-07-22",
+        "sentiment": "positive",
+    }])
+    monkeypatch.setattr(
+        api,
+        "_penny_fetch_sec_filing_context",
+        lambda *args, **kwargs: {"status": "ok", "risk_flags": [], "warning_flags": []},
+    )
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *args, **kwargs: _compressed_breakout_bars(now_ts))
     monkeypatch.setattr(api, "_penny_fetch_live_spread", lambda *args, **kwargs: {
         "bid": 1.044,
         "ask": 1.046,
@@ -439,8 +738,9 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     })
     monkeypatch.setattr(api, "_penny_fetch_daily_bars", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "_penny_vrvp_resistances", lambda *args, **kwargs: _targets())
-    # Simulate SMTP failure: the scanner-model lifecycle must still persist.
+    # Simulate SMTP failure: no delivered signal means no model position.
     monkeypatch.setattr(api, "_penny_buy_email", lambda rows: sent.extend(rows) or False)
+    monkeypatch.setattr(api, "_penny_management_email", lambda rows: False)
     monkeypatch.setattr(api, "_penny_exit_email", lambda rows: False)
     monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *args, **kwargs: None)
 
@@ -451,15 +751,276 @@ def test_api_wrapper_builds_buy_signal_and_persists_lifecycle(monkeypatch, tmp_p
     assert rows[0]["trade_action"] == "JETZT_KAUFEN"
     assert len(sent) == 1
     state_payload = api._penny_load_dict(str(state))
-    assert state_payload["tickers"]["PUMP"]["active"] is True
+    assert state_payload["tickers"]["PUMP"]["active"] is False
+    assert state_payload["tickers"]["PUMP"]["last_action"] == "ENTRY_BESTAETIGT_MAIL_FEHLER"
     assert state_payload["tickers"]["PUMP"].get("buy_email_sent") is not True
     assert not api._email_dedupe_active(sent[0]["_dedupe_key"], 6 * 3600, now=now_ts + 1)
 
 
+def test_discovery_defers_active_positions_to_five_minute_monitor(monkeypatch, tmp_path):
+    import api
+
+    now_ts = _market_now()
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "tickers": [{
+                    "ticker": "OPEN",
+                    "day": {"c": 1.05, "o": 1.00, "h": 1.08, "l": 0.98, "v": 2_000_000},
+                    "prevDay": {"c": 1.00, "v": 1_000_000},
+                    "lastTrade": {"p": 1.05},
+                    "lastQuote": {"p": 1.049, "P": 1.051, "t": int(now_ts * 1_000_000_000)},
+                }],
+            }
+
+    paths = {
+        "PENNY_STOCKS_CACHE": tmp_path / "penny.json",
+        "PENNY_STOCKS_STATE": tmp_path / "state.json",
+        "PENNY_STOCKS_REFERENCE_CACHE": tmp_path / "references.json",
+        "PENNY_STOCKS_DAILY_CACHE": tmp_path / "daily.json",
+        "PENNY_STOCKS_NEWS_CACHE": tmp_path / "news.json",
+        "PENNY_STOCKS_SEC_CACHE": tmp_path / "sec.json",
+        "_EMAIL_DEDUPE_FILE": tmp_path / "email_dedupe.json",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(api, name, str(path))
+    api._penny_save_dict(str(paths["PENNY_STOCKS_STATE"]), {
+        "tickers": {
+            "OPEN": {
+                "active": True,
+                "last_seen": now_ts,
+                "buy_entry": 1.00,
+                "trade_setup": {"entry": 1.00, "stop_loss": 0.94, "tp1": 1.10, "tp2": 1.18},
+            },
+        },
+    })
+
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"OPEN"}, "test"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True, "session": "US_REGULAR"})
+    monkeypatch.setattr(api, "_penny_buy_email", lambda rows: False)
+    monkeypatch.setattr(api, "_penny_management_email", lambda rows: False)
+    monkeypatch.setattr(api, "_penny_exit_email", lambda rows: False)
+    monkeypatch.setattr(
+        api,
+        "_fetch_recent_stock_5m_bars",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("active position reached discovery")),
+    )
+
+    api._penny_stock_scanner_wrapper()
+
+    rows, _ = api.load_cache_file(str(paths["PENNY_STOCKS_CACHE"]))
+    metadata = api.load_cache_metadata(str(paths["PENNY_STOCKS_CACHE"]))
+    state = api._penny_load_state_tickers()
+    assert rows == []
+    assert metadata["diagnostics"]["active_deferred_to_position_monitor"] == 1
+    assert state["OPEN"]["active"] is True
+
+
+def test_older_discovery_state_cannot_overwrite_newer_monitor_state(monkeypatch, tmp_path):
+    import api
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(api, "PENNY_STOCKS_STATE", str(state_path))
+    api._penny_save_dict(str(state_path), {
+        "tickers": {
+            "OPEN": {
+                "active": True,
+                "last_seen": 200.0,
+                "active_stop": 0.99,
+                "last_action": "HALTEN",
+            },
+        },
+    })
+
+    merged = api._penny_merge_state_tickers({
+        "OPEN": {
+            "active": False,
+            "last_seen": 100.0,
+            "active_stop": 0.90,
+            "last_action": "JETZT_VERKAUFEN",
+        },
+    }, now_ts=300.0)
+
+    assert merged["OPEN"]["active"] is True
+    assert merged["OPEN"]["active_stop"] == 0.99
+    assert merged["OPEN"]["last_action"] == "HALTEN"
+
+
+def test_newer_discovery_cannot_deactivate_emailed_position(monkeypatch, tmp_path):
+    import api
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(api, "PENNY_STOCKS_STATE", str(state_path))
+    api._penny_save_dict(str(state_path), {
+        "tickers": {
+            "OPEN": {
+                "active": True,
+                "last_seen": 100.0,
+                "position_event_id": "OPEN:position-1",
+                "buy_email_sent": True,
+                "last_action": "JETZT_KAUFEN",
+            },
+        },
+    })
+
+    merged = api._penny_merge_state_tickers({
+        "OPEN": {
+            "active": False,
+            "last_seen": 200.0,
+            "last_action": "BEOBACHTEN",
+        },
+    }, now_ts=300.0)
+
+    assert merged["OPEN"]["active"] is True
+    assert merged["OPEN"]["position_event_id"] == "OPEN:position-1"
+    assert merged["OPEN"]["last_action"] == "JETZT_KAUFEN"
+
+
+def test_only_matching_successful_exit_can_close_active_position(monkeypatch, tmp_path):
+    import api
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(api, "PENNY_STOCKS_STATE", str(state_path))
+    api._penny_save_dict(str(state_path), {
+        "tickers": {
+            "OPEN": {
+                "active": True,
+                "last_seen": 100.0,
+                "position_event_id": "OPEN:position-1",
+                "buy_email_sent": True,
+            },
+        },
+    })
+
+    rejected = api._penny_merge_state_tickers({
+        "OPEN": {
+            "active": False,
+            "last_seen": 200.0,
+            "position_event_id": "OPEN:wrong-position",
+            "exit_email_sent": True,
+            "last_action": "JETZT_VERKAUFEN",
+        },
+    }, now_ts=250.0)
+    assert rejected["OPEN"]["active"] is True
+
+    accepted = api._penny_merge_state_tickers({
+        "OPEN": {
+            "active": False,
+            "last_seen": 300.0,
+            "position_event_id": "OPEN:position-1",
+            "exit_email_sent": True,
+            "last_action": "JETZT_VERKAUFEN",
+        },
+    }, now_ts=350.0)
+    assert accepted["OPEN"]["active"] is False
+    assert accepted["OPEN"]["exit_email_sent"] is True
+
+
+def test_reentry_gets_new_position_event_id_after_exit():
+    import api
+
+    previous = {
+        "active": False,
+        "position_event_id": "PUMP:old-position",
+        "last_exit_event_id": "PUMP:old-position",
+        "exit_email_sent": True,
+    }
+    new_position_id = api._penny_position_event_id({
+        "ticker": "PUMP",
+        "trigger_timestamp": 222.0,
+    }, previous)
+
+    assert new_position_id == "PUMP:222"
+    assert new_position_id != previous["position_event_id"]
+
+
+def test_position_monitor_keeps_position_active_when_exit_mail_fails(monkeypatch, tmp_path):
+    import api
+
+    now_ts = _market_now()
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "tickers": [{
+                    "ticker": "OPEN",
+                    "day": {"c": 0.92, "o": 1.00, "h": 1.01, "l": 0.90, "v": 3_000_000},
+                    "prevDay": {"c": 1.00, "v": 1_000_000},
+                    "lastTrade": {"p": 0.92},
+                    "lastQuote": {"p": 0.919, "P": 0.921, "t": int(now_ts * 1_000_000_000)},
+                }],
+            }
+
+    paths = {
+        "PENNY_STOCKS_MONITOR_CACHE": tmp_path / "monitor.json",
+        "PENNY_STOCKS_STATE": tmp_path / "state.json",
+        "PENNY_STOCKS_REFERENCE_CACHE": tmp_path / "references.json",
+        "PENNY_STOCKS_DAILY_CACHE": tmp_path / "daily.json",
+        "PENNY_STOCKS_NEWS_CACHE": tmp_path / "news.json",
+        "PENNY_STOCKS_SEC_CACHE": tmp_path / "sec.json",
+        "_EMAIL_DEDUPE_FILE": tmp_path / "email_dedupe.json",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(api, name, str(path))
+    api._penny_save_dict(str(paths["PENNY_STOCKS_STATE"]), {
+        "tickers": {
+            "OPEN": {
+                "active": True,
+                "last_seen": now_ts - 300,
+                "buy_entry": 1.00,
+                "trade_setup": {"entry": 1.00, "stop_loss": 0.95, "tp1": 1.10, "tp2": 1.18},
+            },
+        },
+    })
+
+    exit_row = {
+        "ticker": "OPEN",
+        "price": 0.92,
+        "trade_action": "JETZT_VERKAUFEN",
+        "trigger_timestamp": now_ts - 300,
+        "model_position_active": True,
+        "dump_risk_score": 90,
+        "trade_score": 20,
+        "trade_setup": {"entry": 1.00, "stop_loss": 0.95, "tp1": 1.10, "tp2": 1.18},
+    }
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True, "session": "US_REGULAR"})
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *args, **kwargs: _bars(now_ts))
+    monkeypatch.setattr(api, "get_ticker_details", lambda *args, **kwargs: _details())
+    monkeypatch.setattr(api, "get_ticker_news", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        api,
+        "_penny_fetch_sec_filing_context",
+        lambda *args, **kwargs: {"status": "ok", "risk_flags": [], "warning_flags": []},
+    )
+    monkeypatch.setattr(api, "_penny_fetch_daily_bars", lambda *args, **kwargs: [])
+    monkeypatch.setattr(api, "_penny_vrvp_resistances", lambda *args, **kwargs: [])
+    monkeypatch.setattr(api, "_penny_apply_robust_rvol", lambda snapshot, *args, **kwargs: snapshot)
+    monkeypatch.setattr(api, "evaluate_penny_candidate", lambda *args, **kwargs: dict(exit_row))
+    monkeypatch.setattr(api, "_penny_management_email", lambda rows: False)
+    monkeypatch.setattr(api, "_penny_exit_email", lambda rows: False)
+    monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *args, **kwargs: None)
+
+    api._penny_position_monitor_wrapper()
+
+    state = api._penny_load_state_tickers()["OPEN"]
+    assert state["active"] is True
+    assert state["last_action"] == "EXIT_BESTAETIGT_MAIL_FEHLER"
+    assert state["exit_email_sent"] is False
+
+
 def test_spread_and_atr_define_real_breakout_clearance():
-    now_ts = time.time()
+    now_ts = _market_now()
     bars = _bars(now_ts)
-    bars[-1].update({"open": 1.018, "high": 1.025, "low": 1.016, "close": 1.024, "volume": 2_700})
+    bars[-1].update({"open": 1.018, "high": 1.025, "low": 1.016, "close": 1.024, "volume": 1_080_000})
 
     liquid = analyze_penny_intraday(bars, spread_bps=20, now_ts=now_ts)
     wide = analyze_penny_intraday(bars, spread_bps=180, now_ts=now_ts)
@@ -486,8 +1047,119 @@ def test_active_model_position_never_says_hold_when_5m_data_is_missing():
     assert "BLINDES HALTEN" in row["signal_label"]
 
 
+def test_fresh_quote_executes_persisted_stop_when_5m_data_is_missing():
+    snapshot = dict(_snapshot(), price=0.99, bid=0.99, ask=0.992, spread_bps=20)
+    row = evaluate_penny_candidate(
+        snapshot,
+        [],
+        [],
+        details=_details(),
+        extra_resistances=_targets(),
+        previous_position={
+            "active": True,
+            "trade_setup": {"entry": 1.045, "stop_loss": 1.00, "tp1": 1.09, "tp2": 1.15},
+        },
+    )
+    assert row["quote_reliable"] is True
+    assert row["intraday_reliable"] is False
+    assert row["trade_action"] == "JETZT_VERKAUFEN"
+    assert row["lifecycle"] == "EXIT"
+    assert row["trade_setup"]["stop_loss"] == 1.00
+
+
+def test_fresh_last_trade_executes_stop_even_when_spread_is_missing():
+    snapshot = dict(
+        _snapshot(),
+        price=0.99,
+        bid=None,
+        ask=None,
+        spread_known=False,
+        spread_bps=250,
+        price_reliable=True,
+        price_age_seconds=2.0,
+    )
+    row = evaluate_penny_candidate(
+        snapshot,
+        [],
+        [],
+        details=_details(),
+        extra_resistances=_targets(),
+        previous_position={
+            "active": True,
+            "trade_setup": {"entry": 1.045, "stop_loss": 1.00, "tp1": 1.09, "tp2": 1.15},
+        },
+    )
+    assert row["price_reliable"] is True
+    assert row["quote_reliable"] is False
+    assert row["trade_action"] == "JETZT_VERKAUFEN"
+    assert row["lifecycle"] == "EXIT"
+
+
+def test_stale_last_trade_does_not_execute_protective_levels():
+    snapshot = dict(
+        _snapshot(),
+        price=0.99,
+        bid=None,
+        ask=None,
+        spread_known=False,
+        spread_bps=250,
+        price_reliable=False,
+        price_age_seconds=600.0,
+    )
+    row = evaluate_penny_candidate(
+        snapshot,
+        [],
+        [],
+        details=_details(),
+        extra_resistances=_targets(),
+        previous_position={
+            "active": True,
+            "trade_setup": {"entry": 1.045, "stop_loss": 1.00, "tp1": 1.09, "tp2": 1.15},
+        },
+    )
+    assert row["price_reliable"] is False
+    assert row["trade_action"] == "TRIGGER_WARTEN"
+    assert row["lifecycle"] == "DATENLUECKE"
+
+
+def test_stale_price_with_company_risk_exits_without_false_stop_label():
+    snapshot = dict(
+        _snapshot(),
+        price=0.99,
+        bid=None,
+        ask=None,
+        spread_known=False,
+        spread_bps=250,
+        price_reliable=False,
+        price_age_seconds=600.0,
+    )
+    details = _details()
+    details["sec_filing_context"] = {
+        "status": "ok",
+        "risk_flags": ["recent_sec_424b5"],
+        "warning_flags": [],
+    }
+    row = evaluate_penny_candidate(
+        snapshot,
+        [],
+        [],
+        details=details,
+        extra_resistances=_targets(),
+        previous_position={
+            "active": True,
+            "trade_setup": {"entry": 1.045, "stop_loss": 1.00, "tp1": 1.09, "tp2": 1.15},
+        },
+    )
+
+    assert row["price_reliable"] is False
+    assert row["trade_action"] == "JETZT_VERKAUFEN"
+    assert row["lifecycle"] == "EXIT"
+    assert row["signal_label"] == "HARTES UNTERNEHMENSRISIKO - JETZT VERKAUFEN"
+    assert row["exit_reasons"] == ["hard_company_risk_detected"]
+
+
 def test_nearest_overhead_barrier_cannot_be_skipped_for_farther_target():
-    now_ts = time.time()
+    now_ts = _market_now()
     intraday = analyze_penny_intraday(_bars(now_ts), spread_bps=20, now_ts=now_ts)
     plan = build_penny_trade_plan(
         intraday,
@@ -505,7 +1177,7 @@ def test_nearest_overhead_barrier_cannot_be_skipped_for_farther_target():
 
 
 def test_live_ask_drift_blocks_chasing_closed_candle_trigger():
-    now_ts = time.time()
+    now_ts = _market_now()
     snapshot = dict(_snapshot(), ask=1.07, bid=1.069, price=1.0695, spread_bps=9.4)
     row = evaluate_penny_candidate(
         snapshot,
@@ -524,7 +1196,7 @@ def test_live_ask_drift_blocks_chasing_closed_candle_trigger():
 
 
 def test_original_position_stop_controls_exit_not_recomputed_levels():
-    now_ts = time.time()
+    now_ts = _market_now()
     snapshot = dict(_snapshot(), price=0.99, bid=0.99, ask=0.992, spread_bps=20)
     row = evaluate_penny_candidate(
         snapshot,
@@ -559,7 +1231,7 @@ def test_robust_rvol_uses_twenty_day_median_not_single_outlier():
         now_utc=now,
     )
     assert enriched["rvol"] == 4.0
-    assert enriched["rvol_source"] == "projected_volume_vs_20d_median"
+    assert enriched["rvol_source"] == "projected_rth_volume_vs_20d_median"
 
 
 def test_robust_rvol_does_not_replace_missing_recent_days_with_older_volume():
@@ -601,6 +1273,31 @@ def test_news_keyword_matching_does_not_flag_software_or_sector():
     assert context["risk_flags"] == []
 
 
+def test_news_shelf_registration_is_warning_not_proven_dilution():
+    import api
+
+    context = api._penny_news_context([{
+        "title": "Company files shelf registration statement",
+        "published": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "sentiment": "neutral",
+    }])
+
+    assert context["risk_flags"] == []
+    assert "shelf_registration_capacity_not_executed" in context["warning_flags"]
+
+
+def test_news_securities_purchase_agreement_remains_hard_financing_risk():
+    import api
+
+    context = api._penny_news_context([{
+        "title": "Company enters securities purchase agreement with investors",
+        "published": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "sentiment": "neutral",
+    }])
+
+    assert "dilutive_financing_agreement" in context["risk_flags"]
+
+
 def test_replay_is_cost_aware_and_resolves_same_bar_ambiguity_stop_first():
     outcome = evaluate_penny_signal_outcome(
         1.00,
@@ -612,8 +1309,75 @@ def test_replay_is_cost_aware_and_resolves_same_bar_ambiguity_stop_first():
         slippage_bps=20,
     )
     assert outcome["outcome"] == "STOP"
-    assert outcome["net_r"] < -1.0
+    assert outcome["net_r"] == pytest.approx(-1.0)
     assert "stop-first" in outcome["assumption"]
+
+
+def test_replay_gap_through_stop_is_worse_than_minus_one_net_r():
+    outcome = evaluate_penny_signal_outcome(
+        1.00,
+        0.95,
+        1.08,
+        1.14,
+        [{"open": 0.90, "high": 0.92, "low": 0.88, "close": 0.91, "volume": 100_000}],
+        spread_bps=100,
+        slippage_bps=20,
+    )
+    assert outcome["outcome"] == "STOP"
+    assert outcome["net_r"] < -1.0
+
+
+def test_replay_tp1_and_new_breakeven_in_same_bar_uses_adverse_sequence():
+    outcome = evaluate_penny_signal_outcome(
+        1.00,
+        0.95,
+        1.08,
+        1.14,
+        [{"open": 1.02, "high": 1.09, "low": 0.99, "close": 1.06, "volume": 100_000}],
+        spread_bps=20,
+        slippage_bps=10,
+    )
+    assert outcome["outcome"] == "BREAKEVEN_STOP"
+    assert outcome["tp1_realized"] is True
+    assert outcome["remaining_fraction"] == 0.0
+    assert outcome["net_r"] > 0
+    assert "ambiguous same-bar" in outcome["assumption"]
+
+
+def test_snapshot_prefers_fresh_last_trade_and_marks_price_reliable(monkeypatch):
+    import api
+
+    now_ts = _market_now()
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
+    normalized = api._penny_normalize_snapshot({
+        "ticker": "PUMP",
+        "day": {"c": 1.05, "o": 1.00, "h": 1.08, "l": 0.98, "v": 2_000_000},
+        "prevDay": {"c": 1.00, "v": 1_000_000},
+        "lastTrade": {"p": 0.99, "t": int((now_ts - 2) * 1_000_000_000)},
+        "lastQuote": {},
+    }, 1.0)
+
+    assert normalized["price"] == pytest.approx(0.99)
+    assert normalized["spread_known"] is False
+    assert normalized["price_reliable"] is True
+    assert normalized["last_trade_age_seconds"] == pytest.approx(2.0)
+
+
+def test_snapshot_does_not_mark_undated_day_close_as_reliable(monkeypatch):
+    import api
+
+    now_ts = _market_now()
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
+    normalized = api._penny_normalize_snapshot({
+        "ticker": "PUMP",
+        "day": {"c": 1.05, "o": 1.00, "h": 1.08, "l": 0.98, "v": 2_000_000},
+        "prevDay": {"c": 1.00, "v": 1_000_000},
+        "lastTrade": {},
+        "lastQuote": {},
+    }, 1.0)
+
+    assert normalized["price"] == pytest.approx(1.05)
+    assert normalized["price_reliable"] is False
 
 
 def test_failed_scan_does_not_refresh_old_cache(monkeypatch, tmp_path):
@@ -755,7 +1519,7 @@ def test_penny_coverage_marks_fully_completed_batch():
     assert stats["deep_completed"] is True
 
 
-def test_recent_sec_registration_form_is_a_hard_risk_source(monkeypatch):
+def test_recent_sec_shelf_registration_is_warning_not_proven_dilution(monkeypatch):
     import api
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -777,11 +1541,12 @@ def test_recent_sec_registration_form_is_a_hard_risk_source(monkeypatch):
     monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
     context = api._penny_fetch_sec_filing_context("123456")
     assert context["status"] == "ok"
-    assert "recent_sec_s_3" in context["risk_flags"]
+    assert "recent_sec_s_3" not in context["risk_flags"]
+    assert "recent_sec_s_3" in context["warning_flags"]
 
 
 def test_primary_grade_uses_trade_score_not_pump_score():
-    now_ts = time.time()
+    now_ts = _market_now()
     row = evaluate_penny_candidate(
         _snapshot(),
         _bars(now_ts),
@@ -814,4 +1579,156 @@ def test_replay_endpoint_uses_only_post_trigger_bars(monkeypatch):
     monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
     payload = api.replay_penny_stock_signal("TEST", trigger, 1.0, 0.95, 1.08, 1.14)
     assert payload["bars_replayed"] == 2
-    assert payload["result"]["outcome"] == "TP2"
+    assert payload["result"]["outcome"] == "BREAKEVEN_STOP"
+
+
+def test_replay_reaches_tp2_when_post_trigger_path_is_unambiguous():
+    result = evaluate_penny_signal_outcome(
+        1.0,
+        0.95,
+        1.08,
+        1.14,
+        [
+            {"open": 1.0, "high": 1.07, "low": 0.99, "close": 1.06, "volume": 1000},
+            {"open": 1.06, "high": 1.15, "low": 1.02, "close": 1.14, "volume": 1000},
+        ],
+    )
+    assert result["outcome"] == "TP2"
+
+
+def test_trigger_pool_requires_fresh_nearby_structure():
+    import api
+
+    intraday = {
+        "data_ok": True,
+        "fresh": True,
+        "warnings": [],
+        "price": 1.02,
+        "vwap": 1.00,
+        "ema9": 1.01,
+        "ema20": 1.00,
+        "distance_to_breakout_pct": 1.2,
+        "volume_ratio": 0.90,
+        "close_position": 0.72,
+    }
+    eligible, reason = api._penny_trigger_pool_eligibility(
+        _snapshot(),
+        {"eligible": True},
+        intraday,
+    )
+    assert eligible is True
+    assert reason == "technical_trigger_neighborhood"
+
+    distributed = dict(intraday, warnings=["large_upper_wick"])
+    eligible, reason = api._penny_trigger_pool_eligibility(
+        _snapshot(),
+        {"eligible": True},
+        distributed,
+    )
+    assert eligible is False
+    assert reason == "distribution_or_extension_warning"
+
+
+def test_trigger_pool_expires_fail_closed():
+    import api
+
+    api._penny_save_trigger_pool({
+        "pump": {
+            "snapshot": _snapshot(),
+            "broad": {"eligible": True},
+        },
+    }, now_ts=100.0)
+
+    assert set(api._penny_load_trigger_pool(now_ts=101.0)) == {"PUMP"}
+    assert api._penny_load_trigger_pool(
+        now_ts=100.0 + api._PENNY_TRIGGER_POOL_TTL_SECONDS + 1.0,
+    ) == {}
+
+
+@pytest.mark.parametrize("mail_sent", [False, True])
+def test_trigger_pool_buy_activation_is_transactional(monkeypatch, tmp_path, mail_sent):
+    import api
+
+    now_ts = _market_now()
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "tickers": [{
+                    "ticker": "PUMP",
+                    "day": {"c": 1.045, "o": 0.99, "h": 1.05, "l": 0.95, "v": 9_000_000},
+                    "prevDay": {"c": 0.995, "v": 2_812_500},
+                    "lastTrade": {"p": 1.045},
+                    "lastQuote": {"p": 1.044, "P": 1.046, "t": int(now_ts * 1_000_000_000)},
+                }],
+            }
+
+    paths = {
+        "PENNY_STOCKS_MONITOR_CACHE": tmp_path / "monitor.json",
+        "PENNY_STOCKS_STATE": tmp_path / "state.json",
+        "PENNY_STOCKS_REFERENCE_CACHE": tmp_path / "references.json",
+        "PENNY_STOCKS_DAILY_CACHE": tmp_path / "daily.json",
+        "PENNY_STOCKS_NEWS_CACHE": tmp_path / "news.json",
+        "PENNY_STOCKS_SEC_CACHE": tmp_path / "sec.json",
+        "_EMAIL_DEDUPE_FILE": tmp_path / "email_dedupe.json",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(api, name, str(path))
+
+    api._penny_save_trigger_pool({
+        "PUMP": {
+            "snapshot": _snapshot(),
+            "broad": {"eligible": True},
+            "intraday": {"data_ok": True, "fresh": True},
+        },
+    }, now_ts=now_ts)
+
+    buy_row = {
+        "ticker": "PUMP",
+        "price": 1.045,
+        "entry": 1.045,
+        "trade_action": "JETZT_KAUFEN",
+        "trade_signal": "JETZT_KAUFEN",
+        "trade_score": 91,
+        "setup_quality_score": 86,
+        "entry_quality_score": 92,
+        "dump_risk_score": 18,
+        "trigger_timestamp": now_ts - 300,
+        "decision_timestamp": now_ts,
+        "trade_setup": {
+            "entry": 1.045,
+            "stop_loss": 0.99,
+            "tp1": 1.13,
+            "tp2": 1.22,
+        },
+    }
+    sent_rows = []
+    monkeypatch.setattr(api.time, "time", lambda: now_ts)
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(api, "_penny_expected_volume_fraction", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PUMP"}, "test"))
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda: {"allowed": True, "session": "US_REGULAR"})
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *args, **kwargs: _compressed_breakout_bars(now_ts))
+    monkeypatch.setattr(api, "_penny_trigger_pool_eligibility", lambda *args, **kwargs: (True, "ok"))
+    monkeypatch.setattr(
+        api,
+        "_penny_evaluate_trigger_pool_symbol",
+        lambda *args, **kwargs: (dict(buy_row), _snapshot()),
+    )
+    monkeypatch.setattr(api, "_penny_revalidate_buy_candidate", lambda row, **kwargs: (dict(row), "ok"))
+    monkeypatch.setattr(api, "_penny_buy_email", lambda rows: sent_rows.extend(rows) or mail_sent)
+    monkeypatch.setattr(api, "_penny_management_email", lambda rows: False)
+    monkeypatch.setattr(api, "_penny_exit_email", lambda rows: False)
+    monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *args, **kwargs: None)
+
+    api._penny_position_monitor_wrapper()
+
+    state = api._penny_load_state_tickers()["PUMP"]
+    assert len(sent_rows) == 1
+    assert state["active"] is mail_sent
+    assert state["buy_email_sent"] is mail_sent
+    assert state["last_action"] == (
+        "JETZT_KAUFEN" if mail_sent else "ENTRY_BESTAETIGT_MAIL_FEHLER"
+    )
