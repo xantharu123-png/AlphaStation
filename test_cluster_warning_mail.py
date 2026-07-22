@@ -184,6 +184,15 @@ def _mock_sweep_env(monkeypatch, universe):
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *a, **k: (set(universe), "unit"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **k: None)
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda *a, **k: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+    )
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda *a, **k: {
         "allowed": True, "session": "US_REGULAR", "reason": "unit-test market open",
     })

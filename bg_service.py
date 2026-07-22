@@ -74,6 +74,11 @@ sys.path.insert(0, str(BASE_DIR))
 
 from modules.trade_levels import normalize_alert_trade_levels, trade_plan_quality
 from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
+from modules.data_fetchers import rate_limited_get
+from modules.stock_execution import (
+    aggregate_regular_session_4h_bars,
+    stock_swing_4h_execution_state,
+)
 from modules.email_dedupe import (
     email_dedupe_active as _shared_email_dedupe_active,
     email_dedupe_claim as _shared_email_dedupe_claim,
@@ -307,6 +312,10 @@ _ALERT_MIN_HEALTH_SCORE = 80
 # N (Audit 10.06.2026): Frische-Gate fuer bg-Mails — Cache aelter als 2h ist
 # kein "JETZT-Trade"-Signal mehr (Schutz gegen tote Scan-Owner, vgl. K-1).
 _ALERT_CACHE_MAX_AGE_S = 2 * 3600
+_STOCK_SWING_EXECUTION_CACHE_TTL_SEC = 300
+_STOCK_SWING_EXECUTION_CACHE_MAX = 256
+_STOCK_SWING_EXECUTION_CACHE = {}
+_STOCK_SWING_EXECUTION_CACHE_LOCK = threading.Lock()
 # B2: Dedupe-TTLs wie api — Biotech-Katalysator-Setups bleiben tagelang gleich.
 _BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600
 # B5: Einmalige Invalidierungs-Update-Mail je Symbol (72h-Fenster).
@@ -736,6 +745,7 @@ def _stock_swing_rule_reasons(row):
     upper_wick_pct = fields.get("upper_wick_pct")
     rvol = fields.get("rvol")
     strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+    execution_status = str(row.get("Swing_4H_Execution_Status") or "").upper()
 
     extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
     hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
@@ -786,6 +796,10 @@ def _stock_swing_rule_reasons(row):
             reasons.append("swing_momentum_breakout_quality_wait_retest")
         elif continuation_score is not None and continuation_score < 78:
             reasons.append("swing_momentum_breakout_quality_wait_retest")
+    if execution_status == "WAIT_RECLAIM":
+        reasons.append("swing_4h_rejection_wait_reclaim")
+    elif execution_status == "DATA_UNAVAILABLE":
+        reasons.append("swing_4h_state_missing_wait_trigger")
     return list(dict.fromkeys(reasons))
 
 
@@ -954,6 +968,56 @@ def _fetch_bear_latest_intraday_state(ticker, poly_key):
 def _fetch_long_latest_intraday_state(ticker, poly_key):
     """Same 5m state, used to block fading long mails without blocking continuation."""
     return _fetch_bear_latest_intraday_state(ticker, poly_key)
+
+
+def _fetch_stock_swing_execution_state(ticker, poly_key):
+    """Fetch the current 4H execution state for automatic stock swing mails."""
+    symbol = str(ticker or "").strip().upper()
+    if not symbol or not poly_key:
+        return stock_swing_4h_execution_state([])
+
+    now_ts = time.time()
+    with _STOCK_SWING_EXECUTION_CACHE_LOCK:
+        cached = _STOCK_SWING_EXECUTION_CACHE.get(symbol)
+        if cached and now_ts - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC:
+            return dict(cached.get("state", {}))
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        timezone_et = ZoneInfo("America/New_York")
+        now_et = datetime.now(timezone_et)
+        start_date = (now_et - timedelta(days=45)).strftime("%Y-%m-%d")
+        end_date = now_et.strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/30/minute/{start_date}/{end_date}"
+        response = rate_limited_get(
+            url,
+            params={"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 5000},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            return stock_swing_4h_execution_state([])
+        bars = aggregate_regular_session_4h_bars(
+            response.json().get("results", []) or [],
+            timezone_et,
+            limit=24,
+        )
+        state = stock_swing_4h_execution_state(bars)
+        with _STOCK_SWING_EXECUTION_CACHE_LOCK:
+            if len(_STOCK_SWING_EXECUTION_CACHE) >= _STOCK_SWING_EXECUTION_CACHE_MAX:
+                oldest = min(
+                    _STOCK_SWING_EXECUTION_CACHE,
+                    key=lambda key: float(_STOCK_SWING_EXECUTION_CACHE[key].get("timestamp", 0) or 0),
+                )
+                _STOCK_SWING_EXECUTION_CACHE.pop(oldest, None)
+            _STOCK_SWING_EXECUTION_CACHE[symbol] = {
+                "timestamp": now_ts,
+                "state": dict(state),
+            }
+        return state
+    except Exception as exc:
+        log.warning(f"Stock swing 4H execution fetch failed for {symbol}: {exc}")
+        return stock_swing_4h_execution_state([])
 
 
 def _display_crypto_contract_symbol(symbol):
@@ -1996,6 +2060,10 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
                 r = dict(r)
                 if swing_mode:
                     r["long_entry_quality"] = "SWING_SETUP"
+                    r.update(_fetch_stock_swing_execution_state(
+                        ticker,
+                        secrets.get("POLYGON_KEY", ""),
+                    ))
                     long_reasons = _stock_swing_rule_reasons(r)
                 else:
                     if "latest_bar_change_pct" not in r:

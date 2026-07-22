@@ -43,6 +43,15 @@ def _isolate_email_state(monkeypatch, tmp_path):
         "session": "US_REGULAR",
         "reason": "unit-test market open",
     })
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda *a, **k: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+    )
 
 
 def _record_recorder(monkeypatch):

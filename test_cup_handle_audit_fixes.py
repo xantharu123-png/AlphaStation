@@ -108,6 +108,15 @@ def _mock_mail_env(monkeypatch, allowed):
         api, "_fetch_long_latest_intraday_state",
         lambda t: {"latest_bar_change_pct": 0.25, "latest_bar_close_pos": 0.85},
     )
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda *a, **k: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+    )
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **k: None)
     monkeypatch.setattr(api, "_email_dedupe_remaining", lambda *a, **k: 0)
     monkeypatch.setattr(api, "_email_dedupe_mark", lambda *a, **k: None)

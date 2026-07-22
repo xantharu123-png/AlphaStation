@@ -50,6 +50,16 @@ def _setup(monkeypatch, tmp_path, rows):
     monkeypatch.setattr(
         bg_service, "_fetch_long_latest_intraday_state", lambda *a, **k: {}, raising=False
     )
+    monkeypatch.setattr(
+        bg_service,
+        "_fetch_stock_swing_execution_state",
+        lambda *a, **k: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+        raising=False,
+    )
     sent_mails = []
 
     def _recorder(subject, body_html, secrets, mail_class="trade"):
@@ -115,6 +125,41 @@ def test_swing_owner_mail_does_not_require_intraday_5m_state(monkeypatch, tmp_pa
     assert len(sent) == 1
     assert "SWNG" in sent[0]["body"]
     assert "SWING_SETUP" in sent[0]["body"]
+
+
+def test_swing_owner_blocks_unreclaimed_4h_rejection(monkeypatch, tmp_path):
+    sent = _setup(monkeypatch, tmp_path, [_base_row("TEL")])
+    monkeypatch.setattr(
+        bg_service,
+        "_fetch_stock_swing_execution_state",
+        lambda *args, **kwargs: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "WAIT_RECLAIM",
+            "Swing_4H_Execution_Reason": "failed_4h_breakout_not_reclaimed",
+            "Swing_4H_Reclaim_Level": 201.0,
+        },
+    )
+
+    bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": "test"})
+
+    assert sent == []
+
+
+def test_swing_owner_fails_closed_when_4h_state_is_unavailable(monkeypatch, tmp_path):
+    sent = _setup(monkeypatch, tmp_path, [_base_row("MISS")])
+    monkeypatch.setattr(
+        bg_service,
+        "_fetch_stock_swing_execution_state",
+        lambda *args, **kwargs: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "DATA_UNAVAILABLE",
+            "Swing_4H_Execution_Reason": "insufficient_4h_history",
+        },
+    )
+
+    bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": "test"})
+
+    assert sent == []
 
 
 def test_intraday_owner_mail_requires_fresh_5m_state(monkeypatch, tmp_path):

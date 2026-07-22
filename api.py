@@ -101,6 +101,10 @@ from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import normalize_alert_trade_levels, trade_geometry, trade_plan_quality
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline, project_partial_rvol
+from modules.stock_execution import (
+    aggregate_regular_session_4h_bars,
+    stock_swing_4h_execution_state,
+)
 from modules.email_dedupe import (
     email_dedupe_active as _shared_email_dedupe_active,
     email_dedupe_claim as _shared_email_dedupe_claim,
@@ -1239,6 +1243,10 @@ _STOCK_EMAIL_ASSET_GUARD_SCANNERS = {
 _STOCK_ALERT_SCANNERS = set(_STOCK_EMAIL_ASSET_GUARD_SCANNERS) | {"turtle"}
 _INTRADAY_ONLY_SCANNERS = {"orb", "penny_stocks"}
 _STOCK_SWING_ALERT_SCANNERS = set(_STOCK_ALERT_SCANNERS) - _INTRADAY_ONLY_SCANNERS
+_STOCK_SWING_EXECUTION_CACHE_TTL_SEC = 300
+_STOCK_SWING_EXECUTION_CACHE_MAX = 256
+_STOCK_SWING_EXECUTION_CACHE: Dict[str, Dict[str, Any]] = {}
+_STOCK_SWING_EXECUTION_CACHE_LOCK = threading.Lock()
 _TRADE_HORIZON_OPTIONS = {"swing", "intraday", "both"}
 _DEFAULT_TRADE_HORIZON = os.environ.get("ALPHA_TRADE_HORIZON_DEFAULT", "swing")
 _CRYPTO_STRATEGY_ALERTS_ENABLED = False
@@ -4594,6 +4602,56 @@ def _fetch_recent_stock_5m_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
         return []
 
 
+def _fetch_recent_stock_4h_bars(ticker: str, limit: int = 24) -> List[Dict[str, Any]]:
+    """Fetch recent regular-session 4H candles from 30-minute Polygon bars."""
+    symbol = str(ticker or "").strip().upper()
+    if not symbol or not POLYGON_KEY:
+        return []
+    now = time.time()
+    with _STOCK_SWING_EXECUTION_CACHE_LOCK:
+        cached = _STOCK_SWING_EXECUTION_CACHE.get(symbol)
+        if cached and now - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC:
+            return list(cached.get("bars", []))[-limit:]
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        timezone_et = ZoneInfo("America/New_York")
+        now_et = datetime.now(timezone_et)
+        start_date = (now_et - timedelta(days=45)).strftime("%Y-%m-%d")
+        end_date = now_et.strftime("%Y-%m-%d")
+        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/30/minute/{start_date}/{end_date}"
+        response = rate_limited_get(
+            url,
+            params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 5000},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            return []
+        raw_bars = response.json().get("results", []) or []
+        aggregated = aggregate_regular_session_4h_bars(
+            raw_bars,
+            timezone_et,
+            limit=max(limit, 24),
+        )
+        with _STOCK_SWING_EXECUTION_CACHE_LOCK:
+            if len(_STOCK_SWING_EXECUTION_CACHE) >= _STOCK_SWING_EXECUTION_CACHE_MAX:
+                oldest = min(
+                    _STOCK_SWING_EXECUTION_CACHE,
+                    key=lambda key: float(_STOCK_SWING_EXECUTION_CACHE[key].get("timestamp", 0) or 0),
+                )
+                _STOCK_SWING_EXECUTION_CACHE.pop(oldest, None)
+            _STOCK_SWING_EXECUTION_CACHE[symbol] = {"timestamp": now, "bars": aggregated}
+        return aggregated[-limit:]
+    except Exception as exc:
+        print(f"[Alert] stock 4H execution bars error {symbol}: {exc}")
+        return []
+
+
+def _fetch_stock_swing_execution_state(ticker: str) -> Dict[str, Any]:
+    return stock_swing_4h_execution_state(_fetch_recent_stock_4h_bars(ticker, limit=24))
+
+
 def _stock_breakout_freshness_state(
     row: Dict[str, Any],
     *,
@@ -5441,6 +5499,7 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     upper_wick_pct = fields.get("upper_wick_pct")
     rvol = fields.get("rvol")
     strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+    execution_status = str(row.get("Swing_4H_Execution_Status") or "").upper()
 
     extended = (change is not None and change >= 12.0) or (extension_atr is not None and extension_atr >= 4.0)
     hard_extended = (change is not None and change >= 25.0) or (extension_atr is not None and extension_atr >= 6.0)
@@ -5502,7 +5561,11 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_momentum_breakout_quality_wait_retest")
         elif continuation_score is not None and continuation_score < 78:
             reasons.append("swing_momentum_breakout_quality_wait_retest")
-    return reasons
+    if execution_status == "WAIT_RECLAIM":
+        reasons.append("swing_4h_rejection_wait_reclaim")
+    elif execution_status == "DATA_UNAVAILABLE":
+        reasons.append("swing_4h_state_missing_wait_trigger")
+    return list(dict.fromkeys(reasons))
 
 
 def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
@@ -6043,7 +6106,7 @@ def _stock_alert_is_short_context(scanner_name: str, row: Dict[str, Any], strate
 
 
 def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strategy_name: str = "") -> Dict[str, Any]:
-    """Attach fresh 5m state only for scanner types that truly trade intraday timing."""
+    """Attach execution state appropriate to the scanner's trading horizon."""
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
     if not ticker or grade not in _ALERT_TOP_GRADES:
@@ -6053,6 +6116,12 @@ def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strateg
     if scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name):
         enriched.setdefault("entry_quality", "SWING_SETUP")
         enriched.setdefault("swing_timeframe", "daily_swing")
+        score = _alert_float(_extract_alert_score(enriched), 0) or 0
+        if (
+            score >= _ALERT_MIN_SCORE
+            and not _stock_alert_is_short_context(scanner_name, enriched, strategy_name)
+        ):
+            enriched.update(_fetch_stock_swing_execution_state(ticker))
         return enriched
 
     if (
@@ -6104,6 +6173,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_momentum_not_holding_upper_range_wait_retest",
         "swing_momentum_wick_rejection_wait_retest",
         "swing_momentum_breakout_quality_wait_retest",
+        "swing_4h_rejection_wait_reclaim",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
         "swing_short_current_candle_reclaim",
@@ -6121,6 +6191,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "trigger_stale_for_mail",
         "near_structural_barrier_wait_trigger",
         "momentum_breakout_freshness_unconfirmed",
+        "swing_4h_state_missing_wait_trigger",
         "momentum_breakout_stale_wait_trigger",
     }
     no_trade_markers = {

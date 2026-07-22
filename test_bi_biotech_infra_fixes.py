@@ -47,6 +47,16 @@ def _bg_setup(monkeypatch, tmp_path, cache_file, payload):
     monkeypatch.setattr(
         bg_service, "_fetch_long_latest_intraday_state", lambda *a, **k: {}, raising=False
     )
+    monkeypatch.setattr(
+        bg_service,
+        "_fetch_stock_swing_execution_state",
+        lambda *a, **k: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+        raising=False,
+    )
     sent_mails = []
 
     def _recorder(subject, body_html, secrets, mail_class="trade"):

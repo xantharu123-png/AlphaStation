@@ -18,6 +18,15 @@ def _mock_common_stock_universe(monkeypatch, tmp_path, request):
     }
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda *args, **kwargs: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+            "Swing_4H_Execution_Reason": "unit_test_clear",
+        },
+    )
     if "stock_trade_email_status" not in request.node.name:
         monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {
             "allowed": True,
@@ -1386,6 +1395,14 @@ def test_stock_strategy_swing_email_does_not_fetch_or_require_5m(monkeypatch):
         api,
         "_fetch_long_latest_intraday_state",
         lambda ticker: (_ for _ in ()).throw(AssertionError("Swing stock strategy must not fetch 5m bars")),
+    )
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda ticker: {
+            "Swing_4H_Execution_Checked": True,
+            "Swing_4H_Execution_Status": "CLEAR",
+        },
     )
 
     enriched = api._enrich_stock_alert_5m_state("stock_strategy", row, "Momentum Breakout Long")
