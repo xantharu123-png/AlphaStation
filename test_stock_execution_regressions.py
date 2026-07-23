@@ -144,6 +144,59 @@ def test_momentum_mail_allows_sufficient_baseline_liquidity():
     assert reason == ""
 
 
+def test_stock_4h_execution_blocks_multi_candle_chase():
+    bars = [
+        _bar(0, 10.0, 10.2, 9.9, 10.1),
+        _bar(240, 10.1, 10.3, 10.0, 10.2),
+        _bar(480, 10.2, 10.4, 10.0, 10.1),
+        _bar(720, 10.1, 10.5, 10.0, 10.4),
+        _bar(960, 10.4, 10.7, 10.2, 10.6),
+        _bar(1200, 10.6, 10.8, 10.4, 10.7),
+        _bar(1440, 10.7, 11.2, 10.6, 11.1),
+        _bar(1680, 11.1, 12.0, 11.0, 11.9),
+        _bar(1920, 11.9, 13.2, 11.8, 13.0),
+        _bar(2160, 13.0, 14.4, 12.9, 14.2),
+        _bar(2400, 14.2, 15.6, 14.1, 15.4),
+        _bar(2640, 15.4, 15.8, 15.1, 15.3),
+    ]
+
+    state = api.stock_swing_4h_execution_state(bars)
+
+    assert state["Swing_4H_Execution_Status"] == "WAIT_RETEST"
+    assert state["Swing_4H_Recent_Move_Pct"] >= 12
+
+
+def test_stock_4h_execution_allows_fresh_non_extended_breakout():
+    bars = [
+        _bar(0, 10.0, 10.2, 9.9, 10.1),
+        _bar(240, 10.1, 10.3, 10.0, 10.2),
+        _bar(480, 10.2, 10.25, 10.0, 10.1),
+        _bar(720, 10.1, 10.35, 10.0, 10.3),
+        _bar(960, 10.3, 10.4, 10.2, 10.25),
+        _bar(1200, 10.25, 10.45, 10.2, 10.35),
+        _bar(1440, 10.35, 10.5, 10.3, 10.4),
+        _bar(1680, 10.4, 10.85, 10.35, 10.75),
+    ]
+
+    state = api.stock_swing_4h_execution_state(bars)
+
+    assert state["Swing_4H_Execution_Status"] == "CLEAR"
+
+
+def test_gap_momentum_mail_blocks_extended_4h_run():
+    row = {
+        "Strategy": "Gap Momentum Long",
+        "direction": "LONG",
+        "Swing_4H_Execution_Checked": True,
+        "Swing_4H_Execution_Status": "WAIT_RETEST",
+    }
+
+    ok, reason = api._stock_strategy_mail_quality_state(row)
+
+    assert ok is False
+    assert reason == "stock_swing_mail_blocked_4h_extended_run"
+
+
 def test_breakout_freshness_detects_recent_cross():
     bars = [
         _bar(0, 99.3, 99.8, 99.1, 99.5),

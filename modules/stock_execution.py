@@ -126,6 +126,67 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
             "Swing_4H_Execution_Reason": "insufficient_4h_history",
         }
 
+    # Swing mails may be daily-based, but execution still needs to know whether
+    # the 4H move is already several candles old. In that case the setup can
+    # remain interesting, but the entry should wait for a retest instead of
+    # inviting a chase near the local high.
+    run_state: Optional[Dict[str, Any]] = None
+    recent = cleaned[-8:]
+    latest = cleaned[-1]
+    recent_low = min(item["low"] for item in recent)
+    recent_high = max(item["high"] for item in recent)
+    recent_move_pct = ((recent_high - recent_low) / recent_low) * 100.0 if recent_low > 0 else 0.0
+    near_run_high_pct = ((recent_high - latest["close"]) / recent_high) * 100.0 if recent_high > 0 else 0.0
+    green_count = sum(1 for item in recent[-5:] if item["close"] > item["open"])
+    rising_closes = sum(
+        1
+        for index in range(max(1, len(cleaned) - 5), len(cleaned))
+        if cleaned[index]["close"] > cleaned[index - 1]["close"]
+    )
+    prior_resistance = None
+    if len(cleaned) >= 14:
+        prior_resistance = max(item["high"] for item in cleaned[-18:-5] or cleaned[:-5])
+    extension_above_resistance_pct = 0.0
+    bars_since_breakout: Optional[int] = None
+    if prior_resistance and prior_resistance > 0:
+        extension_above_resistance_pct = ((latest["close"] - prior_resistance) / prior_resistance) * 100.0
+        for offset in range(1, min(8, len(cleaned))):
+            index = len(cleaned) - offset
+            if (
+                cleaned[index]["close"] > prior_resistance * 1.003
+                and cleaned[index - 1]["close"] <= prior_resistance * 1.003
+            ):
+                bars_since_breakout = offset - 1
+                break
+
+    extended_run = (
+        recent_move_pct >= 12.0
+        and near_run_high_pct <= 4.0
+        and (green_count >= 3 or rising_closes >= 3)
+    )
+    already_through_resistance = (
+        extension_above_resistance_pct >= 1.5
+        and bars_since_breakout is not None
+        and bars_since_breakout >= 2
+        and near_run_high_pct <= 3.5
+    )
+    if extended_run or already_through_resistance:
+        run_state = {
+            **base_state,
+            "Swing_4H_Execution_Status": "WAIT_RETEST",
+            "Swing_4H_Execution_Reason": (
+                "already_extended_above_4h_resistance"
+                if already_through_resistance
+                else "multi_candle_4h_run_wait_retest"
+            ),
+            "Swing_4H_Green_Count_5": int(green_count),
+            "Swing_4H_Rising_Closes_5": int(rising_closes),
+            "Swing_4H_Recent_Move_Pct": round(recent_move_pct, 2),
+            "Swing_4H_Near_Run_High_Pct": round(near_run_high_pct, 2),
+            "Swing_4H_Extension_Above_Resistance_Pct": round(extension_above_resistance_pct, 2),
+            "Swing_4H_Bars_Since_Breakout": bars_since_breakout,
+        }
+
     rejection: Optional[Dict[str, Any]] = None
     first_candidate = max(6, len(cleaned) - 3)
     for index in range(first_candidate, len(cleaned)):
@@ -186,7 +247,7 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
         }
 
     if rejection is None:
-        return base_state
+        return run_state or base_state
 
     reclaim_level = float(rejection["reclaim_level"])
     state = {
@@ -210,4 +271,6 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
     else:
         state["Swing_4H_Execution_Status"] = "RECLAIMED"
         state["Swing_4H_Execution_Reason"] = "4h_rejection_reclaimed"
+    if state["Swing_4H_Execution_Status"] == "RECLAIMED" and run_state is not None:
+        return run_state
     return state

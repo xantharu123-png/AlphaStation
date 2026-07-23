@@ -5772,7 +5772,9 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_momentum_breakout_quality_wait_retest")
         elif continuation_score is not None and continuation_score < 78:
             reasons.append("swing_momentum_breakout_quality_wait_retest")
-    if execution_status == "WAIT_RECLAIM":
+    if execution_status in {"WAIT_RETEST", "RUN_EXTENDED"}:
+        reasons.append("swing_4h_extended_run_wait_retest")
+    elif execution_status == "WAIT_RECLAIM":
         reasons.append("swing_4h_rejection_wait_reclaim")
     elif execution_status == "DATA_UNAVAILABLE":
         reasons.append("swing_4h_state_missing_wait_trigger")
@@ -5855,6 +5857,18 @@ def _stock_strategy_mail_quality_state(
     breakout setup, not just a trend reclaim that scored well on raw momentum.
     """
     strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+    is_long_context = "short" not in strategy_name and str(
+        row.get("Signal_Direction", row.get("direction", row.get("Signal", ""))) or ""
+    ).lower() != "short"
+    if is_long_context:
+        execution_status = str(row.get("Swing_4H_Execution_Status") or "").upper()
+        if execution_status in {"WAIT_RETEST", "RUN_EXTENDED"}:
+            return False, "stock_swing_mail_blocked_4h_extended_run"
+        if execution_status == "WAIT_RECLAIM":
+            return False, "stock_swing_mail_blocked_4h_rejection"
+        if execution_status == "DATA_UNAVAILABLE":
+            return False, "stock_swing_mail_blocked_missing_4h_state"
+
     if "momentum breakout long" not in strategy_name:
         return True, ""
 
@@ -6406,6 +6420,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_momentum_not_holding_upper_range_wait_retest",
         "swing_momentum_wick_rejection_wait_retest",
         "swing_momentum_breakout_quality_wait_retest",
+        "swing_4h_extended_run_wait_retest",
         "swing_4h_rejection_wait_reclaim",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
