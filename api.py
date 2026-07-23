@@ -23509,6 +23509,7 @@ def _penny_vrvp_resistances(
 
 _PENNY_VISIBLE_ACTIONS = frozenset({"JETZT_KAUFEN", "HALTEN", "JETZT_VERKAUFEN"})
 _PENNY_OPTIONAL_ACTIONS = frozenset({"TRIGGER_WARTEN", "BEOBACHTEN"})
+_PENNY_PREP_ACTIONS = frozenset({"TRIGGER_WARTEN"})
 _PENNY_TRIGGER_MAX_AGE_SECONDS = int(PENNY_TRIGGER_MAX_AGE_SECONDS)
 _PENNY_RESULT_CACHE_MAX_AGE_SECONDS = 720
 _PENNY_OPTIONAL_ROW_LIMIT = 25
@@ -23712,6 +23713,52 @@ def _penny_near_entry_rows(
         _alert_float(row.get("dump_risk_score"), 100.0),
     ))
     return near_rows[:_PENNY_NEAR_ENTRY_ROW_LIMIT]
+
+
+def _penny_trigger_prep_rows(
+    rows: Any,
+    *,
+    cache_age_seconds: Optional[int] = None,
+    now_ts: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Show strong pending Penny trade ideas without relaxing buy-mail gates."""
+    candidates = _penny_active_trade_rows(
+        rows,
+        include_watch=True,
+        cache_age_seconds=cache_age_seconds,
+        now_ts=now_ts,
+    )
+    prep_rows: List[Dict[str, Any]] = []
+    for row in candidates:
+        action = str(row.get("trade_action") or "").upper()
+        if action not in _PENNY_PREP_ACTIONS or row.get("model_position_active"):
+            continue
+        setup_quality = _alert_float(
+            row.get("setup_quality_score", row.get("pump_potential_score")),
+            0.0,
+        )
+        entry_quality = _alert_float(row.get("entry_quality_score"), 0.0)
+        trade_score = _alert_float(row.get("trade_score", row.get("score")), 0.0)
+        dump_risk = _alert_float(row.get("dump_risk_score"), 100.0)
+        if setup_quality < 55 or entry_quality < 45 or trade_score < 50 or dump_risk > 70:
+            continue
+        item = dict(row)
+        item["display_mode"] = "TRIGGER_PREP"
+        item["signal_label"] = "TRIGGER ABWARTEN"
+        item["near_entry_note"] = (
+            "Noch nicht kaufen; die Aktie ist vorbereitet, aber der frische "
+            "5m-Breakout/Retest fehlt noch."
+        )
+        prep_rows.append(item)
+
+    prep_rows.sort(
+        key=lambda row: (
+            -_alert_float(row.get("trade_score", row.get("score")), 0.0),
+            -_alert_float(row.get("entry_quality_score"), 0.0),
+            _alert_float(row.get("dump_risk_score"), 100.0),
+        )
+    )
+    return prep_rows[:_PENNY_OPTIONAL_ROW_LIMIT]
 
 
 def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
@@ -25438,8 +25485,15 @@ def get_penny_stock_results(include_watch: bool = False):
         cached_rows,
         cache_age_seconds=cache_age,
     )
+    prep_rows = _penny_trigger_prep_rows(
+        cached_rows,
+        cache_age_seconds=cache_age,
+    )
+    auto_show_prep = bool(not rows and not include_watch and prep_rows)
+    if auto_show_prep:
+        rows = prep_rows
     requested_actions = _PENNY_VISIBLE_ACTIONS | (
-        _PENNY_OPTIONAL_ACTIONS if effective_include_watch else frozenset()
+        _PENNY_OPTIONAL_ACTIONS if (effective_include_watch or auto_show_prep) else frozenset()
     )
     raw_symbols = {
         str(row.get("ticker") or "").upper().strip()
@@ -25471,11 +25525,14 @@ def get_penny_stock_results(include_watch: bool = False):
         "combined_buy_now": sum(1 for row in rows if row.get("trade_action") == "JETZT_KAUFEN"),
         "combined_hold_now": sum(1 for row in rows if row.get("trade_action") == "HALTEN"),
         "combined_exit_now": sum(1 for row in rows if row.get("trade_action") == "JETZT_VERKAUFEN"),
+        "trigger_prep_count": len(prep_rows),
+        "auto_show_trigger_prep": auto_show_prep,
     })
     return {
         "status": "warning" if current_scan_error or current_monitor_error else "success",
         "data": rows,
         "near_entries": near_entries,
+        "trigger_prep_rows": prep_rows,
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
         "monitor_cached_at": monitor_cached_at,
@@ -25486,6 +25543,7 @@ def get_penny_stock_results(include_watch: bool = False):
         "total": metadata.get("total"),
         "progress_detail": metadata.get("detail"),
         "include_watch": include_watch,
+        "auto_show_trigger_prep": auto_show_prep,
         "partial_watch_rows": bool(is_partial and not include_watch),
         "diagnostics": diagnostics,
         "policy": {

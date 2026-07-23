@@ -568,6 +568,44 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
     assert payload_with_watch["include_watch"] is True
 
 
+def test_penny_results_auto_show_strong_trigger_prep_when_no_active_rows(monkeypatch):
+    import api
+
+    now_ts = time.time()
+    rows = [
+        {
+            "ticker": "PREP",
+            "trade_action": "TRIGGER_WARTEN",
+            "trigger_timestamp": now_ts - 360,
+            "trade_score": 76,
+            "setup_quality_score": 72,
+            "entry_quality_score": 68,
+            "dump_risk_score": 34,
+            "trade_setup": {"entry": 1.0, "stop_loss": 0.9, "tp1": 1.2, "tp2": 1.45},
+        },
+        {
+            "ticker": "WEAK",
+            "trade_action": "TRIGGER_WARTEN",
+            "trigger_timestamp": now_ts - 360,
+            "trade_score": 49,
+            "setup_quality_score": 70,
+            "entry_quality_score": 70,
+            "dump_risk_score": 20,
+            "trade_setup": {"entry": 1.0, "stop_loss": 0.9, "tp1": 1.2, "tp2": 1.45},
+        },
+    ]
+    monkeypatch.setattr(api, "load_cache_file", lambda path: (rows, None))
+    monkeypatch.setattr(api, "load_cache_metadata", lambda path: {"diagnostics": {}})
+
+    payload = api.get_penny_stock_results()
+
+    assert payload["include_watch"] is False
+    assert payload["auto_show_trigger_prep"] is True
+    assert [row["ticker"] for row in payload["data"]] == ["PREP"]
+    assert payload["data"][0]["signal_label"] == "TRIGGER ABWARTEN"
+    assert payload["diagnostics"]["combined_buy_now"] == 0
+
+
 def test_active_position_data_gap_remains_visible_without_watch_toggle():
     import api
 

@@ -8864,10 +8864,12 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             if (!response.ok) return null;
             const payload = await response.json();
             const allowPartialRows = !!payload.partial;
-            const rows = (payload.data || []).filter(item => isVisibleAction(item, showWatchRows || allowPartialRows));
+            const autoShowPrep = !!payload.auto_show_trigger_prep;
+            const rows = (payload.data || []).filter(item => isVisibleAction(item, showWatchRows || allowPartialRows || autoShowPrep));
             const info = {
                 cached_at: payload.cached_at || null,
                 partial: allowPartialRows,
+                auto_show_trigger_prep: autoShowPrep,
                 scan_running: !!payload.scan_running,
                 checked: payload.checked ?? payload.diagnostics?.deep_checked ?? null,
                 total: payload.total ?? payload.diagnostics?.deep_planned ?? null,
@@ -8915,7 +8917,9 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                     pollRef.current = null;
                     setIsScanning(false);
                     updateScanCache('penny_scanning', false);
-                    if (notify && window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} aktive Trading-Signale`, 'success');
+                    const prepOnly = !!payload.auto_show_trigger_prep;
+                    const label = prepOnly ? 'Trigger-Ideen' : 'aktive Trading-Signale';
+                    if (notify && window.addToast) window.addToast(`Pennystock-Scan fertig: ${(payload.data || []).length} ${label}`, 'success');
                     return;
                 }
             }
@@ -8962,7 +8966,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     };
 
     const actionOrder = { JETZT_VERKAUFEN: 0, JETZT_KAUFEN: 1, HALTEN: 2, TRIGGER_WARTEN: 3, BEOBACHTEN: 4 };
-    const sorted = results.filter(item => isVisibleAction(item, showWatchRows || liveInfo?.partial)).sort((a, b) => {
+    const sorted = results.filter(item => isVisibleAction(item, showWatchRows || liveInfo?.partial || liveInfo?.auto_show_trigger_prep)).sort((a, b) => {
         const actionDiff = (actionOrder[a.trade_action] ?? 9) - (actionOrder[b.trade_action] ?? 9);
         if (actionDiff) return actionDiff;
         return Number(b.trade_score || b.score || 0) - Number(a.trade_score || a.score || 0)
@@ -8992,6 +8996,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const broadCandidates = Number(diagnostics.broad_candidates || 0);
     const pennyUniverse = Number(diagnostics.common_penny_universe || 0);
     const fiveMinuteDataOk = Number(diagnostics.five_minute_data_ok || 0);
+    const triggerPrepCount = Number(diagnostics.trigger_prep_count || 0);
     const emptySignalText = diagnostics.last_scan_error
         ? `Der letzte Scan ist fehlgeschlagen: ${diagnostics.last_scan_error}`
         : diagnostics.signal_cache_expired
@@ -8999,7 +9004,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
             : diagnostics.budget_exhausted
                 ? `${deepChecked} von ${Number(diagnostics.deep_planned || 0)} Kandidaten wurden tief geprueft. Das Zeitbudget war erschoepft; dieser Lauf ist unvollstaendig.`
                 : fiveMinuteScreened
-                    ? `Kein bestaetigter Kauf-, Hold- oder Exit-Trigger in diesem Lauf. ${fiveMinuteScreened} Penny Stocks wurden im 5m-Screen geprueft.`
+                    ? `Kein bestaetigter Kauf-, Hold- oder Exit-Trigger in diesem Lauf. ${fiveMinuteScreened} Penny Stocks wurden im 5m-Screen geprueft${triggerPrepCount ? `; ${triggerPrepCount} starke Trigger-Ideen liegen vorbereitet vor.` : '.'}`
                     : 'Noch kein abgeschlossener Tiefenscan vorhanden.';
 
     return (
