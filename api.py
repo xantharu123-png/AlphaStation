@@ -17703,6 +17703,80 @@ _AI_CACHE_TTL = 1800  # 30 Minuten
 _AI_USER_CALLS = {}  # {email: {"date": "2026-04-05", "count": 0}}
 
 
+def _fmt_ai_price(value: Any) -> str:
+    try:
+        value_f = float(value)
+        if value_f >= 100:
+            return f"${value_f:.2f}"
+        if value_f >= 1:
+            return f"${value_f:.4f}".rstrip("0").rstrip(".")
+        return f"${value_f:.6f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _build_ai_provider_fallback_analysis(ticker: str, price_ctx: Dict[str, Any], provider_note: str) -> str:
+    """Return a useful rule-based fallback instead of leaking raw provider errors."""
+    ticker_upper = str(ticker or "").upper()
+    lines = [
+        "**KI-Dienst aktuell nicht verfuegbar**",
+        provider_note,
+        "",
+        "**Regelbasierter Schnellcheck aus App-Daten**",
+    ]
+    if not price_ctx.get("has_data"):
+        lines.extend([
+            "- Kursdaten konnten fuer diesen Ticker gerade nicht sauber geladen werden.",
+            "- Bitte Chart/Scanner-Level pruefen; keine KI-Auswertung wurde berechnet.",
+        ])
+        return "\n".join(lines)
+
+    close = float(price_ctx.get("close") or 0)
+    chg = float(price_ctx.get("change_pct") or 0)
+    ma20 = float(price_ctx.get("ma20") or close or 0)
+    high_20 = float(price_ctx.get("high_20") or close or 0)
+    low_20 = float(price_ctx.get("low_20") or close or 0)
+    vol = float(price_ctx.get("volume") or 0)
+    dist_to_high_pct = ((high_20 - close) / close * 100) if close else 0
+    range_pct = ((high_20 - low_20) / close * 100) if close else 0
+
+    if close > ma20 and chg >= 1.5 and dist_to_high_pct <= 4:
+        signal = "WATCH_LONG"
+        trade_note = "Long-Idee nur bei Breakout/Retest-Bestaetigung, nicht blind in eine lange Kerze."
+    elif close < ma20 and chg <= -1.5:
+        signal = "WATCH_SHORT"
+        trade_note = "Short-Idee nur bei schwachem Retest oder Bruch der Struktur, nicht nachjagen."
+    else:
+        signal = "WATCH"
+        trade_note = "Kein klares Jetzt-Signal aus dem Schnellcheck."
+
+    risk = "Mittel"
+    if range_pct > 25 or abs(chg) > 8:
+        risk = "Hoch"
+    elif dist_to_high_pct <= 2 and chg > 3:
+        risk = "Mittel bis hoch"
+    elif range_pct < 12 and abs(chg) < 4:
+        risk = "Niedrig bis mittel"
+
+    long_stop = min(close * 0.97, max(low_20, ma20 * 0.98)) if close and ma20 else close * 0.97
+    if long_stop >= close:
+        long_stop = close * 0.97
+    risk_amount = max(close - long_stop, close * 0.01)
+    long_tp1 = max(high_20, close + risk_amount * 1.8)
+    long_tp2 = max(long_tp1 + risk_amount, close + risk_amount * 3.0)
+
+    lines.extend([
+        f"- Ticker: **{ticker_upper}**",
+        f"- Preis: **{_fmt_ai_price(close)}**, Tagesbewegung: **{chg:.2f}%**, Volumen: **{vol:,.0f}**",
+        f"- MA20: **{_fmt_ai_price(ma20)}**, 20D Hoch/Tief: **{_fmt_ai_price(high_20)} / {_fmt_ai_price(low_20)}**",
+        f"- Signal: **{signal}**",
+        f"- Risiko: **{risk}**",
+        f"- Beispiel-Long-Plan: Entry erst bei bestaetigter Struktur, Stop ca. **{_fmt_ai_price(long_stop)}**, TP1/TP2 ca. **{_fmt_ai_price(long_tp1)} / {_fmt_ai_price(long_tp2)}**",
+        f"- Hinweis: {trade_note}",
+    ])
+    return "\n".join(lines)
+
+
 @app.get("/api/ai-analysis")
 def get_ai_analysis(
     ticker: str = Query(..., description="Ticker symbol"),
@@ -17778,6 +17852,7 @@ def get_ai_analysis(
             }
 
     # ── Preisdaten holen ──
+    price_ctx: Dict[str, Any] = {"has_data": False}
     try:
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 30, "sort": "desc"})
@@ -17794,8 +17869,32 @@ def get_ai_analysis(
             low_20 = round(min(b["l"] for b in bars[:20]), 2)
             vol = bars[0].get("v", 0)
             price_info = f"Preis: ${close}, Veraenderung: {chg}%, MA20: ${ma20}, 20d-Hoch: ${high_20}, 20d-Tief: ${low_20}, Vol: {vol}"
+            price_ctx = {
+                "has_data": True,
+                "close": close,
+                "change_pct": chg,
+                "ma20": ma20,
+                "high_20": high_20,
+                "low_20": low_20,
+                "volume": vol,
+            }
     except Exception:
         price_info = "Preisdaten nicht verfuegbar"
+
+    if not ANTHROPIC_API_KEY:
+        return {
+            "ticker": ticker,
+            "analysis": _build_ai_provider_fallback_analysis(
+                ticker,
+                price_ctx,
+                "Auf dem Server ist kein KI-Key konfiguriert. Bitte ANTHROPIC_API_KEY setzen.",
+            ),
+            "error": "ai_provider_not_configured",
+            "provider_status": None,
+            "fallback": True,
+            "timestamp": datetime.now().isoformat(),
+            "cached": False,
+        }
 
     # ── AI provider API call ──
     try:
@@ -17846,9 +17945,41 @@ Kurz und praezise, keine langen Erklaerungen."""}],
 
             return {"ticker": ticker, "analysis": content, "model": AI_PROVIDER_MODEL, "timestamp": ts, "cached": False}
         else:
-            return {"ticker": ticker, "analysis": f"API Fehler: {ai_resp.status_code}", "timestamp": datetime.now().isoformat()}
+            status = int(ai_resp.status_code)
+            if status in (401, 403):
+                provider_note = (
+                    f"Der KI-Provider lehnt den Server-Key ab (HTTP {status}). "
+                    "Sehr wahrscheinlich ist der Key ungueltig, abgelaufen oder ohne Berechtigung."
+                )
+                error = "ai_provider_auth_failed"
+            elif status == 429:
+                provider_note = "Der KI-Provider ist rate-limited (HTTP 429). Bitte spaeter erneut versuchen."
+                error = "ai_provider_rate_limited"
+            else:
+                provider_note = f"Der KI-Provider antwortet aktuell mit HTTP {status}."
+                error = "ai_provider_error"
+            return {
+                "ticker": ticker,
+                "analysis": _build_ai_provider_fallback_analysis(ticker, price_ctx, provider_note),
+                "error": error,
+                "provider_status": status,
+                "fallback": True,
+                "timestamp": datetime.now().isoformat(),
+                "cached": False,
+            }
     except Exception as e:
-        return {"ticker": ticker, "analysis": f"Fehler: {str(e)}", "timestamp": datetime.now().isoformat()}
+        return {
+            "ticker": ticker,
+            "analysis": _build_ai_provider_fallback_analysis(
+                ticker,
+                price_ctx,
+                f"Der KI-Provider ist gerade nicht erreichbar: {str(e)}",
+            ),
+            "error": "ai_provider_unreachable",
+            "fallback": True,
+            "timestamp": datetime.now().isoformat(),
+            "cached": False,
+        }
 
 
 @app.get("/api/strategies", response_model=StrategiesResponse)
