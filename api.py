@@ -22833,6 +22833,11 @@ def _penny_merge_state_tickers(
             existing_position_id = _penny_event_token(existing.get("position_event_id"))
             incoming_position_id = _penny_event_token(raw_update.get("position_event_id"))
             incoming_action = str(raw_update.get("last_action") or "").upper()
+            incoming_model_entry = (
+                incoming_active
+                and incoming_action == "JETZT_KAUFEN"
+                and raw_update.get("position_state_source") == "scanner_model_not_broker"
+            )
             explicit_exit = (
                 not incoming_active
                 and raw_update.get("exit_email_sent") is True
@@ -22844,7 +22849,7 @@ def _penny_merge_state_tickers(
             )
             explicit_entry = (
                 incoming_active
-                and raw_update.get("buy_email_sent") is True
+                and (raw_update.get("buy_email_sent") is True or incoming_model_entry)
                 and incoming_action == "JETZT_KAUFEN"
                 and (
                     not existing_position_id
@@ -22853,8 +22858,9 @@ def _penny_merge_state_tickers(
                 )
             )
 
-            # Discovery may finish after the five-minute monitor. Only a
-            # successful mail lifecycle event may open or close a position.
+            # Discovery may finish after the five-minute monitor. A validated
+            # scanner-model entry may open the model position; exit still
+            # requires the explicit exit mail lifecycle.
             if existing_active and not incoming_active and not explicit_exit:
                 continue
             if (
@@ -23575,6 +23581,49 @@ def _penny_position_event_id(
         return existing
     ticker = str(row.get("ticker") or "UNKNOWN").upper()
     return f"{ticker}:{_penny_trigger_event_id(row)}"
+
+
+def _penny_activate_model_entry_state(
+    state: Dict[str, Any],
+    row: Dict[str, Any],
+    *,
+    notification_sent: bool,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Open the scanner's model position after a fully validated Penny entry.
+
+    This is not broker execution. It is the scanner lifecycle state that allows
+    later scans to produce HOLD/EXIT decisions for a signal already published in
+    the UI/cache. Mail delivery is tracked separately so a temporary SMTP issue
+    cannot erase the trade from subsequent management logic.
+    """
+    timestamp = float(now_ts if now_ts is not None else time.time())
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    trigger_id = _penny_trigger_event_id(row)
+    position_event_id = _penny_position_event_id(row, state)
+    state.update({
+        "active": True,
+        "position_state_source": "scanner_model_not_broker",
+        "buy_entry": row.get("entry"),
+        "buy_at": timestamp,
+        "stop_loss": setup.get("stop_loss"),
+        "active_stop": setup.get("stop_loss"),
+        "tp1": setup.get("tp1"),
+        "tp2": setup.get("tp2"),
+        "trade_setup": setup,
+        "signal_trigger": trigger_id,
+        "position_event_id": position_event_id,
+        "last_trigger": trigger_id,
+        "last_buy_trigger": trigger_id,
+        "last_action": "JETZT_KAUFEN",
+        "last_seen": timestamp,
+        "buy_email_sent": bool(notification_sent),
+        "entry_notification_sent": bool(notification_sent),
+        "tp1_realized": False,
+        "remaining_fraction": 1.0,
+    })
+    state.pop("pending_buy_notification", None)
+    return state
 
 
 def _penny_active_trade_rows(
@@ -24514,44 +24563,18 @@ def _penny_stock_scanner_wrapper() -> None:
         if buy_mail_sent:
             _safe_record_alert_signals("penny_stocks", claimed_buy_candidates)
             for row in claimed_buy_candidates:
-                symbol = row["ticker"]
-                trigger_id = _penny_trigger_event_id(row)
-                position_event_id = _penny_position_event_id(row)
-                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+                symbol = str(row.get("ticker") or "").upper()
                 state = ticker_state.setdefault(symbol, {})
-                state.update({
-                    "active": True,
-                    "position_state_source": "scanner_model_not_broker",
-                    "buy_entry": row.get("entry"),
-                    "buy_at": time.time(),
-                    "stop_loss": setup.get("stop_loss"),
-                    "active_stop": setup.get("stop_loss"),
-                    "tp1": setup.get("tp1"),
-                    "tp2": setup.get("tp2"),
-                    "trade_setup": setup,
-                    "signal_trigger": trigger_id,
-                    "position_event_id": position_event_id,
-                    "last_trigger": trigger_id,
-                    "last_buy_trigger": trigger_id,
-                    "last_action": "JETZT_KAUFEN",
-                    "last_seen": time.time(),
-                    "buy_email_sent": True,
-                    "tp1_realized": False,
-                    "remaining_fraction": 1.0,
-                })
-                state.pop("pending_buy_notification", None)
+                _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
                 state_changed_after_mail = True
         else:
             for row in claimed_buy_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-                state = ticker_state.setdefault(str(row.get("ticker") or ""), {})
-                state.pop("pending_buy_notification", None)
-                state.update({
-                    "active": bool(state.get("active")),
-                    "last_action": "ENTRY_BESTAETIGT_MAIL_FEHLER",
-                    "buy_email_sent": False,
-                })
+                symbol = str(row.get("ticker") or "").upper()
+                state = ticker_state.setdefault(symbol, {})
+                _penny_activate_model_entry_state(state, row, notification_sent=False)
+                state["entry_notification_error"] = "buy_mail_failed"
                 state_changed_after_mail = True
 
         side_effect_now = time.time()
@@ -25264,30 +25287,7 @@ def _penny_position_monitor_wrapper() -> None:
             for row in claimed_buys:
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
-                trigger_id = _penny_trigger_event_id(row)
-                position_event_id = _penny_position_event_id(row, state)
-                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
-                state.update({
-                    "active": True,
-                    "position_state_source": "scanner_model_not_broker",
-                    "buy_entry": row.get("entry"),
-                    "buy_at": time.time(),
-                    "stop_loss": setup.get("stop_loss"),
-                    "active_stop": setup.get("stop_loss"),
-                    "tp1": setup.get("tp1"),
-                    "tp2": setup.get("tp2"),
-                    "trade_setup": setup,
-                    "signal_trigger": trigger_id,
-                    "position_event_id": position_event_id,
-                    "last_trigger": trigger_id,
-                    "last_buy_trigger": trigger_id,
-                    "last_action": "JETZT_KAUFEN",
-                    "last_seen": time.time(),
-                    "buy_email_sent": True,
-                    "tp1_realized": False,
-                    "remaining_fraction": 1.0,
-                })
-                state.pop("pending_buy_notification", None)
+                _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
                 state_changed_after_mail = True
         else:
@@ -25295,13 +25295,8 @@ def _penny_position_monitor_wrapper() -> None:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
-                state.pop("pending_buy_notification", None)
-                state.update({
-                    "active": bool(state.get("active")),
-                    "last_action": "ENTRY_BESTAETIGT_MAIL_FEHLER",
-                    "buy_email_sent": False,
-                    "last_seen": time.time(),
-                })
+                _penny_activate_model_entry_state(state, row, notification_sent=False)
+                state["entry_notification_error"] = "buy_mail_failed"
                 state_changed_after_mail = True
 
         claim_time = time.time()

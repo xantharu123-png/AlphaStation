@@ -714,7 +714,7 @@ def test_fresh_exit_uses_decision_time_not_the_old_entry_trigger():
     assert visible[0]["signal_age_seconds"] == 30
 
 
-def test_api_wrapper_does_not_activate_position_when_buy_mail_fails(monkeypatch, tmp_path):
+def test_api_wrapper_tracks_model_position_when_buy_mail_fails(monkeypatch, tmp_path):
     import api
 
     now_ts = _market_now()
@@ -776,7 +776,8 @@ def test_api_wrapper_does_not_activate_position_when_buy_mail_fails(monkeypatch,
     })
     monkeypatch.setattr(api, "_penny_fetch_daily_bars", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "_penny_vrvp_resistances", lambda *args, **kwargs: _targets())
-    # Simulate SMTP failure: no delivered signal means no model position.
+    # Simulate SMTP failure: UI/cache still published a validated entry, so
+    # the model position must be tracked for later HOLD/EXIT decisions.
     monkeypatch.setattr(api, "_penny_buy_email", lambda rows: sent.extend(rows) or False)
     monkeypatch.setattr(api, "_penny_management_email", lambda rows: False)
     monkeypatch.setattr(api, "_penny_exit_email", lambda rows: False)
@@ -789,9 +790,11 @@ def test_api_wrapper_does_not_activate_position_when_buy_mail_fails(monkeypatch,
     assert rows[0]["trade_action"] == "JETZT_KAUFEN"
     assert len(sent) == 1
     state_payload = api._penny_load_dict(str(state))
-    assert state_payload["tickers"]["PUMP"]["active"] is False
-    assert state_payload["tickers"]["PUMP"]["last_action"] == "ENTRY_BESTAETIGT_MAIL_FEHLER"
-    assert state_payload["tickers"]["PUMP"].get("buy_email_sent") is not True
+    assert state_payload["tickers"]["PUMP"]["active"] is True
+    assert state_payload["tickers"]["PUMP"]["last_action"] == "JETZT_KAUFEN"
+    assert state_payload["tickers"]["PUMP"].get("buy_email_sent") is False
+    assert state_payload["tickers"]["PUMP"].get("entry_notification_sent") is False
+    assert state_payload["tickers"]["PUMP"].get("entry_notification_error") == "buy_mail_failed"
     assert not api._email_dedupe_active(sent[0]["_dedupe_key"], 6 * 3600, now=now_ts + 1)
 
 
@@ -1684,7 +1687,7 @@ def test_trigger_pool_expires_fail_closed():
 
 
 @pytest.mark.parametrize("mail_sent", [False, True])
-def test_trigger_pool_buy_activation_is_transactional(monkeypatch, tmp_path, mail_sent):
+def test_trigger_pool_buy_activation_tracks_model_entry(monkeypatch, tmp_path, mail_sent):
     import api
 
     now_ts = _market_now()
@@ -1765,8 +1768,9 @@ def test_trigger_pool_buy_activation_is_transactional(monkeypatch, tmp_path, mai
 
     state = api._penny_load_state_tickers()["PUMP"]
     assert len(sent_rows) == 1
-    assert state["active"] is mail_sent
+    assert state["active"] is True
     assert state["buy_email_sent"] is mail_sent
-    assert state["last_action"] == (
-        "JETZT_KAUFEN" if mail_sent else "ENTRY_BESTAETIGT_MAIL_FEHLER"
-    )
+    assert state["entry_notification_sent"] is mail_sent
+    assert state["last_action"] == "JETZT_KAUFEN"
+    if not mail_sent:
+        assert state["entry_notification_error"] == "buy_mail_failed"
