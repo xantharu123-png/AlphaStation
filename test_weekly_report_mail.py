@@ -47,6 +47,11 @@ def _summary(**total_overrides):
         "sum_r": 3.5, "alerts_per_day": 1.714,
     }
     total.update(total_overrides)
+    # T1/Kalibrier-Loop-Felder (Schema 1:1 zum echten Tracker)
+    total.setdefault("avg_r_managed_50_50", 0.55)
+    total["decided_signals"] = total["tp1_hit"] + total["tp2_hit"] + total["stop_hit"]
+    total["sample_reliable"] = total["decided_signals"] >= 30
+    total.setdefault("win_rate_wilson_95", {"lower_pct": 36.0, "upper_pct": 80.0})
     return {
         "generated_at": "2026-06-12T20:20:00+00:00",
         "window_days": 7,
@@ -55,7 +60,10 @@ def _summary(**total_overrides):
             "bi_long": {"signals": 7, "open": 1, "tp1_hit": 2, "tp2_hit": 2,
                         "stop_hit": 1, "expired": 1, "untracked": 0,
                         "win_rate_pct": 80.0, "avg_r": 0.92, "sum_r": 4.6,
-                        "alerts_per_day": 1.0},
+                        "alerts_per_day": 1.0,
+                        "avg_r_managed_50_50": 1.2, "decided_signals": 5,
+                        "sample_reliable": False,
+                        "win_rate_wilson_95": {"lower_pct": 36.0, "upper_pct": 99.0}},
             "bear_scan": {"signals": 5, "open": 1, "tp1_hit": 1, "tp2_hit": 0,
                           "stop_hit": 3, "expired": 0, "untracked": 0,
                           "win_rate_pct": 25.0, "avg_r": -0.275, "sum_r": -1.1,
@@ -66,7 +74,8 @@ def _summary(**total_overrides):
              "scanner": "bi_long", "ticker": f"TK{i}", "asset_class": "stock",
              "direction": "LONG", "status": "TP2_HIT", "outcome_detail": "",
              "entry": 10.0, "stop": 9.5, "tp1": 11.0, "tp2": 11.8,
-             "r_realized": 2.0, "tp1_hit_at": "2026-06-11T15:00:00+00:00"}
+             "r_realized": 2.0, "tp1_hit_at": "2026-06-11T15:00:00+00:00",
+             "r_managed_50_50": 1.5}
             for i in range(12)
         ],
     }
@@ -236,3 +245,49 @@ def test_raising_summary_loader_no_crash_no_mail(monkeypatch, tmp_path):
         bg_service._weekly_report_dedupe_key(FRIDAY_1620),
         bg_service._WEEKLY_REPORT_DEDUPE_SEC,
     )
+
+
+
+# ── T1/Kalibrier-Loop: Managed-R + Wilson im Mail-Body (AUDIT 2026-07-24) ────
+
+def test_managed_r_column_in_head_and_scanner_table(monkeypatch, tmp_path):
+    """T1: Ø R 50/50 in Kopf- UND Scanner-Tabelle (total +0.55R, bi_long +1.20R)."""
+    sent = _setup(monkeypatch, tmp_path)
+    bg_service._run_weekly_report({})
+    body = sent[0]["body"]
+    assert "Ø R 50/50" in body
+    assert "+0.55R" in body  # total.avg_r_managed_50_50
+    assert "+1.20R" in body  # bi_long.avg_r_managed_50_50
+
+
+def test_wilson_ci_next_to_head_hit_rate(monkeypatch, tmp_path):
+    """Kalibrier-Loop: Wilson-KI steht an der Hit-Rate der Kopftabelle."""
+    sent = _setup(monkeypatch, tmp_path)
+    bg_service._run_weekly_report({})
+    assert "KI 36–80%" in sent[0]["body"]
+
+
+def test_managed_r_in_recent_rows(monkeypatch, tmp_path):
+    """Letzte Signale zeigen das 50/50-Management-R hinter r_realized."""
+    sent = _setup(monkeypatch, tmp_path)
+    bg_service._run_weekly_report({})
+    assert "(50/50: +1.50R)" in sent[0]["body"]
+
+
+def test_summary_without_new_fields_still_renders(monkeypatch, tmp_path):
+    """Rueckwaertskompatibel: Summary ohne T1/Kalibrier-Felder => Spalte bleibt,
+    Werte '–', kein KI-Span, kein Crash; decided-Fallback = lokale Summe."""
+    legacy = _summary()
+    for bucket in [legacy["total"], *legacy["per_scanner"].values()]:
+        for key in ("avg_r_managed_50_50", "win_rate_wilson_95",
+                    "decided_signals", "sample_reliable"):
+            bucket.pop(key, None)
+    for row in legacy["recent"]:
+        row.pop("r_managed_50_50", None)
+    sent = _setup(monkeypatch, tmp_path, summary=legacy)
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Ø R 50/50" in body        # Spaltenkoepfe bleiben
+    assert "(KI " not in body         # kein Wilson-Span ohne Feld
+    # decided-Fallback: 3+2+4 = 9 < 30 => Stichproben-Hinweis weiterhin da
+    assert "Stichprobe noch klein" in body

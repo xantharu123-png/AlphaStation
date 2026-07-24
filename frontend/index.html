@@ -6478,11 +6478,19 @@ function SignalPerformanceTab() {
     const recent = perf?.recent || [];
     const hasSignals = (total.signals || 0) > 0;
 
+    // AUDIT 2026-07-24 (T1 + Kalibrier-Loop): Managed-R (50/50), Wilson-KI
+    // der Trefferquote und Stichproben-Reliability sichtbar machen.
+    const totalWilson = total.win_rate_wilson_95;
+    const wilsonHint = totalWilson
+        ? `95%-KI: ${Number(totalWilson.lower_pct).toFixed(1)}–${Number(totalWilson.upper_pct).toFixed(1)}%`
+        : 'TP1+TP2 vs. entschieden';
+
     const headCards = [
         { label: 'Signale gesamt', value: String(total.signals ?? 0), cls: 'text-gray-900' },
-        { label: 'Hit-Rate', value: fmtPct(total.win_rate_pct), cls: 'text-gray-900', hint: 'TP1+TP2 vs. entschieden' },
+        { label: 'Hit-Rate', value: fmtPct(total.win_rate_pct), cls: 'text-gray-900', hint: wilsonHint },
         { label: 'Summe R', value: fmtR(total.sum_r), cls: rTone(total.sum_r) },
         { label: 'Ø R', value: fmtR(total.avg_r), cls: rTone(total.avg_r) },
+        { label: 'Ø R 50/50', value: fmtR(total.avg_r_managed_50_50), cls: rTone(total.avg_r_managed_50_50), hint: '50% bei TP1 raus, Rest läuft' },
         { label: 'Offene Positionen', value: String(total.open ?? 0), cls: 'text-blue-600' },
     ];
 
@@ -6528,8 +6536,15 @@ function SignalPerformanceTab() {
 
             {perf && !forbidden && hasSignals && (
                 <>
+                    {/* Stichproben-Warnung (Kalibrier-Loop): < 30 entschiedene Signale */}
+                    {total.sample_reliable === false && (
+                        <div className="card border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 rounded-lg text-sm">
+                            Stichprobe noch klein — {total.decided_signals ?? 0} von 30 entschiedenen Signalen. Quoten und R-Werte mit Vorsicht lesen, keine Schwellen-Entscheidungen daraus ableiten.
+                        </div>
+                    )}
+
                     {/* Kopf-Karten */}
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                         {headCards.map(c => (
                             <div key={c.label} className="card border border-gray-200 rounded-lg p-4">
                                 <div className="text-xs text-gray-500">{c.label}</div>
@@ -6553,6 +6568,7 @@ function SignalPerformanceTab() {
                                     <th className="text-right py-2 px-1">Offen</th>
                                     <th className="text-right py-2 px-1">Hit-Rate</th>
                                     <th className="text-right py-2 px-1">Ø R</th>
+                                    <th className="text-right py-2 px-1">Ø R 50/50</th>
                                     <th className="text-right py-2 px-1">Σ R</th>
                                     <th className="text-right py-2 px-1">Alerts/Tag</th>
                                 </tr>
@@ -6566,8 +6582,14 @@ function SignalPerformanceTab() {
                                         <td className="py-2 px-1 text-right text-green-700 font-semibold">{s.tp2_hit ?? 0}</td>
                                         <td className="py-2 px-1 text-right text-red-600">{s.stop_hit ?? 0}</td>
                                         <td className="py-2 px-1 text-right text-blue-600">{s.open ?? 0}</td>
-                                        <td className="py-2 px-1 text-right font-medium">{fmtPct(s.win_rate_pct)}</td>
+                                        <td className="py-2 px-1 text-right font-medium">
+                                            {fmtPct(s.win_rate_pct)}
+                                            {s.win_rate_wilson_95 && (
+                                                <div className="text-[10px] text-gray-400 font-normal">KI {Number(s.win_rate_wilson_95.lower_pct).toFixed(0)}–{Number(s.win_rate_wilson_95.upper_pct).toFixed(0)}%{s.sample_reliable === false ? ' · kleine Stichprobe' : ''}</div>
+                                            )}
+                                        </td>
                                         <td className={`py-2 px-1 text-right ${rTone(s.avg_r)}`}>{fmtR(s.avg_r)}</td>
+                                        <td className={`py-2 px-1 text-right ${rTone(s.avg_r_managed_50_50)}`}>{fmtR(s.avg_r_managed_50_50)}</td>
                                         <td className={`py-2 px-1 text-right font-semibold ${rTone(s.sum_r)}`}>{fmtR(s.sum_r)}</td>
                                         <td className="py-2 px-1 text-right text-gray-500">{(s.alerts_per_day ?? 0).toFixed(2)}</td>
                                     </tr>
@@ -6590,7 +6612,12 @@ function SignalPerformanceTab() {
                                         <span className="text-xs text-gray-500 flex-1 min-w-[90px]">{sig.scanner}</span>
                                         <span className={`text-xs px-2 py-0.5 rounded font-medium ${String(sig.direction).toLowerCase() === 'short' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700'}`}>{String(sig.direction || 'long').toUpperCase()}</span>
                                         <span className={`text-xs px-2 py-0.5 rounded font-semibold ${badge.cls}`}>{badge.label}</span>
-                                        <span className={`w-16 text-right font-medium ${rTone(sig.r_realized)}`}>{sig.r_realized === null || sig.r_realized === undefined ? '—' : fmtR(sig.r_realized)}</span>
+                                        <span className={`w-16 text-right font-medium ${rTone(sig.r_realized)}`}>
+                                            {sig.r_realized === null || sig.r_realized === undefined ? '—' : fmtR(sig.r_realized)}
+                                            {sig.r_managed_50_50 !== null && sig.r_managed_50_50 !== undefined && (
+                                                <div className="text-[10px] font-normal text-gray-400">50/50: {fmtR(sig.r_managed_50_50)}</div>
+                                            )}
+                                        </span>
                                     </div>
                                 );
                             })}
@@ -6601,7 +6628,7 @@ function SignalPerformanceTab() {
 
             {!forbidden && (
                 <div className="text-xs text-gray-400">
-                    Auswertung: First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto stündlicher Spot-Check.
+                    Auswertung: First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto stündlicher Spot-Check. Ø R 50/50 = R des empfohlenen 50/50-Managements (50% bei TP1 realisiert, Rest läuft bis TP2/Stop). KI = Wilson-95%-Konfidenzintervall; Quoten erst ab 30 entschiedenen Signalen belastbar.
                 </div>
             )}
         </div>

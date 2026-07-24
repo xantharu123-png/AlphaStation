@@ -1676,8 +1676,30 @@ def _build_weekly_report_mail(summary, now_et=None):
         rate = bucket.get("win_rate_pct")
         return f"{float(rate):.0f}%" if isinstance(rate, (int, float)) else "–"
 
+    def _managed_r_text(bucket):
+        # T1: avg_r_managed_50_50 aus dem Tracker (fehlt in aelteren Summaries)
+        value = bucket.get("avg_r_managed_50_50")
+        return f"{float(value):+.2f}R" if isinstance(value, (int, float)) else "–"
+
+    def _hit_cell(bucket):
+        # Kalibrier-Loop: Hit-Rate mit Wilson-95%-KI, falls der Tracker es liefert
+        rate = bucket.get("win_rate_pct")
+        if not isinstance(rate, (int, float)):
+            return "–"
+        ci = bucket.get("win_rate_wilson_95") or {}
+        lo, hi = ci.get("lower_pct"), ci.get("upper_pct")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            return (f"{float(rate):.0f}% "
+                    f"<span style=\"color:#999;font-size:11px\">"
+                    f"(KI {float(lo):.0f}–{float(hi):.0f}%)</span>")
+        return f"{float(rate):.0f}%"
+
     n = _i(total, "signals")
     decided = _i(total, "tp1_hit") + _i(total, "tp2_hit") + _i(total, "stop_hit")
+    # Kalibrier-Loop: Tracker liefert decided_signals fertig (Fallback: lokale Summe)
+    _decided_bucket = total.get("decided_signals")
+    if isinstance(_decided_bucket, int):
+        decided = _decided_bucket
     sum_r = float(total.get("sum_r") or 0.0)
     avg_r = total.get("avg_r")
     avg_r_text = f"{float(avg_r):+.2f}R" if isinstance(avg_r, (int, float)) else "–"
@@ -1699,15 +1721,17 @@ def _build_weekly_report_mail(summary, now_et=None):
             <th style="padding:8px;text-align:left">Hit-Rate</th>
             <th style="padding:8px;text-align:left">Σ R</th>
             <th style="padding:8px;text-align:left">Ø R</th>
+            <th style="padding:8px;text-align:left">Ø R 50/50</th>
             <th style="padding:8px;text-align:left">Alerts/Tag</th>
             <th style="padding:8px;text-align:left">Offen</th>
         </tr>
         <tr>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{n}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{decided}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{_hit_text(total)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_hit_cell(total)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{sum_r:+.1f}R</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{avg_r_text}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_managed_r_text(total)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{float(total.get('alerts_per_day') or 0.0):.1f}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_i(total, 'open')}</td>
         </tr>
@@ -1731,6 +1755,7 @@ def _build_weekly_report_mail(summary, now_et=None):
             <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'stop_hit')}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'open')}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_hit_text(bucket)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_managed_r_text(bucket)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{row_sum_r:+.1f}R</b></td>
         </tr>"""
 
@@ -1747,6 +1772,10 @@ def _build_weekly_report_mail(summary, now_et=None):
             r_realized = sig.get("r_realized")
             r_text = (f"{float(r_realized):+.2f}R"
                       if isinstance(r_realized, (int, float)) else "–")
+            r_managed = sig.get("r_managed_50_50")
+            if isinstance(r_managed, (int, float)):
+                r_text += (f" <span style=\"color:#999;font-size:11px\">"
+                           f"(50/50: {float(r_managed):+.2f}R)</span>")
             recent_rows += f"""<tr>
             <td style="padding:6px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
             <td style="padding:6px;border-bottom:1px solid #eee">{rec_scanner}</td>
@@ -1765,6 +1794,7 @@ def _build_weekly_report_mail(summary, now_et=None):
             <th style="padding:8px;text-align:left">Stop</th>
             <th style="padding:8px;text-align:left">offen</th>
             <th style="padding:8px;text-align:left">Hit-Rate</th>
+            <th style="padding:8px;text-align:left">Ø R 50/50</th>
             <th style="padding:8px;text-align:left">Σ R</th>
         </tr>
         {scanner_rows}
@@ -1792,7 +1822,9 @@ def _build_weekly_report_mail(summary, now_et=None):
     <p style="color:#999;font-size:12px;margin-top:20px">
         Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
         Kursen ausgewertet. Mechanik: 1R Risiko, TP1 = halb raus + Stop auf
-        Einstand. Kein Backtest.{sample_hint}
+        Einstand. Ø R 50/50 = R des empfohlenen 50/50-Managements (50% bei TP1
+        realisiert, Rest laeuft bis TP2/Stop). KI = Wilson-95%-Intervall der
+        Trefferquote. Kein Backtest.{sample_hint}
     </p>
     </body></html>"""
     return subject, body_html

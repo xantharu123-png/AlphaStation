@@ -17,6 +17,8 @@ Frontend (frontend/index.html, String-Pins wie test_frontend_unit_labels):
 - Status-Badges (OPEN blau / TP gruen / STOP rot / EXPIRED grau),
   Hinweiszeile zur Auswertungs-Methodik, 7/30/90-Zeitraum-Schalter,
   403-Zustand "Performance-Ansicht benötigt Pro-Plan".
+- AUDIT 2026-07-24: Ø R 50/50 (Managed-R), Wilson-KI an der Hit-Rate,
+  Stichproben-Warnung (<30 entschieden) und 50/50-R bei letzten Signalen.
 """
 import inspect
 import sys
@@ -177,3 +179,28 @@ def test_frontend_status_badges_hint_period_switch_and_403():
     assert "[7, 30, 90].map" in source
     assert "const [days, setDays] = useState(30);" in source
     assert "Performance-Ansicht benötigt Pro-Plan" in source
+
+
+
+# ── 7) Frontend: Managed-R, Wilson-KI, Stichproben-Warnung (AUDIT 2026-07-24) ──
+
+
+def test_frontend_managed_r_wilson_and_reliability_visible():
+    source = _frontend_source()
+
+    # Kopf-Karte + Scanner-Spalte Ø R 50/50
+    assert "'Ø R 50/50'" in source
+    assert ">Ø R 50/50</th>" in source
+    assert "avg_r_managed_50_50" in source
+
+    # Wilson-KI an der Hit-Rate (Kopf-Hint + Scanner-Zelle)
+    assert "win_rate_wilson_95" in source
+    assert "95%-KI:" in source
+
+    # Stichproben-Warnung bei < 30 entschiedenen Signalen
+    assert "sample_reliable === false" in source
+    assert "decided_signals" in source
+
+    # 50/50-R bei den letzten Signalen + Methodik-Fusszeile
+    assert "50/50: {fmtR(sig.r_managed_50_50)}" in source
+    assert "Wilson-95%-Konfidenzintervall" in source
