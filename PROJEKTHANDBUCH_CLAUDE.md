@@ -420,6 +420,14 @@ Mindestmetriken:
 
 Die Performance-Seite und der Wochenreport sollen nicht nur Trefferquote, sondern die reale R-Bilanz aller versandten Signale zeigen.
 
+### 14.1 Kalibrier-Loop und Verdikt-Alarm (Stand 2026-07-24)
+
+Der Forward-Track-Record führt zwei R-Semantiken: `avg_r` (Signal-Level-R) und `avg_r_managed_50_50` (befolgbares 50/50-Management: 50 % bei TP1 realisiert, Rest läuft). Trefferquoten tragen ein Wilson-95%-Konfidenzintervall (`win_rate_wilson_95`); `sample_reliable` markiert Buckets ab 30 entschiedenen Signalen — darunter gelten Quoten als nicht belastbar (Hinweis in UI und Mail).
+
+`scanner_verdict(bucket)` in `modules/signal_tracker.py` ist die einzige Quelle für Scanner-Verdikte: **behalten** (n ≥ 30, Ø R > 0, Wilson-Untergrenze > Breakeven p* = p/(1+E)), **abschalten** (Ø R ≤ −1R oder Wilson-Obergrenze < p*), sonst **beobachten**. Der Wochenreport vergleicht die Verdikte Woche für Woche (persistenter State, atomar, erst nach erfolgreichem Versand gespeichert) und meldet 30er-Überschreitungen und Verdikt-Wechsel als Alarm-Block.
+
+Operativ: `scripts/smoke_signal_performance.py` (Feld-Verifikation), `scripts/preview_weekly_report.py` (Mail-Preview + Scanner-Abrechnung im Terminal, ohne Versand). Tagesdokumentation: `AUDIT_ABSCHLUSSBERICHT_2026-07-24.md`.
+
 ## 15. Authentifizierung und Abomodelle
 
 ### 15.1 Aktuelle Pläne
