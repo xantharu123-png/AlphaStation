@@ -17968,12 +17968,15 @@ Kurz und praezise, keine langen Erklaerungen."""}],
                 "cached": False,
             }
     except Exception as e:
+        # Detail nur serverseitig loggen — Exception-Texte koennen interne
+        # Hostnamen/URLs enthalten und gehen nicht an den Client.
+        print(f"[AI] provider unreachable for {ticker}: {type(e).__name__}: {e}")
         return {
             "ticker": ticker,
             "analysis": _build_ai_provider_fallback_analysis(
                 ticker,
                 price_ctx,
-                f"Der KI-Provider ist gerade nicht erreichbar: {str(e)}",
+                "Der KI-Provider ist gerade nicht erreichbar. Bitte spaeter erneut versuchen.",
             ),
             "error": "ai_provider_unreachable",
             "fallback": True,

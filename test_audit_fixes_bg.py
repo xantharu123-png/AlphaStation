@@ -35,7 +35,10 @@ def _load_scanner_helpers():
     nichtdeterministischer Collection-Timeout). Die getesteten Helper sind pure
     Funktionen/Konstanten — Quelltext-Extraktion ist hier die robuste Loesung.
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner.py")
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "archive", "legacy_streamlit", "scanner.py",
+    )
     with open(path, "r", encoding="utf-8") as f:
         source = f.read()
     tree = ast.parse(source)
