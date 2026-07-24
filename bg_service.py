@@ -100,11 +100,13 @@ try:
         record_alert_signals,
         evaluate_open_signals,
         load_performance_summary,
+        scanner_verdict,
     )
 except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
     record_alert_signals = None
     evaluate_open_signals = None
     load_performance_summary = None
+    scanner_verdict = None
 # Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
 try:
     from modules.notify_telegram import (
@@ -1656,12 +1658,73 @@ def _weekly_report_dedupe_key(now_et):
     return f"weekly_report_{iso[0]}W{iso[1]:02d}"
 
 
-def _build_weekly_report_mail(summary, now_et=None):
+# ── Verdikt-Alarm (Kalibrier-Loop, AUDIT 2026-07-24) ────────────────────────
+_WEEKLY_VERDICT_STATE_FILE = "/tmp/alphastation_weekly_verdicts.json"
+
+
+def _load_verdict_state():
+    """Letzter Verdikt-Snapshot {scanner: {'decided': int, 'verdict': str}}."""
+    try:
+        with open(_WEEKLY_VERDICT_STATE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_verdict_state(state):
+    """Atomar schreiben (.tmp + replace), Fehler nur geloggt."""
+    try:
+        tmp_path = _WEEKLY_VERDICT_STATE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp_path, _WEEKLY_VERDICT_STATE_FILE)
+    except Exception as exc:
+        log.warning(f"[Wochenreport] Verdikt-State nicht gespeichert: {exc}")
+
+
+def _verdict_alerts(summary, prev_state):
+    """Kalibrier-Loop-Alarme aus Verdikt-Vergleich (Woche vs. Vorwoche).
+
+    Alarmiert bei (a) Ueberschreiten der 30er-Marke und (b) Verdikt-Wechsel
+    (deckt 'behalten -> ...' bei gebrochener KI-Untergrenze ab). Erster Lauf
+    ohne State = Baseline, bewusst still. Rueckgabe (alarm_lines, new_state);
+    new_state wird erst nach erfolgreichem Versand gespeichert.
+    """
+    alerts = []
+    new_state = {}
+    per_scanner = summary.get("per_scanner") or {}
+    for name in sorted(per_scanner):
+        bucket = per_scanner[name] or {}
+        decided = bucket.get("decided_signals") or 0
+        verdict, why = scanner_verdict(bucket)
+        new_state[name] = {"decided": decided, "verdict": verdict}
+        prev = prev_state.get(name) or {}
+        prev_decided = prev.get("decided", 0)
+        prev_verdict = prev.get("verdict")
+        if prev_decided < 30 <= decided:
+            alerts.append(
+                f"<b>{html.escape(str(name))}</b>: überschreitet 30er-Marke "
+                f"({prev_decided} → {decided} entschieden) — Verdikt jetzt: "
+                f"<b>{verdict}</b> ({html.escape(str(why))})"
+            )
+        elif prev_verdict and prev_verdict != verdict:
+            alerts.append(
+                f"<b>{html.escape(str(name))}</b>: Verdikt-Wechsel "
+                f"{html.escape(str(prev_verdict))} → <b>{verdict}</b> "
+                f"({html.escape(str(why))})"
+            )
+    return alerts, new_state
+
+
+def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
     """Baut (subject, body_html) der Wochen-Bilanz aus load_performance_summary(days=7).
 
     Hausstil wie _send_signal_update_mail (Arial, 700px, Tabellen). Subject
     OHNE Klassen-Praefix — das ℹ️ setzt _apply_mail_class_prefix beim Versand.
     Leere Woche => 'Keine Signale diese Woche'-Lebenszeichen statt Tabellen.
+    verdict_alerts: Liste von HTML-Zeilen aus _verdict_alerts — als gelber
+    Alarm-Block ganz oben (Kalibrier-Loop, AUDIT 2026-07-24).
     """
     stamp = now_et if now_et is not None else datetime.now()
     total = summary.get("total") or {}
@@ -1814,10 +1877,18 @@ def _build_weekly_report_mail(summary, now_et=None):
     if decided < 30:
         sample_hint = ("<br>Stichprobe noch klein — keine Schwellen-Entscheidungen "
                        "daraus ableiten.")
+    alarm_html = ""
+    if verdict_alerts:
+        items = "<br>".join(f"• {line}" for line in verdict_alerts)
+        alarm_html = f"""
+    <div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>⚠ Verdikt-Alarm (Kalibrier-Loop)</b><br>{items}
+    </div>"""
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
     <p style="color:#666">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]} | Fenster: letzte 7 Tage</p>
+    {alarm_html}
     {mid_html}
     <p style="color:#999;font-size:12px;margin-top:20px">
         Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
@@ -1866,7 +1937,12 @@ def _run_weekly_report(secrets=None, now_et=None):
             return False
         try:
             summary = load_performance_summary(days=7) or {}
-            subject, body_html = _build_weekly_report_mail(summary, now_et=now_et)
+            verdict_alerts, new_verdict_state = [], {}
+            if scanner_verdict is not None:
+                verdict_alerts, new_verdict_state = _verdict_alerts(
+                    summary, _load_verdict_state())
+            subject, body_html = _build_weekly_report_mail(
+                summary, now_et=now_et, verdict_alerts=verdict_alerts)
             sent = _send_email_alert(
                 subject, body_html,
                 secrets if secrets is not None else _load_secrets(),
@@ -1877,6 +1953,8 @@ def _run_weekly_report(secrets=None, now_et=None):
             raise
         if sent:
             _email_dedupe_mark(dedupe_key, now=claim_now)
+            if scanner_verdict is not None:
+                _save_verdict_state(new_verdict_state)
             log.info(f"[Wochenreport] 📧 Wochen-Bilanz versendet ({dedupe_key})")
         else:
             _email_dedupe_release(dedupe_key, claimed_at=claim_now)

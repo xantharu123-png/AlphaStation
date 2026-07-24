@@ -67,6 +67,8 @@ __all__ = [
     "evaluate_open_signals",
     "load_performance_summary",
     "get_signal_count",
+    "breakeven_win_rate_pct",
+    "scanner_verdict",
 ]
 
 # ── Pfad-Konfiguration (gleiches Muster wie modules/auth.py) ─────────────────
@@ -1160,6 +1162,52 @@ def _finalize_bucket(
         round(sum(managed) / len(managed), 3) if managed else None
     )
     bucket["alerts_per_day"] = round(bucket["signals"] / float(window_days), 3)
+
+
+def breakeven_win_rate_pct(
+    win_rate_pct: Optional[float], avg_r: Optional[float]
+) -> Optional[float]:
+    """Breakeven-Trefferquote p* in % aus dem Bucket-Erwartungswert.
+
+    E = p*(W+L) - L, mit L = 1R normiert => p* = p / (1 + E).
+    Heuristik: Wins sind heterogen (TP1-Teilgewinne + TP2-Vollgewinne),
+    daher Naeherung ueber avg_r als Erwartungswert.
+    """
+    if not isinstance(win_rate_pct, (int, float)):
+        return None
+    if not isinstance(avg_r, (int, float)) or avg_r <= -1.0:
+        return None
+    return 100.0 * (win_rate_pct / 100.0) / (1.0 + avg_r)
+
+
+def scanner_verdict(bucket: Dict[str, Any]) -> Tuple[str, str]:
+    """Scanner-Verdikt (behalten/beobachten/abschalten, Begruendung).
+
+    AUDIT 2026-07-24 (Kalibrier-Loop):
+      behalten   — decided>=30, avg_r>0 UND Wilson-Untergrenze > Breakeven
+      abschalten — decided>=30 und (avg_r<=-1R ODER Wilson-Obergrenze <
+                   Breakeven)
+      beobachten — alles andere / zu kleine Stichprobe
+    """
+    decided = bucket.get("decided_signals") or 0
+    if decided < 30:
+        return "beobachten", f"Stichprobe {decided} < 30"
+    avg_r = bucket.get("avg_r")
+    win = bucket.get("win_rate_pct")
+    if not isinstance(avg_r, (int, float)) or not isinstance(win, (int, float)):
+        return "beobachten", "keine verwertbaren R-Daten"
+    if avg_r <= -1.0:
+        return "abschalten", "Ø R <= -1R, strukturell defizitär"
+    be = breakeven_win_rate_pct(win, avg_r)
+    wilson = bucket.get("win_rate_wilson_95") or {}
+    lo, hi = wilson.get("lower_pct"), wilson.get("upper_pct")
+    if (avg_r > 0 and isinstance(lo, (int, float))
+            and isinstance(be, (int, float)) and lo > be):
+        return "behalten", f"KI {lo:.0f}% > Breakeven {be:.0f}%"
+    if (avg_r < 0 and isinstance(hi, (int, float))
+            and isinstance(be, (int, float)) and hi < be):
+        return "abschalten", f"KI {hi:.0f}% < Breakeven {be:.0f}%"
+    return "beobachten", "Erwartungswert nicht signifikant"
 
 
 def load_performance_summary(days: int = 90) -> dict:

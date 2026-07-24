@@ -143,3 +143,51 @@ def test_crypto_grades_now_easier_than_stock_in_relative_terms():
     assert 48 / 168 < 57 / 173
     # Und die Ordnung innerhalb Krypto bleibt monoton
     assert 71 > 61 > 48 > 44
+
+
+
+# ── Kalibrier-Loop: scanner_verdict / breakeven_win_rate_pct ─────────────────
+
+def test_verdict_small_sample_is_beobachten():
+    v, why = st.scanner_verdict({"decided_signals": 13, "avg_r": 0.74,
+                                 "win_rate_pct": 54.0})
+    assert v == "beobachten"
+    assert "13" in why and "30" in why
+
+
+def test_verdict_behalten_when_ci_lower_above_breakeven():
+    # BE = 43/1.29 = 33.3 < KI-Untergrenze 36.2 => behalten
+    v, _ = st.scanner_verdict({
+        "decided_signals": 188, "win_rate_pct": 43.0, "avg_r": 0.29,
+        "win_rate_wilson_95": {"lower_pct": 36.2, "upper_pct": 50.0}})
+    assert v == "behalten"
+
+
+def test_verdict_beobachten_when_positive_but_not_significant():
+    # avg_r > 0, aber KI-Untergrenze 30.0 < BE 33.3 => nicht signifikant
+    v, _ = st.scanner_verdict({
+        "decided_signals": 100, "win_rate_pct": 43.0, "avg_r": 0.29,
+        "win_rate_wilson_95": {"lower_pct": 30.0, "upper_pct": 55.0}})
+    assert v == "beobachten"
+
+
+def test_verdict_abschalten_when_ci_upper_below_breakeven():
+    # BE = 30/0.6 = 50.0 > KI-Obergrenze 45.0 => abschalten
+    v, _ = st.scanner_verdict({
+        "decided_signals": 60, "win_rate_pct": 30.0, "avg_r": -0.4,
+        "win_rate_wilson_95": {"lower_pct": 22.0, "upper_pct": 45.0}})
+    assert v == "abschalten"
+
+
+def test_verdict_abschalten_structural_minus_1r():
+    v, why = st.scanner_verdict({"decided_signals": 50, "win_rate_pct": 10.0,
+                                 "avg_r": -1.3, "win_rate_wilson_95": None})
+    assert v == "abschalten"
+    assert "strukturell" in why
+
+
+def test_breakeven_rate_edges():
+    assert st.breakeven_win_rate_pct(None, 0.3) is None
+    assert st.breakeven_win_rate_pct(43.0, None) is None
+    assert st.breakeven_win_rate_pct(43.0, -1.2) is None  # E+1 <= 0
+    assert st.breakeven_win_rate_pct(43.0, 0.29) == 100.0 * 0.43 / 1.29

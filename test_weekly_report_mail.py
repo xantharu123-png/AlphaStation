@@ -12,6 +12,7 @@ Beweist den Freitag-nach-US-Close-Wochenreport des Signal-Trackers:
 
 Session-unabhaengig: Pfade via __file__, kein echter SMTP-/DB-Zugriff.
 """
+import json
 import os
 import sys
 import time
@@ -67,7 +68,11 @@ def _summary(**total_overrides):
             "bear_scan": {"signals": 5, "open": 1, "tp1_hit": 1, "tp2_hit": 0,
                           "stop_hit": 3, "expired": 0, "untracked": 0,
                           "win_rate_pct": 25.0, "avg_r": -0.275, "sum_r": -1.1,
-                          "alerts_per_day": 0.714},
+                          "alerts_per_day": 0.714,
+                          "avg_r_managed_50_50": -0.3, "decided_signals": 4,
+                          "sample_reliable": False,
+                          "win_rate_wilson_95": {"lower_pct": 4.0,
+                                                 "upper_pct": 70.0}},
         },
         "recent": [
             {"id": 90 + i, "created_at": "2026-06-11T14:00:00+00:00",
@@ -84,6 +89,8 @@ def _summary(**total_overrides):
 def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     """Dedupe auf tmp, Startup-Delay aus, Uhr fixiert, Versand aufgezeichnet."""
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
+    monkeypatch.setattr(bg_service, "_WEEKLY_VERDICT_STATE_FILE",
+                        str(tmp_path / "verdicts.json"))
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)
     _FakeDatetime._now = now
     monkeypatch.setattr(bg_service, "datetime", _FakeDatetime)
@@ -291,3 +298,101 @@ def test_summary_without_new_fields_still_renders(monkeypatch, tmp_path):
     assert "(KI " not in body         # kein Wilson-Span ohne Feld
     # decided-Fallback: 3+2+4 = 9 < 30 => Stichproben-Hinweis weiterhin da
     assert "Stichprobe noch klein" in body
+
+
+
+# ── Verdikt-Alarm (Kalibrier-Loop, AUDIT 2026-07-24) ────────────────────────
+
+def _crash_bucket(decided=31):
+    """behalten-Kandidat: BE = 54.8/1.5 = 36.5 < KI-Untergrenze 37.5."""
+    wins = int(round(decided * 0.548))
+    return {"signals": decided + 9, "open": 2, "tp1_hit": wins // 2,
+            "tp2_hit": wins - wins // 2, "stop_hit": decided - wins,
+            "expired": 7, "untracked": 0, "win_rate_pct": 54.8, "avg_r": 0.5,
+            "sum_r": round(0.5 * decided, 1), "alerts_per_day": 5.7,
+            "avg_r_managed_50_50": 0.45, "decided_signals": decided,
+            "sample_reliable": decided >= 30,
+            "win_rate_wilson_95": {"lower_pct": 37.5, "upper_pct": 71.2}}
+
+
+def _summary_with_crash(decided=31):
+    s = _summary()
+    s["per_scanner"] = {"crash": _crash_bucket(decided)}
+    return s
+
+
+def _write_verdict_state(tmp_path, state):
+    (tmp_path / "verdicts.json").write_text(
+        json.dumps(state), encoding="utf-8")
+
+
+def _read_verdict_state(tmp_path):
+    return json.loads((tmp_path / "verdicts.json").read_text(encoding="utf-8"))
+
+
+def test_verdict_alert_on_30_crossing(monkeypatch, tmp_path):
+    """crash waechst 13 → 31 entschieden => 30er-Alarm, State aktualisiert."""
+    _write_verdict_state(tmp_path, {"crash": {"decided": 13, "verdict": "beobachten"}})
+    sent = _setup(monkeypatch, tmp_path, summary=_summary_with_crash(31))
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Verdikt-Alarm" in body
+    assert "überschreitet 30er-Marke" in body
+    assert "13 → 31 entschieden" in body
+    assert "<b>behalten</b>" in body
+    assert _read_verdict_state(tmp_path)["crash"] == {"decided": 31,
+                                                      "verdict": "behalten"}
+
+
+def test_verdict_alert_on_verdict_change(monkeypatch, tmp_path):
+    """behalten → abschalten (KI-Obergrenze 45% < Breakeven 50%) => Alarm."""
+    _write_verdict_state(tmp_path, {"stock_strategy": {"decided": 100,
+                                                       "verdict": "behalten"}})
+    s = _summary()
+    s["per_scanner"] = {
+        "stock_strategy": {"signals": 130, "open": 5, "tp1_hit": 10, "tp2_hit": 8,
+                           "stop_hit": 42, "expired": 65, "untracked": 0,
+                           "win_rate_pct": 30.0, "avg_r": -0.4, "sum_r": -24.0,
+                           "alerts_per_day": 18.6, "avg_r_managed_50_50": -0.35,
+                           "decided_signals": 60, "sample_reliable": True,
+                           "win_rate_wilson_95": {"lower_pct": 22.0,
+                                                  "upper_pct": 45.0}},
+    }
+    sent = _setup(monkeypatch, tmp_path, summary=s)
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Verdikt-Alarm" in body
+    assert "Verdikt-Wechsel" in body
+    assert "behalten → <b>abschalten</b>" in body
+
+
+def test_no_verdict_alert_when_unchanged(monkeypatch, tmp_path):
+    """State entspricht dem aktuellen Bild => kein Alarm-Block in der Mail."""
+    _write_verdict_state(tmp_path, {
+        "bi_long": {"decided": 5, "verdict": "beobachten"},
+        "bear_scan": {"decided": 4, "verdict": "beobachten"},
+    })
+    sent = _setup(monkeypatch, tmp_path)  # _summary: bi_long 5, bear_scan 4
+    assert bg_service._run_weekly_report({}) is True
+    assert "Verdikt-Alarm" not in sent[0]["body"]
+
+
+def test_baseline_run_saves_state_without_alarm(monkeypatch, tmp_path):
+    """Erster Lauf ohne State-Datei: Baseline still speichern, kein Alarm."""
+    sent = _setup(monkeypatch, tmp_path)
+    assert bg_service._run_weekly_report({}) is True
+    assert "Verdikt-Alarm" not in sent[0]["body"]
+    state = _read_verdict_state(tmp_path)
+    assert state["bi_long"] == {"decided": 5, "verdict": "beobachten"}
+    assert state["bear_scan"] == {"decided": 4, "verdict": "beobachten"}
+
+
+def test_failed_send_keeps_old_verdict_state(monkeypatch, tmp_path):
+    """Versand-Fehler => Verdikt-State bleibt alt, Alarm geht nicht verloren."""
+    old_state = {"crash": {"decided": 13, "verdict": "beobachten"}}
+    _write_verdict_state(tmp_path, old_state)
+    _setup(monkeypatch, tmp_path, summary=_summary_with_crash(31))
+    monkeypatch.setattr(bg_service, "_send_email_alert",
+                        lambda *args, **kwargs: False)  # SMTP down
+    assert bg_service._run_weekly_report({}) is False
+    assert _read_verdict_state(tmp_path) == old_state
