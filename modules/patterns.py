@@ -2054,13 +2054,20 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # V2.9: Crypto-Schwellen angehoben — waren 41% unter Aktien (Grade-Inflation)
     # Jetzt ~15% unter Aktien (Crypto hat weniger Volume-Signale, aber nicht 41% weniger)
     if crypto_mode:
-        if score >= 95 and smart_money_fires >= 3:
+        # AUDIT 2026-07-24 (T2): Schwellen neu verankert. V2.9 kalibrierte
+        # Krypto ~15-20% UNTER Aktien (Ratios S .841 / A .859 / B .847 / C .80,
+        # damalige Aktien-Schwellen 113/99/85/75). V3.3 senkte nur die
+        # Aktien-Schwellen (113->85 etc.) — Krypto blieb und wurde dadurch
+        # STRENGER als Aktien (S: 95/168=56.5% vs. 85/173=49.1%). Jetzt
+        # dieselben V2.9-Ratios auf die aktuellen Aktien-Schwellen:
+        # 85*.841=71, 71*.859=61, 57*.847=48, 55*.80=44.
+        if score >= 71 and smart_money_fires >= 3:
             grade = "S"
-        elif score >= 85 and smart_money_fires >= 2:
+        elif score >= 61 and smart_money_fires >= 2:
             grade = "A"
-        elif score >= 72 and smart_money_hits >= 1:
+        elif score >= 48 and smart_money_hits >= 1:
             grade = "B"
-        elif score >= 60:
+        elif score >= 44:
             grade = "C"
         else:
             grade = "D"

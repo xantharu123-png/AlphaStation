@@ -484,6 +484,45 @@ def _signed_r(price: float, entry: float, risk: float, direction: str) -> float:
     return (price - entry) / risk
 
 
+def _managed_r_50_50(row: Dict[str, Any]) -> Optional[float]:
+    """R-Multiple des empfohlenen 50/50-Managements (TP1 = 50% Teilverkauf).
+
+    AUDIT 2026-07-24 (T1): r_realized bucht das Level-R (TP2 = volles
+    Geometrie-R). Die Handlungsempfehlung verkauft aber 50% am TP1. Diese
+    Funktion leitet das befolgbare Management-R retroaktiv aus den
+    gespeicherten Feldern ab:
+      - TP1 nicht erreicht: managed = r_realized (beide Modelle identisch)
+      - TP2_HIT:            managed = 0.5*r_tp1 + 0.5*r_tp2
+      - STOP_HIT nach TP1:  managed = 0.5*r_tp1 + 0.5*r_stop_exit
+      - EXPIRED nach TP1:   managed = 0.5*r_tp1 + 0.5*r_close
+    Bei unvollstaendigen Levels faellt die Funktion auf r_realized zurueck
+    (besser ein Level-R als gar kein Wert); None nur bei fehlendem r_realized.
+    """
+    realized = _to_float(row.get("r_realized"))
+    if realized is None:
+        return None
+    tp1 = _to_float(row.get("tp1"))
+    if tp1 is None:
+        return realized
+    tp1_hit = bool(row.get("tp1_hit_at")) or row.get("status") == STATUS_TP2
+    if not tp1_hit:
+        return realized
+    fill = _to_float(row.get("entry_fill_price"))
+    if fill is None:
+        fill = _to_float(row.get("entry"))
+    stop = _to_float(row.get("stop"))
+    tp2 = _to_float(row.get("tp2"))
+    if fill is None or stop is None:
+        return realized
+    direction = "SHORT" if str(row.get("direction")) == "SHORT" else "LONG"
+    geometry = trade_geometry(fill, stop, tp1, tp2, direction)
+    risk = geometry.get("risk")
+    if not geometry.get("valid") or not risk:
+        return realized
+    r_tp1 = _signed_r(tp1, fill, risk, direction)
+    return round(0.5 * r_tp1 + 0.5 * realized, 4)
+
+
 def _register_eval_failure(sig: Dict[str, Any], now_dt: datetime) -> Dict[str, Any]:
     """Fehlversuch zaehlen; ab MAX_EVAL_FAILS Fehlversuchen -> UNTRACKED."""
     fail_count = int(sig.get("eval_fail_count") or 0) + 1
@@ -1076,12 +1115,50 @@ def _classify_row(row: Dict[str, Any]) -> str:
     return "open"
 
 
-def _finalize_bucket(bucket: Dict[str, Any], r_values: List[float], window_days: int) -> None:
+def _wilson_interval_95(wins: int, decided: int) -> Optional[Dict[str, float]]:
+    """Wilson-Score-Konfidenzintervall (95%) fuer eine Trefferquote.
+
+    AUDIT 2026-07-24 (Kalibrier-Loop): exakter Binomial-CI-Ersatz ohne
+    Normalapproximation — robust bei kleinen Stichproben und Quoten nahe
+    0%/100%, wo das naive p+-2sigma-Intervall aus [0,1] laeuft.
+    """
+    if decided <= 0:
+        return None
+    z = 1.96
+    p_hat = wins / decided
+    denom = 1.0 + z * z / decided
+    center = (p_hat + z * z / (2.0 * decided)) / denom
+    half = (
+        z
+        * math.sqrt(p_hat * (1.0 - p_hat) / decided + z * z / (4.0 * decided * decided))
+        / denom
+    )
+    return {
+        "lower_pct": round(100.0 * max(0.0, center - half), 1),
+        "upper_pct": round(100.0 * min(1.0, center + half), 1),
+    }
+
+
+def _finalize_bucket(
+    bucket: Dict[str, Any],
+    r_values: List[float],
+    window_days: int,
+    managed_values: Optional[List[float]] = None,
+) -> None:
     wins = sum(1 for value in r_values if value > 0)
     decided = len(r_values)
+    bucket["decided_signals"] = decided
     bucket["win_rate_pct"] = round(100.0 * wins / decided, 1) if decided else None
+    bucket["win_rate_wilson_95"] = _wilson_interval_95(wins, decided)
+    # AUDIT 2026-07-24 (Kalibrier-Loop): 30 entschiedene Signale ist die im
+    # Weekly-Report verankerte Mindest-Stichprobe fuer belastbare Quoten.
+    bucket["sample_reliable"] = bool(decided >= 30)
     bucket["avg_r"] = round(sum(r_values) / len(r_values), 3) if r_values else None
     bucket["sum_r"] = round(sum(r_values), 3) if r_values else 0.0
+    managed = [value for value in (managed_values or []) if value is not None]
+    bucket["avg_r_managed_50_50"] = (
+        round(sum(managed) / len(managed), 3) if managed else None
+    )
     bucket["alerts_per_day"] = round(bucket["signals"] / float(window_days), 3)
 
 
@@ -1104,6 +1181,9 @@ def load_performance_summary(days: int = 90) -> dict:
       win_rate_pct — wins = tp1_hit + tp2_hit vs. decided = wins + stop_hit;
                      None ohne entschiedene Signale
       avg_r / sum_r — ueber geschlossene Signale mit r_realized
+      avg_r_managed_50_50 — R des empfohlenen 50/50-Managements (T1)
+      win_rate_wilson_95 — Wilson-Konfidenzintervall der Trefferquote
+      decided_signals / sample_reliable — Stichprobengroesse / >=30-Flag
       alerts_per_day — signals / window_days
     """
     try:
@@ -1130,7 +1210,9 @@ def load_performance_summary(days: int = 90) -> dict:
                     ).fetchall()
                 ]
         total_r: List[float] = []
+        total_managed: List[float] = []
         scanner_r: Dict[str, List[float]] = {}
+        scanner_managed: Dict[str, List[float]] = {}
         for row in rows:
             bucket_key = _classify_row(row)
             scanner = str(row.get("scanner") or "unknown")
@@ -1142,9 +1224,22 @@ def load_performance_summary(days: int = 90) -> dict:
             if r_value is not None:
                 total_r.append(float(r_value))
                 scanner_r.setdefault(scanner, []).append(float(r_value))
-        _finalize_bucket(summary["total"], total_r, window)
+                managed_value = _managed_r_50_50(row)
+                if managed_value is not None:
+                    total_managed.append(managed_value)
+                    scanner_managed.setdefault(scanner, []).append(managed_value)
+        _finalize_bucket(summary["total"], total_r, window, total_managed)
         for scanner, bucket in summary["per_scanner"].items():
-            _finalize_bucket(bucket, scanner_r.get(scanner, []), window)
+            _finalize_bucket(
+                bucket, scanner_r.get(scanner, []), window, scanner_managed.get(scanner, [])
+            )
+        summary["r_semantics"] = (
+            "avg_r = Level-R (TP2 volles Geometrie-R, unmanaged); "
+            "avg_r_managed_50_50 = R des empfohlenen 50/50-Managements "
+            "(50% Teilverkauf am TP1, Rest Stop/TP2/Expiry). "
+            "win_rate_wilson_95 = Wilson-Konfidenzintervall der Trefferquote; "
+            "sample_reliable ab 30 entschiedenen Signalen. AUDIT 2026-07-24 (T1 + Kalibrier-Loop)."
+        )
         summary["recent"] = [
             {
                 "id": row.get("id"),
@@ -1162,6 +1257,7 @@ def load_performance_summary(days: int = 90) -> dict:
                 "tp1": row.get("tp1"),
                 "tp2": row.get("tp2"),
                 "r_realized": row.get("r_realized"),
+                "r_managed_50_50": _managed_r_50_50(row),
                 "tp1_hit_at": row.get("tp1_hit_at"),
             }
             for row in rows[:20]
