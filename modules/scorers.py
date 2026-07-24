@@ -44,7 +44,10 @@ def _z_score(value, values_list):
     """Calculate z-score for statistical significance.
 
     Returns 0.0 if insufficient data (< 5 points).
-    Z-score >= 2.0 is considered statistically significant (95% confidence).
+    Z-score >= 2.0 is treated as significant. AUDIT 2026-07-24: the textbook
+    "95% confidence" holds only under normality; hourly crypto returns are
+    fat-tailed (empirically ~90%). The threshold is a robust heuristic gate,
+    not a calibrated statistical test.
     """
     if len(values_list) < 5:
         return 0.0
