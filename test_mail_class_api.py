@@ -648,3 +648,55 @@ def test_atr_distance_annotations_fallback_to_row_key():
     html_out = api._format_alert_plan_html(row)
     # Stop -1.0 => -5.0% ≈ 2.0xATR
     assert "(-5.0% ≈ 2.0×ATR)" in html_out
+
+
+# ── AUDIT 2026-07-28: Volatilitätsbudget (HLN) + Stop-Rausch-Warnung (BELFB) ──
+
+
+def test_low_volatility_budget_blocks_swing_mail():
+    """HLN-Repro: 1,7% ATR — TP1 (1,8xATR ≈ 3% brutto) traegt die Kosten eines
+    Swing-Trades nicht. Das Gate greift VOR den Momentum-spezifischen Pruefungen."""
+    row = {
+        "Strategy": "Momentum Breakout Long",
+        "Signal_Direction": "LONG",
+        "price": 10.29,
+        "trade_setup": {"atr": 0.178},
+    }
+    ok, reason = api._stock_strategy_mail_quality_state(row)
+    assert ok is False
+    assert reason == "stock_swing_mail_blocked_low_volatility_budget"
+
+
+def test_volatility_budget_boundary_and_missing_atr_pass():
+    """Genau 2,0% ATR passiert das Budget-Gate; Rows ohne ATR-Metadaten
+    behalten das bisherige Verhalten (kein hartes Gate auf Alt-Daten)."""
+    row_boundary = {"Strategy": "Gap Momentum Long", "price": 100.0, "trade_setup": {"atr": 2.0}}
+    ok, reason = api._stock_strategy_mail_quality_state(row_boundary)
+    assert ok is True and reason == ""
+    row_legacy = {"Strategy": "Gap Momentum Long", "price": 100.0}
+    ok, reason = api._stock_strategy_mail_quality_state(row_legacy)
+    assert ok is True and reason == ""
+
+
+def test_stop_noise_warning_rendered_for_sub_atr_stop():
+    """BELFB-Repro: Stop nur 0,6xATR entfernt — Warnung vor erhoehtem
+    Stop-out-Risiko gehoert in das Plan-HTML."""
+    row = {
+        "Ticker": "BELFB", "direction": "SHORT",
+        "Entry": 249.36, "StopLoss": 260.90, "TP1": 231.92, "TP2": 213.68,
+        "trade_setup": {"atr": 19.2},
+    }
+    html_out = api._format_alert_plan_html(row)
+    assert "Tagesrauschen" in html_out
+    assert "0.6×ATR" in html_out
+
+
+def test_stop_noise_warning_absent_when_stop_beyond_noise():
+    """Stop bei 1,0xATR liegt ausserhalb des Rauschbereichs — keine Warnung."""
+    row = {
+        "Ticker": "TSN", "direction": "LONG",
+        "Entry": 61.63, "StopLoss": 60.67, "TP1": 63.29, "TP2": 64.53,
+        "trade_setup": {"atr": 0.96},
+    }
+    html_out = api._format_alert_plan_html(row)
+    assert "Tagesrauschen" not in html_out

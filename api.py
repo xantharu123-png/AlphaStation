@@ -2301,6 +2301,17 @@ def _alert_move_warning_line(row: Dict[str, Any], levels: Dict[str, Any]) -> str
             notes.append("Drop schon weit: Short nur nach failed reclaim/weak bounce.")
         elif change <= -8:
             notes.append("Drop laeuft bereits: keine spaete Market-Order ohne Rejection.")
+    # AUDIT 2026-07-28 (BELFB): Stop naeher als ~0.9xATR liegt im Tagesrauschen
+    # — Stop-out-Wahrscheinlichkeit ist erhoeht und das gedruckte R:R schoent.
+    atr = _alert_atr_value(row)
+    entry = levels.get("entry")
+    stop = levels.get("stop")
+    if atr and isinstance(entry, (int, float)) and isinstance(stop, (int, float)):
+        stop_atr_mult = abs(stop - entry) / atr
+        if stop_atr_mult < 0.9:
+            notes.append(
+                f"Stop nur {stop_atr_mult:.1f}×ATR entfernt — liegt im Tagesrauschen (erhoehtes Stop-out-Risiko)."
+            )
     if not notes:
         return ""
     safe = html.escape(" ".join(notes))
@@ -5735,6 +5746,35 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+# AUDIT 2026-07-28 (RITM/GSK/KO/HLN): Tages-Extension in ATR statt nur %.
+# Die %-Schwellen (8/12%) lassen einen Korridor: +6,2% bei 2,1% ATR ist ein
+# ~2,9-ATR-Tag — der Move ist gelaufen, bevor die Mail kommt, und TP1 liegt
+# naeher als die Strecke, die der Kurs heute schon gelaufen ist.
+_SWING_DAY_MOVE_EXTENDED_ATR = 2.5   # ab hier: kein JETZT, Retest abwarten
+_SWING_DAY_MOVE_HARD_ATR = 3.5       # ab hier: Move erschoepft, NO_CHASE
+_SWING_PREMARKET_GAP_MIN_PCT = 3.0   # Gap, ab dem "vorboeslich gelaufen" gilt
+# Session bestaetigt nach dem Gap faktisch nichts mehr (<= +0.5% seit Open):
+_SWING_PREMARKET_GAP_MAX_SESSION_FOLLOW_PCT = 0.5
+
+
+def _swing_day_move_atr(row: Dict[str, Any], change_pct: Optional[float]) -> Optional[float]:
+    """Tagesbewegung in ATR-Einheiten (|change_%| / ATR_%).
+
+    None, wenn ATR oder Preis in der Row fehlen — Legacy-/Test-Rows ohne
+    ATR-Metadaten behalten das bisherige Verhalten.
+    """
+    if change_pct is None:
+        return None
+    atr = _alert_atr_value(row)
+    price = _alert_float(_extract_alert_price(row), None)
+    if not atr or not price or price <= 0:
+        return None
+    atr_pct = (atr / price) * 100.0
+    if atr_pct <= 0:
+        return None
+    return abs(change_pct) / atr_pct
+
+
 def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     """Daily/swing timing gate for generic stock strategy alerts.
 
@@ -5779,6 +5819,24 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("swing_extended_wait_retest")
     elif soft_extended_without_volume:
         reasons.append("swing_extended_without_volume_wait_retest")
+    # Tagesmove relativ zur eigenen Volatilitaet (RITM: +6,2% bei 2,1% ATR
+    # ≈ 2,9 ATR — unter allen %-Schwellen, aber der Tag ist gelaufen).
+    day_move_atr = _swing_day_move_atr(row, change)
+    if day_move_atr is not None:
+        if day_move_atr >= _SWING_DAY_MOVE_HARD_ATR:
+            reasons.append("swing_day_move_exhausted_no_chase")
+        elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
+            reasons.append("swing_day_move_extended_wait_retest")
+    # Gap lief vorbörslich, die Session bestaetigt nichts: kein JETZT.
+    # (Bisherige Gap-Gates greifen nur bei "Gap Momentum Long"-Strategienamen;
+    # RITM lief als "Momentum Breakout Long" daran vorbei.)
+    if (
+        gap_pct is not None
+        and gap_pct >= _SWING_PREMARKET_GAP_MIN_PCT
+        and open_to_current is not None
+        and open_to_current <= _SWING_PREMARKET_GAP_MAX_SESSION_FOLLOW_PCT
+    ):
+        reasons.append("swing_gap_done_premarket_wait_retest")
     if fading_daily:
         reasons.append("swing_current_candle_fading")
     if not_holding_highs and (extended or soft_extended_without_volume or fading_daily):
@@ -5850,6 +5908,15 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
     elif change <= -8.0:
         reasons.append("swing_short_drop_extended_wait_failed_reclaim")
 
+    # Symmetrisch zur Long-Seite: Drop relativ zur eigenen Volatilitaet.
+    # (BELFB -7,7% bei 7,7% ATR = 1,0 ATR bleibt frei — ein normaler Tag.)
+    day_move_atr = _swing_day_move_atr(row, change)
+    if day_move_atr is not None:
+        if day_move_atr >= _SWING_DAY_MOVE_HARD_ATR:
+            reasons.append("swing_short_day_move_exhausted_no_chase")
+        elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
+            reasons.append("swing_short_day_move_extended_wait_retest")
+
     if open_to_current is not None and open_to_current > 0.5:
         reasons.append("swing_short_current_candle_reclaim")
     if close_pos is not None and close_pos > 0.55:
@@ -5886,6 +5953,11 @@ def _is_late_us_regular_session(
 
 
 _STOCK_MOMENTUM_MAIL_MIN_MEDIAN_DOLLAR_VOLUME_20D = 2_000_000.0
+# AUDIT 2026-07-28 (HLN): Mindest-Volatilitaetsbudget fuer Swing-Mails.
+# Unter ~2% Tages-ATR traegt ein Setup seine Kosten nicht (TP1 ~1.8xATR < 4%
+# brutto) — die Cents-Ziele wirken "lachhaft", weil das Vehikel sich nicht
+# bewegt, nicht weil die Mathematik falsch waere.
+_STOCK_STRATEGY_MAIL_MIN_ATR_PCT = 2.0
 
 
 def _stock_strategy_mail_quality_state(
@@ -5913,6 +5985,15 @@ def _stock_strategy_mail_quality_state(
             return False, "stock_swing_mail_blocked_4h_rejection"
         if execution_status == "DATA_UNAVAILABLE":
             return False, "stock_swing_mail_blocked_missing_4h_state"
+
+    # Volatilitaetsbudget (Long UND Short): ohne ausreichend Tages-ATR ist
+    # kein Swing-Setup mail-wuerdig. Rows ohne ATR-Metadaten: Bestandsverhalten.
+    atr_value = _alert_atr_value(row)
+    price_value = _alert_float(_extract_alert_price(row), None)
+    if atr_value and price_value and price_value > 0:
+        atr_pct = (atr_value / price_value) * 100.0
+        if atr_pct < _STOCK_STRATEGY_MAIL_MIN_ATR_PCT:
+            return False, "stock_swing_mail_blocked_low_volatility_budget"
 
     if "momentum breakout long" not in strategy_name:
         return True, ""
@@ -6467,6 +6548,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_momentum_breakout_quality_wait_retest",
         "swing_4h_extended_run_wait_retest",
         "swing_4h_rejection_wait_reclaim",
+        "swing_day_move_extended_wait_retest",
+        "swing_gap_done_premarket_wait_retest",
+        "swing_short_day_move_extended_wait_retest",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
         "swing_short_current_candle_reclaim",
@@ -6509,6 +6593,8 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "trade_health_fakeout_risk",
         "trade_health_liquidity_risk",
         "swing_hard_extended_no_chase",
+        "swing_day_move_exhausted_no_chase",
+        "swing_short_day_move_exhausted_no_chase",
         "swing_short_drop_too_extended_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")

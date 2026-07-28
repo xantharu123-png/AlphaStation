@@ -3067,3 +3067,201 @@ def test_stock_strategy_swing_short_blocks_chased_drop(monkeypatch):
     assert state["alertable_now"] is False
     assert "swing_short_drop_extended_wait_failed_reclaim" in state["suppression_reasons"]
     assert state["decision"] == "WAIT_RETEST"
+
+
+# ── AUDIT 2026-07-28: Tages-Extension in ATR (RITM/GSK/KO/HLN) ───────────────
+# Die %-Schwellen (8/12%) liessen einen Korridor: +6,2% bei 2,1% ATR ist ein
+# ~2,9-ATR-Tag — der Move war gelaufen, bevor die Mail kam ("JETZT SWING").
+
+
+def test_stock_strategy_swing_blocks_day_move_extended_in_atr(monkeypatch):
+    """RITM-Repro: +6,2% bei ~2,1% ATR ≈ 2,9 ATR Tagesmove → kein JETZT mehr."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RITM"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "RITM",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 85,
+        "rvol": 1.5,
+        "price": 9.8,
+        "current_price": 9.8,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 6.2,
+        "gap_pct": 5.0,
+        "close_pos": 0.8,
+        "open_to_current_pct": 0.3,
+        "trade_setup": {"atr": 0.21, "entry": 9.8, "stop": 9.51, "tp1": 10.27, "tp2": 10.51},
+        "Entry": 9.8,
+        "StopLoss": 9.51,
+        "TP1": 10.27,
+        "TP2": 10.51,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_day_move_extended_wait_retest" in state["suppression_reasons"]
+    # Gap lief vorbörslich, die Session bestätigte nichts (<= +0.5% seit Open):
+    assert "swing_gap_done_premarket_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_day_move_exhausted_is_no_chase(monkeypatch):
+    """Ab 3,5 ATR Tagesmove: erschoepft — hartes NO_TRADE statt Retest-Hinweis."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"EXH"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "EXH",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.2,
+        "price": 9.8,
+        "current_price": 9.8,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 7.6,
+        "gap_pct": 2.0,
+        "close_pos": 0.82,
+        "open_to_current_pct": 1.2,
+        "trade_setup": {"atr": 0.21},
+        "Entry": 9.8,
+        "StopLoss": 9.51,
+        "TP1": 10.27,
+        "TP2": 10.51,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_day_move_exhausted_no_chase" in state["suppression_reasons"]
+    assert state["decision"] == "NO_TRADE"
+
+
+def test_stock_strategy_swing_fresh_breakout_stays_alertable(monkeypatch):
+    """Gegenprobe: frischer Ausbruch (1,5 ATR, kleines Gap, Session bestaetigt)
+    muss weiterhin mailbar bleiben — das Gate darf nicht ueberschiessen."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"FRESH"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "FRESH",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 89,
+        "rvol": 2.0,
+        "price": 10.0,
+        "current_price": 10.0,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 5.0,
+        "gap_pct": 1.0,
+        "close_pos": 0.8,
+        "open_to_current_pct": 3.0,
+        "trade_setup": {"atr": 0.33, "entry": 10.0, "stop": 9.5, "tp1": 10.75, "tp2": 11.0},
+        "Entry": 10.0,
+        "StopLoss": 9.5,
+        "TP1": 10.75,
+        "TP2": 11.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True, state["suppression_reasons"]
+    assert state["decision"] == "TRADE_NOW"
+
+
+def test_stock_strategy_swing_premarket_gap_waits_for_retest(monkeypatch):
+    """Gap >= 3% + Session <= +0,5%: Move lief vorbörslich — das Gate greift
+    unabhaengig vom Strategienamen (schliesst die 'Momentum Breakout Long'-Luecke)
+    und unabhaengig von ATR-Metadaten."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"GAPY"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "GAPY",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.0,
+        "price": 20.0,
+        "current_price": 20.0,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 4.5,
+        "gap_pct": 4.0,
+        "close_pos": 0.8,
+        "open_to_current_pct": 0.4,
+        "Entry": 20.0,
+        "StopLoss": 19.2,
+        "TP1": 21.2,
+        "TP2": 22.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_gap_done_premarket_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_short_day_move_extended_waits(monkeypatch):
+    """Short-Seite symmetrisch: -6,0% bei 2,1% ATR ≈ 2,9 ATR → WAIT_RETEST."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"DROP"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "DROP",
+        "Strategy": "Gap Momentum Short",
+        "grade": "S",
+        "score": 90,
+        "rvol": 1.8,
+        "price": 50.0,
+        "current_price": 50.0,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -6.0,
+        "close_pos": 0.3,
+        "open_to_current_pct": -1.0,
+        "trade_setup": {"atr": 1.05},
+        "Entry": 50.0,
+        "StopLoss": 51.5,
+        "TP1": 47.0,
+        "TP2": 45.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_short_day_move_extended_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_short_normal_atr_day_stays_alertable(monkeypatch):
+    """BELFB-Gegenprobe: -7,7% bei 7,7% ATR = 1,0 ATR — ein normaler Tag fuer
+    dieses Vehikel; das ATR-Gate darf hier NICHT feuern."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BELFB"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "BELFB",
+        "Strategy": "Gap Momentum Short",
+        "grade": "S",
+        "score": 91,
+        "rvol": 1.6,
+        "price": 250.0,
+        "current_price": 250.0,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -7.7,
+        "close_pos": 0.3,
+        "open_to_current_pct": -2.0,
+        "trade_setup": {"atr": 19.25},
+        "Entry": 250.0,
+        "StopLoss": 260.0,
+        "TP1": 232.0,
+        "TP2": 214.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True, state["suppression_reasons"]
+    assert state["decision"] == "TRADE_NOW"
