@@ -756,9 +756,13 @@ def test_api_wrapper_tracks_model_position_when_buy_mail_fails(monkeypatch, tmp_
     monkeypatch.setattr(api, "_us_equity_expected_volume_fraction", lambda *args, **kwargs: 1.0)
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {"allowed": True, "session": "US_REGULAR"})
     monkeypatch.setattr(api, "get_ticker_details", lambda *args, **kwargs: _details())
+    # Zeitbombe fixen (2026-07-28): _penny_news_context nutzt die ECHTE Uhr
+    # (age_factor bis 7 Tage) — fixes Datum altert den Katalysator weg und
+    # kippte setup_quality unter 70. Dynamisches Datum = immer frisch,
+    # Muster wie Zeilen 1311/1322/1335 in dieser Datei.
     monkeypatch.setattr(api, "get_ticker_news", lambda *args, **kwargs: [{
         "title": "Pump Test wins contract award",
-        "published": "2026-07-22",
+        "published": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "sentiment": "positive",
     }])
     monkeypatch.setattr(

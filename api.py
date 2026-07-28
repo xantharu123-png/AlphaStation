@@ -2442,6 +2442,40 @@ def _biotech_binary_warning_html(row: Dict[str, Any]) -> str:
     )
 
 
+def _alert_atr_value(row: Dict[str, Any]) -> Optional[float]:
+    """ATR fuer Abstands-Annotationen: erst der Bau-ATR aus dem Setup,
+    dann Row-Keys (atr_14/ATR/atr). None => keine Annotation."""
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    for container in (setup, row):
+        for key in ("atr", "atr_14", "ATR", "ATR14", "atr14"):
+            value = _alert_float(container.get(key), None)
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _atr_distance_annotations(row: Dict[str, Any], levels: Dict[str, Any]) -> Dict[str, str]:
+    """Pro Level '+/-x.x% ≈ y.y×ATR' (Stop/TP1/TP2 vs. Entry).
+
+    AUDIT 2026-07-28: ATR-Einheiten machen die Enge eines Levels ohne
+    Taschenrechner lesbar — < 1xATR liegt im Tagesrauschen. Shorts zeigen
+    TP negativ / Stop positiv (Vorzeichen = Richtung relativ zum Entry).
+    """
+    atr = _alert_atr_value(row)
+    entry = levels.get("entry")
+    if not atr or not isinstance(entry, (int, float)) or entry <= 0:
+        return {}
+    out: Dict[str, str] = {}
+    for key in ("stop", "tp1", "tp2"):
+        price = levels.get(key)
+        if not isinstance(price, (int, float)) or price <= 0:
+            continue
+        pct = 100.0 * (price - entry) / entry
+        mult = abs(price - entry) / atr
+        out[key] = f"{pct:+.1f}% ≈ {mult:.1f}×ATR"
+    return out
+
+
 def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -2479,6 +2513,17 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
             f'Trade-Plan blockiert: {issue_label}</span>'
         )
     level_source_text = _alert_level_source_line(row)
+    atr_notes = _atr_distance_annotations(row, levels)
+    stop_atr_text = (
+        f' <span style="color:#64748b;font-size:11px">({atr_notes["stop"]})</span>'
+        if "stop" in atr_notes else ""
+    )
+    _tp_atr_parts = [atr_notes.get("tp1"), atr_notes.get("tp2")]
+    tp_atr_text = (
+        f' <span style="color:#64748b;font-size:11px">'
+        f'({" / ".join(p for p in _tp_atr_parts if p)})</span>'
+        if any(_tp_atr_parts) else ""
+    )
     move_warning = _alert_move_warning_line(row, levels)
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
@@ -2505,8 +2550,8 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
     binary_warning_text = _biotech_binary_warning_html(row)
     return (
         f'<span>Entry <b>{entry}</b></span><br>'
-        f'<span>Stop <b style="color:#dc2626">{stop}</b></span><br>'
-        f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b></span>'
+        f'<span>Stop <b style="color:#dc2626">{stop}</b>{stop_atr_text}</span><br>'
+        f'<span>TP1/TP2 <b style="color:#059669">{tp1} / {tp2}</b>{tp_atr_text}</span>'
         f'{rr_text}'
         f'{runner_text}'
         f'{issue_text}'
@@ -10392,6 +10437,7 @@ def _build_structured_trade_setup(
         "rr_tp1": round(rr_tp1, 2),
         "rr_tp2": round(rr_tp2, 2),
         "risk": _round_trade_price(risk),
+        "atr": _round_trade_price(atr_value),
         "model": "Struktur-Invalidation + Zielzonen; R:R nur Filter",
         "level_model": "structure_first_v2",
         "stop_source": stop_source,

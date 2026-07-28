@@ -610,3 +610,41 @@ def test_m1_native_levels_are_not_marked():
     html_out = api._format_alert_plan_html(row)
 
     assert "nicht Scanner-nativ" not in html_out
+
+
+# ── ATR-Abstands-Annotationen (AUDIT 2026-07-28) ─────────────────────────────
+
+def test_atr_distance_annotations_rendered_when_atr_present():
+    """Stop/TP1/TP2 tragen '%-Abstand ≈ x×ATR' — TSN-Beispiel aus der Swing-Mail."""
+    row = {
+        "Ticker": "TSN", "direction": "LONG",
+        "Entry": 61.63, "StopLoss": 60.67, "TP1": 63.29, "TP2": 64.53,
+        "trade_setup": {"atr": 0.96, "stop_source": "s1_invalidation"},
+    }
+    html_out = api._format_alert_plan_html(row)
+    # Stop: 0.96 Risiko => -1.6% und exakt 1.0xATR
+    assert "(-1.6% ≈ 1.0×ATR)" in html_out
+    # TP1 +1.66 => +2.7% ≈ 1.7x ; TP2 +2.90 => +4.7% ≈ 3.0x
+    assert "+2.7% ≈ 1.7×ATR" in html_out
+    assert "+4.7% ≈ 3.0×ATR" in html_out
+
+
+def test_atr_distance_annotations_absent_without_atr():
+    """Ohne ATR keine Annotation (graceful, keine '≈ ?×ATR'-Fragmente)."""
+    row = {
+        "Ticker": "NOATR", "direction": "LONG",
+        "Entry": 10.0, "StopLoss": 9.2, "TP1": 11.5, "TP2": 12.4,
+    }
+    html_out = api._format_alert_plan_html(row)
+    assert "×ATR" not in html_out
+
+
+def test_atr_distance_annotations_fallback_to_row_key():
+    """ATR kommt auch als Row-Key (z. B. atr_14 aus den Technicals)."""
+    row = {
+        "Ticker": "ROWKEY", "direction": "LONG", "atr_14": 0.5,
+        "Entry": 20.0, "StopLoss": 19.0, "TP1": 21.0, "TP2": 22.5,
+    }
+    html_out = api._format_alert_plan_html(row)
+    # Stop -1.0 => -5.0% ≈ 2.0xATR
+    assert "(-5.0% ≈ 2.0×ATR)" in html_out
