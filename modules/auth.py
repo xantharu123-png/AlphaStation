@@ -1775,7 +1775,77 @@ def _normalize_trade_horizon(value: Any) -> str:
     return aliases.get(horizon, horizon if horizon in TRADE_HORIZON_OPTIONS else "swing")
 
 
-def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "", mail_class: str = "trade") -> List[str]:
+# AUDIT 2026-07-28: Feingranulare Mail-Kanal-Auswahl pro User.
+# Default fuer jeden Kanal ist AN (Bestandsverhalten); User schalten Kanaele
+# explizit AUS. Unbekannte Kanal-Keys werden beim Update ignoriert.
+MAIL_CHANNELS: Dict[str, str] = {
+    "stocks_swing": "Aktien Swing",
+    "stocks_intraday": "Aktien Intraday",
+    "crypto": "Crypto",
+    "biotech": "Biotech",
+    "bear": "Bear & Crash",
+    "new_listing": "New Listing",
+}
+
+_SCANNER_MAIL_CHANNEL: Dict[str, str] = {
+    "stock_strategy": "stocks_swing",
+    "strategy_scan": "stocks_swing",
+    "strategies": "stocks_swing",
+    "trade_reminder": "stocks_swing",
+    "turtle": "stocks_swing",
+    "orb": "stocks_intraday",
+    "penny_stocks": "stocks_intraday",
+    "penny_positions": "stocks_intraday",
+    "early_movers": "crypto",
+    "crypto_explosion": "crypto",
+    "crypto_strategy": "crypto",
+    "volume_spikes": "crypto",
+    "btc_divergenz": "crypto",
+    "bi_long": "biotech",
+    "bi_short": "biotech",
+    "biotech": "biotech",
+    "bear": "bear",
+    "bear_scan": "bear",
+    "crash_monitor": "bear",
+    "new_listing": "new_listing",
+}
+
+
+def scanner_mail_channel(scanner_name: str) -> str:
+    """Mail-Kanal eines Scanners; "" wenn keiner gemappt (kein Kanal-Filter)."""
+    return _SCANNER_MAIL_CHANNEL.get(str(scanner_name or "").strip().lower(), "")
+
+
+def _effective_mail_channels(user: Dict[str, Any]) -> Dict[str, bool]:
+    stored = user.get("mail_channels") if isinstance(user.get("mail_channels"), dict) else {}
+    return {key: stored.get(key, True) is not False for key in MAIL_CHANNELS}
+
+
+def mail_channel_enabled(email: str, channel: str) -> bool:
+    """True, wenn der User den Kanal nicht explizit abgeschaltet hat.
+
+    Default True: unbekannte Adressen, fehlende Settings und unbekannte
+    Kanaele aendern nichts am Bestandsverhalten. Wird zusaetzlich auf den
+    Betreiber-Fallback angewandt, damit die eigene Mailbox denselben
+    Filtern folgt wie das Abonnenten-Routing.
+    """
+    channel = str(channel or "").strip().lower()
+    if not channel or channel not in MAIL_CHANNELS:
+        return True
+    address = str(email or "").strip().lower()
+    if "@" not in address:
+        return True
+    try:
+        users = _load_effective_users_atomic()
+    except Exception:
+        return True
+    user = users.get(address)
+    if not isinstance(user, dict):
+        return True
+    return _effective_mail_channels(user).get(channel, True)
+
+
+def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "", mail_class: str = "trade", mail_channel: str = "") -> List[str]:
     """Return unique alert recipients for active plans with email-alert access.
 
     AUDIT H-3: mail_class steuert das Abonnenten-Routing. "watch"-Mails
@@ -1790,6 +1860,7 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
     frequency = _normalize_narrative_email_frequency(frequency) if frequency else ""
     trade_horizon = _normalize_trade_horizon(trade_horizon) if trade_horizon else ""
     mail_class = str(mail_class or "trade").strip().lower()
+    mail_channel = str(mail_channel or "").strip().lower()
     for email, user in users.items():
         if not isinstance(user, dict):
             continue
@@ -1800,6 +1871,9 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
             continue
         if mail_class == "watch" and not bool(user.get("watch_mail_optin", False)):
             # AUDIT H-3: Watch-Mails nur mit explizitem Opt-in.
+            continue
+        if mail_channel and mail_channel in MAIL_CHANNELS and not _effective_mail_channels(user).get(mail_channel, True):
+            # AUDIT 2026-07-28: Kanal vom User explizit abgeschaltet.
             continue
         if alert_type == "narrative_pulse":
             user_frequency = _normalize_narrative_email_frequency(user.get("narrative_email_frequency", "daily"))
@@ -1839,6 +1913,8 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
         "scanner_trade_horizon": _normalize_trade_horizon(user.get("scanner_trade_horizon", "swing")),
         "trade_horizon_options": ["swing", "intraday", "both"],
         "watch_mail_optin": bool(user.get("watch_mail_optin", False)),  # AUDIT H-3
+        "mail_channels": _effective_mail_channels(user),  # AUDIT 2026-07-28
+        "mail_channel_options": [{"key": k, "label": v} for k, v in MAIL_CHANNELS.items()],
         "penny_show_watch_rows": bool(user.get("penny_show_watch_rows", False)),
         "has_email_alerts": get_plan_features(effective_plan).get("has_email_alerts", False),
     }
@@ -1853,6 +1929,7 @@ def update_user_alert_settings(
     scanner_trade_horizon: Optional[str] = None,
     watch_mail_optin: Optional[bool] = None,
     penny_show_watch_rows: Optional[bool] = None,
+    mail_channels: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
@@ -1886,6 +1963,14 @@ def update_user_alert_settings(
         updates["watch_mail_optin"] = bool(watch_mail_optin)
     if penny_show_watch_rows is not None:
         updates["penny_show_watch_rows"] = bool(penny_show_watch_rows)
+    if mail_channels is not None:
+        if not isinstance(mail_channels, dict):
+            return {"success": False, "message": "Invalid mail channels"}
+        unknown = sorted(k for k in mail_channels if k not in MAIL_CHANNELS)
+        if unknown:
+            return {"success": False, "message": "Unknown mail channels: " + ", ".join(unknown)}
+        # AUDIT 2026-07-28: nur bekannte Keys, strikt als bool speichern.
+        updates["mail_channels"] = {k: bool(v) for k, v in mail_channels.items()}
 
     user = _update_user_atomic(email, lambda current: current.update(updates))
     if not isinstance(user, dict):

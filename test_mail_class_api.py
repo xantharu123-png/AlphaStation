@@ -498,7 +498,7 @@ def test_h3_send_email_alert_passes_mail_class_and_operator_watch_is_opt_in(monk
     monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", True)
     monkeypatch.setattr(api, "HAS_AUTH", True)
 
-    def _fake_recipients(trade_horizon="", mail_class="trade"):
+    def _fake_recipients(trade_horizon="", mail_class="trade", mail_channel=""):
         captured["mail_class"] = mail_class
         return []  # kein Abonnent hat Watch-Opt-in
 
@@ -700,3 +700,90 @@ def test_stop_noise_warning_absent_when_stop_beyond_noise():
     }
     html_out = api._format_alert_plan_html(row)
     assert "Tagesrauschen" not in html_out
+
+
+# ── AUDIT 2026-07-28: Mail-Kanal-Opt-out im Versandpfad (api._send_email_alert) ──
+
+
+def test_mail_channel_filters_operator_and_passes_channel_to_recipients(monkeypatch):
+    deliveries = []
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            deliveries.append(list(recipients))
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(api, "_SECRETS", {"GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "op@x.com"})
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", True)
+    monkeypatch.setattr(api, "HAS_AUTH", True)
+    # Betreiber-Adresse hat den crypto-Kanal abgeschaltet.
+    monkeypatch.setattr(api, "mail_channel_enabled", lambda addr, channel: not (addr == "op@x.com" and channel == "crypto"))
+    captured = {}
+
+    def _fake_recipients(trade_horizon="", mail_class="trade", mail_channel=""):
+        captured["mail_channel"] = mail_channel
+        return ["sub@example.com"]
+
+    monkeypatch.setattr(api, "get_email_alert_recipients", _fake_recipients)
+
+    ok = api._send_email_alert(
+        "Crypto Early Mover LONG Digest: 1 Setup(s)",
+        "<p>x</p>",
+        bypass_startup_cooldown=True,
+        mail_channel="crypto",
+    )
+
+    assert ok is True
+    assert captured["mail_channel"] == "crypto"
+    # op@x.com durch Kanal-Opt-out entfernt; Abonnent mit Kanal AN bleibt.
+    assert deliveries == [["sub@example.com"]]
+
+
+def test_mail_channel_empty_keeps_operator_unfiltered(monkeypatch):
+    deliveries = []
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            deliveries.append(list(recipients))
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(api, "_SECRETS", {"GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "op@x.com"})
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+    monkeypatch.setattr(api, "HAS_AUTH", True)
+    # Selbst ein "alles aus"-Filter darf ohne mail_channel nicht greifen.
+    monkeypatch.setattr(api, "mail_channel_enabled", lambda addr, channel: False)
+
+    ok = api._send_email_alert("Test", "<p>x</p>", bypass_startup_cooldown=True)
+
+    assert ok is True
+    assert deliveries == [["op@x.com"]]

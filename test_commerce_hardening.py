@@ -1484,3 +1484,89 @@ def test_direct_runtime_dependencies_are_exactly_pinned():
 
     assert requirements
     assert all("==" in line for line in requirements if line.strip() and not line.startswith("#"))
+
+
+# ── AUDIT 2026-07-28: Feingranulare Mail-Kanal-Auswahl ───────────────────────
+
+
+def test_mail_channel_optout_filters_recipients(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+
+    for email in ("kanal-aus@example.com", "kanal-an@example.com"):
+        assert auth.register_user(email, "secret-pass-123", email.split("@")[0])["success"] is True
+        db = auth._load_users()
+        db["users"][email]["plan"] = "elite"
+        auth._save_users(db)
+    db = auth._load_users()
+    db["users"]["kanal-aus@example.com"]["mail_channels"] = {"crypto": False}
+    auth._save_users(db)
+
+    # Crypto-Kanal: Opt-out-User faellt raus, der andere bleibt.
+    assert auth.get_email_alert_recipients(mail_channel="crypto") == ["kanal-an@example.com"]
+    # Anderer Kanal: beide dabei.
+    assert auth.get_email_alert_recipients(mail_channel="stocks_swing") == ["kanal-an@example.com", "kanal-aus@example.com"]
+    # Kein Kanal (Bestandsaufrufe) und unbekannter Kanal: kein Filter.
+    assert auth.get_email_alert_recipients() == ["kanal-an@example.com", "kanal-aus@example.com"]
+    assert auth.get_email_alert_recipients(mail_channel="unbekannt") == ["kanal-an@example.com", "kanal-aus@example.com"]
+
+
+def test_mail_channel_settings_roundtrip_and_validation(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    assert auth.register_user("kanal@example.com", "secret-pass-123", "Kanal")["success"] is True
+    db = auth._load_users()
+    db["users"]["kanal@example.com"]["plan"] = "elite"
+    auth._save_users(db)
+
+    token = "unit-token"
+    monkeypatch.setattr(auth, "verify_token", lambda value: {"email": "kanal@example.com"} if value == token else None)
+
+    updated = auth.update_user_alert_settings(token, mail_channels={"crypto": False, "bear": False})
+    assert updated["success"] is True
+    settings = auth.get_user_alert_settings(token)
+    assert settings["mail_channels"]["crypto"] is False
+    assert settings["mail_channels"]["bear"] is False
+    assert settings["mail_channels"]["stocks_swing"] is True
+    assert {opt["key"] for opt in settings["mail_channel_options"]} == set(auth.MAIL_CHANNELS)
+
+    rejected = auth.update_user_alert_settings(token, mail_channels={"gibts_nicht": False})
+    assert rejected["success"] is False
+
+
+def test_mail_channel_enabled_defaults_and_optout(monkeypatch, tmp_path):
+    _isolate_auth_store(monkeypatch, tmp_path)
+    # Unbekannte Adresse / kein Kanal / unbekannter Kanal: True (Bestandsverhalten).
+    assert auth.mail_channel_enabled("ghost@example.com", "crypto") is True
+    assert auth.mail_channel_enabled("ghost@example.com", "") is True
+    assert auth.mail_channel_enabled("ghost@example.com", "unbekannt") is True
+
+    assert auth.register_user("optout@example.com", "secret-pass-123", "Opt")["success"] is True
+    db = auth._load_users()
+    db["users"]["optout@example.com"]["plan"] = "elite"
+    auth._save_users(db)
+    # User ohne Kanal-Settings: True.
+    assert auth.mail_channel_enabled("optout@example.com", "crypto") is True
+
+    db = auth._load_users()
+    db["users"]["optout@example.com"]["mail_channels"] = {"crypto": False}
+    auth._save_users(db)
+    assert auth.mail_channel_enabled("optout@example.com", "crypto") is False
+    assert auth.mail_channel_enabled("optout@example.com", "bear") is True
+
+
+def test_scanner_mail_channel_mapping_is_complete_for_known_scanners():
+    expected = {
+        "stock_strategy": "stocks_swing",
+        "orb": "stocks_intraday",
+        "early_movers": "crypto",
+        "biotech": "biotech",
+        "bi_long": "biotech",
+        "crash_monitor": "bear",
+        "bear": "bear",
+        "new_listing": "new_listing",
+    }
+    for scanner, channel in expected.items():
+        assert auth.scanner_mail_channel(scanner) == channel
+    assert auth.scanner_mail_channel("unbekannter_scanner") == ""
+    # Jeder gemappte Kanal muss ein gueltiger Kanal sein.
+    for scanner in auth._SCANNER_MAIL_CHANNEL:
+        assert auth.scanner_mail_channel(scanner) in auth.MAIL_CHANNELS

@@ -89,11 +89,13 @@ from modules.email_dedupe import (
     save_email_dedupe as _shared_save_email_dedupe,
 )
 try:
-    from modules.auth import get_email_alert_recipients
+    from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
     HAS_AUTH_ALERT_RECIPIENTS = False
     get_email_alert_recipients = None
+    mail_channel_enabled = None
+    scanner_mail_channel = None
 # Signal-Tracking (Team-A-Kontrakt) — defensiv: bg muss auch ohne Modul laufen.
 try:
     from modules.signal_tracker import (
@@ -1966,7 +1968,7 @@ def _run_weekly_report(secrets=None, now_et=None):
         return False
 
 
-def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text=""):
+def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text="", mail_channel=""):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
 
     mail_class (B6, mit api-Team abgestimmt): "trade" -> '🚨 JETZT: ',
@@ -1994,6 +1996,10 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
         )
     ).strip().lower() in {"1", "true", "yes", "on"}
     operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+    if mail_channel and mail_channel_enabled:
+        # AUDIT 2026-07-28: Kanal-Opt-out gilt auch fuer die Betreiber-Mailbox
+        # (Adresse hat als User-Konto den Kanal abgeschaltet).
+        operator_recipients = [addr for addr in operator_recipients if mail_channel_enabled(addr, mail_channel)]
     recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
     send_to_subscribers = str(secrets.get("ALERT_SEND_TO_SUBSCRIBERS", os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"))).strip().lower() not in {"0", "false", "no", "off"}
     if send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
@@ -2001,7 +2007,7 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
             # B7: swing-Horizont wie api; mail_class nur defensiv via
             # TypeError-Fallback mitgeben (api-Team rollt den Parameter parallel aus).
             try:
-                recipients.extend(get_email_alert_recipients(trade_horizon="swing", mail_class=mail_class))
+                recipients.extend(get_email_alert_recipients(trade_horizon="swing", mail_class=mail_class, mail_channel=mail_channel))
             except TypeError:
                 recipients.extend(get_email_alert_recipients(trade_horizon="swing"))
         except Exception as exc:
@@ -2312,7 +2318,8 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
         # telegram_text bleiben funktionsfähig).
         try:
             sent = _send_email_alert(subject, body_html, secrets, mail_class="trade",
-                                     telegram_text=_format_telegram_text(alert_source_rows))
+                                     telegram_text=_format_telegram_text(alert_source_rows),
+                                     mail_channel=scanner_mail_channel(scanner_name) if scanner_mail_channel else "")
         except TypeError:
             sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
         if sent:
@@ -2915,7 +2922,7 @@ def _run_bear_scanner(poly_key, secrets):
                 {_crash_rows}</table>
                 <p style="color:#999;font-size:11px;margin-top:12px">Automatischer Short/Crash Alert vom Background Service (stündlich)</p>
                 </body></html>'''
-                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets, mail_class="trade")
+                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets, mail_class="trade", mail_channel="bear")
                 if sent:
                     crash_mail_sent = True
                     _EMAIL_COOLDOWN[_crash_ck] = now
@@ -3235,7 +3242,7 @@ def _run_strategy_scanner(poly_key, secrets):
             </p>
             </body></html>"""
 
-            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
+            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade", mail_channel="stocks_swing")
             if sent:
                 # B8: Cooldown/Dedupe erst NACH erfolgreichem Versand setzen.
                 for a in all_alerts:
@@ -4177,7 +4184,7 @@ def _alert_nls_signals_legacy(results, secrets):
     </body></html>
     """
 
-    _send_email_alert(subject, body_html, secrets)
+    _send_email_alert(subject, body_html, secrets, mail_channel="new_listing")
     log.info(f"📧 NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
 
 
@@ -4406,7 +4413,8 @@ def _alert_nls_signals(results, secrets):
         try:
             sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets,
                                      mail_class="trade",
-                                     telegram_text=_format_telegram_text(alert_source_rows))
+                                     telegram_text=_format_telegram_text(alert_source_rows),
+                                     mail_channel="new_listing")
         except TypeError:
             sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
     except Exception:

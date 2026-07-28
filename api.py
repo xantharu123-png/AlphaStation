@@ -56,6 +56,7 @@ try:
         handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
         get_email_alert_recipients, get_user_alert_settings,
         update_user_alert_settings, auth_security_status,
+        mail_channel_enabled, scanner_mail_channel,
         change_password, create_password_reset_request,
         confirm_password_reset, revoke_token,
         _load_users, _save_users, _update_user_atomic, _delete_user,
@@ -5356,6 +5357,7 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
             body,
             trade_horizon="swing",
             mail_class="watch",
+            mail_channel="crypto",
         )
     except Exception:
         _email_dedupe_release(_EARLY_MOVER_WATCH_DIGEST_KEY, claimed_at=now)
@@ -5635,7 +5637,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         _send_early_mover_watch_alerts(watch_rows, now=now)
         return False
     try:
-        sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows))  # AUDIT H-3 / H-2
+        sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows), mail_channel="crypto")  # AUDIT H-3 / H-2
     except Exception:
         _email_dedupe_release(_EARLY_MOVER_DIGEST_KEY, claimed_at=now)
         raise
@@ -7279,6 +7281,7 @@ def _send_email_alert(
     trade_horizon: str = "swing",
     mail_class: str = "trade",
     telegram_text: str = "",
+    mail_channel: str = "",
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
@@ -7309,13 +7312,20 @@ def _send_email_alert(
         recipients = [addr.strip().lower() for addr in recipient_emails if str(addr).strip()]
     else:
         operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
+        if mail_channel and HAS_AUTH:
+            # AUDIT 2026-07-28: Kanal-Opt-out gilt auch fuer die Betreiber-Mailbox,
+            # sofern die Adresse ein User-Konto mit abgeschaltetem Kanal hat.
+            operator_recipients = [
+                addr for addr in operator_recipients
+                if mail_channel_enabled(addr, mail_channel)
+            ]
         recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
     if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
             # Watch-Mails gehen nur an explizit angemeldete Empfaenger. Das gilt
             # auch fuer den Betreiber-Fallback, damit Watchlists nie ungefragt
             # den Trade-Posteingang fluten.
-            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon, mail_class=mail_class))
+            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon, mail_class=mail_class, mail_channel=mail_channel))
         except Exception as exc:
             print(f"[Alert] Subscriber recipients skipped: {exc}")
     recipients = sorted(set(addr for addr in recipients if "@" in addr))
@@ -7548,7 +7558,7 @@ def _check_and_alert(scanner_name, cache_file):
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
         _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"]) for a in alerts]
-        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
+        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=scanner_mail_channel(scanner_name))  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
         if sent:
             mail_sent = True
             for alert in alerts:
@@ -7799,7 +7809,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
     try:
-        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
+        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel="stocks_swing")  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
     except Exception:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -8052,6 +8062,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
         body,
         trade_horizon="swing",
         mail_class="watch",
+        mail_channel="new_listing",
     )  # AUDIT H-3 / H-2 (Beobachtung, kein Einstiegssignal)
     if not sent:
         _email_dedupe_release(dedupe_key, claimed_at=now)
@@ -8155,7 +8166,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
     </body></html>'''
     try:
-        sent = _send_email_alert(f"Pump & Dump: {len(email_alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_alerts))  # AUDIT H-3 / H-2
+        sent = _send_email_alert(f"Pump & Dump: {len(email_alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_alerts), mail_channel="new_listing")  # AUDIT H-3 / H-2
     except Exception:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -14157,6 +14168,7 @@ def _bear_scan_wrapper() -> None:
                             trade_horizon="swing",
                             mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
                             telegram_text=_safe_format_telegram_rows(_crash_stocks),
+                            mail_channel="bear",
                         )
                     except Exception:
                         _email_dedupe_release(_crash_ck, claimed_at=_crash_claim_now)
@@ -14263,6 +14275,7 @@ def _bear_scan_wrapper() -> None:
                             trade_horizon="swing",
                             mail_class="trade",  # AUDIT H-2
                             telegram_text=_safe_format_telegram_rows(_bear_alert_rows),
+                            mail_channel="bear",
                         )
                     except Exception:
                         _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
@@ -15258,6 +15271,7 @@ class AlertSettingsRequest(BaseModel):
     scanner_trade_horizon: Optional[str] = None
     watch_mail_optin: Optional[bool] = None  # AUDIT H-3
     penny_show_watch_rows: Optional[bool] = None
+    mail_channels: Optional[Dict[str, bool]] = None  # AUDIT 2026-07-28
 
 
 # ── Admin Models ──
@@ -15675,6 +15689,7 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
         scanner_trade_horizon=req_body.scanner_trade_horizon,
         watch_mail_optin=req_body.watch_mail_optin,  # AUDIT H-3
         penny_show_watch_rows=req_body.penny_show_watch_rows,
+        mail_channels=req_body.mail_channels,  # AUDIT 2026-07-28
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
@@ -24116,6 +24131,7 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
         trade_horizon="intraday",
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
+        mail_channel="stocks_intraday",
     )
 
 
@@ -24144,6 +24160,7 @@ def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
         trade_horizon="intraday",
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
+        mail_channel="stocks_intraday",
     )
 
 
@@ -24186,6 +24203,7 @@ def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
         trade_horizon="intraday",
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
+        mail_channel="stocks_intraday",
     )
 
 
@@ -26759,6 +26777,7 @@ def _orb_scanner_wrapper() -> None:
                     trade_horizon="intraday",
                     mail_class="trade",  # AUDIT H-2
                     telegram_text=_safe_format_telegram_rows(alert_breakouts),
+                    mail_channel="stocks_intraday",
                 )
             except Exception:
                 for _ck in _orb_alert_cooldown_keys:

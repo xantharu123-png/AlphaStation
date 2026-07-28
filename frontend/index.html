@@ -1799,7 +1799,8 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                     trade_alert_horizon: next.trade_alert_horizon || 'swing',
                     scanner_trade_horizon: next.scanner_trade_horizon || 'swing',
                     watch_mail_optin: !!next.watch_mail_optin,
-                    penny_show_watch_rows: !!next.penny_show_watch_rows
+                    penny_show_watch_rows: !!next.penny_show_watch_rows,
+                    mail_channels: next.mail_channels || {}
                 })
             });
             const data = await res.json();
@@ -1927,6 +1928,33 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                                 }}>
                                 {(alertSettings?.watch_mail_optin ?? false) ? 'AN' : 'AUS'}
                             </button>
+                        </div>
+                        <div style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 10, background: '#f8fafc' }}>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 3 }}>📬 Mail-Kanäle</div>
+                            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>Welche Scanner-Mails du erhalten willst. AUS = dieser Kanal kommt dir nicht mehr zu.</div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                {(alertSettings?.mail_channel_options || []).map(opt => {
+                                    const active = (alertSettings?.mail_channels?.[opt.key] ?? true);
+                                    return (
+                                        <button
+                                            key={opt.key}
+                                            onClick={() => saveAlertSettings({ mail_channels: { ...(alertSettings?.mail_channels || {}), [opt.key]: !active } })}
+                                            disabled={alertSaving}
+                                            style={{
+                                                padding: '7px 11px',
+                                                border: `1px solid ${active ? '#2563eb' : '#cbd5e1'}`,
+                                                borderRadius: 999,
+                                                background: active ? '#dbeafe' : '#fff',
+                                                color: active ? '#1d4ed8' : '#475569',
+                                                fontSize: 12,
+                                                fontWeight: 800,
+                                                cursor: alertSaving ? 'wait' : 'pointer'
+                                            }}>
+                                            {opt.label}: {active ? 'AN' : 'AUS'}
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </div>
                         {[
                             ['trade_alert_horizon', 'Signal-Mail Modus', 'Welche Trade-Mails du erhalten willst. Swing ist Standard; Intraday ist separat.'],
