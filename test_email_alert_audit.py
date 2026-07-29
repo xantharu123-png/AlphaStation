@@ -3265,3 +3265,175 @@ def test_stock_strategy_swing_short_normal_atr_day_stays_alertable(monkeypatch):
 
     assert state["alertable_now"] is True, state["suppression_reasons"]
     assert state["decision"] == "TRADE_NOW"
+
+
+def test_stock_strategy_swing_blocks_top_entry_after_extended_day(monkeypatch):
+    """PBT-Repro 2026-07-29: +9,6% bei 4,0% ATR = 2,4 ATR — UNTER dem 2,5er-
+    Gate, aber Entry 0,36% unterm Tageshoch (30,80). Top-Kauf nach gelaufenem
+    Move: das Orts-Gate muss die Mail blockieren."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PBT"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "PBT",
+        "Strategy": "Gap Momentum Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 3.4,
+        "price": 30.69,
+        "current_price": 30.69,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 9.6,
+        "close_pos": 0.9,
+        "open_to_current_pct": 5.0,
+        "day_high": 30.80,
+        "trade_setup": {"atr": 1.23, "entry": 30.69, "stop": 29.57, "tp1": 33.31, "tp2": 34.91},
+        "Entry": 30.69,
+        "StopLoss": 29.57,
+        "TP1": 33.31,
+        "TP2": 34.91,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_top_entry_extended_wait_retest" in state["suppression_reasons"]
+    # 2,4 ATR < 2,5: das Groessen-Gate allein haette PBT NICHT gefangen —
+    # genau das war die Luecke, die das Orts-Gate schliesst.
+    assert "swing_day_move_extended_wait_retest" not in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_top_entry_retest_stays_alertable(monkeypatch):
+    """Gegenprobe: gleicher 2,3-ATR-Tag, aber Kurs bereits 3,2% unterm
+    Tageshoch (Retest) — das Orts-Gate darf NICHT feuern, die Zeile bleibt
+    mailbar."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PBTR"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "PBTR",
+        "Strategy": "Gap Momentum Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 3.4,
+        "price": 29.8,
+        "current_price": 29.8,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 9.6,
+        "close_pos": 0.9,
+        "open_to_current_pct": 5.0,
+        "day_high": 30.80,
+        "trade_setup": {"atr": 1.23, "entry": 29.8, "stop": 29.0, "tp1": 31.8, "tp2": 33.0},
+        "Entry": 29.8,
+        "StopLoss": 29.0,
+        "TP1": 31.8,
+        "TP2": 33.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True, state["suppression_reasons"]
+    assert state["decision"] == "TRADE_NOW"
+
+
+def test_stock_strategy_swing_short_blocks_bottom_entry_after_extended_drop(monkeypatch):
+    """Short-Orts-Gate isoliert: -7,0% bei 3,0% ATR = 2,3 ATR (unter dem 2,5er-
+    Gate, unter der -8%-Drop-Schwelle), aber Preis 0,5% ueberm Tagestief —
+    Boden-Short nach gelaufenem Move muss blockieren."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PBTSH"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "PBTSH",
+        "Strategy": "Gap Momentum Short",
+        "grade": "S",
+        "score": 90,
+        "rvol": 2.0,
+        "price": 30.0,
+        "current_price": 30.0,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -7.0,
+        "close_pos": 0.3,
+        "open_to_current_pct": -1.0,
+        "day_low": 29.85,
+        "trade_setup": {"atr": 0.9},
+        "Entry": 30.0,
+        "StopLoss": 31.2,
+        "TP1": 27.6,
+        "TP2": 26.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_short_bottom_entry_extended_wait_retest" in state["suppression_reasons"]
+    # 2,3 ATR < 2,5 und -7% > -8%: die bisherigen Short-Gates haette die Zeile
+    # nicht gefangen — nur das neue Orts-Gate.
+    assert "swing_short_day_move_extended_wait_retest" not in state["suppression_reasons"]
+    assert "swing_short_drop_extended_wait_failed_reclaim" not in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_long_entry_top_entry_gate_after_extended_day():
+    """Crypto/Intraday-Long: dieselbe Orts-Logik. 2,25 ATR Tagesmove + Preis
+    0,3% unterm Tageshoch => top_entry_extended_wait_retest. Ohne Tageshoch-
+    Metadaten bleibt das Gate stumm (Bestandsverhalten)."""
+    row = {
+        "ticker": "BTCXYZ",
+        "Signal_Direction": "LONG",
+        "change_pct": 9.0,
+        "price": 10.0,
+        "current_price": 10.0,
+        "atr": 0.4,
+        "day_high": 10.03,
+        "close_pos": 0.9,
+        "open_to_current_pct": 4.0,
+        "rvol": 2.0,
+        "latest_bar_change_pct": 0.4,
+        "latest_bar_close_pos": 0.8,
+    }
+
+    reasons = api._long_entry_rule_reasons(row)
+    assert "top_entry_extended_wait_retest" in reasons
+
+    row_no_high = dict(row)
+    row_no_high.pop("day_high")
+    reasons_no_high = api._long_entry_rule_reasons(row_no_high)
+    assert "top_entry_extended_wait_retest" not in reasons_no_high
+
+
+def test_bear_short_bottom_entry_gate_after_extended_drop():
+    """Crypto/Bear-Short symmetrisch: 2,4 ATR Drop + Preis 0,3% ueberm
+    Tagestief => bottom_entry_extended_wait_retest. Crash-Meldungen sind
+    davon ausgenommen (informeller Flush, kein Short-Einstieg)."""
+    row = {
+        "ticker": "ETHXYZ",
+        "Signal_Direction": "SHORT",
+        "change_pct": -9.6,
+        "price": 10.0,
+        "current_price": 10.0,
+        "atr": 0.4,
+        "day_low": 9.97,
+        "close_pos": 0.3,
+        "open_to_current_pct": -1.0,
+        "rvol": 2.0,
+        "latest_bar_change_pct": -0.3,
+        "latest_bar_close_pos": 0.3,
+    }
+
+    reasons = api._bear_short_rule_reasons(row)
+    assert "bottom_entry_extended_wait_retest" in reasons
+
+    crash_reasons = api._bear_crash_rule_reasons(row)
+    assert "bottom_entry_extended_wait_retest" not in crash_reasons
+
+
+def test_top_entry_distance_helper_edges():
+    """Hilfsfunktion: fehlende Daten => None; Kurs ueberm Hoch bzw. unterm
+    Tief (veraltete Tagesdaten) zaehlt als 0 = am Extrem."""
+    assert api._swing_top_entry_distance_pct({"price": 10.0}) is None
+    assert api._swing_top_entry_distance_pct({"price": 10.0, "day_high": 10.5}) == pytest.approx(4.7619, abs=0.001)
+    assert api._swing_top_entry_distance_pct({"price": 10.6, "day_high": 10.5}) == 0.0
+    assert api._swing_top_entry_distance_pct({"price": 10.0, "day_low": 9.9}, short=True) == pytest.approx(1.0101, abs=0.001)
+    assert api._swing_top_entry_distance_pct({"price": 10.0}, short=True) is None

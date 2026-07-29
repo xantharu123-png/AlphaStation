@@ -5745,6 +5745,11 @@ def _long_entry_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("fresh_5m_state_missing_wait_retest")
     elif extended and (latest_red_fade or intraday_red_fade or not_holding_highs):
         reasons.append("extended_long_fading_wait_retest")
+    # AUDIT 2026-07-29 (PBT): gleiche Orts-Logik wie im Aktien-Swing —
+    # >= 2 ATR Tagesmove UND Einstieg <= 1% unterm Tageshoch = Top-Kauf.
+    # None-sicher: Rows ohne ATR-/Tages-Metadaten behalten Bestandsverhalten.
+    if _top_entry_gate_active(row, change):
+        reasons.append("top_entry_extended_wait_retest")
     return reasons
 
 
@@ -5757,6 +5762,13 @@ _SWING_DAY_MOVE_HARD_ATR = 3.5       # ab hier: Move erschoepft, NO_CHASE
 _SWING_PREMARKET_GAP_MIN_PCT = 3.0   # Gap, ab dem "vorboeslich gelaufen" gilt
 # Session bestaetigt nach dem Gap faktisch nichts mehr (<= +0.5% seit Open):
 _SWING_PREMARKET_GAP_MAX_SESSION_FOLLOW_PCT = 0.5
+# AUDIT 2026-07-29 (PBT): Orts-Gate gegen Top-Kaeufe nach gelaufenem Tag.
+# +9,6% bei 4,0% ATR = 2,4 ATR rutschte unter dem 2,5er-Gate durch, der Entry
+# lag 0,4% unterm Tageshoch — ein Top-Kauf nach >= 2 ATR gelaufenem Move.
+# Tag >= 2 ATR UND Preis <= 1% am Tages-Extrem => kein JETZT. Frische
+# Breakouts (< 2 ATR) und Ruecksetzer > 1% vom Extrem (Retest) bleiben frei.
+_SWING_TOP_ENTRY_DAY_MOVE_ATR = 2.0
+_SWING_TOP_ENTRY_MAX_DIST_FROM_EXTREME_PCT = 1.0
 
 
 def _swing_day_move_atr(row: Dict[str, Any], change_pct: Optional[float]) -> Optional[float]:
@@ -5775,6 +5787,37 @@ def _swing_day_move_atr(row: Dict[str, Any], change_pct: Optional[float]) -> Opt
     if atr_pct <= 0:
         return None
     return abs(change_pct) / atr_pct
+
+
+def _swing_top_entry_distance_pct(row: Dict[str, Any], *, short: bool = False) -> Optional[float]:
+    """Abstand des aktuellen Preises vom Tages-Extrem in % (0 = am Extrem).
+
+    Long: Abstand unterm Tageshoch; Short: Abstand ueberm Tagestief.
+    Liegt der Preis ueber/unter dem hinterlegten Extrem (veraltete Tagesdaten),
+    zaehlt das als 0 — der Kurs IST am Extrem. None, wenn Preis oder
+    Tages-Extrem in der Row fehlen.
+    """
+    price = _alert_float(_extract_alert_price(row), None)
+    if not price or price <= 0:
+        return None
+    if short:
+        day_low = _alert_float(_alert_get_any(row, "Day_Low", "day_low", "DayLow", "Low", "low"))
+        if not day_low or day_low <= 0:
+            return None
+        return max(0.0, (price - day_low) / day_low * 100.0)
+    day_high = _alert_float(_alert_get_any(row, "Day_High", "day_high", "DayHigh", "High", "high"))
+    if not day_high or day_high <= 0:
+        return None
+    return max(0.0, (day_high - price) / day_high * 100.0)
+
+
+def _top_entry_gate_active(row: Dict[str, Any], change_pct: Optional[float], *, short: bool = False) -> bool:
+    """PBT-Muster: Tag schon >= 2 ATR gelaufen UND Einstieg <= 1% am Tages-Extrem."""
+    day_move_atr = _swing_day_move_atr(row, change_pct)
+    if day_move_atr is None or day_move_atr < _SWING_TOP_ENTRY_DAY_MOVE_ATR:
+        return False
+    dist = _swing_top_entry_distance_pct(row, short=short)
+    return dist is not None and dist <= _SWING_TOP_ENTRY_MAX_DIST_FROM_EXTREME_PCT
 
 
 def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
@@ -5829,6 +5872,11 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_day_move_exhausted_no_chase")
         elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
             reasons.append("swing_day_move_extended_wait_retest")
+    # PBT 2026-07-29: 2,4 ATR rutschte unter dem 2,5er-Gate durch, aber der
+    # Entry 0,4% unterm Tageshoch war ein Top-Kauf. Das Orts-Gate faengt den
+    # 2,0-2,5-ATR-Korridor, sobald der Preis am Tages-Extrem klebt.
+    if _top_entry_gate_active(row, change):
+        reasons.append("swing_top_entry_extended_wait_retest")
     # Gap lief vorbörslich, die Session bestaetigt nichts: kein JETZT.
     # (Bisherige Gap-Gates greifen nur bei "Gap Momentum Long"-Strategienamen;
     # RITM lief als "Momentum Breakout Long" daran vorbei.)
@@ -5918,6 +5966,10 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_short_day_move_exhausted_no_chase")
         elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
             reasons.append("swing_short_day_move_extended_wait_retest")
+    # Orts-Gate symmetrisch (PBT): >= 2 ATR Drop UND Preis <= 1% ueberm
+    # Tagestief = Boden-Short nach gelaufenem Move.
+    if _top_entry_gate_active(row, change, short=True):
+        reasons.append("swing_short_bottom_entry_extended_wait_retest")
 
     if open_to_current is not None and open_to_current > 0.5:
         reasons.append("swing_short_current_candle_reclaim")
@@ -6205,6 +6257,11 @@ def _bear_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("latest_5m_green_reclaim")
     if rvol is not None and rvol < 1.0:
         reasons.append("rvol_below_bear_threshold")
+    # AUDIT 2026-07-29 (PBT): Orts-Gate symmetrisch zur Long-Seite — >= 2 ATR
+    # Drop UND Preis <= 1% ueberm Tagestief = Boden-Short nach gelaufenem Move.
+    # None-sicher: Rows ohne ATR-/Tages-Metadaten behalten Bestandsverhalten.
+    if _top_entry_gate_active(row, change, short=True):
+        reasons.append("bottom_entry_extended_wait_retest")
 
     return reasons
 
@@ -6223,7 +6280,13 @@ def _bear_entry_quality(row: Dict[str, Any]) -> str:
 def _bear_crash_rule_reasons(row: Dict[str, Any]) -> List[str]:
     """Crash alert is informational: active flush only, not a normal short-entry gate."""
     reasons: List[str] = []
-    hard_blocks = set(_bear_short_rule_reasons(row)) - {"drop_too_extended_no_chase"}
+    # Das Bottom-Orts-Gate gehoert zum Short-EINSTIEG, nicht zur Crash-Meldung:
+    # ein aktiver Flush liegt per Definition am Tagestief und darf hier nicht
+    # zusaetzlich unterdrueckt werden.
+    hard_blocks = set(_bear_short_rule_reasons(row)) - {
+        "drop_too_extended_no_chase",
+        "bottom_entry_extended_wait_retest",
+    }
     reasons.extend(sorted(hard_blocks))
     fields = _extract_bear_short_fields(row)
     change = fields["change_pct"]
@@ -6552,9 +6615,13 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_4h_rejection_wait_reclaim",
         "swing_day_move_extended_wait_retest",
         "swing_gap_done_premarket_wait_retest",
+        "swing_top_entry_extended_wait_retest",
         "swing_short_day_move_extended_wait_retest",
         "swing_short_extended_wait_retest",
         "swing_short_drop_extended_wait_failed_reclaim",
+        "swing_short_bottom_entry_extended_wait_retest",
+        "top_entry_extended_wait_retest",
+        "bottom_entry_extended_wait_retest",
         "swing_short_current_candle_reclaim",
         "swing_short_not_closing_weak",
         "early_mover_retest_not_near_entry",
