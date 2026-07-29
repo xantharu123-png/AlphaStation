@@ -296,7 +296,10 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 - **Server-Verifikation:** `scripts/smoke_signal_performance.py` prüft die Felder live
   gegen `signal_tracker.sqlite`; `scripts/preview_weekly_report.py` rendert den Report
   ohne Versand; `scripts/signal_performance_breakdown.py` (29.07.) bricht dieselbe
-  Metrik auf **Scanner × Kalendermonat** herunter (Regime-/Stichproben-Analyse).
+  Metrik auf **Scanner × Kalendermonat** herunter (Regime-/Stichproben-Analyse);
+  `scripts/websocket_benefit_analysis.py` (29.07.) misst die **Zeit-Sensitivität**
+  (TP1-/Stop-Zeiten ab Mail, Extension zum Mail-Zeitpunkt in ATR, T-10/T-15-Preisvorteil
+  samt Stop-Gegencheck) als Datengrundlage für die Phase-2-Entscheidung (WebSocket).
 
 ---
 
