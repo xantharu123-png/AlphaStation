@@ -1,6 +1,6 @@
 # Alpha Station — Projekthandbuch
 
-**Stand:** 28. Juli 2026 · **Endstand Code:** `b757ade` auf `main` · **Tests:** 1120 (alle grün)
+**Stand:** 29. Juli 2026 · **Endstand Code:** `2c66d4f` auf `main` · **Tests:** 1130 (alle grün)
 **Repository:** `C:\Users\miros\Desktop\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`
 
@@ -160,9 +160,61 @@ Filter greift im Abonnenten-Routing **und** bei der Betreiber-Mailbox (sofern di
 ein User-Konto ist). Watch-Mails bleiben separat: Opt-in, Default AUS (AUDIT H-3).
 Info-Mails (Passwort, Test, Wochenreport, Markt-Puls) bewusst ohne Kanal-Filter.
 
+### 3.6 29. Juli — Orts-Gate gegen Top-Käufe, Breakdown-Werkzeug, UI-Konsistenzpaket
+
+Anlass drei produktive Fehlverhalten plus vier UI-Meldungen des Betreibers:
+
+1. **PBT-Fall:** Mail 29.07. 14:13 UTC — PBT „Gap Momentum Long", Entry $30,69 = **0,36 %
+   unterm Tageshoch**, Tagesmove +9,6 % bei 4,0 % ATR = **2,4 ATR** — rutschte um 0,1 ATR
+   **unter dem gestrigen 2,5-ATR-Gate durch**. Kurs fiel danach Richtung Stop.
+   Lehre: Reine Größen-Schwellen erzeugen immer Grenzfälle; das Muster ist ein
+   **Orts-Problem** (Kauf am Tages-Extrem nach ≥ 2 ATR gelaufenem Move).
+
+2. **NVST-Fall (gleiches Muster):** Mail 14:47 UTC — NVST +6,3 % bei 2,67 % ATR = 2,36 ATR,
+   Preis 0,45 % unterm Hoch. Ging raus, **bevor** das Orts-Gate deployed war (Push ~17:05 MESZ,
+   Mail 16:47 MESZ). Das vom Betreiber vermisste „Gap" war real (Filter verlangt ≥ 3 %,
+   Open vs. Vortagesschluss), aber im 4h-Chart unspektakulär — die Mail zeigte es nicht.
+
+**Umsetzung A — Top-Entry-Orts-Gate (Commit `da6c4be`, Suite 1126):**
+**Tag ≥ 2,0 ATR gelaufen UND Preis ≤ 1 % am Tages-Extrem → WAIT_RETEST** (kein JETZT).
+Identische Logik in allen vier Einstiegspfaden: Aktien long + short
+(`_stock_swing_rule_reasons` / `_stock_swing_short_rule_reasons`), Crypto/Intraday long
+(`_long_entry_rule_reasons`), Bear-Short (`_bear_short_rule_reasons`).
+**Crash-Meldungen bewusst ausgenommen** (ein aktiver Flush liegt per Definition am
+Tagestief — Lage-Meldung, kein Short-Einstieg). Gegenproben abgesichert: frischer
+Breakout < 2 ATR bleibt mailbar (auch am Hoch); ≥ 1 % Rücksetzer vom Extrem = Retest
+bleibt frei; Kurs über/unter dem hinterlegten Extrem (veraltete Tagesdaten) zählt als
+„am Extrem"; Rows ohne ATR-/Tages-Metadaten: Bestandsverhalten. Verifiziert:
+Produktions-Strategy-Rows tragen `Day_High`/`Day_Low`/`ATR14` (api.py ~12993) — das Gate
+ist live wirksam. PBT wäre blockiert worden, RITM auch, NVST auch.
+
+**Umsetzung B — Hit-Rate-Einordnung + Breakdown-Werkzeug (Commit `da6c4be`):**
+Betreiber-Frage „43 % ist schlecht, früher 70 %". Einordnung: Trefferquote ohne R:R ist
+bedeutungslos — Breakeven beim 50/50-Management ≈ 33 %, Wilson-KI 36–49 %, +0,31 R/Trade,
+Σ +66,4 R. Die „70 %" sind lokal nicht verifizierbar (DB auf dem Server); wahrscheinlichste
+Erklärungen: andere Metrik (TP1-Berührung ≠ entschiedener Trade), kleinere Stichprobe,
+anderes Regime, Semantik vor dem T1-Fix. Neues Werkzeug
+`scripts/signal_performance_breakdown.py` (Server): Win-Rate/Ø R/Σ R **pro Scanner ×
+Kalendermonat** aus `signal_tracker.sqlite`, Zellen mit n < 30 markiert — zeigt, ob und
+wann die Quote kippte.
+
+**Umsetzung C — UI/UX-Konsistenzpaket (Commit `2c66d4f`, Suite 1130):**
+
+| # | Befund | Fix |
+|---|---|---|
+| 1 | „No Trade" vs. „Nicht traden" gemischt | Es gibt **keinen EN/DE-Sprach-Toggle** — die UI ist fest deutsch mit hartcodierten Englisch-Resten. Vereinheitlicht auf Deutsch (trade_health, api, ORB-Frontend; Bundle neu gebaut + verifiziert). Ein echter EN/DE-Toggle wäre ein eigenes Feature |
+| 2 | Ganze ORB-Liste „Blockiert" — was heißt das, was nützt sie | Badge 1 zeigt jetzt den **konkreten Sperr-Grund** aus Trade-Health („Live R:R zu schwach", „TP1 schon gelaufen", „Stop im Tagesrauschen", „Geometrie ungültig" …), Badge 2 = Entscheidung „Nicht traden"; Detailzeile nennt die Gründe; Erklärtext über der Liste. Nutzen der Liste: Transparenz — Top-Kandidaten **mit** Qualitätsurteil statt leerer Liste; Sortierung bleibt: handelbar zuerst, Nicht-traden zuletzt |
+| 3 | „Letzter Scan: vor 18h" trotz Server | Anzeige-Problem: bg-owned Scanner (bi_long/bi_short/biotech, H-9) laufen **außerhalb** der api — deren In-Memory-`last_run` veraltet. Neu `_effective_scan_timing`: last_run/next_run = max(In-Memory, **Cache-Datei-mtime**). Falls der Cache wirklich 18 h alt ist (echter Stillstand): `systemctl status tradingbot-bg` + `journalctl -u tradingbot-bg -n 60` |
+| 4 | NVST: Mail nach gelaufenem Move, „wo ist das Gap" | Orts-Gate (A) blockiert den Fall nach Deploy; Mail zeigt das gemessene Gap jetzt explizit: „Gap +3,2 % (Open vs. Vortagesschluss)" unter der Tagesänderung |
+
+**Kalenderfeste Tests (in `2c66d4f`):** Vier Tests hingen am **echten Wirtschaftskalender**
+(FOMC-Tag 29.07.2026 → Event-Penalty in trade_health → chase_risk HIGH → NICHT_TRADEN
+statt WARTEN; am 28.07. noch grün). Market-Context in diesen Tests neutral gemockt —
+das Produktivverhalten (defensivere Bewertung an Event-Tagen) ist gewollt und bleibt.
+
 ---
 
-## 4. Das Mail-System (Stand 28.07.)
+## 4. Das Mail-System (Stand 29.07.)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
 `info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT SWING / 👁️ WATCH.
@@ -177,8 +229,9 @@ Kanal-Opt-out greift aber auch dort (28.07.).
 Grade/Score/RVOL → Common-Stock-Guard → 4H-Execution-State → **Volatilitätsbudget (neu)** →
 Momentum-spezifisch (Breakout-Typ, Frische, Continuation, Fakeout, Wick, RVOL-Floor,
 Late-Session, TP1-schon-berührt, Spike-Rejection, ≥ 8 %-Move-Chase) → Swing-Regelgründe
-(≥ 12 %/≥ 8 %+RVOL, Fading, Highs-Halten, Gap-Gates, **Tagesmove-ATR (neu)**,
-**Pre-Market-Gap (neu)**) → Trade-Plan-Guard (valide Level, natives Setup, R:R) →
+(≥ 12 %/≥ 8 %+RVOL, Fading, Highs-Halten, Gap-Gates, Tagesmove-ATR,
+Pre-Market-Gap, **Top-Entry-Orts-Gate (29.07.)**) → Trade-Plan-Guard (valide Level,
+natives Setup, R:R) →
 Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ---
@@ -194,13 +247,14 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
   zentral in `signal_tracker`, mit Alarm im Wochenreport.
 - **Server-Verifikation:** `scripts/smoke_signal_performance.py` prüft die Felder live
   gegen `signal_tracker.sqlite`; `scripts/preview_weekly_report.py` rendert den Report
-  ohne Versand.
+  ohne Versand; `scripts/signal_performance_breakdown.py` (29.07.) bricht dieselbe
+  Metrik auf **Scanner × Kalendermonat** herunter (Regime-/Stichproben-Analyse).
 
 ---
 
 ## 6. Testlandschaft
 
-**1120 Tests, alle grün** (28.07.). Wichtige Suiten:
+**1130 Tests, alle grün** (29.07.). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -213,8 +267,10 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 | `test_stock_execution_regressions.py`, `test_stock_swing_4h_rejection.py` | 4H-Execution-Gates |
 
 **Regeln:** Nie ohne `--basetemp=tmp/pytest_audit` (Sandbox). Produktivcode-Änderungen
-erst nach voller Suite pushen. Suite-Stand-Historie: 985 (21.07.) → 1101 (24.07.) →
-1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) → 1120 (28.07. Mail-Kanäle).
+erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalender in
+Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
+985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
+1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket).
 
 ---
 
@@ -222,11 +278,13 @@ erst nach voller Suite pushen. Suite-Stand-Historie: 985 (21.07.) → 1101 (24.0
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **C: Scan-Taktung** — Sweep läuft 30-Min-Takt, Mails erst in US-Regular-Session; vorbörsliche Moves (RITM) entstehen im Blindfenster. Optionen: Takt 9:30–11:00 ET auf 10–15 Min verdichten; Pre-Market-Watch-Mailklasse (Produktentscheidung) | Vom Betreiber angesprochen, bewusst vertagt |
-| 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR und 2,0 %-Budget sind an 5 Produktivfällen kalibriert; nach weiteren Sweeps an Server-Logs prüfen (`swing_day_move_*`, `low_volatility`) und ggf. nachjustieren | Commit `cdeff7e` |
+| 1 | **C: Scan-Taktung** — Sweep läuft 30-Min-Takt, Mails erst in US-Regular-Session; vorbörsliche/frühe Moves (RITM, NVST) entstehen im Blindfenster. Optionen: Takt 9:30–11:00 ET auf 10–15 Min verdichten; Pre-Market-Watch-Mailklasse (Produktentscheidung) | Vom Betreiber angesprochen, bewusst vertagt |
+| 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
-| 4 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
-| 5 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
+| 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
+| 5 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
+| 6 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
+| 7 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
 
 ---
 
