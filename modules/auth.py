@@ -1781,6 +1781,7 @@ def _normalize_trade_horizon(value: Any) -> str:
 MAIL_CHANNELS: Dict[str, str] = {
     "stocks_swing": "Aktien Swing",
     "stocks_intraday": "Aktien Intraday",
+    "stocks_premarket": "Aktien Pre-Market",
     "crypto": "Crypto",
     "biotech": "Biotech",
     "bear": "Bear & Crash",

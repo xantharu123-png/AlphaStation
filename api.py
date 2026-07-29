@@ -1410,6 +1410,126 @@ def _project_us_equity_rvol(raw_rvol: Any, now_utc: Optional[datetime] = None) -
     return project_partial_rvol(value, expected_fraction)
 
 
+# ── AUDIT 2026-07-29 (Punkt C / RITM+NVST): Pre-Market-Radar + Opening-Takt ──
+# Root-Cause des Blindfensters: vorbörsliche Explosionen (z.B. NVST ab 8:00 ET)
+# wurden strukturell nie gemailt — (1) Mail-Session-Gate sperrt alles vor 9:30
+# ET, (2) RVOL-Filter vergleicht duennes PM-Volumen mit dem 20-Tage-GANZTAGES-
+# Schnitt und rejected jeden PM-Mover, (3) 30-Min-Takt. Die PM-Logik ersetzt
+# RVOL deshalb durch ABSOLUTE PM-Liquiditaet + Spread-Guard + ATR-Extensions-
+# Decke und schickt eine eigene, abschaltbare Fruehwarn-Mail.
+_PREMARKET_WINDOW_START_ET = (7, 0)    # Frueheste PM-Mail: 7:00 ET
+_PREMARKET_WINDOW_END_ET = (9, 25)     # Spaeteste PM-Mail: 9:25 ET (vor Open)
+_PREMARKET_MIN_DOLLAR_VOLUME = 500_000.0   # Absoluter PM-Liquiditaets-Floor
+_PREMARKET_MAX_SPREAD_PCT = 7.0            # Spread-Guard (PM-Spreizen)
+_PREMARKET_MAX_EXTENSION_ATR = 3.0         # >3 ATR PM-Move = schon gelaufen
+_PREMARKET_MIN_SCORE = 85                  # Strenger als Regular (80)
+_OPENING_WINDOW_START_ET = (9, 25)   # Verdichteter Scan-Takt ab 9:25 ET
+_OPENING_WINDOW_END_ET = (11, 30)    # ... bis 11:30 ET
+_STRATEGY_SCAN_OPENING_INTERVAL_MIN = 10.0
+
+
+def _et_wallclock_minutes(now_utc: Optional[datetime] = None) -> Optional[float]:
+    """US-Eastern-Wanduhr in Minuten seit Mitternacht; None bei Fehler/WE."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        current = now_utc or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_et = current.astimezone(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return None
+        return now_et.hour * 60 + now_et.minute + now_et.second / 60.0
+    except Exception:
+        return None
+
+
+def _et_window_active(window: Tuple[Tuple[int, int], Tuple[int, int]], now_utc: Optional[datetime] = None) -> bool:
+    minutes = _et_wallclock_minutes(now_utc)
+    if minutes is None:
+        return False
+    start = window[0][0] * 60 + window[0][1]
+    end = window[1][0] * 60 + window[1][1]
+    return start <= minutes < end
+
+
+def _premarket_window_active(now_utc: Optional[datetime] = None) -> bool:
+    """True im PM-Mail-Fenster (7:00–9:25 ET, Mo–Fr)."""
+    return _et_window_active((_PREMARKET_WINDOW_START_ET, _PREMARKET_WINDOW_END_ET), now_utc)
+
+
+def _opening_window_active(now_utc: Optional[datetime] = None) -> bool:
+    """True im Opening-Fenster (9:25–11:30 ET, Mo–Fr) — verdichteter Takt."""
+    return _et_window_active((_OPENING_WINDOW_START_ET, _OPENING_WINDOW_END_ET), now_utc)
+
+
+def _premarket_rvol_proxy(dollar_vol: Any) -> float:
+    """Absolutes PM-Dollar-Volumen → RVOL-aequivalenter Intensitaets-Proxy.
+
+    PM-RVOL (PM-Volumen vs. 20-Tage-Ganztages-Schnitt) ist mathematisch nicht
+    vergleichbar — der ehrliche Proxy ist absolute PM-Liquiditaet: >$500k PM
+    ist fuer die meisten Ticker aussergewoehnlich, >$5M extrem. Nur fuer
+    Scoring/Gates; die Row behaelt den Roh-Wert als RVOL_PM_Raw.
+    """
+    try:
+        dv = float(dollar_vol or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if dv >= 5_000_000:
+        return 3.0
+    if dv >= 2_000_000:
+        return 2.5
+    if dv >= 1_000_000:
+        return 2.0
+    if dv >= 500_000:
+        return 1.5
+    return 0.0
+
+
+def _premarket_scan_gate_reason(
+    *,
+    dollar_vol: Any,
+    spread_pct: Optional[float],
+    min_dollar_vol: float = _PREMARKET_MIN_DOLLAR_VOLUME,
+    max_spread_pct: float = _PREMARKET_MAX_SPREAD_PCT,
+) -> str:
+    """Fruehe PM-Gates im Strategy-Scan (pure, testbar).
+
+    Ersetzt im Pre-Market das Dollar-Vol-/RVOL-Filter-Paar: absolute
+    PM-Liquiditaet + harte Spread-Obergrenze. Rueckgabe "" = passiert,
+    sonst der Reject-Grund fuer die Scan-Diagnostik.
+    """
+    try:
+        dv = float(dollar_vol or 0.0)
+    except (TypeError, ValueError):
+        dv = 0.0
+    if dv < float(min_dollar_vol):
+        return "premarket_dollar_volume_filter"
+    if spread_pct is None:
+        return "premarket_missing_quote"
+    if spread_pct > float(max_spread_pct):
+        return "premarket_spread_guard"
+    return ""
+
+
+def _effective_scan_interval_min(scan_name: str, now_utc: Optional[datetime] = None) -> float:
+    """Dynamischer Scan-Takt (AUDIT 2026-07-29, Punkt C).
+
+    strategy_scan laeuft im Opening-Fenster (9:25–11:30 ET) alle 10 statt 30
+    Minuten — Moves, die direkt am Open starten (RITM/NVST-Muster), werden
+    ~20 Minuten frueher erfasst. Alle anderen Scanner unveraendert.
+    """
+    try:
+        base = float((_scan_status.get(scan_name) or {}).get("interval_min", 0) or 0)
+    except Exception:
+        base = 0.0
+    if base <= 0:
+        base = 1.0
+    if scan_name == "strategy_scan" and _opening_window_active(now_utc):
+        return min(base, _STRATEGY_SCAN_OPENING_INTERVAL_MIN)
+    return base
+
+
 def _normalize_trade_horizon_value(value: Any) -> str:
     raw = str(value or "swing").strip().lower().replace("-", "_")
     aliases = {
@@ -6903,6 +7023,81 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     }
 
 
+def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    """Dedizierter Alert-Check fuer Pre-Market-Radar-Rows (AUDIT 2026-07-29).
+
+    Die Regular-Session-Maschinerie (trade_health, 4H-Execution, 5m-Freshness,
+    RVOL-Guard) wuerde PM-Rows systematisch verwerfen — sie ist auf
+    Regular-Session-Daten kalibriert. PM ist eine bewusst einfachere
+    Fruehwarnung: Scan-Score >= 85, Top-Grade, absolute PM-Liquiditaet,
+    ATR-Extensions-Decke, valide Level. Eigener Cooldown-Namespace (_pm),
+    damit die Regular-Mail nach Open unabhaengig bleibt.
+    """
+    now = now or time.time()
+    ticker = _extract_alert_ticker(row)
+    grade = _extract_alert_grade(row)
+    score = _alert_float(_extract_alert_score(row), 0) or 0
+    rvol = _extract_alert_rvol(row)
+    reasons = []
+
+    if not ticker:
+        reasons.append("missing_ticker")
+    if not _alert_bool(row.get("Premarket") or row.get("premarket")):
+        reasons.append("not_a_premarket_row")
+    asset_exclusion_reason = None
+    if ticker and scanner_name in _STOCK_EMAIL_ASSET_GUARD_SCANNERS:
+        common_stock_universe, common_stock_source = _load_common_stock_universe()
+        asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
+            ticker,
+            common_stock_universe=common_stock_universe,
+            universe_source=common_stock_source,
+            require_reference=common_stock_universe is None,
+        )
+        if asset_exclusion_reason:
+            reasons.append("non_common_stock_product")
+    if grade not in _ALERT_TOP_GRADES:
+        reasons.append("grade_below_alert_threshold")
+    if score < _PREMARKET_MIN_SCORE:
+        reasons.append("premarket_score_below_threshold")
+    pm_dollar_vol = _alert_float(_alert_get_any(row, "PM_DollarVol", "dollar_volume", "Dollar_Volume"), 0) or 0.0
+    if pm_dollar_vol < _PREMARKET_MIN_DOLLAR_VOLUME:
+        reasons.append("premarket_liquidity_below_threshold")
+    extension_atr = _alert_float(row.get("Extension_ATR"), None)
+    if extension_atr is not None and extension_atr > _PREMARKET_MAX_EXTENSION_ATR:
+        reasons.append("premarket_extension_too_stretched")
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid") or levels.get("estimated"):
+        reasons.append("premarket_missing_trade_levels")
+
+    cooldown_key = f"{scanner_name}_{ticker}_pm" if ticker else ""
+    cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
+    cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
+    cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
+    if cooldown_remaining > 0:
+        reasons.append("cooldown_active")
+    dedupe_remaining = _email_dedupe_remaining(cooldown_key, cooldown_ttl, now) if cooldown_key else 0
+    if dedupe_remaining > 0:
+        reasons.append("persistent_dedupe_active")
+
+    decision = _alert_decision_from_reasons(scanner_name, reasons)
+    return {
+        "ticker": ticker,
+        "grade": grade,
+        "score": int(score) if float(score).is_integer() else round(score, 2),
+        "price": _extract_alert_price(row),
+        "rvol": rvol,
+        "pm_dollar_vol": pm_dollar_vol,
+        "cooldown_key": cooldown_key,
+        "cooldown_remaining_seconds": cooldown_remaining,
+        "persistent_dedupe_remaining_seconds": dedupe_remaining,
+        "bearish_dedupe_remaining_seconds": 0,
+        "asset_exclusion_reason": asset_exclusion_reason,
+        "alertable_now": not reasons,
+        "suppression_reasons": reasons,
+        **decision,
+    }
+
+
 def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> List[Dict[str, Any]]:
     rows, _ = load_cache_file(cache_file, max_age_hours=24)
     if scanner_name == "orb":
@@ -7699,6 +7894,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
     daily_close_confirmed_mode = False
+    # AUDIT 2026-07-29 (Punkt C / RITM+NVST): Pre-Market-Radar-Modus — eigene
+    # Fruehwarn-Mail im PM-Fenster, bewusst einfachere Gates (siehe
+    # _classify_premarket_candidate), eigener Kanal + Cooldown-Namespace.
+    premarket_mail_mode = False
     send_time_utc = datetime.now(timezone.utc)
     market_status: Dict[str, Any] = {}
     if market_type == "stocks":
@@ -7708,12 +7907,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             # Some unit tests monkeypatch the helper as a no-arg lambda.
             market_status = _stock_trade_email_status()
         if not market_status.get("allowed"):
+            if _premarket_window_active(send_time_utc):
+                premarket_mail_mode = True
             # AUDIT K-2b (PRODUKTENTSCHEIDUNG, final): Nach US-Daily-Close ist
             # die Bestaetigung eines Daily-Breakouts legitim — sonst waere der
             # C&H-Kanal architektonisch tot (intraday unterdrueckt K-2a, nach
             # Close blockte das Session-Gate alles). ENG begrenzte Ausnahme:
             # nur wenn ALLE Rows BREAKOUT_CONFIRMED + heutige Tageskerze.
-            if _strategy_rows_daily_close_confirmed(results):
+            elif _strategy_rows_daily_close_confirmed(results):
                 daily_close_confirmed_mode = True
             else:
                 reason = str(market_status.get("reason") or "US market closed")
@@ -7734,9 +7935,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             continue
         grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
         grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
-        if scanner_key in _STOCK_ALERT_SCANNERS:
+        if scanner_key in _STOCK_ALERT_SCANNERS and not premarket_mail_mode:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
-        if scanner_key == "stock_strategy":
+        if scanner_key == "stock_strategy" and not premarket_mail_mode:
             row_strategy = str(row.get("Strategy") or row.get("strategy") or strategy_name or "").lower()
             if "momentum breakout long" in row_strategy:
                 row = _stock_breakout_freshness_state(
@@ -7753,7 +7954,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 reason_key = mail_quality_reason or "stock_strategy_mail_quality_gate"
                 suppressed[reason_key] = suppressed.get(reason_key, 0) + 1
                 continue
-        state = _classify_alert_candidate(scanner_key, row, now)
+        if premarket_mail_mode:
+            state = _classify_premarket_candidate(scanner_key, row, now)
+        else:
+            state = _classify_alert_candidate(scanner_key, row, now)
         if daily_close_confirmed_mode and state.get("cooldown_key"):
             # AUDIT K-2b: eigener Dedupe-Namespace fuer die Daily-Close-Mail
             # (Suffix _dailyclose), damit pro Ticker und Tag genau eine
@@ -7780,6 +7984,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "score": state["score"],
             "price": state["price"],
             "rvol": _alert_float(state["rvol"], 0) or 0,
+            "premarket": premarket_mail_mode,
+            "pm_dollar_vol": _alert_float(state.get("pm_dollar_vol"), 0) or 0,
             "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", default=0), 0) or 0,
             "entry_quality": row.get("entry_quality") or row.get("long_entry_quality") or ("SWING_SETUP" if scanner_key in _SWING_STOCK_STRATEGY_ALERT_SCANNERS else ""),
             "strategy": row.get("Strategy") or row.get("strategy") or strategy_name,
@@ -7827,6 +8033,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             if _gap_pct is not None and abs(_gap_pct) >= 1.0
             else ""
         )
+        # PM-Radar: RVOL-Spalte zeigt das absolute PM-Dollar-Volumen (der
+        # ehrliche PM-Massstab), nicht den unvergleichbaren Ganztages-RVOL.
+        if a.get("premarket") and a.get("pm_dollar_vol"):
+            _rvol_cell = f'PM ${a["pm_dollar_vol"] / 1_000_000:.1f}M'
+        else:
+            _rvol_cell = f'{a["rvol"]:.1f}x'
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
@@ -7834,11 +8046,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%{_gap_suffix}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_rvol_cell}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{timing_label}</td></tr>'
         )
     label = "Crypto Strategie" if market_type == "crypto" else "Aktien Strategie Swing"
+    if premarket_mail_mode:
+        label = "Aktien Pre-Market Radar"
     horizon_note = (
         "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind Struktur-Level; "
         "nicht als Intraday-Scalp oder sofortiger Minuten-TP interpretieren. "
@@ -7846,12 +8060,21 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if market_type == "stocks"
         else "Crypto Strategie-Alert: nur mit bestaetigtem Exchange-Trigger handeln."
     )
+    if premarket_mail_mode:
+        horizon_note = (
+            "PRE-MARKET-FRUEHWARNUNG: duenne Liquiditaet, weite Spreads, der Kurs kann sich zum Open "
+            "stark veraendern. KEIN Market-Einstieg — nur Limit-Orders, kleine Positionsgroesse; "
+            "Abwarten der Eroeffnungsrange ist oft der bessere Einstieg. Volumen-Angabe = absolutes "
+            "PM-Dollar-Volumen (kein Ganztages-RVOL). Die regulaere Swing-Mail nach US-Open bleibt "
+            "davon unberuehrt (eigener Cooldown)."
+        )
     trigger_note = (
         "Intraday-Trigger sind optional und gehoeren in den separaten Intraday-Modus, nicht in diese Swing-Mail."
         if market_type == "stocks"
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
     count_text = f"{len(email_alerts)} von {total_alerts}" if total_alerts > len(email_alerts) else str(len(email_alerts))
+    _score_floor_shown = _PREMARKET_MIN_SCORE if premarket_mail_mode else _ALERT_MIN_SCORE
     # AUDIT K-2b: Daily-Close-Bestaetigung klar labeln (Betreff + Body-Hinweis).
     _dailyclose_subject_suffix = ""
     _dailyclose_hint = ""
@@ -7871,7 +8094,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     _cluster_hint = _cluster_warning_html(email_alerts) if market_type == "stocks" else ""
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_ALERT_MIN_SCORE}</p>
+    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
     {_cluster_hint}
     {_dailyclose_hint}
@@ -7882,11 +8105,11 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
     <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
     {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_score_floor_shown}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
     try:
-        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel="stocks_swing")  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade
+        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade; 2026-07-29: PM-Radar eigener Kanal
     except Exception:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -12674,6 +12897,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         common_stock_universe, common_stock_source = _load_common_stock_universe()
         session_name, _session_label = get_current_trading_session()
         _use_extended_prices = session_name in ("Pre-Market", "After-Hours")
+        # AUDIT 2026-07-29 (Punkt C / RITM+NVST): Pre-Market-Modus. Ohne ihn
+        # rejected der RVOL-/Dollar-Vol-Filter jeden vorbörslichen Mover
+        # (duennes PM-Volumen vs. 20-Tage-Ganztages-Schnitt). PM-Gates:
+        # absolute PM-Liquiditaet + Spread-Guard + ATR-Extensions-Decke.
+        premarket_mode = session_name == "Pre-Market"
         scan_now_utc = datetime.now(timezone.utc)
         session_volume_fraction = _us_equity_expected_volume_fraction(scan_now_utc)
         history_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -12834,10 +13062,23 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         continue
                     if _has_vortag_filter:
                         _stage("vortag_filter")
-                    if min_dollar_vol > 0 and projected_dollar_vol < min_dollar_vol:
+                    if premarket_mode:
+                        # PM: absolute PM-Liquiditaet + Spread-Guard statt
+                        # Ganztages-Projektion/RVOL (AUDIT 2026-07-29, Punkt C).
+                        _pm_reason = _premarket_scan_gate_reason(
+                            dollar_vol=dollar_vol,
+                            spread_pct=spread_pct,
+                            min_dollar_vol=float(strat.get("premarket_min_dollar_volume", _PREMARKET_MIN_DOLLAR_VOLUME) or _PREMARKET_MIN_DOLLAR_VOLUME),
+                        )
+                        if _pm_reason:
+                            _reject(_pm_reason)
+                            continue
+                        _stage("dollar_volume_filter")
+                    elif min_dollar_vol > 0 and projected_dollar_vol < min_dollar_vol:
                         _reject("dollar_volume_filter")
                         continue
-                    _stage("dollar_volume_filter")
+                    else:
+                        _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
                     history_metrics = _strategy_daily_history_metrics(
@@ -12884,7 +13125,17 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # Rows mit RVOL<1.5 konnten den Filter komplett umgehen).
                     _is_mdr = (_is_true_mdr or _is_day1_blowout) and (rvol is not None and float(rvol) >= 1.5)
 
-                    if "RVOL" in filters and not _is_mdr and not (rvol_min <= rvol <= rvol_max):
+                    # AUDIT 2026-07-29 (Punkt C): PM-RVOL ist kein sinnvoller
+                    # Massstab (duennes PM-Volumen vs. Ganztages-Schnitt). Im
+                    # PM-Modus ersetzt der absolute Liquiditaets-Proxy den
+                    # RVOL-Filter; Scoring/Gates nutzen rvol_effective, die Row
+                    # behaelt den Roh-Wert (RVOL_PM_Raw) fuer Transparenz.
+                    rvol_pm_raw = rvol
+                    rvol_effective = rvol
+                    if premarket_mode:
+                        rvol_effective = max(float(rvol or 0.0), _premarket_rvol_proxy(dollar_vol))
+                        rvol_source = "premarket_proxy_absolute_dollar_volume"
+                    if "RVOL" in filters and not _is_mdr and not premarket_mode and not (rvol_min <= rvol <= rvol_max):
                         _reject("rvol_filter")
                         continue
                     _stage("rvol_filter")
@@ -12894,7 +13145,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         history_metrics,
                         price=price,
                         change_pct=change_pct,
-                        rvol=rvol,
+                        rvol=rvol_effective,
                         close_pos=close_pos,
                     )
                     if not _momentum_ok:
@@ -12924,7 +13175,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         strategy_name=strategy_name,
                         filters=filters,
                         change_pct=change_pct,
-                        rvol=rvol,
+                        rvol=rvol_effective,
                         close_pos=close_pos,
                         dollar_vol=dollar_vol,
                         gap_pct=gap_pct,
@@ -12935,6 +13186,12 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         day_low=day_low,
                         prev_atr_pct=prev_atr_pct,
                     )
+                    # PM-Extensions-Decke (AUDIT 2026-07-29): ein PM-Move jenseits
+                    # von ~3 ATR ist schon gelaufen — keine Fruehwarnung mehr,
+                    # sondern Chase-Risiko. PM-Aequivalent zum Orts-Gate.
+                    if premarket_mode and (_score_meta.get("extension_atr") or 0) > _PREMARKET_MAX_EXTENSION_ATR:
+                        _reject("premarket_extension_guard")
+                        continue
                     _breakout_quality = _stock_momentum_breakout_continuation_quality(
                         strategy_name,
                         history_metrics,
@@ -12942,7 +13199,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         breakout_type=_momentum_breakout_type,
                         price=price,
                         change_pct=change_pct,
-                        rvol=rvol,
+                        rvol=rvol_effective,
                         close_pos=close_pos,
                         gap_pct=gap_pct,
                         open_to_current_pct=((price - day_open) / day_open * 100) if day_open > 0 else None,
@@ -12970,7 +13227,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             _strat_score = min(_strat_score, 79)
                     if not history_metrics.get("history_ok"):
                         _strat_score = min(_strat_score, 74)
-                    if not rvol_source.startswith("20D_"):
+                    # PM-Proxy ist der DESIGNED-PM-Massstab, kein Fallback —
+                    # der 76er-Fallback-Cap gilt fuer ihn nicht.
+                    if not rvol_source.startswith("20D_") and not premarket_mode:
                         _strat_score = min(_strat_score, 76)
 
                     # Grade (verschärft — konsistent mit Krypto-Scanner)
@@ -13040,9 +13299,13 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "change_pct": round(change_pct, 2),
                         "Volume": volume,
                         "volume": volume,
-                        "RVOL": rvol,
-                        "rvol": rvol,
+                        "RVOL": round(rvol_effective, 2) if premarket_mode else rvol,
+                        "rvol": round(rvol_effective, 2) if premarket_mode else rvol,
                         "RVOL_Source": rvol_source,
+                        "Premarket": premarket_mode,
+                        "premarket": premarket_mode,
+                        "PM_DollarVol": round(dollar_vol) if premarket_mode else None,
+                        "RVOL_PM_Raw": round(rvol_pm_raw, 2) if (premarket_mode and isinstance(rvol_pm_raw, (int, float))) else None,
                         "AvgVol20": round(history_metrics.get("avg_vol20") or 0),
                         "MedianDollarVol20": round(history_metrics.get("median_dollar_vol20") or 0),
                         "median_dollar_volume_20d": round(history_metrics.get("median_dollar_vol20") or 0),
@@ -14862,7 +15125,7 @@ def _scheduler_loop():
     for name, func in scan_tasks:
         if not _scheduler_running:
             break
-        interval_sec = _scan_status[name]["interval_min"] * 60
+        interval_sec = _effective_scan_interval_min(name) * 60
         cache_file = SCAN_CACHE_MAP.get(name)
         cache_age = None
         if cache_file and os.path.exists(cache_file):
@@ -14921,7 +15184,9 @@ def _scheduler_loop():
             if not _scheduler_running:
                 break
             with _scan_lock:
-                interval_sec = _scan_status[name]["interval_min"] * 60
+                # AUDIT 2026-07-29 (Punkt C): dynamischer Takt — strategy_scan
+                # im Opening-Fenster (9:25–11:30 ET) alle 10 statt 30 Minuten.
+                interval_sec = _effective_scan_interval_min(name) * 60
                 elapsed = now - last_run_times.get(name, 0)
                 is_running = _scan_status[name]["running"]
                 started_at = _scan_status[name].get("_started_at")

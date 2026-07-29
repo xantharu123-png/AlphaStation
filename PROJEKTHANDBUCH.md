@@ -212,9 +212,47 @@ wann die Quote kippte.
 statt WARTEN; am 28.07. noch grün). Market-Context in diesen Tests neutral gemockt —
 das Produktivverhalten (defensivere Bewertung an Event-Tagen) ist gewollt und bleibt.
 
+### 3.7 29. Juli (abends) — Pre-Market-Radar und Opening-Takt (Punkt C, RITM/NVST)
+
+**Anlass:** RITM (28.07.) und NVST (29.07.) explodierten vorbörslich bzw. in der ersten
+Handelsstunde; die Swing-Mails kamen erst 10:12 bzw. 10:47 ET — nach dem Move.
+
+**Root-Cause-Analyse (drei Faktoren, gemeinsam das Blindfenster):**
+
+1. **Session-Gate:** `_stock_trade_email_status` ließ Aktien-Mails nur 9:30–16:00 ET zu;
+   vorbörsliche Kandidaten wurden strukturell geskippt.
+2. **RVOL ist vorbörslich kein sinnvoller Maßstab (die eigentliche Root Cause):** Der
+   Scan las PM-Kurse zwar korrekt ein (`lastTrade`, Extended-Price-Pfad), aber
+   `rvol20` = winziges PM-Volumen vs. 20-Tage-**Ganztages**-Schnitt (~0,1–0,3) →
+   RVOL-Filter (≥ 1,5) rejected praktisch **jeden** PM-Mover; zusätzlich killte das
+   Dollar-Vol-Gate ($200k, ohne Projektion vorbörslich) den Rest. In den ersten 15
+   Regular-Minuten drückte der Projektions-Guard den Score unter 80.
+3. **Takt:** 30-Minuten-Sweep + mehrminütige Laufzeit → nach Open weitere ~35 Minuten.
+
+**Umsetzung (Bausteine B1–B3, Suite 1147):**
+
+| B | Inhalt | Details |
+|---|---|---|
+| **B1** | **PM-Modus im Strategy-Scan** (`session_name == "Pre-Market"`) | Ersetzt RVOL-/Dollar-Vol-Filter durch: **absolute PM-Liquidität ≥ $500k** (strategie-übersteuerbar via `premarket_min_dollar_volume`), **Spread-Guard > 7 %** Bid/Ask → Reject, fehlende Quote → Reject. `_premarket_rvol_proxy` ($500k→1,5 … $5M→3,0) speist als `rvol_effective` Momentum-Gate + Scoring (sonst kein Score ≥ 80 möglich). **PM-Extensions-Decke > 3,0 ATR** → Reject (PM-Äquivalent zum Orts-Gate: gelaufener Move = keine Frühwarnung). Fallback-Cap 76 greift nicht für die designed PM-Quelle. Row-Flags: `Premarket`, `PM_DollarVol`, `RVOL_PM_Raw` (Rohwert bleibt transparent), `RVOL` = effektiver Wert |
+| **B2** | **PM-Mail als eigener Kanal** `stocks_premarket` („Aktien Pre-Market") | Fenster **7:00–9:25 ET** (Mo–Fr). Dedizierter Klassifizierer `_classify_premarket_candidate` (statt Regular-Maschinerie, die PM-Rows systematisch verwerfen würde): Score ≥ **85** (strenger als 80), Top-Grade, PM-Liquidität, Extensions-Decke, valide Level, Common-Stock-Guard. Eigener Cooldown-Namespace `..._pm` → **Regular-Mail nach Open bleibt möglich**. Betreff „Aktien Pre-Market Radar", Pflicht-Warnhinweis (dünne Liquidität, nur Limit, kleine Größe, Opening-Range abwarten), RVOL-Spalte zeigt „PM $2,0M". Default **an**, in den Alert-Einstellungen abschaltbar (Frontend rendert die Optionen dynamisch — kein Frontend-Eingriff nötig) |
+| **B3** | **Dynamischer Scan-Takt** | `_effective_scan_interval_min`: `strategy_scan` im Fenster **9:25–11:30 ET** alle **10 statt 30 Minuten** (Scheduler-Hauptschleife + Smart-Startup). Alle anderen Scanner unverändert |
+
+**Bewusst nicht gebaut (Phase 2):** WebSocket-Trigger (Polygon-Streams). Begründung:
+Engpass war die Gate-Logik, nicht der Transport; Stream = anderes Paradigma (Event-Router,
+Reconnects, Gaps, Tick-Filter gegen PM-Einzelprint-Rauschen) auf einem produktiven
+Einzel-VPS; Echtzeit-Tier beim Provider ungeprüft. B1–B3 deckt ~90 % des Nutzens ab.
+Legitime Phase-2-Ziele: Level-Cross-Trigger, Sekunden-statt-Minuten-Detection nach Open,
+Tick-nahes Stop/TP-Monitoring — als eigener Ingest-Service mit Designdokument.
+
+**Tests:** `test_premarket_radar.py` (17): Fenster-Grenzen (kalenderfest, fester
+Wochentag), Proxy-Schwellen, PM-Gate-Gründe, dynamischer Takt, Klassifizierer
+(alertable/Score/Liquidität/Extension/Level/Cooldown-Namespace), Mail E2E
+(Kanal, Warnhinweis, PM-$-Zelle, Non-PM-Rows ausgeschlossen, Regular-Pfad bei
+offenem Markt im Fenster unberührt), Kanal-Registrierung.
+
 ---
 
-## 4. Das Mail-System (Stand 29.07.)
+## 4. Das Mail-System (Stand 29.07., abends)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
 `info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT SWING / 👁️ WATCH.
@@ -224,6 +262,16 @@ Plan hat E-Mail-Alerts → `email_alerts_enabled` → Watch-Opt-in (nur watch-Kl
 Narrative-Frequenz (nur narrative_pulse) → Trade-Horizont (swing/intraday/both) →
 **Mail-Kanal** (seit 28.07.). Betreiber-Fallback (`ALERT_EMAIL`) bekommt alle Klassen,
 Kanal-Opt-out greift aber auch dort (28.07.).
+
+**Kanäle:** `stocks_swing`, `stocks_intraday`, `crypto`, `biotech`, `bear`,
+`new_listing` und seit 29.07. **`stocks_premarket`** — der Pre-Market-Radar
+(7:00–9:25 ET, eigener Betreff, eigener `_pm`-Cooldown-Namespace, Warnhinweis;
+Default an, pro User abschaltbar). Die Regular-Swing-Mail nach Open wird durch
+eine PM-Mail desselben Tickers **nicht** verbraucht (getrennte Namespaces).
+
+**Pre-Market-Gates (29.07.):** Scan-Seite ersetzt RVOL durch absolute PM-Liquidität
+(≥ $500k), Spread-Guard (≤ 7 %) und ATR-Extensions-Decke (≤ 3,0); Mail-Seite verlangt
+Score ≥ 85 + Top-Grade + valide Level über `_classify_premarket_candidate`.
 
 **Qualitätsgates vor jeder Aktien-Swing-Mail** (Kette, jeder Grund = Zeile raus):
 Grade/Score/RVOL → Common-Stock-Guard → 4H-Execution-State → **Volatilitätsbudget (neu)** →
@@ -254,7 +302,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1130 Tests, alle grün** (29.07.). Wichtige Suiten:
+**1147 Tests, alle grün** (29.07., abends). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -265,12 +313,14 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 | `test_commerce_hardening.py` | Auth, Billing, Kanal-Settings (28.07.) |
 | `test_cluster_warning_mail.py` | Klumpenrisiko, Sweep-End-to-End |
 | `test_stock_execution_regressions.py`, `test_stock_swing_4h_rejection.py` | 4H-Execution-Gates |
+| `test_premarket_radar.py` (29.07.) | PM-Fenster, RVOL-Proxy, PM-Gates, Opening-Takt, PM-Mail E2E |
 
 **Regeln:** Nie ohne `--basetemp=tmp/pytest_audit` (Sandbox). Produktivcode-Änderungen
 erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalender in
 Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
-1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket).
+1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
+1147 (29.07. PM-Radar).
 
 ---
 
@@ -278,13 +328,14 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **C: Scan-Taktung** — Sweep läuft 30-Min-Takt, Mails erst in US-Regular-Session; vorbörsliche/frühe Moves (RITM, NVST) entstehen im Blindfenster. Optionen: Takt 9:30–11:00 ET auf 10–15 Min verdichten; Pre-Market-Watch-Mailklasse (Produktentscheidung) | Vom Betreiber angesprochen, bewusst vertagt |
+| 1 | **PM-Radar live beobachten** — Schwellen ($500k PM-Liquidität, 7 % Spread, 3,0 ATR Decke, Score 85) sind Erstkalibrierung; nach einigen Handelstagen an Server-Logs prüfen (`premarket_*` Reject-Gründe in der Scan-Diagnostik) und PM-Signale im Tracker gegen Regular-Signale vergleichen. Bei Spam → Schwelle hoch / Kanal aus; bei zu wenig Treffern → Beleglage prüfen | 3.7 |
 | 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
 | 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
-| 6 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
-| 7 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
+| 5 | **Phase 2: WebSocket-Trigger (Polygon-Streams)** — Level-Cross-Trigger, Sekunden-Detection nach Open, Tick-nahes Stop/TP-Monitoring. Als eigener Ingest-Service mit Designdokument (Architektur, Reconnect/Gap-Strategie, PM-Tick-Filter, Provider-Tier prüfen) — bewusst vertagt, siehe 3.7 | Betreiber-Frage 29.07. |
+| 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
+| 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
+| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
 
 ---
 
