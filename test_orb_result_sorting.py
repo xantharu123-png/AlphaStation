@@ -46,5 +46,6 @@ def test_orb_breakouts_keeps_all_rows_visible_and_sorts_tradeable_first(monkeypa
     assert nope["trade_decision"] == "NO_TRADE"
     assert nope["entry_quality_raw"] == "GOOD"
     assert nope["entry_quality"] == "BLOCKED"
-    assert nope["entry_badge_label"] == "Blockiert"
+    assert nope["entry_badge_label"] == "TP1 schon gelaufen"
     assert "Entry GOOD" not in nope["score_details"]
+    assert "Nicht traden" in nope["score_details"]

@@ -6018,14 +6018,14 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         const decision = finalDecisionOf(item);
         const signal = String(item.trade_signal || '').toUpperCase();
         const action = String(item.trade_action || '').toUpperCase();
-        if (decision === 'NO_TRADE') return { label: 'NO TRADE', cls: 'signal-bearish' };
+        if (decision === 'NO_TRADE') return { label: 'NICHT TRADEN', cls: 'signal-bearish' };
         if (decision === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
         if (decision === 'WAIT_FOR_TRIGGER') return { label: 'ENTRY WARTEN', cls: 'signal-abwarten' };
         if (decision === 'WAIT_FOR_CONTINUATION') return { label: 'FORTSETZUNG', cls: 'signal-lightdiv' };
         if (decision === 'WATCH_ONLY') return { label: 'WATCH', cls: 'signal-abwarten' };
         if (signal === 'JETZT_TRADEN') return { label: 'READY', cls: 'signal-bullish' };
         if (signal === 'EXPLOSION_ARMED' || item.pre_breakout_armed) return { label: 'WATCH', cls: 'signal-abwarten' };
-        if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NO TRADE', cls: 'signal-bearish' };
+        if (signal === 'NICHT_TRADEN' || action === 'NO_LONG_CHASE') return { label: 'NICHT TRADEN', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_LIQUIDITY') return { label: 'LIQUIDITAET', cls: 'signal-bearish' };
         if (action === 'WAIT_FOR_RETEST') return { label: 'RETEST WARTEN', cls: 'signal-lightdiv' };
         if (action === 'LONG_TRIGGER' && !item.execution_trigger_ok) return { label: 'ENTRY WARTEN', cls: 'signal-abwarten' };
@@ -9441,10 +9441,11 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             </div>
             {subView === 'breakouts' && breakouts.length > 0 && (
                 <div className="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded px-3 py-2">
-                    Sortierung: Tradeable zuerst, dann Retest/Trigger-Watch, No-Trade zuletzt.
-                    <span className="ml-2 text-emerald-700 font-medium">Tradeable: {decisionCounts.tradeable || 0}</span>
+                    Sortierung: Handelbar zuerst, dann Retest/Trigger-Warten, Nicht-traden zuletzt.
+                    „Nicht traden" heißt: Der Risiko-Check (R:R, Chase-/Fakeout-Risiko, Geometrie, Volumen) sperrt den Einstieg — der konkrete Grund steht am roten Badge und in der Detailzeile.
+                    <span className="ml-2 text-emerald-700 font-medium">Handelbar: {decisionCounts.tradeable || 0}</span>
                     <span className="ml-2 text-amber-700 font-medium">Warten: {decisionCounts.wait || 0}</span>
-                    <span className="ml-2 text-red-700 font-medium">No Trade: {decisionCounts.no_trade || 0}</span>
+                    <span className="ml-2 text-red-700 font-medium">Nicht traden: {decisionCounts.no_trade || 0}</span>
                 </div>
             )}
 

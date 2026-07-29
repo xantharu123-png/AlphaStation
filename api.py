@@ -7817,13 +7817,23 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     rows = ""
     for a in email_alerts:
         timing_label = html.escape(_format_alert_timing_label(a.get("entry_quality"), market_type))
+        # AUDIT 2026-07-29 (NVST): Strategiename 'Gap Momentum' ohne sichtbaren
+        # Gap-Beleg verwirrt — die Mail zeigt das gemessene Gap (Open vs.
+        # Vortagesschluss) jetzt explizit unter der Tagesaenderung.
+        _src_row = a.get("source_row") or {}
+        _gap_pct = _alert_float(_alert_get_any(_src_row, "Gap_Pct", "gap_pct"), None)
+        _gap_suffix = (
+            f'<br><span style="color:#64748b;font-size:11px">Gap {_gap_pct:+.1f}% (Open vs. Vortagesschluss)</span>'
+            if _gap_pct is not None and abs(_gap_pct) >= 1.0
+            else ""
+        )
         rows += (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["change_pct"]:+.1f}%{_gap_suffix}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]:.1f}x</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{timing_label}</td></tr>'
@@ -9678,6 +9688,56 @@ def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) 
     return visible
 
 
+_NO_TRADE_REASON_LABELS = {
+    "invalid_trade_geometry": "Geometrie ungültig",
+    "invalid_stop_geometry": "Stop-Geometrie ungültig",
+    "stop_distance_below_noise_floor": "Stop im Tagesrauschen",
+    "setup_invalidated_stop_breached": "Stop bereits gerissen",
+    "implausible_live_rr": "Live R:R unplausibel",
+    "trade_health_no_trade": "Risiko-Check negativ",
+    "trade_health_chase_risk": "Chase-Risiko",
+    "trade_health_fakeout_risk": "Fakeout-Risiko",
+    "trade_health_liquidity_risk": "Liquiditätsrisiko",
+}
+
+
+def _no_trade_reason_labels(health: Dict[str, Any], max_reasons: int = 2) -> List[str]:
+    """Konkrete, kurze Sperr-Gruende aus Trade-Health fuer Badge/Detailzeile.
+
+    AUDIT 2026-07-29: 'Blockiert' + 'NO TRADE: Nicht traden' sagte dem Nutzer
+    nichts — jetzt steht der eigentliche Grund am Badge (R:R, Chase, Geometrie
+    ...), die Entscheidung 'Nicht traden' bleibt am zweiten Badge.
+    """
+    raw: List[str] = []
+    for key in ("exclusion_reasons", "tactical_reasons", "warnings"):
+        values = health.get(key)
+        if isinstance(values, list):
+            raw.extend(str(value) for value in values if value)
+    labels: List[str] = []
+    for reason in raw:
+        text = str(reason).strip()
+        label = _NO_TRADE_REASON_LABELS.get(text)
+        if label is None:
+            lower = text.lower()
+            if "tp1" in lower and "erreicht" in lower:
+                label = "TP1 schon gelaufen"
+            elif "tp2" in lower and "erreicht" in lower:
+                label = "TP2 schon gelaufen"
+            elif "live r:r" in lower:
+                label = "Live R:R zu schwach"
+            elif "vom entry entfernt" in lower:
+                label = "Zu weit vom Entry"
+            elif "spread" in lower:
+                label = "Spread zu breit"
+            elif "news" in lower or "dilution" in lower:
+                label = "Negative News/Dilution"
+            else:
+                label = text.replace("_", " ")[:40]
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:max_reasons]
+
+
 def _normalize_orb_display_state(row: Dict[str, Any]) -> None:
     """Prevent ORB rows from showing a positive entry badge when final state is blocked."""
     health = row.get("trade_health") if isinstance(row.get("trade_health"), dict) else {}
@@ -9687,10 +9747,12 @@ def _normalize_orb_display_state(row: Dict[str, Any]) -> None:
         row["entry_quality_raw"] = raw_entry_quality
 
     if decision == "NO_TRADE":
-        label = row.get("trade_decision_label") or health.get("decision_label") or "No Trade"
+        label = row.get("trade_decision_label") or health.get("decision_label") or "Nicht traden"
+        reasons = _no_trade_reason_labels(health)
         row["entry_quality"] = "BLOCKED"
-        row["entry_quality_label"] = "Blockiert"
-        row["entry_badge_label"] = "Blockiert"
+        row["entry_quality_label"] = "Nicht traden"
+        # Badge 1 = konkreter Sperr-Grund, Badge 2 (Trade-Health) = Entscheidung.
+        row["entry_badge_label"] = reasons[0] if reasons else "Nicht traden"
         row["entry_badge_tone"] = "danger"
         row["orb_display_state"] = "NO_TRADE"
         details = [
@@ -9699,7 +9761,12 @@ def _normalize_orb_display_state(row: Dict[str, Any]) -> None:
             if part.strip()
         ]
         details = [part for part in details if part.upper() != "ENTRY GOOD"]
-        details.append(f"NO TRADE: {label}")
+        if reasons:
+            details.append(f"Nicht traden: {' · '.join(reasons)}")
+        elif label != "Nicht traden":
+            details.append(f"Nicht traden: {label}")
+        else:
+            details.append("Nicht traden")
         row["score_details"] = " | ".join(dict.fromkeys(details))
         return
 
@@ -16194,6 +16261,59 @@ def get_health():
     )
 
 
+def _effective_scan_timing(
+    status: Dict[str, Any],
+    cache: Dict[str, Any],
+    *,
+    now_ts: Optional[float] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Letzten/naechsten Scan-Zeitpunkt robust bestimmen (AUDIT 2026-07-29).
+
+    bg-owned Scanner (seit H-9: bi_long/bi_short/biotech) laufen ausserhalb
+    des api-Prozesses — deren In-Memory last_run/next_run veraltet oder fehlt,
+    waehrend der geteilte Cache (/tmp/*.json) vom bg-Service frisch
+    geschrieben wird. Wirksamer letzter Lauf = max(In-Memory, Cache-mtime);
+    naechster Lauf = In-Memory next_run, wenn in der Zukunft, sonst
+    letzter Lauf + Intervall. Verhindert irrefuehrende 'Letzter: vor 18h'-
+    Anzeigen, obwohl der Scanner laeuft (und umgekehrt echte Staendigkeit).
+    """
+    now_ts = now_ts if now_ts is not None else time.time()
+    interval_sec = max(60, int(status.get("interval_min", 0) or 0) * 60)
+
+    def _parse_ts(value: Any) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (ValueError, TypeError, OverflowError, OSError):
+            return None
+
+    candidates = []
+    mem_last = _parse_ts(status.get("last_run"))
+    if mem_last is not None:
+        candidates.append(mem_last)
+    cache_age = cache.get("cache_age_seconds")
+    if cache.get("cache_exists") and isinstance(cache_age, (int, float)):
+        candidates.append(now_ts - float(cache_age))
+    last_ts = max(candidates) if candidates else None
+
+    next_ts = _parse_ts(status.get("next_run"))
+    if next_ts is None or next_ts <= now_ts:
+        next_ts = (last_ts + interval_sec) if last_ts is not None else None
+
+    last_iso = (
+        datetime.fromtimestamp(last_ts).isoformat()
+        if last_ts is not None
+        else status.get("last_run")
+    )
+    next_iso = (
+        datetime.fromtimestamp(next_ts).isoformat()
+        if next_ts is not None
+        else status.get("next_run")
+    )
+    return last_iso, next_iso
+
+
 def _build_system_health() -> Dict[str, Any]:
     """Build a trader-facing health summary without triggering expensive scans."""
     with _scan_lock:
@@ -16221,11 +16341,12 @@ def _build_system_health() -> Dict[str, Any]:
                 stuck_scans.append(name)
             if health_key in ("stale", "missing", "error", "stuck"):
                 stale_or_missing.append(name)
+            effective_last_run, effective_next_run = _effective_scan_timing(status, cache)
             scan_health[name] = {
                 "running": status.get("running", False),
-                "last_run": status.get("last_run"),
+                "last_run": effective_last_run,
                 "last_attempt_at": status.get("last_attempt_at"),
-                "next_run": status.get("next_run"),
+                "next_run": effective_next_run,
                 "interval_min": status.get("interval_min"),
                 **cache,
             }
@@ -19202,7 +19323,7 @@ def _build_early_mover_long_setup(
         "WAIT_FOR_LIQUIDITY": "Liquiditaet abwarten",
         "WAIT_FOR_CONTINUATION": "Nur neue Continuation-Flag",
         "NO_LONG_CHASE": "Kein Long-Chase",
-        "NO_TRADE": "No Trade",
+        "NO_TRADE": "Nicht traden",
     }.get(trade_action, trade_action)
 
     return {

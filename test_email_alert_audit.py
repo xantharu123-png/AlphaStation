@@ -3437,3 +3437,108 @@ def test_top_entry_distance_helper_edges():
     assert api._swing_top_entry_distance_pct({"price": 10.6, "day_high": 10.5}) == 0.0
     assert api._swing_top_entry_distance_pct({"price": 10.0, "day_low": 9.9}, short=True) == pytest.approx(1.0101, abs=0.001)
     assert api._swing_top_entry_distance_pct({"price": 10.0}, short=True) is None
+
+
+def test_orb_no_trade_badge_shows_concrete_reason():
+    """AUDIT 2026-07-29: 'Blockiert' + 'NO TRADE: Nicht traden' war nichts-
+    sagend. Badge 1 zeigt jetzt den konkreten Sperr-Grund aus Trade-Health,
+    die Detailzeile nennt die Gruende; die Entscheidung bleibt 'Nicht traden'."""
+    row = {
+        "ticker": "LMND",
+        "trade_decision": "NO_TRADE",
+        "trade_health": {
+            "decision": "NO_TRADE",
+            "decision_label": "Nicht traden",
+            "exclusion_reasons": ["stop_distance_below_noise_floor"],
+            "tactical_reasons": ["Live R:R nur 0.80"],
+            "warnings": [],
+        },
+        "score_details": "Vol unconfirmed | RVOL 5.8x",
+    }
+
+    api._normalize_orb_display_state(row)
+
+    assert row["entry_quality"] == "BLOCKED"
+    assert row["entry_badge_label"] == "Stop im Tagesrauschen"
+    assert "Nicht traden: Stop im Tagesrauschen · Live R:R zu schwach" in row["score_details"]
+    assert "Vol unconfirmed" in row["score_details"]
+
+    # Fallback ohne Health-Gruende: Badge bleibt verstaendlich, kein Duplikat-Text.
+    row_plain = {"ticker": "X", "trade_decision": "NO_TRADE", "score_details": "RVOL 1.0"}
+    api._normalize_orb_display_state(row_plain)
+    assert row_plain["entry_badge_label"] == "Nicht traden"
+    assert row_plain["score_details"].count("Nicht traden") == 1
+
+
+def test_effective_scan_timing_prefers_fresh_cache_mtime():
+    """18h-Anzeige-Bug: bg-owned Scanner (bi_long) schreibt den geteilten Cache
+    ausserhalb der api — das In-Memory last_run der api veraltet. Wirksam ist
+    max(In-Memory, Cache-mtime); next_run faellt auf last + Intervall zurueck."""
+    now = 1_800_000_000.0
+    status = {
+        "last_run": api.datetime.fromtimestamp(now - 18 * 3600).isoformat(),
+        "next_run": None,
+        "interval_min": 180,
+    }
+    cache = {"cache_exists": True, "cache_age_seconds": 300}
+
+    last_iso, next_iso = api._effective_scan_timing(status, cache, now_ts=now)
+
+    last_ts = api.datetime.fromisoformat(last_iso).timestamp()
+    next_ts = api.datetime.fromisoformat(next_iso).timestamp()
+    assert last_ts == pytest.approx(now - 300, abs=1.0)
+    assert next_ts == pytest.approx(now - 300 + 180 * 60, abs=1.0)
+
+
+def test_effective_scan_timing_keeps_fresher_memory_and_future_next_run():
+    """Gegenprobe: In-Memory frischer als Cache => In-Memory gewinnt; ein
+    next_run in der Zukunft wird nicht ueberschrieben."""
+    now = 1_800_000_000.0
+    future_next = api.datetime.fromtimestamp(now + 600).isoformat()
+    status = {
+        "last_run": api.datetime.fromtimestamp(now - 60).isoformat(),
+        "next_run": future_next,
+        "interval_min": 30,
+    }
+    cache = {"cache_exists": True, "cache_age_seconds": 3600}
+
+    last_iso, next_iso = api._effective_scan_timing(status, cache, now_ts=now)
+
+    assert api.datetime.fromisoformat(last_iso).timestamp() == pytest.approx(now - 60, abs=1.0)
+    assert next_iso == future_next
+
+
+def test_strategy_sweep_email_shows_gap_pct(monkeypatch):
+    """NVST 2026-07-29: 'Gap Momentum Long' ohne sichtbaren Gap-Beleg verwirrte —
+    die Mail weist das gemessene Gap (Open vs. Vortagesschluss) jetzt aus."""
+    api._EMAIL_COOLDOWN.clear()
+    sent = []
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"NVST"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [{
+        "Ticker": "NVST",
+        "Strategy": "Gap Momentum Long",
+        "grade": "A",
+        "score": 89,
+        "RVOL": 2.6,
+        "Preis": 28.65,
+        "Change_Pct": 6.3,
+        "Gap_Pct": 3.2,
+        "Signal_Direction": "LONG",
+        "change_pct": 6.3,
+        "close_pos": 0.84,
+        "latest_bar_change_pct": 0.18,
+        "latest_bar_close_pos": 0.76,
+        "trade_setup": {
+            "direction": "LONG",
+            "entry": 28.66,
+            "stop": 27.75,
+            "tp1": 30.12,
+            "tp2": 30.92,
+        },
+    }], "stocks")
+
+    assert len(sent) == 1
+    assert "Gap +3.2% (Open vs. Vortagesschluss)" in sent[0][1]

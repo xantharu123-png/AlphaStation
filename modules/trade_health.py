@@ -281,7 +281,7 @@ def _decision_label(decision: str) -> str:
         "WAIT_FOR_CONTINUATION": "Momentum-Fortsetzung beobachten",
         "WAIT_FOR_TRIGGER": "Setup gut, Trigger fehlt",
         "WATCH_ONLY": "Nur Watchlist",
-        "NO_TRADE": "No Trade",
+        "NO_TRADE": "Nicht traden",
     }.get(decision, decision)
 
 

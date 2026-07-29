@@ -104,6 +104,9 @@ def test_stock_strategy_swing_results_use_daily_state_not_5m(monkeypatch, tmp_pa
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"LATE", "RUNR"}, "unit"))
+    # Kalenderunabhaengig: kein echter Market-Context (FOMC-Tag 2026-07-29
+    # machte diesen Test tagesabhaengig — AUDIT-Fix).
+    monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
 
     base_row = {
         "ticker": "LATE",
@@ -159,6 +162,7 @@ def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatc
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RAW"}, "unit"))
+    monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
     row = {
         "ticker": "RAW",
         "grade": "S",
@@ -194,6 +198,7 @@ def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatc
 
 def test_biotech_watchlist_rows_do_not_survive_signal_filter(monkeypatch):
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"CRSP"}, "unit"))
+    monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
     row = {
         "ticker": "CRSP",
         "grade": "S",
@@ -349,6 +354,7 @@ def test_stock_swing_strategy_scanners_do_not_cap_for_missing_5m(monkeypatch, tm
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"RAW"}, "unit"))
+    monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
     row = {
         "ticker": "RAW",
         "grade": "S",
