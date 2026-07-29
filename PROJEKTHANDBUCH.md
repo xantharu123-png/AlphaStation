@@ -273,6 +273,39 @@ realisierten R relativ zum Maximalgewinn) — die Wertvernichtung sitzt auf der
 
 ---
 
+### 3.8 30. Juli — Exit-Effizienz gemessen, Management-Regel abgeleitet
+
+**Messung** (`scripts/exit_efficiency_analysis.py` auf dem Server, 237 entschiedene
+Signale, 90 Tage; Simulationsfunktionen in `modules/signal_tracker.py`, 13 Tests,
+Suite 1160):
+
+| Befund | Zahl |
+|---|---|
+| Signale mit MFE ≥ +1 R | 126/237 (53 %) |
+| davon ≤ 0 geendet (**Total-Giveback**) | **39 = 31 %** |
+| Ø verschenkt (MFE ≥ 0,5 R) | **+1,64 R pro Signal** |
+| ØR ist → Regel A (BE nach +1 R) | +0,18 → **+0,34** (+0,157 R/Signal) |
+| ØR ist → Regel B (50/50 + BE-Rest) | +0,18 → **+0,33** (+0,143 R; vs. Ist-50/50 +0,147 R) |
+
+**Scanner-Differenzierung (wichtig):** stock_strategy (n=208): +0,20 → +0,33 —
+Regel lohnt. early_movers (n=13, Crypto): −0,32 → +0,26 — Regel dreht das Vorzeichen
+(Giveback 5/7, Ø 3,08 R; Crypto-MFE ist Spot-Stichprobe → Richtung belastbar,
+Größe unterschätzt). crash (n=16): realized +0,40 > 50/50-managed +0,27 — **hier
+schadet Teilverkauf**; nur BE-Schutz (+0,46), kein TP1-Zwang. trade_reminder: n=0.
+Haltezeit: Giveback-Rate <24h 50 %, 1–3d 54 %, >3d 25 % (absolut 24/39 in >3d —
+lange Läufer, die verblassen; die >3d-Trades tragen ØR +0,56, die kurzen negativ).
+
+**Abgeleitete Regel (Implementierung folgt):** **Breakeven-Nachzug nach +1 R** für
+alle Aktien- + Crypto-Swing-Signale; bei stock_strategy/early_movers zusätzlich
+50/50 an TP1 (Regel B), bei crash **ohne** TP1-Zwang (Regel A pur). Umsetzung als
+Stop-Update-Alert aus der Positions-/Signal-Überwachung (kein Broker-Zugriff —
+der Betreiber zieht den Stop selbst nach), Tracker misst die Regel live weiter
+(BE-adjustiertes R als eigenes Feld). Annahme-Restrisiko: BE-Stop = exakter
+Einstand (Slippage −0,05…−0,1 R einkalkuliert — Delta bleibt > +0,10 R); Simulation
+konservativ (ambiguous_same_day unangetastet).
+
+---
+
 ## 4. Das Mail-System (Stand 29.07., abends)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
@@ -356,7 +389,7 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
 | 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | **Exit-Effizienz (MFE-Nutzung −22 %)** — Messung 29.07.: Das mediane stock_strategy-Signal realisiert −22 % seines Maximalgewinns; Auflösung dauert Tage. Zu prüfen: Wie oft war MFE ≥ +1 R, aber Ergebnis ≤ 0? Daraus ableiten: Breakeven-Nachzug / TP1-Regel / Trailing — dann im Tracker nachmessen. **Das ist der größte verbleibende Hebel, nicht der Transport** | Messung 29.07. (3.7) |
+| 5 | **Exit-Effizienz — Regel abgeleitet (3.8), Implementierung offen:** Breakeven-Nachzug nach +1 R als Stop-Update-Alert (stock_strategy/early_movers mit 50/50 an TP1, crash ohne TP1-Zwang). Tracker misst BE-adjustiertes R live dagegen. Erwarteter Effekt: +0,14…+0,16 R/Signal | Messung 29./30.07. |
 | 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
 | 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
