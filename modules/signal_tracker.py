@@ -525,6 +525,54 @@ def _managed_r_50_50(row: Dict[str, Any]) -> Optional[float]:
     return round(0.5 * r_tp1 + 0.5 * realized, 4)
 
 
+def simulate_breakeven_after_mfe(row: Dict[str, Any], mfe_trigger: float = 1.0) -> Optional[float]:
+    """Gegenprobe 'Breakeven-Stop nach +mfe_trigger R' (AUDIT 2026-07-29).
+
+    Die Exit-Effizienz-Messung (MFE-Nutzung -22%) legt nahe, dass offene
+    Gewinne systematisch verschenkt werden. Diese reine Funktion simuliert
+    die einfachste Gegenregel auf den gespeicherten Feldern:
+      - MFE < Trigger        → unveraendert (Regel greift nie)
+      - MFE >= Trigger, Gewinner → unveraendert (BE-Stop schadet nicht)
+      - MFE >= Trigger, Verlierer/<=0 → 0.0 (BE-Stop haette die Null gerettet)
+    Konservative Ausnahme: outcome_detail 'ambiguous_same_day' (Stop und Ziel
+    am selben Tag, Intraday-Reihenfolge unbekannt) bleibt beim realisierten
+    Wert — dort ist nicht belegbar, dass der MFE VOR dem Stop lag.
+    None nur bei fehlendem r_realized.
+    """
+    realized = _to_float(row.get("r_realized"))
+    if realized is None:
+        return None
+    mfe = _to_float(row.get("max_favorable_r"))
+    if mfe is None or mfe < mfe_trigger:
+        return realized
+    if realized >= 0:
+        return realized
+    if str(row.get("outcome_detail") or "") == "ambiguous_same_day":
+        return realized
+    return 0.0
+
+
+def simulate_managed_5050_breakeven(row: Dict[str, Any]) -> Optional[float]:
+    """Gegenprobe '50/50-Management + Breakeven-Rest nach TP1' (2026-07-29).
+
+    Strengere Variante der bestehenden Empfehlung: TP1 = 50% raus, Rest laeuft
+    mit Stop auf Einstand — die zweite Haelfte kann danach nicht mehr negativ
+    enden. TP1 nie erreicht: faellt auf die BE-nach-+1R-Regel zurueck.
+    None nur bei fehlendem r_realized.
+    """
+    base = _managed_r_50_50(row)
+    if base is None:
+        return None
+    tp1_hit = bool(row.get("tp1_hit_at")) or row.get("status") == STATUS_TP2
+    if not tp1_hit:
+        return simulate_breakeven_after_mfe(row, 1.0)
+    realized = _to_float(row.get("r_realized"))
+    if realized is None or realized >= 0:
+        return base
+    # base = 0.5*r_tp1 + 0.5*realized; BE ersetzt den negativen Rest durch 0.
+    return round(base - 0.5 * realized, 4)
+
+
 def _register_eval_failure(sig: Dict[str, Any], now_dt: datetime) -> Dict[str, Any]:
     """Fehlversuch zaehlen; ab MAX_EVAL_FAILS Fehlversuchen -> UNTRACKED."""
     fail_count = int(sig.get("eval_fail_count") or 0) + 1
