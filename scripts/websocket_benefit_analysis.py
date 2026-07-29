@@ -66,16 +66,29 @@ def _pct(sorted_vals: list[float], q: float) -> float | None:
 
 
 def _load_polygon_key() -> str:
+    """Key wie die App laden (api._load_secrets): ENV, dann secrets.toml/.env.
+
+    Druckt den Key niemals. Suchpfade spiegeln api.py: ~/.streamlit/secrets.toml,
+    <app>/.streamlit/secrets.toml, <app>/.env — plus 'export KEY=...'-Toleranz.
+    """
     for name in ("POLYGON_KEY", "POLYGON_API_KEY"):
         if os.environ.get(name):
             return os.environ[name]
-    env_path = REPO_ROOT / ".env"
-    if env_path.exists():
+    candidates = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        REPO_ROOT / ".streamlit" / "secrets.toml",
+        REPO_ROOT / ".env",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
         try:
-            for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
                 key, val = line.split("=", 1)
                 if key.strip() in ("POLYGON_KEY", "POLYGON_API_KEY") and val.strip():
                     return val.strip().strip('"').strip("'")
