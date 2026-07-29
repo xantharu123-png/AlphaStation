@@ -250,6 +250,27 @@ Wochentag), Proxy-Schwellen, PM-Gate-Gründe, dynamischer Takt, Klassifizierer
 (Kanal, Warnhinweis, PM-$-Zelle, Non-PM-Rows ausgeschlossen, Regular-Pfad bei
 offenem Markt im Fenster unberührt), Kanal-Registrierung.
 
+**WebSocket-Entscheid — gemessen statt Bauchgefühl (29.07., `scripts/websocket_benefit_analysis.py`
+auf dem Server, 237 Tracker-Signale + n=80 Polygon-Stichprobe, 90 Tage):**
+
+| Entscheidungsregel | Schwelle | Gemessen | Urteil |
+|---|---|---|---|
+| TP1 < 30 min nach Mail („Minuten sind Geld") | > 40 % | **0 % (0/64)** — Median TP1-Zeit 2,3 Tage, Stop 1,3 Tage | verfehlt |
+| Extension ≥ 2 ATR zum Mail-Zeitpunkt („Alert zu spät") | > 25 % | **16 %** (Median 1,4 ATR; ≥ 3 ATR: 0 %) | verfehlt |
+| Median-Preisvorteil Entry T-10 | > 1,5 % | **+0,1 %** (p75 +0,3 %) | um Faktor 10 verfehlt |
+| Stop-Gegencheck (Früh-Entry wäre gestoppt worden) | < 15 % | 0/80 | unschädlich, aber wertlos |
+
+**Fazit: Phase 2 (WebSocket/Level-Trigger) wird NICHT gebaut.** Das System ist ein
+Swing-System — Auflösung in Tagen, nicht Minuten; 10 Minuten früher ändern den Entry
+im Median um 0,1 %. Die 16-%-Restfälle (Muster RITM/NVST) sind seit heute durch
+Orts-Gate (blockt „JETZT" nach gelaufenem Move) + PM-Radar (fängt frische PM-Moves)
+strukturell abgedeckt. Ehrliches Caveat: Die Stichprobe misst nur **gemailte**
+Signale (Survivorship) — Moves, die nie ein Gate passierten, bleiben unsichtbar;
+dagegen wirken B1 (PM-Fenster) und B3 (10-Min-Opening-Takt).
+**Nebenbefund mit echtem Hebel:** MFE-Nutzung stock_strategy **−22 %** (Median des
+realisierten R relativ zum Maximalgewinn) — die Wertvernichtung sitzt auf der
+**Exit-Seite** (offene Gewinne werden verschenkt), nicht im Transport.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -335,7 +356,8 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
 | 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | **Phase 2: WebSocket-Trigger (Polygon-Streams)** — Level-Cross-Trigger, Sekunden-Detection nach Open, Tick-nahes Stop/TP-Monitoring. Als eigener Ingest-Service mit Designdokument (Architektur, Reconnect/Gap-Strategie, PM-Tick-Filter, Provider-Tier prüfen) — bewusst vertagt, siehe 3.7 | Betreiber-Frage 29.07. |
+| 5 | **Exit-Effizienz (MFE-Nutzung −22 %)** — Messung 29.07.: Das mediane stock_strategy-Signal realisiert −22 % seines Maximalgewinns; Auflösung dauert Tage. Zu prüfen: Wie oft war MFE ≥ +1 R, aber Ergebnis ≤ 0? Daraus ableiten: Breakeven-Nachzug / TP1-Regel / Trailing — dann im Tracker nachmessen. **Das ist der größte verbleibende Hebel, nicht der Transport** | Messung 29.07. (3.7) |
+| 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
 | 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
 | 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
