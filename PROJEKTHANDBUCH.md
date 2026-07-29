@@ -295,7 +295,7 @@ schadet Teilverkauf**; nur BE-Schutz (+0,46), kein TP1-Zwang. trade_reminder: n=
 Haltezeit: Giveback-Rate <24h 50 %, 1–3d 54 %, >3d 25 % (absolut 24/39 in >3d —
 lange Läufer, die verblassen; die >3d-Trades tragen ØR +0,56, die kurzen negativ).
 
-**Abgeleitete Regel (Implementierung folgt):** **Breakeven-Nachzug nach +1 R** für
+**Abgeleitete Regel (Implementierung in 3.9, gleicher Tag):** **Breakeven-Nachzug nach +1 R** für
 alle Aktien- + Crypto-Swing-Signale; bei stock_strategy/early_movers zusätzlich
 50/50 an TP1 (Regel B), bei crash **ohne** TP1-Zwang (Regel A pur). Umsetzung als
 Stop-Update-Alert aus der Positions-/Signal-Überwachung (kein Broker-Zugriff —
@@ -303,6 +303,39 @@ der Betreiber zieht den Stop selbst nach), Tracker misst die Regel live weiter
 (BE-adjustiertes R als eigenes Feld). Annahme-Restrisiko: BE-Stop = exakter
 Einstand (Slippage −0,05…−0,1 R einkalkuliert — Delta bleibt > +0,10 R); Simulation
 konservativ (ambiguous_same_day unangetastet).
+
+---
+
+### 3.9 30. Juli — BE-Trigger implementiert: Stop-Update-Mail bei +1 R
+
+**Umsetzung der Regel aus 3.8** (Suite 1171, alle grün):
+
+- **Tracker (`modules/signal_tracker.py`):** zwei neue Spalten per idempotenter
+  Migration — `be_activated_at` (ISO-Zeitpunkt, einmalig) und `r_realized_be`
+  (BE-adjustiertes R). `evaluate_open_signals` markiert jedes Signal, das erstmals
+  **MFE ≥ +1 R** erreicht, und meldet es in `result["be_activations"]`. Bei
+  terminalem Exit wird `r_realized_be` nach `breakeven_adjusted_r()` geschrieben —
+  die A/B-Messgröße Ist vs. BE-Regel.
+- **Konservativ-Regeln:** Aktivierung UND Verlust-Exit im selben Eval-Lauf ⇒
+  Intraday-Reihenfolge unbewiesen ⇒ **keine** Aktivierung, kein BE-Kredit
+  (`r_realized_be = r_realized`). `ambiguous_same_day` bleibt generell unangetastet.
+  Abwärtskompatibel: `be_activations` wird im Gleichheitsvergleich des
+  Ergebnis-Dicts ignoriert (wie `transitions`).
+- **Mail (`bg_service._send_be_alert_mail`):** läuft im stündlichen Eval-Job ⇒
+  Latenz ≤ 1 h nach dem MFE-Cross. EINE Sammelmail, `mail_class="info"`, Betreff
+  „Stop-Update: n Trade(s) auf Einstand sichern (+1R gelaufen)".
+  Scanner-differenziert: **crash\*** → „Stop auf Einstand — KEIN Teilverkauf"
+  (Daten: Halten +0,40 R schlug 50/50 +0,27 R); alle anderen → „Stop auf Einstand;
+  an TP1 50 % verkaufen, Rest risikofrei" (Regel B). Gleiche Sicherungen wie bei
+  Exit-Update-Mails: Zweitsicherung `_signal_origin_was_mailed`, persistentes
+  Dedupe `signal_be_{id}` (7 d), Mark erst nach erfolgreichem Versand, Fehler im
+  Mail-Bau beschädigen den Eval-Job nie.
+- **Erwarteter Effekt (Messbasis 3.8):** +0,14…+0,16 R/Signal; Live-Nachweis über
+  `r_realized_be` vs. `r_realized` (nächster Schritt: Aufnahme in Wochenreport).
+- **Tests:** `test_be_activation.py` (11): einmalige Markierung, Same-Run-
+  Konservativfall, BE→Stop = 0 R, Gewinner unverändert, Pure-Funktion,
+  Abwärtskompatibilität, Mail-Texte scanner-differenziert, Dedupe,
+  Origin-Zweitsicherung, Mail-Crash-Toleranz.
 
 ---
 
@@ -359,12 +392,14 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1147 Tests, alle grün** (29.07., abends). Wichtige Suiten:
+**1171 Tests, alle grün** (30.07.). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
 | `test_math_invariants.py` | Rechenkern gegen Lehrbuch-Referenzen |
 | `test_tracker_calibration.py` | Managed-R, Wilson-KI, sample_reliable |
+| `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
+| `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
 | `test_email_alert_audit.py` | Alert-Gates, Swing-Regeln, Chase-Gates (28.07.) |
 | `test_mail_class_api.py` | Mail-Klassen, ATR-Annotation, Kanal-Versand (28.07.) |
 | `test_commerce_hardening.py` | Auth, Billing, Kanal-Settings (28.07.) |
@@ -377,7 +412,7 @@ erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalende
 Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
-1147 (29.07. PM-Radar).
+1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger).
 
 ---
 
@@ -389,7 +424,7 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
 | 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | **Exit-Effizienz — Regel abgeleitet (3.8), Implementierung offen:** Breakeven-Nachzug nach +1 R als Stop-Update-Alert (stock_strategy/early_movers mit 50/50 an TP1, crash ohne TP1-Zwang). Tracker misst BE-adjustiertes R live dagegen. Erwarteter Effekt: +0,14…+0,16 R/Signal | Messung 29./30.07. |
+| 5 | ~~Exit-Effizienz — Regel abgeleitet~~ — **IMPLEMENTIERT (3.9):** BE-Trigger live (be_activated_at, r_realized_be, Stop-Update-Mail). Nächster Schritt: `r_realized_be` vs. `r_realized` in Wochenreport/Performance-Summary aufnehmen, damit der Ist-vs-BE-Nachweis wöchentlich sichtbar wird | 3.8/3.9 |
 | 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
 | 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |

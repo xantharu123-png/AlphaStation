@@ -1594,6 +1594,110 @@ def _send_signal_update_mail(transitions, secrets):
     return bool(sent)
 
 
+def _send_be_alert_mail(activations, secrets):
+    """ℹ️-Stop-Update-Mail bei MFE >= +1R (Breakeven-Empfehlung).
+
+    Datenbasis Exit-Effizienz-Audit 2026-07-30 (237 Signale/90d): 31% der
+    Signale mit MFE >= +1R endeten <= 0, Ø +1.64R verschenkt; die BE-Regel
+    haette den Erwartungswert von +0.18R auf +0.34R gehoben. Der User managed
+    manuell — diese Mail ist die konkrete Anweisung "Stop auf Einstand
+    ziehen", scanner-differenziert:
+      - crash*-Scanner: NUR Stop auf Einstand, KEIN Teilverkauf (Ist-Halten
+        +0.40R schlug das 50/50-Management +0.27R).
+      - alle anderen: Stop auf Einstand + an TP1 50% verkaufen (Regel B).
+    Versandregeln wie _send_signal_update_mail: EINE Sammelmail pro Lauf,
+    Zweitsicherung _signal_origin_was_mailed, persistentes Dedupe
+    signal_be_{id} (7d), Dedupe-Mark erst NACH erfolgreichem Versand (B2).
+
+    Returns True nur bei tatsaechlich versendeter Mail.
+    """
+    if not activations:
+        return False
+    now = time.time()
+    pending = []
+    for act in activations:
+        if not isinstance(act, dict):
+            continue
+        if not _signal_origin_was_mailed(act.get("scanner"), act.get("ticker"), now=now):
+            log.debug(f"[SignalTracker] BE-Alert unterdrueckt (kein Erst-Mail-Mark): "
+                      f"{act.get('scanner')}/{act.get('ticker')}")
+            continue
+        dedupe_key = f"signal_be_{act.get('id')}"
+        if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+            continue
+        pending.append((dedupe_key, act))
+    if not pending:
+        return False
+
+    n = len(pending)
+    subject = f"Stop-Update: {n} Trade(s) auf Einstand sichern (+1R gelaufen)"
+
+    rows = ""
+    for _, act in pending:
+        ticker = html.escape(str(act.get("ticker") or "?"))
+        scanner = html.escape(str(act.get("scanner") or "?"))
+        direction = "SHORT" if str(act.get("direction")) == "SHORT" else "LONG"
+        be_level = act.get("entry_fill_price") or act.get("entry")
+        mfe = act.get("mfe")
+        mfe_text = f"+{float(mfe):.2f}R" if isinstance(mfe, (int, float)) else ">= +1R"
+        if str(act.get("scanner") or "").lower().startswith("crash"):
+            plan = (f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen — "
+                    f"KEIN Teilverkauf: Tracker-Daten zeigen, Halten schlug 50/50.")
+        else:
+            tp1_text = (_format_alert_price(act.get("tp1"))
+                        if act.get("tp1") is not None else "TP1")
+            plan = (f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen. "
+                    f"An TP1 ({tp1_text}): 50% verkaufen, Rest risikofrei weiterlaufen lassen.")
+        levels = " | ".join(
+            f"{label} {_format_alert_price(act.get(key))}"
+            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
+            if act.get(key) is not None
+        )
+        rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mfe_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{levels}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">{plan}</td>
+        </tr>"""
+
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+    <h2 style="color:#0f172a">Stop-Update — Trades auf Einstand sichern</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} Position(en) haben +1R erreicht</p>
+    <p>Diese Trades sind mindestens <b>+1R</b> in deine Richtung gelaufen. Der Stop
+    gehoert jetzt auf den <b>Einstand</b> — damit ist der Trade risikofrei.
+    Tracker-Daten der letzten 90 Tage: 31% der Signale mit +1R MFE endeten ohne
+    diese Regel im Minus.</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Ticker</th>
+            <th style="padding:8px;text-align:left">Scanner</th>
+            <th style="padding:8px;text-align:left">MFE</th>
+            <th style="padding:8px;text-align:left">Plan-Level</th>
+            <th style="padding:8px;text-align:left">Anweisung</th>
+        </tr>
+        {rows}
+    </table>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatischer Stop-Update-Hinweis vom Signal-Tracker (MFE &gt;= +1R, einmalig je Signal).<br>
+        Crash-Scanner: ausdruecklich KEIN Teilverkauf — dort schlug Halten das 50/50-Management.<br>
+        Kein neues Signal, keine Handelsaufforderung. Einmalig je Signal (7-Tage-Dedupe).
+    </p>
+    </body></html>"""
+
+    sent = _send_email_alert(subject, body_html, secrets, mail_class="info")
+    if sent:
+        # B2-Muster: Dedupe-Mark NUR nach erfolgreichem Versand.
+        for dedupe_key, _ in pending:
+            _email_dedupe_mark(dedupe_key, now=now)
+        log.info(f"[SignalTracker] 📧 BE-Alert gesendet: {n} Stop-Update(s) "
+                 f"({', '.join(str(a.get('ticker') or '?') for _, a in pending)})")
+    else:
+        log.warning(f"[SignalTracker] BE-Alert nicht versendet ({n} Aktivierung(en) offen)")
+    return bool(sent)
+
+
 def _run_signal_eval_job(secrets=None):
     """Stündliche Evaluierung offener Tracker-Signale (TP/SL-Auflösung).
 
@@ -1615,7 +1719,8 @@ def _run_signal_eval_job(secrets=None):
         ) or {}
         log.info(f"[SignalTracker] Eval-Lauf: evaluated={stats.get('evaluated', 0)} "
                  f"closed={stats.get('closed', 0)} errors={stats.get('errors', 0)} "
-                 f"transitions={len(stats.get('transitions') or [])}")
+                 f"transitions={len(stats.get('transitions') or [])} "
+                 f"be={len(stats.get('be_activations') or [])}")
         # Exit-Update-Mails: tolerant gegen alte Tracker-Versionen ohne
         # 'transitions'-Feld (.get) und gegen JEDEN Fehler im Mail-Bau.
         try:
@@ -1626,6 +1731,17 @@ def _run_signal_eval_job(secrets=None):
                 )
         except Exception as exc:
             log.warning(f"[SignalTracker] Exit-Update-Mail fehlgeschlagen (Eval-Ergebnis "
+                        f"bleibt gueltig): {exc}")
+        # Stop-Update-Mails (Breakeven, MFE >= +1R dieses Laufs): gleiche
+        # Fehlertoleranz — ein Mail-Fehler darf den Eval-Job nie beschaedigen.
+        try:
+            be_activations = stats.get("be_activations") or []
+            if be_activations:
+                _send_be_alert_mail(
+                    be_activations, secrets if secrets is not None else _load_secrets()
+                )
+        except Exception as exc:
+            log.warning(f"[SignalTracker] BE-Alert-Mail fehlgeschlagen (Eval-Ergebnis "
                         f"bleibt gueltig): {exc}")
         return stats
     except Exception as exc:

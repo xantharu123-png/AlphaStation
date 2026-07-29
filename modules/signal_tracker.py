@@ -302,6 +302,8 @@ _SCHEMA_MIGRATIONS = {
     "instrument_id": "TEXT",
     "venue": "TEXT",
     "contract_symbol": "TEXT",
+    "be_activated_at": "TEXT",
+    "r_realized_be": "REAL",
 }
 
 _INDEXES = (
@@ -976,26 +978,52 @@ def _apply_signal_updates(signal_id: int, updates: Dict[str, Any]) -> None:
 
 
 class _EvalResult(dict):
-    """Rueckgabe-Dict von evaluate_open_signals inkl. 'transitions'-Liste.
+    """Rueckgabe-Dict von evaluate_open_signals inkl. 'transitions'-Liste
+    und 'be_activations'-Liste.
 
     ABWAERTSKOMPATIBILITAET: Bestands-Aufrufer und -Tests vergleichen das
     Ergebnis strikt mit {'evaluated','closed','errors'}-Dicts (z.B.
     ``result == {"evaluated": 1, "closed": 1, "errors": 0}``). Der
-    Gleichheitsvergleich ignoriert deshalb beidseitig den Schluessel
-    'transitions'. ALLE anderen Zugriffe (Iteration, .get, ['transitions'],
-    'in', json.dumps) sehen den Schluessel normal.
+    Gleichheitsvergleich ignoriert deshalb beidseitig die Schluessel
+    'transitions' und 'be_activations'. ALLE anderen Zugriffe (Iteration,
+    .get, ['transitions'], 'in', json.dumps) sehen die Schluessel normal.
     """
 
     def __eq__(self, other: Any) -> Any:
         if not isinstance(other, dict):
             return NotImplemented
-        self_cmp = {k: v for k, v in self.items() if k != "transitions"}
-        other_cmp = {k: v for k, v in other.items() if k != "transitions"}
+        extra_keys = ("transitions", "be_activations")
+        self_cmp = {k: v for k, v in self.items() if k not in extra_keys}
+        other_cmp = {k: v for k, v in other.items() if k not in extra_keys}
         return self_cmp == other_cmp
 
     def __ne__(self, other: Any) -> Any:
         eq = self.__eq__(other)
         return eq if eq is NotImplemented else not eq
+
+
+def breakeven_adjusted_r(row: Dict[str, Any]) -> Optional[float]:
+    """R unter der BE-Regel (Stop auf Einstand sobald MFE >= +1R) fuer eine Row.
+
+    A/B-Messgroesse des Exit-Effizienz-Audits 2026-07-30: Ist-r_realized vs.
+    R bei BE-Management. Regeln (konservativ):
+      - kein r_realized (offen/untracked)          -> None
+      - BE nie aktiviert (kein be_activated_at)    -> r_realized unveraendert
+      - r_realized >= 0                            -> r_realized unveraendert
+      - outcome_detail 'ambiguous_same_day'        -> r_realized (Intraday-
+        Reihenfolge MFE/Stop unbewiesen — kein BE-Kredit)
+      - BE aktiviert UND r_realized < 0            -> 0.0 (Ausstieg am Einstand)
+    """
+    realized = _to_float(row.get("r_realized"))
+    if realized is None:
+        return None
+    if not row.get("be_activated_at"):
+        return realized
+    if realized >= 0:
+        return realized
+    if str(row.get("outcome_detail") or "") == "ambiguous_same_day":
+        return realized
+    return 0.0
 
 
 def _transition_record(
@@ -1064,8 +1092,17 @@ def evaluate_open_signals(
                       TP1_HIT_OPEN/UNTRACKED. tp1_hit_this_run ist auch bei
                       TP2_HIT/EXPIRED True, wenn TP1 erst in diesem Lauf fiel.
                       ABWAERTSKOMPATIBEL: Gleichheitsvergleiche des
-                      Rueckgabe-Dicts ignorieren 'transitions' (_EvalResult),
-                      Bestands-Aufrufer sehen nur ein zusaetzliches Feld.
+                      Rueckgabe-Dicts ignorieren 'transitions' und
+                      'be_activations' (_EvalResult).
+          be_activations — ein Dict je Signal, das in DIESEM Lauf erstmals
+                      MFE >= +1R erreichte (be_activated_at persistiert):
+                      {'id', 'ticker', 'scanner', 'direction', 'entry',
+                       'entry_fill_price', 'stop', 'tp1', 'tp2', 'mfe',
+                       'asset_class', 'activated_at'}
+                      Konsument ist die Stop-Update-Mail in bg_service
+                      (Breakeven-Empfehlung, Exit-Effizienz-Audit 2026-07-30).
+                      Terminale Exits schreiben zusaetzlich r_realized_be
+                      (breakeven_adjusted_r) fuer den Ist-vs-BE-Vergleich.
 
     Aktien werden praezise ueber Daily-OHLC der Folgetage bewertet (Daily-Bars
     implizieren US-Handelstage), Crypto nur als Best-Effort-Spot-Check des
@@ -1073,7 +1110,8 @@ def evaluate_open_signals(
     zwischen zwei Laeufen). Crypto-Expiry: 120h nach created_at; Aktien-Expiry:
     5 Daily-Bars nach Alert.
     """
-    result = _EvalResult({"evaluated": 0, "closed": 0, "errors": 0, "transitions": []})
+    result = _EvalResult({"evaluated": 0, "closed": 0, "errors": 0,
+                          "transitions": [], "be_activations": []})
     try:
         now_dt = _coerce_now(now)
         with _DB_LOCK:
@@ -1104,6 +1142,27 @@ def evaluate_open_signals(
                 updates, fetch_failed = _register_eval_failure(sig, now_dt), True
             if fetch_failed:
                 result["errors"] += 1
+            # BE-Trigger (Exit-Effizienz-Audit 2026-07-30): MFE >= +1R einmalig
+            # als be_activated_at markieren — bg_service mailt dann die
+            # Stop-auf-Einstand-Anweisung. Bei terminalem Exit zusaetzlich
+            # r_realized_be (Ist-vs-BE-Vergleich) mitschreiben.
+            mfe_now = _to_float(updates.get("max_favorable_r"))
+            be_new = (
+                not sig.get("be_activated_at")
+                and mfe_now is not None
+                and mfe_now >= 1.0
+            )
+            r_now = _to_float(updates.get("r_realized"))
+            if be_new and r_now is not None and r_now < 0:
+                # Aktivierung UND Verlust-Exit im selben Lauf: Intraday-
+                # Reihenfolge unbewiesen -> konservativ KEINE Aktivierung.
+                be_new = False
+            if be_new:
+                updates["be_activated_at"] = now_dt.isoformat()
+            if r_now is not None:
+                be_row = dict(sig)
+                be_row.update(updates)
+                updates["r_realized_be"] = breakeven_adjusted_r(be_row)
             new_status = updates.get("status")
             if new_status and new_status != STATUS_OPEN:
                 result["closed"] += 1
@@ -1130,6 +1189,28 @@ def evaluate_open_signals(
                         )
                     except Exception as exc:  # Defensive: darf Eval-Loop nie abbrechen
                         logger.warning("Signal %s: Transition nicht erfasst: %s", sig.get("id"), exc)
+                # BE-Aktivierung nur fuer PERSISTIERTE Updates melden.
+                if be_new:
+                    try:
+                        result["be_activations"].append({
+                            "id": int(sig["id"]),
+                            "ticker": sig.get("ticker"),
+                            "scanner": sig.get("scanner"),
+                            "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
+                            "entry": _to_float(sig.get("entry")),
+                            "entry_fill_price": _to_float(
+                                updates.get("entry_fill_price", sig.get("entry_fill_price"))
+                            ),
+                            "stop": _to_float(sig.get("stop")),
+                            "tp1": _to_float(sig.get("tp1")),
+                            "tp2": _to_float(sig.get("tp2")),
+                            "mfe": mfe_now,
+                            "asset_class": str(sig.get("asset_class") or "stock"),
+                            "activated_at": updates.get("be_activated_at"),
+                        })
+                    except Exception as exc:  # Defensive: darf Eval-Loop nie abbrechen
+                        logger.warning("Signal %s: BE-Aktivierung nicht erfasst: %s",
+                                       sig.get("id"), exc)
     except Exception as exc:
         logger.warning("evaluate_open_signals fehlgeschlagen: %s", exc)
         result["errors"] += 1
