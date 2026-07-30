@@ -462,6 +462,41 @@ nach Zeitungsmeldung wäre Overfitting an Headlines.
   Pre-Market-Fenster 08:00–09:25 ET rot — Stash-Gegenprobe ohne diese Änderung
   zeigt identische Failures; Fix als eigener Punkt offen).
 
+### 3.13 30. Juli (abends) — Erster Live-Alarm → Entwarnungs-Mails + Ein-Befehl-OS-Wartung
+
+**Anlass 1:** Um 16:17 MESZ feuerte der Scan-Wächter seinen **ersten echten
+Alarm** (`strategy_scan` > 10 Min — der erste Strategie-Scan nach US-Open,
+klassischer Netz-Hänger). Der Ablauf bewährte sich (Warn-Mail einmalig,
+Hartdeckel-Selbstheilung). Sichtbare UX-Lücke: Der Betreiber bekäme Warnung
+und ggf. Reset-Meldung, aber **nie die Entwarnung**, dass wieder alles läuft.
+
+**Gebaut — Entwarnungs-Mails (grünes Pendant zur Warnung):**
+- **api.py:** `_send_stuck_recovery_mail` („Scan-Waechter: {name} laeuft
+  wieder — Episode beendet nach ca. X Min"). Auslöser ist der **erste echte
+  Erfolg nach der Episode** im Worker-Finally — nicht der Reset selbst (der
+  sagt nur „versucht es erneut"). Episode-Marker `_episode_started_at`
+  ueberlebt Hartdeckel-Reset und Folge-Runs im Scan-Status und wird erst nach
+  erfolgreichem Lauf gelöst; Versand-Dedupe persistent am Episode-Start
+  (`stuck_recovery_{name}_{start}`, Mark erst nach Versand, Retry beim
+  nächsten Erfolg).
+- **bg_service.py:** `_bg_recovery_decision` (pure) + `_send_bg_recovery_mail`
+  („Hintergrund-Dienst laeuft wieder"); der Monitor speichert beim Alarm
+  `since` (letzter guter Herzschlag = Episode-Beginn) und mailt die Entwarnung
+  beim ersten frischen Herzschlag danach, inkl. Episoden-Dauer.
+
+**Anlass 2:** Betreiber-Frage „was muss ich noch selbst machen?" —
+**`deploy/os_maintenance.sh`**: Ubuntu-Pflege in einem Befehl. Update → bei
+Reboot-Bedarf @reboot-Einmal-Cron (selbstreinigend) → Post-Reboot-Verifikation
+(Dienste active/enabled + health_check) → alles in
+`/var/log/alpha_os_maintenance.log`. Ohne Reboot-Bedarf: Dienste-Restart +
+Health-Check direkt. Abbruch VOR Reboot bei Upgrade-Fehler.
+
+- **Tests:** +5 in `test_stuck_scan_watchdog.py` (16 gesamt): Entwarnung nach
+  gewarnter Episode (Worker E2E via Thread-Join), keine Entwarnung ohne
+  Episode, Dedupe je Episode, bg-Decision pure, bg-Mail-Inhalt. Suite **1218,
+  alle grün** — inkl. der 2 ET-Session-Tests (Lauf um 10:45 ET = Markt offen;
+  bestätigt die PM-Fenster-Diagnose aus 3.12).
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -517,8 +552,8 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1213 Tests, 1211 grün** (30.07.; 2 altbestehende Tests sind ET-Session-abhängig
-und nur 08:00–09:25 ET rot — pre-existing, Stash-Gegenprobe dokumentiert in 3.12).
+**1218 Tests, alle grün** (30.07., Lauf 10:45 ET). Die 2 ET-Session-Tests sind
+nur im Pre-Market-Fenster 08:00–09:25 ET rot (pre-existing, Kap. 7 Punkt 10).
 Wichtige Suiten:
 
 | Datei | Deckt ab |
@@ -527,7 +562,7 @@ Wichtige Suiten:
 | `test_tracker_calibration.py` | Managed-R, Wilson-KI, sample_reliable |
 | `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
 | `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
-| `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag |
+| `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag, **Entwarnungs-Mails** |
 | `test_rates_block.py` (30.07.) | Zins-Block: FRED-Parsing, Regime-Grenzen, Scoring-Invariante, rates_json |
 | `test_email_alert_audit.py` | Alert-Gates, Swing-Regeln, Chase-Gates (28.07.) |
 | `test_mail_class_api.py` | Mail-Klassen, ATR-Annotation, Kanal-Versand (28.07.) |
@@ -547,7 +582,7 @@ Suite-Stand-Historie:
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
 1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard) →
-1213 (30.07. Zins-Block; 1211 grün + 2 ET-Session-Flakes).
+1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün).
 
 ---
 
@@ -563,7 +598,7 @@ Suite-Stand-Historie:
 | 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
 | 7 | ~~JWT_SECRET als ENV setzen~~ — **ERLEDIGT (30.07.):** per `openssl rand -hex 32` in `.env` auf dem Server fixiert, Boot-Log warnfrei | 3.11 |
-| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates — Runbook liegt bereit (`deploy/SERVER_WARTUNG.md`); Wartungsfenster beachten (nie Fr 22:00–Sa 06:00) | Infrastruktur, kein Bot-Thema |
+| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates — **Ein-Befehl-Skript liegt bereit (3.13):** `bash deploy/os_maintenance.sh` (Update → Reboot mit @reboot-Selbstverifikation → Log). Wartungsfenster beachten (nie Fr 22:00–Sa 06:00) | Infrastruktur, kein Bot-Thema |
 | 9 | **Zins-Regime Phase 2: Auswertung** — `rates_json` annotiert ab 30.07. jedes neue Signal (FRED DGS2/10/30, Regime-Label Erstkalibrierung ±10/±25 bp). Sobald ≥ ~100 entschiedene Signale pro Regime-Zelle: Skript analog `exit_efficiency_analysis.py` — Hit-Rate/ØR je Regime; nur bei signifikantem Delta weiches Gate für zinssensible Longs (Biotech/Growth). Zusatzoption: HYG-Trend als Credit-Risiko-Proxy in den Context | 3.12 |
 | 10 | **2 ET-Session-abhängige Tests zeitrobust machen** — `test_stock_strategy_mail_skips_when_us_market_closed`, `test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail` sind nur im PM-Fenster 08:00–09:25 ET rot (pre-existing, Stash-Gegenprobe 30.07.); Session-Zustand mocken statt Wall-Clock | 3.12 / Kap. 6 |
 

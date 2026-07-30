@@ -4681,7 +4681,7 @@ def _resolve_bg_scan_set(env_value=None, allow_api_overlap=None):
 # Thread nicht toeten (Python) — die Mail enthaelt den Restart-Befehl.
 _BG_STUCK_THRESHOLD_SEC = int(os.environ.get("BG_STUCK_THRESHOLD_SEC", str(90 * 60)))
 _bg_heartbeat = {"ts": time.time(), "current": "start"}
-_bg_stuck_alerted = {"key": None}
+_bg_stuck_alerted = {"key": None, "since": None}
 
 
 def _bg_heartbeat_touch(current=None):
@@ -4731,6 +4731,40 @@ def _send_bg_stuck_mail(current_scan, stale_sec, threshold_sec, secrets):
     return bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
 
 
+def _bg_recovery_decision(alerted, now):
+    """(soll_mailen, episode_sec) — pure, testbar.
+
+    Erholung = die Hauptschleife meldet nach einem verschickten Alarm wieder
+    ein Lebenszeichen. Episode-Dauer ab dem letzten guten Herzschlag vor dem
+    Haenger ('since', beim Alarm gespeichert).
+    """
+    if not alerted or alerted.get("key") is None:
+        return False, 0.0
+    since = float(alerted.get("since") or now)
+    return True, max(0.0, now - since)
+
+
+def _send_bg_recovery_mail(current_scan, episode_sec, secrets):
+    """Entwarnung: bg-Hauptschleife antwortet nach Alarm wieder (einmal je Episode)."""
+    minutes = max(1, int(episode_sec // 60))
+    scan_text = html.escape(str(current_scan or "unbekannt"))
+    subject = "Scan-Waechter: Hintergrund-Dienst laeuft wieder"
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+    <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p>Die Hauptschleife von <b>tradingbot-bg</b> meldet wieder Lebenszeichen —
+    die Haenge-Episode ist nach ca. <b>{minutes} Min</b> beendet
+    (zuletzt aktiv: <b>{scan_text}</b>).</p>
+    <p><b>Kein Neustart noetig.</b> Verpasste Slots werden automatisch nachgeholt.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatische Entwarnung des Scan-Waechters (einmalig je Haenge-Episode).<br>
+        Kein Trading-Signal, keine Handelsaufforderung.
+    </p>
+    </body></html>"""
+    return bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+
+
 def _bg_stuck_monitor_loop(secrets):
     """Waechter-Thread: prueft minuetlich das Herzschlag der Hauptschleife."""
     while _running:
@@ -4743,8 +4777,16 @@ def _bg_stuck_monitor_loop(secrets):
             )
             if key is None:
                 if _bg_stuck_alerted.get("key") is not None:
-                    log.info("[Watchdog] Hauptschleife antwortet wieder — Waechter rearmiert")
+                    should_mail, episode_sec = _bg_recovery_decision(_bg_stuck_alerted, now)
+                    log.info(f"[Watchdog] Hauptschleife antwortet wieder nach "
+                             f"{int(episode_sec // 60)} Min — Waechter rearmiert")
+                    if should_mail:
+                        try:
+                            _send_bg_recovery_mail(_bg_heartbeat.get("current"), episode_sec, secrets)
+                        except Exception as exc:
+                            log.warning(f"[Watchdog] Entwarnungs-Mail fehlgeschlagen: {exc}")
                     _bg_stuck_alerted["key"] = None
+                    _bg_stuck_alerted["since"] = None
                 continue
             if not should_alert:
                 continue
@@ -4765,6 +4807,7 @@ def _bg_stuck_monitor_loop(secrets):
                 _email_dedupe_mark(key)
             if sent or _email_dedupe_active(key, 7 * 86400):
                 _bg_stuck_alerted["key"] = key
+                _bg_stuck_alerted["since"] = float(_bg_heartbeat.get("ts") or now)
         except Exception as exc:  # Waechter darf nie sterben
             log.warning(f"[Watchdog] Monitor-Fehler: {exc}")
 

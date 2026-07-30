@@ -15040,6 +15040,36 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
     return bool(sent)
 
 
+def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
+    """Entwarnung nach gemeldeter Haenge-Episode: Scan laeuft wieder.
+
+    Einmal je Episode (Dedupe-Key am Episode-Start, kein Doppel-Versand auch
+    nach Neustart); Mark erst NACH erfolgreichem Versand — schlaegt der
+    Versand fehl, meldet der naechste erfolgreiche Lauf erneut."""
+    minutes = max(1, int(episode_sec // 60))
+    dedupe_key = f"stuck_recovery_{name}_{int(episode_started_at)}"
+    if _email_dedupe_active(dedupe_key, 7 * 86400):
+        return False
+    subject = f"Scan-Waechter: {name} laeuft wieder"
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+    <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p><b>{name} laeuft wieder — Episode beendet nach ca. {minutes} Min.</b></p>
+    <p>Der zuletzt gemeldete Haenger ist beendet: der Scan ist erfolgreich
+    durchgelaufen. <b>Kein Neustart noetig</b> — der Scheduler arbeitet
+    normal weiter.</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatische Entwarnung des Scan-Waechters (einmalig je Haenge-Episode).<br>
+        Kein Trading-Signal, keine Handelsaufforderung.
+    </p>
+    </body></html>"""
+    sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
+    if sent:
+        _email_dedupe_mark(dedupe_key)
+    return bool(sent)
+
+
 def _scan_watchdog_check(name, now=None):
     """Haenge-Check fuer EINEN Scanner (wird im Scheduler-Takt aufgerufen).
 
@@ -15070,6 +15100,9 @@ def _scan_watchdog_check(name, now=None):
             )
             first = not current.get("_timeout_logged")
             current["_timeout_logged"] = True
+            # Episode-Marker fuer die Entwarnungs-Mail: ueberlebt Hartdeckel-
+            # Reset und Folge-Runs, wird erst nach echtem Erfolg geloest.
+            current.setdefault("_episode_started_at", started_at)
         if stuck_sec > _stuck_hard_cap_sec(name):
             # Selbstheilung: Zustand freigeben, damit der naechste Takt frisch
             # starten kann. Der alte Thread bleibt isoliert (s. Modul-Kommentar).
@@ -15079,6 +15112,7 @@ def _scan_watchdog_check(name, now=None):
                     return None
                 current["running"] = False
                 current["_recovered_at"] = now
+                current.setdefault("_episode_started_at", started_at)
                 current["last_error"] = (
                     f"Haenger nach {max(1, int(stuck_sec // 60))} Min automatisch "
                     "zurueckgesetzt; neuer Versuch beim naechsten Takt"
@@ -15165,6 +15199,7 @@ def _run_scan_safe(name, func, timeout_min=None):
             import traceback
             traceback.print_exc()
         finally:
+            recovery = None
             with _scan_lock:
                 state = _scan_status.get(name)
                 if state is not None and state.get("_run_id") == run_id:
@@ -15176,10 +15211,30 @@ def _run_scan_safe(name, func, timeout_min=None):
                     if succeeded:
                         state["last_run"] = datetime.now().isoformat()
                         state.pop("last_error", None)
+                        # Entwarnung nach gemeldeter Haenge-Episode (30.07.):
+                        # der Episode-Marker ueberlebt Hartdeckel-Reset und
+                        # Folge-Runs im Status und wird erst hier — nach
+                        # echtem Erfolg — geloest.
+                        episode_started = state.pop("_episode_started_at", None)
+                        state.pop("_recovered_at", None)
+                        if episode_started is not None:
+                            recovery = (time.time() - float(episode_started), float(episode_started))
                     else:
                         state["last_error"] = error_text or "Unbekannter Scan-Fehler"
                 if _scan_threads.get(name) is threading.current_thread():
                     _scan_threads.pop(name, None)
+            if recovery is not None:
+                try:
+                    sent_rec = _send_stuck_recovery_mail(name, recovery[0], recovery[1])
+                    if not sent_rec:
+                        # Versand fehlgeschlagen (oder Dedupe): Marker wieder
+                        # offen lassen, damit der naechste Erfolg erneut meldet.
+                        with _scan_lock:
+                            st_retry = _scan_status.get(name)
+                            if st_retry is not None and not st_retry.get("running"):
+                                st_retry["_episode_started_at"] = recovery[1]
+                except Exception as rec_exc:
+                    print(f"[Scheduler] Entwarnungs-Mail fehlgeschlagen: {rec_exc}")
 
     t = threading.Thread(target=_worker, daemon=True)
     with _scan_lock:

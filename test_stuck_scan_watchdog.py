@@ -191,5 +191,85 @@ def test_bg_heartbeat_touch_updates_state():
     assert bg_service._bg_heartbeat["current"] == "bi_long"
 
 
+# ── Teil 3: Entwarnungs-Mails (30.07., nach erstem Live-Alarm) ───────────────
+def test_api_recovery_mail_after_warned_episode_completes(monkeypatch, tmp_path):
+    """Warn-Episode -> erfolgreicher Folge-Lauf loest genau EINE Entwarnung
+    ('laeuft wieder') mit Episoden-Dauer aus und loescht die Marker."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=26 * 60)
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    assert len(sent) == 1
+    state = api._scan_status["crypto_explosion"]
+    assert state.get("_episode_started_at") is not None
+    # Episode 'zu Ende': Haenger-Run weg, naechster Takt startet frisch
+    state["running"] = False
+    state["_started_at"] = None
+    api._scan_threads.pop("crypto_explosion", None)
+    monkeypatch.setattr(api, "_require_fresh_scan_cache", lambda *a, **k: None)
+    api._run_scan_safe("crypto_explosion", lambda: None)
+    t = api._scan_threads.get("crypto_explosion")
+    assert t is not None
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert len(sent) == 2
+    rec = sent[1]
+    assert "laeuft wieder" in rec["subject"]
+    assert "crypto_explosion" in rec["subject"]
+    assert "Min" in rec["body"] and "Kein Neustart noetig" in rec["body"]
+    assert rec["mail_class"] == "info"
+    state = api._scan_status["crypto_explosion"]
+    assert "_episode_started_at" not in state
+    assert "_recovered_at" not in state
+
+
+def test_api_no_recovery_mail_without_episode(monkeypatch, tmp_path):
+    """Normaler erfolgreicher Lauf ohne vorherige Warnung => keine Entwarnung."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=0, running=False)
+    api._scan_threads.pop("crypto_explosion", None)
+    monkeypatch.setattr(api, "_require_fresh_scan_cache", lambda *a, **k: None)
+    api._run_scan_safe("crypto_explosion", lambda: None)
+    t = api._scan_threads.get("crypto_explosion")
+    assert t is not None
+    t.join(timeout=5)
+    assert sent == []
+
+
+def test_api_recovery_mail_deduped_per_episode(monkeypatch, tmp_path):
+    """Gleiche Episode (gleicher Start) => hoechstens eine Entwarnung,
+    auch prozessuebergreifend (persistentes Dedupe, Mark erst nach Versand)."""
+    sent, started_at = _setup_api(monkeypatch, tmp_path)
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started_at) is True
+    assert api._send_stuck_recovery_mail("crypto_explosion", 45 * 60, started_at) is False
+    assert len(sent) == 1
+    assert "Episode beendet nach ca. 40 Min" in sent[0]["body"]
+
+
+def test_bg_recovery_decision_pure():
+    """Ohne Alarm => (False, 0); nach Alarm => (True, Dauer ab letztem Herzschlag)."""
+    now = time.time()
+    assert bg_service._bg_recovery_decision({"key": None, "since": None}, now) == (False, 0.0)
+    should, secs = bg_service._bg_recovery_decision({"key": "bg_stuck_1", "since": now - 95 * 60}, now)
+    assert should is True and secs == pytest.approx(95 * 60, abs=1)
+
+
+def test_bg_recovery_mail_content(monkeypatch):
+    """Entwarnungs-Mail: 'laeuft wieder', Dauer, Scan-Name, kein Neustart noetig."""
+    sent = []
+
+    def _recorder(subject, body_html, secrets, mail_class="trade", **kwargs):
+        sent.append({"subject": subject, "body": body_html, "mail_class": mail_class})
+        return True
+
+    monkeypatch.setattr(bg_service, "_send_email_alert", _recorder)
+    ok = bg_service._send_bg_recovery_mail("bi_long (init)", 95 * 60, {})
+    assert ok is True
+    mail = sent[0]
+    assert mail["mail_class"] == "info"
+    assert "laeuft wieder" in mail["subject"]
+    assert "Hintergrund-Dienst" in mail["subject"]
+    assert "95 Min" in mail["body"]
+    assert "bi_long (init)" in mail["body"]
+    assert "Kein Neustart noetig" in mail["body"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
