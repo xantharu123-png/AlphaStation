@@ -14957,6 +14957,136 @@ _SCAN_TIMEOUTS = {
     "penny_positions": 5,
 }
 
+# ── Haenge-Alarm + Selbstheilung (AUDIT 2026-07-30) ──────────────────────────
+# Ein Scan gilt als "stuck", wenn er laenger als sein Zeitbudget laeuft
+# (wahrscheinlich ein Netz-Aufruf ohne Antwort). Beim ERSTEN Budget-Riss geht
+# eine Warn-Mail an den Betreiber (einmal je Episode, persistentes Dedupe).
+# Am Hartdeckel (3x Budget, mindestens Budget + 15 Min) setzt der Waechter den
+# Zustand zurueck, damit der naechste Intervall-Takt einen frischen Worker
+# startet. Der alte Thread bleibt isoliert (Python-Threads kann man nicht
+# sicher toeten); sein finally erkennt an der _run_id, dass er veraltet ist,
+# und ruehrt den neuen Zustand nicht mehr an.
+_STUCK_HARD_CAP_MULT = 3
+_STUCK_HARD_CAP_MIN_EXTRA_SEC = 15 * 60
+
+
+def _stuck_hard_cap_sec(name) -> int:
+    """Hartdeckel in Sekunden: ab hier wird ein Haenger automatisch freigegeben."""
+    budget_sec = _SCAN_TIMEOUTS.get(name, 10) * 60
+    return max(budget_sec * _STUCK_HARD_CAP_MULT, budget_sec + _STUCK_HARD_CAP_MIN_EXTRA_SEC)
+
+
+def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode_key=""):
+    """Betreiber-Warn-Mail bei haengendem Scan. Einmal je Episode (Dedupe-Key
+    enthaelt den Epochen-Start, damit JEDE Episode genau eine Mail bekommt —
+    auch ueber Prozess-Neustarts hinweg). Mark erst NACH erfolgreichem Versand."""
+    minutes = max(1, int(stuck_sec // 60))
+    dedupe_key = episode_key or f"stuck_scan_{name}"
+    if _email_dedupe_active(dedupe_key, 7 * 86400):
+        return False
+    if recovered:
+        subject = f"Scan-Waechter: {name} automatisch zurueckgesetzt"
+        headline = f"{name} wurde nach {minutes} Min automatisch zurueckgesetzt"
+        detail = ("Der Haenger hat das Hartdeckel (3x Zeitbudget) ueberschritten. "
+                  "Der Zustand wurde freigegeben — beim naechsten Intervall-Takt "
+                  "startet der Scan automatisch frisch. <b>Ein Neustart ist NICHT noetig.</b>")
+    else:
+        subject = f"Scan-Waechter: {name} haengt"
+        headline = f"{name} laeuft seit {minutes} Min (Budget {timeout_min} Min)"
+        detail = ("Der Scan hat sein Zeitbudget gerissen und haengt wahrscheinlich in "
+                  "einem Netz-Aufruf ohne Antwort. Ueberschreitet er das Hartdeckel, "
+                  "setzt der Waechter ihn automatisch zurueck — <b>du musst nichts tun.</b><br>"
+                  "Sofort-Abhilfe, falls gewuenscht: <code>systemctl restart tradingbot-api</code>")
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+    <h2 style="color:#b45309">Scan-Waechter</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p><b>{headline}</b></p>
+    <p>{detail}</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatische Betreiber-Warnung des Scan-Waechters (einmalig je Haenge-Episode).<br>
+        Kein Trading-Signal, keine Handelsaufforderung.
+    </p>
+    </body></html>"""
+    sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
+    if sent:
+        _email_dedupe_mark(dedupe_key)
+    return bool(sent)
+
+
+def _scan_watchdog_check(name, now=None):
+    """Haenge-Check fuer EINEN Scanner (wird im Scheduler-Takt aufgerufen).
+
+    Returns None oder "stuck" (Budget erstmals gerissen, Warn-Mail raus) bzw.
+    "recovered" (Hartdeckel erreicht, Zustand fuer frischen Start freigegeben).
+    Setzt die bekannten Status-Felder (_timeout_logged, last_error) wie der
+    fruehere Inline-Watchdog. Wirft nie — ein Waechter-Fehler darf den
+    Scheduler unter keinen Umstaenden abbrechen.
+    """
+    try:
+        now = time.time() if now is None else now
+        with _scan_lock:
+            state = dict(_scan_status.get(name) or {})
+        if not state.get("running") or not state.get("_started_at"):
+            return None
+        started_at = float(state["_started_at"])
+        timeout_min = _SCAN_TIMEOUTS.get(name, 10)
+        stuck_sec = now - started_at
+        if stuck_sec <= timeout_min * 60:
+            return None
+        with _scan_lock:
+            current = _scan_status.get(name)
+            if current is None or current.get("_started_at") != started_at:
+                return None  # Episode ist inzwischen vorbei/neu — nicht anfassen
+            current["last_error"] = (
+                f"Scan-Zeitbudget nach {timeout_min} Minuten ueberschritten; "
+                "kein Parallelstart"
+            )
+            first = not current.get("_timeout_logged")
+            current["_timeout_logged"] = True
+        if stuck_sec > _stuck_hard_cap_sec(name):
+            # Selbstheilung: Zustand freigeben, damit der naechste Takt frisch
+            # starten kann. Der alte Thread bleibt isoliert (s. Modul-Kommentar).
+            with _scan_lock:
+                current = _scan_status.get(name)
+                if current is None or current.get("_started_at") != started_at:
+                    return None
+                current["running"] = False
+                current["_recovered_at"] = now
+                current["last_error"] = (
+                    f"Haenger nach {max(1, int(stuck_sec // 60))} Min automatisch "
+                    "zurueckgesetzt; neuer Versuch beim naechsten Takt"
+                )
+                thread = _scan_threads.get(name)
+                if thread is not None and thread is not threading.current_thread():
+                    _scan_threads.pop(name, None)
+            print(f"[Scheduler] WATCHDOG: {name} Hartdeckel nach {int(stuck_sec)}s — "
+                  "Zustand zurueckgesetzt, naechster Takt startet frisch")
+            try:
+                _send_stuck_scan_mail(
+                    name, stuck_sec, timeout_min, recovered=True,
+                    episode_key=f"stuck_scan_recover_{name}_{int(started_at)}",
+                )
+            except Exception as exc:
+                print(f"[Scheduler] Stuck-Mail (recover) fehlgeschlagen: {exc}")
+            return "recovered"
+        if first:
+            print(f"[Scheduler] WATCHDOG: {name} exceeds {timeout_min}min; "
+                  "no overlapping restart")
+            try:
+                _send_stuck_scan_mail(
+                    name, stuck_sec, timeout_min, recovered=False,
+                    episode_key=f"stuck_scan_{name}_{int(started_at)}",
+                )
+            except Exception as exc:
+                print(f"[Scheduler] Stuck-Mail fehlgeschlagen: {exc}")
+            return "stuck"
+        return None
+    except Exception as exc:  # Defensive: Waechter darf Scheduler nie abbrechen
+        print(f"[Scheduler] Watchdog-Fehler bei {name}: {exc}")
+        return None
+
+
 def _run_scan_safe(name, func, timeout_min=None):
     """Start exactly one non-blocking worker for a scanner.
 
@@ -15191,23 +15321,10 @@ def _scheduler_loop():
                 is_running = _scan_status[name]["running"]
                 started_at = _scan_status[name].get("_started_at")
 
-            # A timed-out thread remains isolated. Never launch an overlapping
-            # replacement; health reporting exposes it as stuck.
-            if is_running and started_at:
-                timeout_min = _SCAN_TIMEOUTS.get(name, 10)
-                stuck_sec = now - started_at
-                if stuck_sec > timeout_min * 60:
-                    with _scan_lock:
-                        if not _scan_status[name].get("_timeout_logged"):
-                            print(
-                                f"[Scheduler] WATCHDOG: {name} exceeds {timeout_min}min; "
-                                "no overlapping restart"
-                            )
-                            _scan_status[name]["_timeout_logged"] = True
-                        _scan_status[name]["last_error"] = (
-                            f"Scan-Zeitbudget nach {timeout_min} Minuten ueberschritten; "
-                            "kein Parallelstart"
-                        )
+            # Haenge-Alarm + Selbstheilung (AUDIT 2026-07-30): Warn-Mail beim
+            # ersten Budget-Riss, Zustand-Reset am Hartdeckel — Details in
+            # _scan_watchdog_check. Ein isolierter Thread wird nie dupliziert.
+            _scan_watchdog_check(name, now)
 
             if elapsed >= interval_sec and not is_running:
                 if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):

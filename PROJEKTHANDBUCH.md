@@ -339,6 +339,42 @@ konservativ (ambiguous_same_day unangetastet).
 
 ---
 
+### 3.10 30. Juli — Scan-Wächter: Hänge-Alarm + Selbstheilung
+
+**Anlass Betreiber-Frage „der Server scannt nicht":** Server-Diagnose (journalctl
+beider Dienste) zeigte das Gegenteil — alle Scanner-Caches waren Sekunden bis
+wenige Minuten frisch (btc_divergenz 31 s, strategy_scan 354 s, …). Das
+18-Stunden-„Loch" der Aktien-Scanner ist **Design** (feste ET-Fenster
+10:00–16:05 ET = 16:00–22:05 MESZ, Daily-Bars ändern sich kaum untertägig);
+die irreführende „vor 18h"-Anzeige war bereits am 29.07. gefixt worden
+(Cache-mtime-Merge in den Status-Zeiten).
+
+**Gebaut wurde trotzdem die echte Lücke — Sichtbarkeit bei echten Hängern:**
+
+- **api.py `_scan_watchdog_check`:** ersetzt den stillen Inline-Watchdog.
+  Reißt ein Scan sein Zeitbudget (`_SCAN_TIMEOUTS`, Default 10 Min), geht
+  **einmal je Episode eine Warn-Mail** an den Betreiber (Scanner, Dauer,
+  Budget, Restart-Befehl; persistentes Dedupe `stuck_scan_{name}_{start}`,
+  7 d, Mark erst nach Versand). Am **Hartdeckel (3× Budget, min. Budget + 15
+  Min)** Selbstheilung: Zustand wird freigegeben (`running=False`,
+  Thread-Register bereinigt), der nächste Intervall-Takt startet frisch —
+  der isolierte Alt-Thread erkennt an der `_run_id`, dass er veraltet ist,
+  und rührt den neuen Zustand nicht an (kein Thread-Kill, kein Parallelstart).
+- **bg_service Herzschlag-Wächter:** die bg-Hauptschleife arbeitet
+  sequenziell — ein Hänger dort stoppt ALLES (BI-Scanner, Signal-Eval,
+  Wochenreport). Neuer Daemon-Thread `_bg_stuck_monitor_loop` beobachtet das
+  Herzschlag-Zeitstempel (`_bg_heartbeat_touch` an Schleifenanfang + vor
+  jedem Scan, inkl. Init-Phase); > 90 Min (`BG_STUCK_THRESHOLD_SEC`, ENV) ohne
+  Lebenszeichen ⇒ Alarm-Mail mit hängendem Scan-Namen und
+  `systemctl restart tradingbot-bg`. Einmal je Episode, Re-Arming nach
+  Erholung. Thread kann nicht getötet werden — die Mail ist die Abhilfe.
+- **Tests:** `test_stuck_scan_watchdog.py` (11): Mail einmalig/Episoden-Dedupe
+  über Restart hinweg, Hartdeckel-Reset + Freigabe, Deckel-Faustregel,
+  im-Budget/idle/kaputter Status, bg-Entscheidungslogik, Mail-Inhalte,
+  Re-Arming. Suite **1182**.
+
+---
+
 ## 4. Das Mail-System (Stand 29.07., abends)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
@@ -392,7 +428,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1171 Tests, alle grün** (30.07.). Wichtige Suiten:
+**1182 Tests, alle grün** (30.07.). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -400,6 +436,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 | `test_tracker_calibration.py` | Managed-R, Wilson-KI, sample_reliable |
 | `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
 | `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
+| `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag |
 | `test_email_alert_audit.py` | Alert-Gates, Swing-Regeln, Chase-Gates (28.07.) |
 | `test_mail_class_api.py` | Mail-Klassen, ATR-Annotation, Kanal-Versand (28.07.) |
 | `test_commerce_hardening.py` | Auth, Billing, Kanal-Settings (28.07.) |
@@ -412,7 +449,8 @@ erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalende
 Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
-1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger).
+1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
+1182 (30.07. Scan-Wächter).
 
 ---
 

@@ -4642,6 +4642,114 @@ def _resolve_bg_scan_set(env_value=None, allow_api_overlap=None):
     return active, BG_ALL_SCANS - active
 
 
+# ── Haenge-Waechter fuer die bg-Hauptschleife (AUDIT 2026-07-30) ─────────────
+# Die bg-Hauptschleife arbeitet Scans SEQUENZIELL ab: haengt ein Scan (z.B.
+# Netz-Aufruf ohne Antwort), steht der ganze Dienst still — inklusive
+# Signal-Tracker-Eval (BE-Alerts) und Wochenreport. Ein eigener Wächter-Thread
+# beobachtet deshalb das Herzschlag-Zeitstempel der Schleife und mailt dem
+# Betreiber einmal je Episode, wenn nichts mehr ruehrt. Er kann den haengenden
+# Thread nicht toeten (Python) — die Mail enthaelt den Restart-Befehl.
+_BG_STUCK_THRESHOLD_SEC = int(os.environ.get("BG_STUCK_THRESHOLD_SEC", str(90 * 60)))
+_bg_heartbeat = {"ts": time.time(), "current": "start"}
+_bg_stuck_alerted = {"key": None}
+
+
+def _bg_heartbeat_touch(current=None):
+    """Lebenszeichen der Hauptschleife setzen (mit aktuellem Scan-Namen)."""
+    _bg_heartbeat["ts"] = time.time()
+    if current is not None:
+        _bg_heartbeat["current"] = str(current)
+
+
+def _bg_stuck_decision(now, heartbeat_ts, alerted_key, threshold_sec):
+    """(episode_key|None, soll_alarmieren) — pure, testbar.
+
+    episode_key enthaelt den Herzschlag-Zeitstempel: jede Haenge-Episode
+    bekommt genau eine Mail, Erholung (frischer Herzschlag) schliesst die
+    Episode und armiert den Waechter fuer die naechste.
+    """
+    stale = now - float(heartbeat_ts or 0)
+    if stale <= threshold_sec:
+        return None, False
+    key = f"bg_stuck_{int(heartbeat_ts)}"
+    return key, key != alerted_key
+
+
+def _send_bg_stuck_mail(current_scan, stale_sec, threshold_sec, secrets):
+    """Betreiber-Warn-Mail: bg-Hauptschleife gibt kein Lebenszeichen mehr."""
+    minutes = max(1, int(stale_sec // 60))
+    threshold_min = max(1, int(threshold_sec // 60))
+    scan_text = html.escape(str(current_scan or "unbekannt"))
+    subject = "Scan-Waechter: Hintergrund-Dienst haengt"
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+    <h2 style="color:#b45309">Scan-Waechter (Hintergrund-Dienst)</h2>
+    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p>Die Hauptschleife von <b>tradingbot-bg</b> meldet seit <b>{minutes} Min</b>
+    kein Lebenszeichen mehr (Schwelle {threshold_min} Min). Wahrscheinlich haengt
+    der Scan <b>{scan_text}</b> in einem Netz-Aufruf ohne Antwort.</p>
+    <p>Betroffen sind alle bg-Aufgaben: BI-Scanner, Signal-Tracker-Eval
+    (Stop-Update-Mails), Wochenreport.</p>
+    <p><b>Abhilfe auf dem Server:</b><br>
+    <code>systemctl restart tradingbot-bg</code><br>
+    Danach laeuft alles automatisch weiter (Scans holen verpasste Slots nach).</p>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatische Betreiber-Warnung des Scan-Waechters (einmalig je Haenge-Episode).<br>
+        Kein Trading-Signal, keine Handelsaufforderung.
+    </p>
+    </body></html>"""
+    return bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+
+
+def _bg_stuck_monitor_loop(secrets):
+    """Waechter-Thread: prueft minuetlich das Herzschlag der Hauptschleife."""
+    while _running:
+        time.sleep(60)
+        try:
+            now = time.time()
+            key, should_alert = _bg_stuck_decision(
+                now, _bg_heartbeat.get("ts"), _bg_stuck_alerted.get("key"),
+                _BG_STUCK_THRESHOLD_SEC,
+            )
+            if key is None:
+                if _bg_stuck_alerted.get("key") is not None:
+                    log.info("[Watchdog] Hauptschleife antwortet wieder — Waechter rearmiert")
+                    _bg_stuck_alerted["key"] = None
+                continue
+            if not should_alert:
+                continue
+            log.warning(f"[Watchdog] Hauptschleife haengt seit "
+                        f"{int((now - float(_bg_heartbeat.get('ts') or 0)) // 60)} Min "
+                        f"(aktuell: {_bg_heartbeat.get('current') or '?'}) — Alarm-Mail")
+            sent = False
+            try:
+                sent = _send_bg_stuck_mail(
+                    _bg_heartbeat.get("current"),
+                    now - float(_bg_heartbeat.get("ts") or 0),
+                    _BG_STUCK_THRESHOLD_SEC, secrets,
+                )
+            except Exception as exc:
+                log.warning(f"[Watchdog] Alarm-Mail fehlgeschlagen: {exc}")
+            if sent:
+                # B2-Muster: Dedupe-Mark erst NACH erfolgreichem Versand.
+                _email_dedupe_mark(key)
+            if sent or _email_dedupe_active(key, 7 * 86400):
+                _bg_stuck_alerted["key"] = key
+        except Exception as exc:  # Waechter darf nie sterben
+            log.warning(f"[Watchdog] Monitor-Fehler: {exc}")
+
+
+def _start_bg_stuck_monitor(secrets):
+    """Waechter-Thread genau einmal starten (daemon — stirbt mit dem Prozess)."""
+    monitor = threading.Thread(
+        target=_bg_stuck_monitor_loop, args=(secrets,),
+        name="bg-stuck-monitor", daemon=True,
+    )
+    monitor.start()
+    log.info(f"🐕 Scan-Waechter aktiv (Schwelle {_BG_STUCK_THRESHOLD_SEC // 60} Min ohne Herzschlag)")
+    return monitor
+
+
 def run_service():
     global _running
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -4657,6 +4765,8 @@ def run_service():
     log.info(f"Email alerts: {'AKTIV' if secrets.get('GMAIL_USER') and secrets.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
     log.info(f"🚀 Background Service V2 gestartet (PID: {os.getpid()})")
     _update_status("_service", "running", f"PID {os.getpid()}")
+    _bg_heartbeat_touch("start")
+    _start_bg_stuck_monitor(secrets)
 
     # ── Zeitplan: Feste Uhrzeiten (ET = US Eastern) ──
     # Aktien-Scanner basieren auf Daily Bars → ändern sich kaum untertägig
@@ -4734,6 +4844,7 @@ def run_service():
     log.info("📡 Initialer Load...")
     if "crash_monitor" in _bg_scans:
         try:
+            _bg_heartbeat_touch("crash_monitor (init)")
             _fetch_crash_monitor(poly_key)
             last_run["crash_monitor"] = time.time()
         except Exception as e:
@@ -4742,6 +4853,7 @@ def run_service():
 
     if "btc_divergence" in _bg_scans:
         try:
+            _bg_heartbeat_touch("btc_divergence (init)")
             _run_btc_divergence(poly_key)
             last_run["btc_divergence"] = time.time()
         except Exception as e:
@@ -4750,6 +4862,7 @@ def run_service():
 
     if "new_listing" in _bg_scans:
         try:
+            _bg_heartbeat_touch("new_listing (init)")
             _nls_init = _run_new_listing_scanner()
             _alert_nls_signals(_nls_init, secrets)
             last_run["new_listing"] = time.time()
@@ -4759,6 +4872,7 @@ def run_service():
 
     if "bi_long" in _bg_scans:
         try:
+            _bg_heartbeat_touch("bi_long (init)")
             _run_bi_scanner(poly_key, "long")
             last_run["bi_long"] = time.time()
         except Exception as e:
@@ -4767,6 +4881,7 @@ def run_service():
 
     if "bi_short" in _bg_scans:
         try:
+            _bg_heartbeat_touch("bi_short (init)")
             _run_bi_scanner(poly_key, "short")
             last_run["bi_short"] = time.time()
         except Exception as e:
@@ -4776,6 +4891,7 @@ def run_service():
         # Biotech Scanner nach 2 Min starten (nicht sofort — spart API-Calls beim Init)
         time.sleep(120)
         try:
+            _bg_heartbeat_touch("biotech (init)")
             _run_biotech_scanner(poly_key)
             last_run["biotech"] = time.time()
         except Exception as e:
@@ -4791,6 +4907,7 @@ def run_service():
     # ── Hauptschleife ──
     while _running:
         now = time.time()
+        _bg_heartbeat_touch()  # Lebenszeichen fuer den Haenge-Waechter
         try:
             now_et = datetime.now(ET)
         except Exception:
@@ -4816,6 +4933,7 @@ def run_service():
             should_run, slot_key = _check_fixed_schedule(scanner_name, now_et)
             if should_run:
                 _running_scanners.add(scanner_name)  # B-05: Mark as running
+                _bg_heartbeat_touch(scanner_name)    # Waechter: dieser Scan laeuft jetzt
                 try:
                     log.info(f"⏰ {scanner_name} — geplante Zeit erreicht ({now_et.strftime('%H:%M')} ET)")
                     if scanner_name == "crash_monitor":
