@@ -336,5 +336,97 @@ def test_recovery_mail_suppressed_only_when_warn_throttled(monkeypatch, tmp_path
     assert len(sent) == 2
 
 
+# ── Teil 5: Waechter-Ereignis-Log (JSONL, Wochenreport-Quelle, 30.07.) ───────
+@pytest.fixture(autouse=True)
+def _watchdog_events_tmp(monkeypatch, tmp_path):
+    """Event-Log aller Tests in tmp umleiten (kein Schreiben nach data_cache/)."""
+    from modules import watchdog_log as _wl
+    monkeypatch.setattr(_wl, "WATCHDOG_EVENTS_PATH",
+                        str(tmp_path / "watchdog_events.jsonl"))
+    return _wl
+
+
+def _wd_events():
+    from modules import watchdog_log as _wl
+    return _wl.load_watchdog_events(days=7)
+
+
+def test_warn_event_logged_with_mailed_flag(monkeypatch, tmp_path):
+    """Versandte Warnung => Event kind=warn, mailed=True, Dauer befuellt."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=26 * 60)
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    evs = _wd_events()
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev["kind"] == "warn"
+    assert ev["scanner"] == "crypto_explosion"
+    assert ev["mailed"] is True
+    assert ev["throttled"] is False
+    assert ev["stuck_min"] >= 25
+
+
+def test_throttled_warn_event_logged(monkeypatch, tmp_path):
+    """Throttle-gedeckelte Warnung => keine Mail, aber Event throttled=True."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=26 * 60)
+    api._email_dedupe_mark("stuck_throttle_crypto_explosion")
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    assert sent == []
+    evs = _wd_events()
+    assert len(evs) == 1
+    assert evs[0]["kind"] == "warn"
+    assert evs[0]["throttled"] is True
+    assert evs[0]["mailed"] is False
+
+
+def test_reset_event_logged(monkeypatch, tmp_path):
+    """Hartdeckel-Reset mit versandter Mail => Event kind=reset, mailed=True."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
+    api._scan_threads["crypto_explosion"] = object()
+    assert api._scan_watchdog_check("crypto_explosion") == "recovered"
+    assert [e["kind"] for e in _wd_events()] == ["reset"]
+    assert _wd_events()[0]["mailed"] is True
+
+
+def test_suppressed_reset_event_logged_throttled(monkeypatch, tmp_path):
+    """Reset-Mail throttle-gedeckelt => Event kind=reset, throttled=True."""
+    sent, started = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
+    api._email_dedupe_mark("stuck_throttle_crypto_explosion")
+    api._scan_threads["crypto_explosion"] = object()
+    assert api._scan_watchdog_check("crypto_explosion") == "recovered"
+    assert sent == []
+    evs = _wd_events()
+    assert [e["kind"] for e in evs] == ["reset"]
+    assert evs[0]["throttled"] is True
+    assert evs[0]["mailed"] is False
+
+
+def test_recovery_event_logged(monkeypatch, tmp_path):
+    """Entwarnung => Event kind=recovery mit Episode-Dauer."""
+    sent, started = _setup_api(monkeypatch, tmp_path)
+    api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(started)}")
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started) is True
+    evs = _wd_events()
+    assert [e["kind"] for e in evs] == ["recovery"]
+    assert evs[0]["mailed"] is True
+    assert evs[0]["stuck_min"] == 40
+
+
+def test_bg_events_logged(monkeypatch):
+    """bg-Waechter: Warnung => bg_warn, Entwarnung => bg_recovery (Scan-Name)."""
+    sent = []
+
+    def _recorder(subject, body_html, secrets, mail_class="trade", **kwargs):
+        sent.append(subject)
+        return True
+
+    monkeypatch.setattr(bg_service, "_send_email_alert", _recorder)
+    assert bg_service._send_bg_stuck_mail("bi_long (init)", 16 * 60, 15 * 60, {}) is True
+    assert bg_service._send_bg_recovery_mail("bi_long (init)", 95 * 60, {}) is True
+    evs = _wd_events()
+    assert [e["kind"] for e in evs] == ["bg_warn", "bg_recovery"]
+    assert all(e["scanner"] == "bi_long (init)" for e in evs)
+    assert all(e["mailed"] is True for e in evs)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

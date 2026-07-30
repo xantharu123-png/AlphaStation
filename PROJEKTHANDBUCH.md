@@ -525,6 +525,43 @@ stand aber NICHT in `_SCAN_TIMEOUTS` → 10-Min-Default-Budget. Der Sweep über
   (gedrosselt/gescheitert/versandt). Suite **1223, alle grün** — erstmals
   zeitunabhängig.
 
+### 3.15 30. Juli (Nacht) — Wächter-Ereignis-Log + Wächter-Sektion im Wochenreport
+
+**Anlass:** Gedrosselte Wächter-Episoden (3.14) waren nur noch im Journal
+sichtbar — der Betreiber konnte nicht mehr erkennen, WIE OFT Scanner haengen,
+ohne Mails zu zaehlen. Ziel: einmal pro Woche die volle Wahrheit statt
+Einzelsicht pro Mail.
+
+**Gebaut:**
+- **`modules/watchdog_log.py`** — JSONL-Ereignis-Log
+  (`data_cache/watchdog_events.jsonl`, bewusst NICHT /tmp wegen PrivateTmp):
+  `log_watchdog_event(kind, scanner, stuck_min, mailed, throttled)` mit
+  Kinds `warn | reset | recovery | bg_warn | bg_recovery`; wirft NIE
+  (Log-Ausfall darf Waechter/Mailversand nie stoppen); FIFO-Rotation
+  (2000 Zeilen → 1500, Guessen-Gate 512 KB); `load_watchdog_events(days)`
+  toleriert korrupte Zeilen; `summarize_watchdog_events` aggregiert je
+  Scanner (Episoden, gemeldet, gedrosselt, Resets, Entwarnungen, Ø Dauer).
+- **Wiring:** api.py loggt in `_send_stuck_scan_mail` (warn/reset, auch die
+  Throttle-Unterdrückungen) und `_send_stuck_recovery_mail`;
+  bg_service.py loggt `bg_warn`/`bg_recovery` in den beiden bg-Mailern.
+  Import ueberall try/except-guarded.
+- **Wochenreport-Sektion** `_watchdog_report_section`: >0 Episoden → gelbe
+  Tabelle „🐕 Scan-Waechter diese Woche" (Scanner | Episoden | gemeldet |
+  gedrosselt | Resets | Entwarnungen | Ø Dauer) inkl. Drossel-Hinweis;
+  0 Episoden → gruene Zeile „Keine Hänge-Episoden diese Woche ✓";
+  Ladefehler → Sektion faellt weg, Report geht immer raus. Im Builder als
+  `watchdog_events=None` injizierbar (Tests); `_run_weekly_report` laedt
+  selbst (7 Tage). Preview-Skript prueft die Sektion jetzt als Pflicht-Check.
+- **Tests:** +19: `test_watchdog_log.py` (9: Roundtrip, Tage-Filter,
+  Korrupt-Zeilen, Rotation, Summarize, Nie-werfen), Watchdog-Event-Assertions
+  (6: warn/reset/recovery × mailed/throttled, bg-Kinds, tmp-Umleitung via
+  autouse-Fixture), Report-Sektion (4: Tabelle mit Events, All-clear,
+  Loader-Ausfall, Direkt-Injektion). Suite **1242, alle grün**.
+
+**Effekt:** Der Betreiber sieht Freitag im Wochenreport auf einen Blick, ob
+die Throttle (3.14) nur Spam verhinderte oder ob ein Scanner chronisch
+haengt — inkl. der Episoden, die bewusst NICHT gemailt wurden.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -580,7 +617,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1223 Tests, alle grün** (30.07.) — seit dem PM-Fenster-Mock (3.14) erstmals
+**1242 Tests, alle grün** (30.07.) — seit dem PM-Fenster-Mock (3.14) erstmals
 zu jeder Tageszeit. Wichtige Suiten:
 
 | Datei | Deckt ab |
@@ -589,7 +626,8 @@ zu jeder Tageszeit. Wichtige Suiten:
 | `test_tracker_calibration.py` | Managed-R, Wilson-KI, sample_reliable |
 | `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
 | `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
-| `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag, **Entwarnungs-Mails** |
+| `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag, Entwarnungs-Mails, **Event-Log** |
+| `test_watchdog_log.py` (30.07.) | JSONL-Event-Log: Roundtrip, Filter, Rotation, Summarize, Nie-werfen |
 | `test_rates_block.py` (30.07.) | Zins-Block: FRED-Parsing, Regime-Grenzen, Scoring-Invariante, rates_json |
 | `test_email_alert_audit.py` | Alert-Gates, Swing-Regeln, Chase-Gates (28.07.) |
 | `test_mail_class_api.py` | Mail-Klassen, ATR-Annotation, Kanal-Versand (28.07.) |
@@ -608,7 +646,8 @@ Suite-Stand-Historie:
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
 1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard) →
 1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün) →
-1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün).
+1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün) →
+1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün).
 
 ---
 

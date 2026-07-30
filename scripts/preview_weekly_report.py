@@ -122,6 +122,12 @@ def main() -> int:
         print("  INFO leere Woche — Lebenszeichen-Mail gerendert "
               "(Tabellen-Check entfaellt; ggf. --days 30 probieren)")
 
+    # Waechter-Sektion rendert IMMER (gruene Zeile oder Tabelle, 30.07.)
+    wd_ok = "Scan-Waechter" in body_html
+    print(("  OK   " if wd_ok else "  FAIL ") + "Waechter-Sektion")
+    if not wd_ok:
+        failures.append("Waechter-Sektion")
+
     _print_scanner_table(summary)
 
     print(f"\nHTML geschrieben: {out}")

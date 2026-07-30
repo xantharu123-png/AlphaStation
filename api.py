@@ -115,6 +115,11 @@ from modules.email_dedupe import (
     load_email_dedupe as _shared_load_email_dedupe,
     save_email_dedupe as _shared_save_email_dedupe,
 )
+try:
+    from modules.watchdog_log import log_watchdog_event as _log_watchdog_event
+except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
+    def _log_watchdog_event(*_args, **_kwargs):
+        return None
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -15029,6 +15034,7 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
         if _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC):
             print(f"[Scheduler] WATCHDOG: {name} Warnung unterdrueckt "
                   f"(max 1 Mail/{_STUCK_WARN_THROTTLE_SEC // 3600}h je Scanner)")
+            _log_watchdog_event("warn", name, stuck_min=minutes, mailed=False, throttled=True)
             return False
     elif (
         episode_started_at is not None
@@ -15037,6 +15043,7 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
     ):
         print(f"[Scheduler] WATCHDOG: {name} Reset-Mail unterdrueckt "
               "(Warnung dieser Episode war throttle-gedeckelt)")
+        _log_watchdog_event("reset", name, stuck_min=minutes, mailed=False, throttled=True)
         return False
     if recovered:
         subject = f"Scan-Waechter: {name} automatisch zurueckgesetzt"
@@ -15067,6 +15074,8 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
         _email_dedupe_mark(dedupe_key)
         if not recovered:
             _email_dedupe_mark(f"stuck_throttle_{name}")
+    _log_watchdog_event("reset" if recovered else "warn", name,
+                        stuck_min=minutes, mailed=bool(sent))
     return bool(sent)
 
 
@@ -15083,6 +15092,8 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
         _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC)
         and not _email_dedupe_active(f"stuck_scan_{name}_{int(episode_started_at)}", 7 * 86400)
     ):
+        _log_watchdog_event("recovery", name, stuck_min=max(1, int(episode_sec // 60)),
+                            mailed=False, throttled=True)
         return False  # Warnung war throttle-gedeckelt: Entwarnung waere kontext-los
     minutes = max(1, int(episode_sec // 60))
     dedupe_key = f"stuck_recovery_{name}_{int(episode_started_at)}"
@@ -15105,6 +15116,7 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
     sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
     if sent:
         _email_dedupe_mark(dedupe_key)
+    _log_watchdog_event("recovery", name, stuck_min=minutes, mailed=bool(sent))
     return bool(sent)
 
 

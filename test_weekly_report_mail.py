@@ -92,6 +92,8 @@ def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     monkeypatch.setattr(bg_service, "_WEEKLY_VERDICT_STATE_FILE",
                         str(tmp_path / "verdicts.json"))
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)
+    # Waechter-Log hermetisch: kein Lesen aus data_cache/ (30.07.)
+    monkeypatch.setattr(bg_service, "_load_watchdog_events", lambda days=7: [])
     _FakeDatetime._now = now
     monkeypatch.setattr(bg_service, "datetime", _FakeDatetime)
     monkeypatch.setattr(
@@ -441,3 +443,63 @@ def test_no_be_box_without_activations(monkeypatch, tmp_path):
     assert "Ø R BE" in body                            # Spaltenkopf bleibt
     assert "Einstand-Regel (seit 30.07. live)" not in body   # keine Box
     assert "Einstand-Regel (Stop auf Einstand ab +1R" in body  # Footer-Semantik
+
+
+# ── Waechter-Sektion (JSONL-Event-Log, 30.07.) ───────────────────────────────
+
+def _wd_events_sample():
+    """2 Warnungen (1 gedrosselt) + 1 Entwarnung fuer strategy_scan."""
+    now = time.time()
+    return [
+        {"ts": now - 3600, "kind": "warn", "scanner": "strategy_scan",
+         "stuck_min": 26, "mailed": True, "throttled": False},
+        {"ts": now - 3500, "kind": "warn", "scanner": "strategy_scan",
+         "stuck_min": 28, "mailed": False, "throttled": True},
+        {"ts": now - 3400, "kind": "recovery", "scanner": "strategy_scan",
+         "stuck_min": 30, "mailed": True, "throttled": False},
+    ]
+
+
+def test_watchdog_table_with_events(monkeypatch, tmp_path):
+    """Gelber Block: Episoden-Zahl, Scanner-Name, Drossel-Hinweis, Tabelle."""
+    sent = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(bg_service, "_load_watchdog_events",
+                        lambda days=7: _wd_events_sample())
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Scan-Waechter diese Woche: 2 Hänge-Episode(n)" in body
+    assert "strategy_scan" in body
+    assert "gedrosselt" in body
+    assert "27 Min" in body  # Ø Dauer (26+28)/2
+    assert "Keine Hänge-Episoden" not in body
+
+
+def test_watchdog_all_clear_without_events(monkeypatch, tmp_path):
+    """0 Episoden => gruene Entwarnungs-Zeile statt Tabelle."""
+    sent = _setup(monkeypatch, tmp_path)  # _setup patcht Loader auf []
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Keine Hänge-Episoden diese Woche" in body
+    assert "Hänge-Episode(n)" not in body
+
+
+def test_watchdog_loader_failure_drops_section(monkeypatch, tmp_path):
+    """Werfender Log-Loader => Sektion faellt weg, Report geht trotzdem raus."""
+    sent = _setup(monkeypatch, tmp_path)
+
+    def _boom(days=7):
+        raise RuntimeError("kaputt")
+
+    monkeypatch.setattr(bg_service, "_load_watchdog_events", _boom)
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Wochenreport Signal-Tracker" in body
+    assert "Hänge-Episoden" not in body
+
+
+def test_build_mail_watchdog_events_injected():
+    """Direkt-Injektion (ohne Loader): Tabelle zeigt Episoden/Reset-Spalten."""
+    subject, body = bg_service._build_weekly_report_mail(
+        _summary(), now_et=FRIDAY_1620, watchdog_events=_wd_events_sample())
+    assert "Scan-Waechter diese Woche" in body
+    assert "Entwarnungen" in body

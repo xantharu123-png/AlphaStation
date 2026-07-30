@@ -89,6 +89,18 @@ from modules.email_dedupe import (
     save_email_dedupe as _shared_save_email_dedupe,
 )
 try:
+    from modules.watchdog_log import (
+        load_watchdog_events as _load_watchdog_events,
+        log_watchdog_event as _log_watchdog_event,
+        summarize_watchdog_events as _summarize_watchdog_events,
+    )
+except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
+    _load_watchdog_events = None
+    _summarize_watchdog_events = None
+
+    def _log_watchdog_event(*_args, **_kwargs):
+        return None
+try:
     from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
@@ -1835,7 +1847,67 @@ def _verdict_alerts(summary, prev_state):
     return alerts, new_state
 
 
-def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
+def _watchdog_report_section(events=None):
+    """HTML-Block 'Scan-Waechter diese Woche' fuer den Wochenreport.
+
+    events=None => selbst aus dem JSONL-Log laden (letzte 7 Tage). Fehler oder
+    fehlendes Modul => leerer String (Report geht trotzdem raus). 0 Episoden
+    => gruene Entwarnungs-Zeile, sonst Tabelle je Scanner.
+    """
+    try:
+        if events is None:
+            if _load_watchdog_events is None:
+                return ""
+            events = _load_watchdog_events(days=7)
+        if _summarize_watchdog_events is None:
+            return ""
+        agg = _summarize_watchdog_events(events)
+    except Exception:
+        return ""
+    total = agg.get("total") or {}
+    episodes = int(total.get("episodes") or 0)
+    if episodes == 0:
+        return """
+    <div style="background:#e9f7ef;border:1px solid #10b981;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>🐕 Scan-Waechter:</b> Keine Hänge-Episoden diese Woche — alle
+        Scanner liefen im Zeitbudget. ✓
+    </div>"""
+    rows = ""
+    for name, b in (agg.get("per_scanner") or {}).items():
+        dur = b.get("avg_stuck_min")
+        dur_text = f"{float(dur):.0f} Min" if isinstance(dur, (int, float)) else "–"
+        rows += f"""<tr>
+            <td style="padding:6px;border-bottom:1px solid #eee"><b>{html.escape(str(name))}</b></td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{int(b.get('episodes') or 0)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{int(b.get('mailed') or 0)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{int(b.get('throttled') or 0)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{int(b.get('resets') or 0)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{int(b.get('recoveries') or 0)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{dur_text}</td>
+        </tr>"""
+    throttled_n = int(total.get("throttled") or 0)
+    throttle_note = (f"<br>{throttled_n} Wiederholungs-Warnung(en) wurden bewusst "
+                     f"gedrosselt (max 1 Mail je Scanner/6h) — Zaehler oben zeigt "
+                     f"die volle Episode-Zahl.")
+    return f"""
+    <div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>🐕 Scan-Waechter diese Woche: {episodes} Hänge-Episode(n)</b>{throttle_note}
+        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px">
+            <tr style="background:#fff7e0">
+                <th style="padding:6px;text-align:left">Scanner</th>
+                <th style="padding:6px;text-align:left">Episoden</th>
+                <th style="padding:6px;text-align:left">gemeldet</th>
+                <th style="padding:6px;text-align:left">gedrosselt</th>
+                <th style="padding:6px;text-align:left">Resets</th>
+                <th style="padding:6px;text-align:left">Entwarnungen</th>
+                <th style="padding:6px;text-align:left">Ø Dauer</th>
+            </tr>
+            {rows}
+        </table>
+    </div>"""
+
+
+def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdog_events=None):
     """Baut (subject, body_html) der Wochen-Bilanz aus load_performance_summary(days=7).
 
     Hausstil wie _send_signal_update_mail (Arial, 700px, Tabellen). Subject
@@ -1843,6 +1915,9 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
     Leere Woche => 'Keine Signale diese Woche'-Lebenszeichen statt Tabellen.
     verdict_alerts: Liste von HTML-Zeilen aus _verdict_alerts — als gelber
     Alarm-Block ganz oben (Kalibrier-Loop, AUDIT 2026-07-24).
+    watchdog_events: None = selbst aus modules.watchdog_log laden (7 Tage);
+    Liste = injiziert (Tests). Fehler/Lesefehler => Sektion faellt weg,
+    der Report selbst geht immer raus.
     """
     stamp = now_et if now_et is not None else datetime.now()
     total = summary.get("total") or {}
@@ -2029,12 +2104,14 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
         dieser Woche waren +1R gelaufen und wurden auf Einstand
         gesichert{saved_line}.{compare}
     </div>"""
+    wd_html = _watchdog_report_section(watchdog_events)
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
     <p style="color:#666">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]} | Fenster: letzte 7 Tage</p>
     {alarm_html}
     {be_html}
+    {wd_html}
     {mid_html}
     <p style="color:#999;font-size:12px;margin-top:20px">
         Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
@@ -4728,7 +4805,10 @@ def _send_bg_stuck_mail(current_scan, stale_sec, threshold_sec, secrets):
         Kein Trading-Signal, keine Handelsaufforderung.
     </p>
     </body></html>"""
-    return bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+    sent = bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+    _log_watchdog_event("bg_warn", current_scan or "unbekannt",
+                        stuck_min=minutes, mailed=sent)
+    return sent
 
 
 def _bg_recovery_decision(alerted, now):
@@ -4762,7 +4842,10 @@ def _send_bg_recovery_mail(current_scan, episode_sec, secrets):
         Kein Trading-Signal, keine Handelsaufforderung.
     </p>
     </body></html>"""
-    return bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+    sent = bool(_send_email_alert(subject, body_html, secrets, mail_class="info"))
+    _log_watchdog_event("bg_recovery", current_scan or "unbekannt",
+                        stuck_min=minutes, mailed=sent)
+    return sent
 
 
 def _bg_stuck_monitor_loop(secrets):
