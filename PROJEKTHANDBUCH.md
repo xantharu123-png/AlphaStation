@@ -336,6 +336,14 @@ konservativ (ambiguous_same_day unangetastet).
   Konservativfall, BE→Stop = 0 R, Gewinner unverändert, Pure-Funktion,
   Abwärtskompatibilität, Mail-Texte scanner-differenziert, Dedupe,
   Origin-Zweitsicherung, Mail-Crash-Toleranz.
+- **Wochenreport-Integration (gleicher Tag, nachgeliefert):**
+  `load_performance_summary` liefert je Bucket `avg_r_be` (live gemessenes R
+  unter der Einstand-Regel — kein Backtest), `be_activations` und `be_saved`
+  (Verlierer, die die Regel auf ≥ 0 R gedreht hätte). Der Freitags-Report
+  zeigt eine „Ø R BE"-Spalte in Kopf- UND Scanner-Tabelle plus eine grüne
+  Ergebnis-Box (Aktivierungen, bewahrte Verlierer, Ø R Ist vs. Ø R BE);
+  Alt-Summaries ohne BE-Felder rendern „–" und keine Box. Das Preview-Skript
+  prüft die neuen Elemente als Smoke-Checks mit. Suite 1187.
 
 ---
 
@@ -428,7 +436,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1182 Tests, alle grün** (30.07.). Wichtige Suiten:
+**1187 Tests, alle grün** (30.07.). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -450,7 +458,7 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
-1182 (30.07. Scan-Wächter).
+1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport).
 
 ---
 
@@ -462,7 +470,7 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
 | 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
 | 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | ~~Exit-Effizienz — Regel abgeleitet~~ — **IMPLEMENTIERT (3.9):** BE-Trigger live (be_activated_at, r_realized_be, Stop-Update-Mail). Nächster Schritt: `r_realized_be` vs. `r_realized` in Wochenreport/Performance-Summary aufnehmen, damit der Ist-vs-BE-Nachweis wöchentlich sichtbar wird | 3.8/3.9 |
+| 5 | ~~Exit-Effizienz — Regel abgeleitet~~ — **IMPLEMENTIERT (3.9):** BE-Trigger live (be_activated_at, r_realized_be, Stop-Update-Mail) **+ Wochenreport-Nachweis** („Ø R BE"-Spalte, Ergebnis-Box: Aktivierungen, bewahrte Verlierer, Ø R Ist vs. BE). Nächste Prüfung: Freitags-Report der kommenden Wochen gegen die Erwartung +0,14…+0,16 R/Signal | 3.8/3.9 |
 | 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
 | 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |

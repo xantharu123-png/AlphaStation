@@ -396,3 +396,48 @@ def test_failed_send_keeps_old_verdict_state(monkeypatch, tmp_path):
                         lambda *args, **kwargs: False)  # SMTP down
     assert bg_service._run_weekly_report({}) is False
     assert _read_verdict_state(tmp_path) == old_state
+
+
+# ── BE-Spalte + BE-Box (BE-Trigger, AUDIT 2026-07-30) ────────────────────────
+
+def _summary_with_be():
+    """_summary() + BE-Felder (Schema 1:1 zum echten Tracker seit 30.07.)."""
+    s = _summary()
+    s["total"]["avg_r_be"] = 0.61
+    s["total"]["be_activations"] = 5
+    s["total"]["be_saved"] = 2
+    s["per_scanner"]["bi_long"]["avg_r_be"] = 1.4
+    s["per_scanner"]["bi_long"]["be_activations"] = 4
+    s["per_scanner"]["bi_long"]["be_saved"] = 1
+    return s
+
+
+def test_be_column_in_head_and_scanner_table(monkeypatch, tmp_path):
+    """Ø R BE in Kopf- UND Scanner-Tabelle (total +0.61R, bi_long +1.40R)."""
+    sent = _setup(monkeypatch, tmp_path, summary=_summary_with_be())
+    bg_service._run_weekly_report({})
+    body = sent[0]["body"]
+    assert body.count("Ø R BE") >= 2   # Spaltenkopf in beiden Tabellen
+    assert "+0.61R" in body            # total.avg_r_be
+    assert "+1.40R" in body            # bi_long.avg_r_be
+
+
+def test_be_box_with_activations_and_saved(monkeypatch, tmp_path):
+    """Gruene BE-Box: Aktivierungen, verhinderte Verlierer, Ist-vs-BE-Vergleich."""
+    sent = _setup(monkeypatch, tmp_path, summary=_summary_with_be())
+    bg_service._run_weekly_report({})
+    body = sent[0]["body"]
+    assert "Einstand-Regel (seit 30.07. live)" in body
+    assert "5 Signale" in body
+    assert "2 vor einem Verlust bewahrt" in body
+    assert "+0.29R" in body and "+0.61R" in body   # ØR Ist vs. ØR BE
+
+
+def test_no_be_box_without_activations(monkeypatch, tmp_path):
+    """Alt-Summary OHNE BE-Felder: keine Box, Spaltenkoepfe bleiben, Werte '–'."""
+    sent = _setup(monkeypatch, tmp_path)  # _summary() ohne BE-Felder
+    assert bg_service._run_weekly_report({}) is True
+    body = sent[0]["body"]
+    assert "Ø R BE" in body                            # Spaltenkopf bleibt
+    assert "Einstand-Regel (seit 30.07. live)" not in body   # keine Box
+    assert "Einstand-Regel (Stop auf Einstand ab +1R" in body  # Footer-Semantik

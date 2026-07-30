@@ -1275,6 +1275,9 @@ def _finalize_bucket(
     r_values: List[float],
     window_days: int,
     managed_values: Optional[List[float]] = None,
+    be_values: Optional[List[float]] = None,
+    be_activations: int = 0,
+    be_saved: int = 0,
 ) -> None:
     wins = sum(1 for value in r_values if value > 0)
     decided = len(r_values)
@@ -1290,6 +1293,12 @@ def _finalize_bucket(
     bucket["avg_r_managed_50_50"] = (
         round(sum(managed) / len(managed), 3) if managed else None
     )
+    # AUDIT 2026-07-30 (BE-Trigger): live gemessenes R unter der Einstand-Regel
+    # (r_realized_be) + Zaehler fuer Markierungen und verhinderte Verlierer.
+    be = [value for value in (be_values or []) if value is not None]
+    bucket["avg_r_be"] = round(sum(be) / len(be), 3) if be else None
+    bucket["be_activations"] = int(be_activations)
+    bucket["be_saved"] = int(be_saved)
     bucket["alerts_per_day"] = round(bucket["signals"] / float(window_days), 3)
 
 
@@ -1359,6 +1368,11 @@ def load_performance_summary(days: int = 90) -> dict:
                      None ohne entschiedene Signale
       avg_r / sum_r — ueber geschlossene Signale mit r_realized
       avg_r_managed_50_50 — R des empfohlenen 50/50-Managements (T1)
+      avg_r_be — live gemessenes R unter der Einstand-Regel (Stop auf
+                 Einstand ab MFE >= +1R; seit 30.07., kein Backtest);
+                 None solange keine BE-Daten existieren
+      be_activations / be_saved — Signale mit BE-Markierung / davon vor
+                 einem Verlust bewahrt (r_realized < 0, BE-R >= 0)
       win_rate_wilson_95 — Wilson-Konfidenzintervall der Trefferquote
       decided_signals / sample_reliable — Stichprobengroesse / >=30-Flag
       alerts_per_day — signals / window_days
@@ -1390,6 +1404,13 @@ def load_performance_summary(days: int = 90) -> dict:
         total_managed: List[float] = []
         scanner_r: Dict[str, List[float]] = {}
         scanner_managed: Dict[str, List[float]] = {}
+        # BE-Trigger (AUDIT 2026-07-30): live-Wirkung der Einstand-Regel
+        total_be: List[float] = []
+        scanner_be: Dict[str, List[float]] = {}
+        be_act_total = 0
+        be_saved_total = 0
+        be_act_scanner: Dict[str, int] = {}
+        be_saved_scanner: Dict[str, int] = {}
         for row in rows:
             bucket_key = _classify_row(row)
             scanner = str(row.get("scanner") or "unknown")
@@ -1405,15 +1426,33 @@ def load_performance_summary(days: int = 90) -> dict:
                 if managed_value is not None:
                     total_managed.append(managed_value)
                     scanner_managed.setdefault(scanner, []).append(managed_value)
-        _finalize_bucket(summary["total"], total_r, window, total_managed)
+                if row.get("be_activated_at"):
+                    be_act_total += 1
+                    be_act_scanner[scanner] = be_act_scanner.get(scanner, 0) + 1
+                be_value = _to_float(row.get("r_realized_be"))
+                if be_value is not None:
+                    total_be.append(be_value)
+                    scanner_be.setdefault(scanner, []).append(be_value)
+                    # r < 0, aber BE-R >= 0: die Regel haette den Verlierer
+                    # verhindert (impliziert zugleich eine BE-Aktivierung).
+                    if float(r_value) < 0.0 and be_value >= 0.0:
+                        be_saved_total += 1
+                        be_saved_scanner[scanner] = be_saved_scanner.get(scanner, 0) + 1
+        _finalize_bucket(summary["total"], total_r, window, total_managed,
+                         total_be, be_act_total, be_saved_total)
         for scanner, bucket in summary["per_scanner"].items():
             _finalize_bucket(
-                bucket, scanner_r.get(scanner, []), window, scanner_managed.get(scanner, [])
+                bucket, scanner_r.get(scanner, []), window, scanner_managed.get(scanner, []),
+                scanner_be.get(scanner, []), be_act_scanner.get(scanner, 0),
+                be_saved_scanner.get(scanner, 0),
             )
         summary["r_semantics"] = (
             "avg_r = Level-R (TP2 volles Geometrie-R, unmanaged); "
             "avg_r_managed_50_50 = R des empfohlenen 50/50-Managements "
             "(50% Teilverkauf am TP1, Rest Stop/TP2/Expiry). "
+            "avg_r_be = live gemessenes R unter der Einstand-Regel "
+            "(Stop auf Einstand ab MFE >= +1R; seit 30.07., kein Backtest); "
+            "be_activations/be_saved = BE-Markierungen / verhinderte Verlierer. "
             "win_rate_wilson_95 = Wilson-Konfidenzintervall der Trefferquote; "
             "sample_reliable ab 30 entschiedenen Signalen. AUDIT 2026-07-24 (T1 + Kalibrier-Loop)."
         )

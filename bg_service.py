@@ -1862,6 +1862,12 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
         value = bucket.get("avg_r_managed_50_50")
         return f"{float(value):+.2f}R" if isinstance(value, (int, float)) else "–"
 
+    def _be_r_text(bucket):
+        # BE-Trigger (30.07.): live gemessenes R unter der Einstand-Regel
+        # (fehlt in aelteren Summaries bzw. solange keine BE-Daten existieren)
+        value = bucket.get("avg_r_be")
+        return f"{float(value):+.2f}R" if isinstance(value, (int, float)) else "–"
+
     def _hit_cell(bucket):
         # Kalibrier-Loop: Hit-Rate mit Wilson-95%-KI, falls der Tracker es liefert
         rate = bucket.get("win_rate_pct")
@@ -1903,6 +1909,7 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
             <th style="padding:8px;text-align:left">Σ R</th>
             <th style="padding:8px;text-align:left">Ø R</th>
             <th style="padding:8px;text-align:left">Ø R 50/50</th>
+            <th style="padding:8px;text-align:left">Ø R BE</th>
             <th style="padding:8px;text-align:left">Alerts/Tag</th>
             <th style="padding:8px;text-align:left">Offen</th>
         </tr>
@@ -1913,6 +1920,7 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{sum_r:+.1f}R</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{avg_r_text}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_managed_r_text(total)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_be_r_text(total)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{float(total.get('alerts_per_day') or 0.0):.1f}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_i(total, 'open')}</td>
         </tr>
@@ -1937,6 +1945,7 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
             <td style="padding:8px;border-bottom:1px solid #eee">{_i(bucket, 'open')}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_hit_text(bucket)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_managed_r_text(bucket)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_be_r_text(bucket)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{row_sum_r:+.1f}R</b></td>
         </tr>"""
 
@@ -1976,6 +1985,7 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
             <th style="padding:8px;text-align:left">offen</th>
             <th style="padding:8px;text-align:left">Hit-Rate</th>
             <th style="padding:8px;text-align:left">Ø R 50/50</th>
+            <th style="padding:8px;text-align:left">Ø R BE</th>
             <th style="padding:8px;text-align:left">Σ R</th>
         </tr>
         {scanner_rows}
@@ -2002,17 +2012,37 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None):
     <div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
         <b>⚠ Verdikt-Alarm (Kalibrier-Loop)</b><br>{items}
     </div>"""
+    be_html = ""
+    be_activations = total.get("be_activations")
+    if isinstance(be_activations, int) and be_activations > 0:
+        be_saved_n = total.get("be_saved")
+        saved_line = (f", davon <b>{be_saved_n} vor einem Verlust bewahrt</b>"
+                      if isinstance(be_saved_n, int) and be_saved_n > 0 else "")
+        be_avg = total.get("avg_r_be")
+        compare = ""
+        if isinstance(avg_r, (int, float)) and isinstance(be_avg, (int, float)):
+            compare = (f"<br>Ø R Ist {float(avg_r):+.2f}R vs. Ø R mit "
+                       f"Einstand-Regel <b>{float(be_avg):+.2f}R</b>.")
+        be_html = f"""
+    <div style="background:#e9f7ef;border:1px solid #10b981;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>🛡 Einstand-Regel (seit 30.07. live):</b> {be_activations} Signale
+        dieser Woche waren +1R gelaufen und wurden auf Einstand
+        gesichert{saved_line}.{compare}
+    </div>"""
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
     <p style="color:#666">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]} | Fenster: letzte 7 Tage</p>
     {alarm_html}
+    {be_html}
     {mid_html}
     <p style="color:#999;font-size:12px;margin-top:20px">
         Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
         Kursen ausgewertet. Mechanik: 1R Risiko, TP1 = halb raus + Stop auf
         Einstand. Ø R 50/50 = R des empfohlenen 50/50-Managements (50% bei TP1
-        realisiert, Rest laeuft bis TP2/Stop). KI = Wilson-95%-Intervall der
+        realisiert, Rest laeuft bis TP2/Stop). Ø R BE = live gemessenes R mit
+        Einstand-Regel (Stop auf Einstand ab +1R, seit 30.07.) — kein Backtest.
+        KI = Wilson-95%-Intervall der
         Trefferquote. Kein Backtest.{sample_hint}
     </p>
     </body></html>"""

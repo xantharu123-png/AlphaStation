@@ -42,7 +42,7 @@ def _print_scanner_table(summary):
     rows.append(("GESAMT", total))
 
     header = (f"{'Scanner':<18} {'Sig':>4} {'Entsch':>6} {'Hit%':>6} "
-              f"{'KI95':>11} {'ØR':>7} {'ØR5050':>8} {'ΣR':>8}  Verdikt")
+              f"{'KI95':>11} {'ØR':>7} {'ØR5050':>8} {'ØRBE':>7} {'ΣR':>8}  Verdikt")
     print("\nScanner-Abrechnung (nach Σ R, GESAMT-Zeile unten):")
     print(header)
     print("-" * len(header))
@@ -61,11 +61,17 @@ def _print_scanner_table(summary):
               f"{bucket.get('decided_signals', 0):>6} {hit:>6} {ki:>11} "
               f"{_fmt_signed(bucket.get('avg_r')):>7} "
               f"{_fmt_signed(bucket.get('avg_r_managed_50_50')):>8} "
+              f"{_fmt_signed(bucket.get('avg_r_be')):>7} "
               f"{_fmt_signed(bucket.get('sum_r'), 1):>8}  "
               f"{verdict} ({why})")
     print(f"\nVerdikt: {counts.get('behalten', 0)} behalten | "
           f"{counts.get('beobachten', 0)} beobachten | "
           f"{counts.get('abschalten', 0)} abschalten")
+    be_act = total.get("be_activations") or 0
+    if be_act:
+        print(f"Einstand-Regel: {be_act} aktiviert | "
+              f"{total.get('be_saved') or 0} vor Verlust bewahrt | "
+              f"ØR BE {_fmt_signed(total.get('avg_r_be'))}")
 
 
 def main() -> int:
@@ -103,8 +109,10 @@ def main() -> int:
         # Nur pruefbar, wenn die Woche Tabellen rendert (keine Leere-Woche-Mail)
         for label, needle in (
             ("Ø R 50/50-Spalte", "Ø R 50/50"),
+            ("Ø R BE-Spalte", "Ø R BE"),
             ("Wilson-Fusstext", "KI = Wilson-95%-Intervall"),
             ("50/50-Semantik im Fusstext", "50/50-Managements"),
+            ("BE-Semantik im Fusstext", "Einstand-Regel"),
         ):
             ok = needle in body_html
             print(("  OK   " if ok else "  FAIL ") + label)

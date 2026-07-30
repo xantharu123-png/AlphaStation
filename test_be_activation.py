@@ -284,3 +284,38 @@ def test_bg_failing_be_mail_still_returns_eval_stats(monkeypatch, tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── Teil 3: BE-Metriken in load_performance_summary (Wochenreport-Daten) ─────
+def test_summary_reports_be_metrics(tracker):
+    """BE→Stop-Szenario: avg_r_be 0.0 vs avg_r -1.0, be_activations/be_saved 1 —
+    genau die Zahlen, die der Wochenreport als Ist-vs-BE-Nachweis zeigt."""
+    tracker.record_alert_signals("breakout", [_base_row()])
+    bars1 = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
+    tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars1}))
+    bars2 = _bars_after("AAPL", [(106.0, 99.0, 105.5), (104.0, 94.5, 95.5)])
+    tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars2}))
+    summary = tracker.load_performance_summary(days=7)
+    total = summary["total"]
+    assert total["avg_r"] == pytest.approx(-1.0)
+    assert total["avg_r_be"] == pytest.approx(0.0)
+    assert total["be_activations"] == 1
+    assert total["be_saved"] == 1
+    bucket = summary["per_scanner"]["breakout"]
+    assert bucket["avg_r_be"] == pytest.approx(0.0)
+    assert bucket["be_activations"] == 1
+    assert bucket["be_saved"] == 1
+
+
+def test_summary_without_activation_be_equals_ist(tracker):
+    """Stop OHNE vorheriges +1R: r_realized_be == r_realized (Regel greift
+    nicht) — avg_r_be == avg_r, Zaehler 0. Belegt: BE veraendert nur, was
+    vorher aktiviert war."""
+    tracker.record_alert_signals("breakout", [_base_row()])
+    bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])  # Stop am Tag 1, MFE +0.2R
+    tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
+    total = tracker.load_performance_summary(days=7)["total"]
+    assert total["avg_r"] == pytest.approx(-1.0)
+    assert total["avg_r_be"] == pytest.approx(-1.0)
+    assert total["be_activations"] == 0
+    assert total["be_saved"] == 0
