@@ -344,6 +344,14 @@ konservativ (ambiguous_same_day unangetastet).
   Ergebnis-Box (Aktivierungen, bewahrte Verlierer, Ø R Ist vs. Ø R BE);
   Alt-Summaries ohne BE-Felder rendern „–" und keine Box. Das Preview-Skript
   prüft die neuen Elemente als Smoke-Checks mit. Suite 1187.
+- **Dashboard-Integration (gleicher Tag):** der Performance-Tab in der App
+  zeigt dieselben BE-Daten — Kopf-Karte „Ø R BE" (Hint: Einstand-Regel ab
+  +1R, live), grünes Ergebnis-Banner (Aktivierungen, bewahrte Verlierer,
+  Ø R Ist vs. BE), „Ø R BE"-Spalte in der Scanner-Tabelle und eine BE-Zeile
+  in „Letzte Signale", sobald BE-R vom Ist-R abweicht. Der API-Endpoint
+  `/api/signal-performance` reicht die Summary unveraendert durch — neue
+  Felder flossen ohne Code-Aenderung; recent fuehrt jetzt auch
+  `r_realized_be`. Suite 1189.
 
 ---
 
@@ -436,7 +444,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1187 Tests, alle grün** (30.07.). Wichtige Suiten:
+**1189 Tests, alle grün** (30.07.). Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -458,7 +466,7 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
-1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport).
+1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard).
 
 ---
 

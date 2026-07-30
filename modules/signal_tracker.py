@@ -1473,6 +1473,7 @@ def load_performance_summary(days: int = 90) -> dict:
                 "tp1": row.get("tp1"),
                 "tp2": row.get("tp2"),
                 "r_realized": row.get("r_realized"),
+                "r_realized_be": row.get("r_realized_be"),
                 "r_managed_50_50": _managed_r_50_50(row),
                 "tp1_hit_at": row.get("tp1_hit_at"),
             }

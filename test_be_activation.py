@@ -319,3 +319,29 @@ def test_summary_without_activation_be_equals_ist(tracker):
     assert total["avg_r_be"] == pytest.approx(-1.0)
     assert total["be_activations"] == 0
     assert total["be_saved"] == 0
+
+
+# ── Teil 4: Dashboard-Vertrag (Performance-Tab rendert die BE-Felder) ────────
+def test_frontend_performance_tab_renders_be_fields():
+    """frontend/index.html muss die BE-Felder der Summary tatsaechlich anzeigen:
+    Kopf-Karte + Scanner-Spalte 'Ø R BE', Ergebnis-Banner, BE-Zeile in den
+    letzten Signalen, Footer-Semantik."""
+    src = (Path(_DIR) / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "'Ø R BE'" in src                       # Kopf-Karte
+    assert ">Ø R BE</th>" in src                   # Scanner-Tabellen-Spalte
+    assert "total.avg_r_be" in src                 # Karte belegt
+    assert "s.avg_r_be" in src                     # Scanner-Zelle belegt
+    assert "total.be_activations" in src           # Ergebnis-Banner
+    assert "total.be_saved" in src                 # bewahrte Verlierer im Banner
+    assert "sig.r_realized_be" in src              # BE-Zeile je Signal
+    assert "kein Backtest" in src                  # Ehrlichkeits-Footer
+
+
+def test_recent_payload_contains_r_realized_be(tracker):
+    """Die recent-Liste der Summary fuehrt r_realized_be mit (Dashboard-Zeile)."""
+    tracker.record_alert_signals("breakout", [_base_row()])
+    bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])
+    tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
+    recent = tracker.load_performance_summary(days=7)["recent"]
+    assert recent and "r_realized_be" in recent[0]
+    assert recent[0]["r_realized_be"] == pytest.approx(-1.0)  # ohne Aktivierung = Ist
