@@ -98,8 +98,9 @@ journalctl -u tradingbot-api --since '3 min ago' --no-pager | grep -E '\[Schedul
 # c) bg-Dienst: Ownership + Waechter aktiv?
 journalctl -u tradingbot-bg --since '3 min ago' --no-pager | grep -E 'Ownership|Waechter|Signal-Tracker' | tail -5
 
-# d) Frische Caches = Scans laufen (nach ein paar Minuten):
-ls -la --time-style=+%H:%M /tmp/*cache*.json 2>/dev/null | head -8
+# d) Cache-Frische = Scans laufen? Nicht per ls pruefen — die Dienste schreiben
+#    in PrivateTmp-Namespaces, die root im direkten /tmp nicht sieht.
+#    Stattdessen: bash /home/tradingbot/app/deploy/health_check.sh  (Abschnitt [4])
 ```
 
 **Falls `is-enabled` NICHT `enabled` sagt** (Dienste würden nach Reboot nicht

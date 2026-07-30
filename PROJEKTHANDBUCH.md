@@ -414,6 +414,14 @@ die irreführende „vor 18h"-Anzeige war bereits am 29.07. gefixt worden
   (monitoring-tauglich). Cache-Pfade/-Intervalle gegen api.py verifiziert.
 - **Tests:** Shell/Docs only — `bash -n` Syntax-Check; Suite-Stand unverändert **1189**.
 
+**Nachbesserung am selben Tag (erster Live-Lauf):** Der Gesundheitscheck meldete
+zwei Fehlalarm-Typen — Scan-Fenster-Logik fehlte (Stillstand vor 10:00 ET ist
+Design, 3.10) und die Caches liegen in systemd-`PrivateTmp`-Namespaces, die root
+direkt nicht sieht (die sichtbare 9,7 Tage alte Crypto-Datei ist ein Namespace-Überrest).
+Fix: fenster-/wochentagsbewusster Takt-Check + Namespace-auflösender Cache-Finder
+(jüngste Sicht aus /tmp, api- und bg-Namespace gewinnt). Echter Restbefund:
+`tradingbot-bg` war nicht `enabled` → per `systemctl enable` fixiert.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)

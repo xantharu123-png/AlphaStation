@@ -51,21 +51,40 @@ fi
 
 echo
 echo "[3] Scanner-Takt"
-ticks=$(journalctl -u tradingbot-api --since '2 hours ago' --no-pager 2>/dev/null | grep -c '\[Scheduler\] Cache aktualisiert' || true)
-if [ "${ticks:-0}" -ge 4 ]; then
-  green "Scheduler laeuft ($ticks Cache-Updates in 2h)"
+# Aktien-Scheduler tickt nur Mo-Fr im Fenster 10:00-16:05 ET; ausserhalb ist
+# Stillstand Design (Handbuch 3.10). Crypto laeuft 24/7 -> Nachweis ueber [4].
+ticks=$(journalctl -u tradingbot-api --since '2 hours ago' --no-pager 2>/dev/null | grep -c '\[Scheduler\]' || true)
+et_hm=$((10#$(TZ=America/New_York date +%H%M)))
+et_dow=$(TZ=America/New_York date +%u)
+if [ "${ticks:-0}" -ge 2 ]; then
+  green "Scheduler aktiv ($ticks Log-Zeilen in 2h)"
+elif [ "$et_dow" -le 5 ] && [ "$et_hm" -ge 955 ] && [ "$et_hm" -le 1610 ]; then
+  red "Kein Scheduler-Lebenszeichen IM Scan-Fenster  →  systemctl restart tradingbot-api tradingbot-bg"
 else
-  red "Nur $ticks Cache-Updates in 2h — Scanner haengt?  →  systemctl restart tradingbot-api"
+  yellow "Keine Ticks — ausserhalb Aktien-Fenster (Mo-Fr 10:00-16:05 ET) normal; 24/7-Nachweis: Crypto-Cache [4]"
 fi
 
 echo
 echo "[4] Cache-Frische"
+# Dienste schreiben ggf. in PrivateTmp-Namespaces; juengste Sicht auf die
+# Datei gewinnt (direktes /tmp, api-Namespace, bg-Namespace).
+resolve_cache() {
+  local base="$1" newest="" f
+  for f in "/tmp/$base" \
+           /tmp/systemd-private-*-tradingbot-api.service-*/tmp/"$base" \
+           /tmp/systemd-private-*-tradingbot-bg.service-*/tmp/"$base"; do
+    [ -f "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  printf '%s' "$newest"
+}
 check_cache() {
-  # $1 Name, $2 Pfad, $3 Limit in Minuten, $4 Modus: "fenster" = nur 09:30-15:45 ET,
-  # "immer" = 24/7 (kein Wochenend-Nachlass)
-  local name="$1" path="$2" maxmin="$3" mode="${4:-}"
-  if [ ! -f "$path" ]; then
-    yellow "$name: Cache fehlt ($path) — wird beim naechsten Lauf gebaut"
+  # $1 Name, $2 Dateiname, $3 Limit in Minuten, $4 Modus: "fenster" = nur
+  # 09:30-15:45 ET, "immer" = 24/7 (kein Wochenend-Nachlass)
+  local name="$1" base="$2" maxmin="$3" mode="${4:-}"
+  local path; path=$(resolve_cache "$base")
+  if [ -z "$path" ]; then
+    yellow "$name: Cache fehlt ($base) — wird beim naechsten Lauf gebaut"
     return
   fi
   local age=$(( ( $(date +%s) - $(stat -c %Y "$path") ) / 60 ))
@@ -76,17 +95,17 @@ check_cache() {
   elif [ "$dow" -ge 6 ] && [ "$mode" != "immer" ]; then
     yellow "$name: ${age} min alt — Wochenende, kein Refresh geplant (normal)"
   else
-    red "$name: ${age} min alt (Limit $maxmin) — Scanner haengt?  →  systemctl restart tradingbot-api"
+    red "$name: ${age} min alt (Limit $maxmin) — Scanner haengt?  →  systemctl restart tradingbot-api tradingbot-bg"
   fi
 }
-check_cache "Aktien-Scanner"  /tmp/stock_cache.json           75
-check_cache "Indizes"         /tmp/index_cache.json           75
-check_cache "Heatmap"         /tmp/heatmap_cache.json         75
-check_cache "A-Share"         /tmp/a_share_cache.json         75
-check_cache "Strategie-Sweep" /tmp/stock_strategy_cache.json  370
-check_cache "Early Movers"    /tmp/movers_cache.json          370
-check_cache "Premarket"       /tmp/premarket_cache.json       370 fenster
-check_cache "Crypto-Signale"  /tmp/crypto_trade_signals_cache.json 45 immer
+check_cache "Aktien-Scanner"  stock_cache.json           75
+check_cache "Indizes"         index_cache.json           75
+check_cache "Heatmap"         heatmap_cache.json         75
+check_cache "A-Share"         a_share_cache.json         75
+check_cache "Strategie-Sweep" stock_strategy_cache.json  370
+check_cache "Early Movers"    movers_cache.json          370
+check_cache "Premarket"       premarket_cache.json       370 fenster
+check_cache "Crypto-Signale"  crypto_trade_signals_cache.json 45 immer
 
 echo
 echo "[5] Sicherheit"
