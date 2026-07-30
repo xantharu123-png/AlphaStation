@@ -497,6 +497,34 @@ Health-Check direkt. Abbruch VOR Reboot bei Upgrade-Fehler.
   alle grün** — inkl. der 2 ET-Session-Tests (Lauf um 10:45 ET = Markt offen;
   bestätigt die PM-Fenster-Diagnose aus 3.12).
 
+### 3.14 30. Juli (spät) — Wächter-Mailflut: Fehlalarm-Budget + Anti-Spam-Throttle
+
+**Anlass:** Betreiber bekam „gefuelt 5 Wächter-Mails pro Stunde"
+(`strategy_scan haengt`). Diagnose: `strategy_scan` läuft im **30-Min-Takt**,
+stand aber NICHT in `_SCAN_TIMEOUTS` → 10-Min-Default-Budget. Der Sweep über
+60+ Kandidaten braucht regelmäßig >10 Min → jeder langsame Lauf wurde als
+„Haenge-Episode" gemeldet (Fehlalarm, kein echter Hänger), plus Reset-Mails.
+
+**Fixes (drei Ebenen):**
+- **Budget-Kalibrierung:** `strategy_scan: 25` Min (Erstkalibrierung;
+  Nachkalibrierung an `[Scheduler] strategy_scan DONE in Xs` offen).
+- **Anti-Spam-Throttle:** max. **eine Warn-Mail je Scanner pro 6h**
+  (`stuck_throttle_{name}`, unabhängig vom Episoden-Dedupe). Ein chronisch
+  langsamer Scan kann den Betreiber nicht mehr zuspamen; Selbstheilung läuft
+  trotzdem (Throttle deckelt nur Mails, nie die Logik).
+- **Kontext-Kohärenz:** Reset-/Entwarnungs-Mails nur, wenn die Warnung der
+  Episode nicht gedrosselt war (sonst kaemen kontext-lose Folge-Mails).
+  Praezisierung: bei **gescheiterter** Warnung (kein Throttle-Mark) gehen
+  Reset/Entwarnung trotzdem raus — der Betreiber bliebe sonst blind.
+- **Zeitrobuste Tests (Kap.-7-Punkt 10 ERLEDIGT):** beide ET-Session-Flakes
+  hingen an `_premarket_window_active` (Wall-Clock 07:00–09:25 ET wechselte
+  den Mail-Pfad in den PM-Modus); jetzt zentral gemockt
+  (`_mock_mail_env` + Einzeltest).
+- **Tests:** +5 (Teil 4): Budget/Hartdeckel, Throttle 1-Mail/6h, Re-Arm nach
+  6h, Reset-Unterdrückung bei gedrosselter Episode, Entwarnungs-Logik
+  (gedrosselt/gescheitert/versandt). Suite **1223, alle grün** — erstmals
+  zeitunabhängig.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -552,9 +580,8 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1218 Tests, alle grün** (30.07., Lauf 10:45 ET). Die 2 ET-Session-Tests sind
-nur im Pre-Market-Fenster 08:00–09:25 ET rot (pre-existing, Kap. 7 Punkt 10).
-Wichtige Suiten:
+**1223 Tests, alle grün** (30.07.) — seit dem PM-Fenster-Mock (3.14) erstmals
+zu jeder Tageszeit. Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -573,16 +600,15 @@ Wichtige Suiten:
 
 **Regeln:** Nie ohne `--basetemp=tmp/pytest_audit` (Sandbox). Produktivcode-Änderungen
 erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalender in
-Tests (Market-Context mocken — 29.07., FOMC-Lehre). **Bekannte Ausnahme (30.07.):**
-`test_stock_strategy_mail_skips_when_us_market_closed` und
-`test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail` hängen an der echten
-ET-Session und sind im PM-Fenster rot — zeitrobust mocken steht noch aus (Kap. 7).
+Tests (Market-Context mocken — 29.07., FOMC-Lehre) und keine Abhängigkeit von der
+echten Uhrzeit/Session (`_premarket_window_active` mocken — 30.07., PM-Fenster-Lehre).
 Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
 1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard) →
-1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün).
+1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün) →
+1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün).
 
 ---
 
@@ -600,7 +626,7 @@ Suite-Stand-Historie:
 | 7 | ~~JWT_SECRET als ENV setzen~~ — **ERLEDIGT (30.07.):** per `openssl rand -hex 32` in `.env` auf dem Server fixiert, Boot-Log warnfrei | 3.11 |
 | 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates — **Ein-Befehl-Skript liegt bereit (3.13):** `bash deploy/os_maintenance.sh` (Update → Reboot mit @reboot-Selbstverifikation → Log). Wartungsfenster beachten (nie Fr 22:00–Sa 06:00) | Infrastruktur, kein Bot-Thema |
 | 9 | **Zins-Regime Phase 2: Auswertung** — `rates_json` annotiert ab 30.07. jedes neue Signal (FRED DGS2/10/30, Regime-Label Erstkalibrierung ±10/±25 bp). Sobald ≥ ~100 entschiedene Signale pro Regime-Zelle: Skript analog `exit_efficiency_analysis.py` — Hit-Rate/ØR je Regime; nur bei signifikantem Delta weiches Gate für zinssensible Longs (Biotech/Growth). Zusatzoption: HYG-Trend als Credit-Risiko-Proxy in den Context | 3.12 |
-| 10 | **2 ET-Session-abhängige Tests zeitrobust machen** — `test_stock_strategy_mail_skips_when_us_market_closed`, `test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail` sind nur im PM-Fenster 08:00–09:25 ET rot (pre-existing, Stash-Gegenprobe 30.07.); Session-Zustand mocken statt Wall-Clock | 3.12 / Kap. 6 |
+| 10 | ~~2 ET-Session-abhängige Tests zeitrobust machen~~ — **ERLEDIGT (30.07., 3.14):** `_premarket_window_active` in `_mock_mail_env` + Einzeltest gemockt; Suite jetzt rund um die Uhr grün | 3.14 |
 
 ---
 

@@ -126,6 +126,10 @@ def _mock_mail_env(monkeypatch, allowed):
     monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *a, **k: None)
     # Kalender deterministisch: "heute ist US-Handelstag" (kein Wochenend-Flake)
     monkeypatch.setattr(api, "_is_exchange_trading_day", lambda *a, **k: True)
+    # Zeitrobust (30.07.): PM-Fenster pinnen — zwischen 07:00-09:25 ET wuerde
+    # _send_strategy_scan_alerts sonst in den Pre-Market-Modus wechseln und
+    # die K-2b/Daily-Close-Pfade umgehen (Wall-Clock-Flake).
+    monkeypatch.setattr(api, "_premarket_window_active", lambda *a, **k: False)
     monkeypatch.setattr(
         api, "_send_email_alert",
         lambda subject, body, **k: (sent.append({"subject": subject, "body": body}), True)[1],

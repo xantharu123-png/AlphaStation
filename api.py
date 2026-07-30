@@ -14981,6 +14981,11 @@ _SCAN_TIMEOUTS = {
     "crypto_explosion": 25,
     "penny_stocks": 45,
     "penny_positions": 5,
+    # Erstkalibrierung 30.07. (Live-Befund): der Sweep im 30-Min-Takt ueber
+    # 60+ Kandidaten braucht regulaer >10 Min — der 10-Min-Default erzeugte
+    # eine Fehlalarm-Flut. Nachkalibrieren an '[Scheduler] strategy_scan DONE
+    # in Xs' (Server-Logs); Ziel: P95-Laufzeit + Puffer.
+    "strategy_scan": 25,
 }
 
 # ── Haenge-Alarm + Selbstheilung (AUDIT 2026-07-30) ──────────────────────────
@@ -15002,13 +15007,36 @@ def _stuck_hard_cap_sec(name) -> int:
     return max(budget_sec * _STUCK_HARD_CAP_MULT, budget_sec + _STUCK_HARD_CAP_MIN_EXTRA_SEC)
 
 
-def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode_key=""):
+# Anti-Spam (30.07., Live-Befund strategy_scan): unabhaengig vom Episoden-
+# Dedupe hoechstens EINE Warn-Mail je Scanner und 6h — ein chronisch
+# langsamer Scan darf den Betreiber nicht zuspamen. Reset-/Entwarnungs-Mails
+# gehen nur raus, wenn die Episode auch angekuendigt wurde (Warnung haengt
+# sonst in der Throttle und die Folge-Mail waere kontext-los).
+_STUCK_WARN_THROTTLE_SEC = 6 * 3600
+
+
+def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode_key="", episode_started_at=None):
     """Betreiber-Warn-Mail bei haengendem Scan. Einmal je Episode (Dedupe-Key
     enthaelt den Epochen-Start, damit JEDE Episode genau eine Mail bekommt —
-    auch ueber Prozess-Neustarts hinweg). Mark erst NACH erfolgreichem Versand."""
+    auch ueber Prozess-Neustarts hinweg). Mark erst NACH erfolgreichem Versand.
+    Zusaetzlich 6h-Throttle je Scanner (Anti-Spam 30.07.); Reset-Mail nur
+    fuer angekuendigte Episoden."""
     minutes = max(1, int(stuck_sec // 60))
     dedupe_key = episode_key or f"stuck_scan_{name}"
     if _email_dedupe_active(dedupe_key, 7 * 86400):
+        return False
+    if not recovered:
+        if _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC):
+            print(f"[Scheduler] WATCHDOG: {name} Warnung unterdrueckt "
+                  f"(max 1 Mail/{_STUCK_WARN_THROTTLE_SEC // 3600}h je Scanner)")
+            return False
+    elif (
+        episode_started_at is not None
+        and _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC)
+        and not _email_dedupe_active(f"stuck_scan_{name}_{int(episode_started_at)}", 7 * 86400)
+    ):
+        print(f"[Scheduler] WATCHDOG: {name} Reset-Mail unterdrueckt "
+              "(Warnung dieser Episode war throttle-gedeckelt)")
         return False
     if recovered:
         subject = f"Scan-Waechter: {name} automatisch zurueckgesetzt"
@@ -15037,6 +15065,8 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
     sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
     if sent:
         _email_dedupe_mark(dedupe_key)
+        if not recovered:
+            _email_dedupe_mark(f"stuck_throttle_{name}")
     return bool(sent)
 
 
@@ -15045,7 +15075,15 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
 
     Einmal je Episode (Dedupe-Key am Episode-Start, kein Doppel-Versand auch
     nach Neustart); Mark erst NACH erfolgreichem Versand — schlaegt der
-    Versand fehl, meldet der naechste erfolgreiche Lauf erneut."""
+    Versand fehl, meldet der naechste erfolgreiche Lauf erneut. Unterdrueckt
+    nur, wenn die Warnung der Episode bewusst throttle-gedeckelt war —
+    bei gescheiterter Warnung (kein Throttle-Mark) ist die Entwarnung
+    trotzdem willkommen (30.07.)."""
+    if (
+        _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC)
+        and not _email_dedupe_active(f"stuck_scan_{name}_{int(episode_started_at)}", 7 * 86400)
+    ):
+        return False  # Warnung war throttle-gedeckelt: Entwarnung waere kontext-los
     minutes = max(1, int(episode_sec // 60))
     dedupe_key = f"stuck_recovery_{name}_{int(episode_started_at)}"
     if _email_dedupe_active(dedupe_key, 7 * 86400):
@@ -15126,6 +15164,7 @@ def _scan_watchdog_check(name, now=None):
                 _send_stuck_scan_mail(
                     name, stuck_sec, timeout_min, recovered=True,
                     episode_key=f"stuck_scan_recover_{name}_{int(started_at)}",
+                    episode_started_at=started_at,
                 )
             except Exception as exc:
                 print(f"[Scheduler] Stuck-Mail (recover) fehlgeschlagen: {exc}")

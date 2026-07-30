@@ -235,8 +235,10 @@ def test_api_no_recovery_mail_without_episode(monkeypatch, tmp_path):
 
 def test_api_recovery_mail_deduped_per_episode(monkeypatch, tmp_path):
     """Gleiche Episode (gleicher Start) => hoechstens eine Entwarnung,
-    auch prozessuebergreifend (persistentes Dedupe, Mark erst nach Versand)."""
+    auch prozessuebergreifend (persistentes Dedupe, Mark erst nach Versand).
+    Voraussetzung: die Episode wurde angekuendigt (Warn-Key aktiv, 30.07.)."""
     sent, started_at = _setup_api(monkeypatch, tmp_path)
+    api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(started_at)}")
     assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started_at) is True
     assert api._send_stuck_recovery_mail("crypto_explosion", 45 * 60, started_at) is False
     assert len(sent) == 1
@@ -269,6 +271,69 @@ def test_bg_recovery_mail_content(monkeypatch):
     assert "95 Min" in mail["body"]
     assert "bi_long (init)" in mail["body"]
     assert "Kein Neustart noetig" in mail["body"]
+
+
+# ── Teil 4: Anti-Spam-Throttle + Budget-Kalibrierung (30.07., Live-Flut) ────
+def test_strategy_scan_budget_kalibriert():
+    """strategy_scan (30-Min-Takt, 60+ Kandidaten) hat eigenes 25-Min-Budget
+    statt 10-Min-Default; Hartdeckel = 3x Budget."""
+    assert api._SCAN_TIMEOUTS["strategy_scan"] == 25
+    assert api._stuck_hard_cap_sec("strategy_scan") == 75 * 60
+
+
+def test_warn_throttle_one_mail_per_scanner_per_6h(monkeypatch, tmp_path):
+    """Zwei Episoden desselben Scanners kurz hintereinander => nur die ERSTE
+    mailt; die zweite Warnung haengt in der 6h-Throttle (Event bleibt 'stuck')."""
+    sent, started1 = _setup_api(monkeypatch, tmp_path, timeout_min=10, started_ago_sec=26 * 60)
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    assert len(sent) == 1
+    # Neue Episode (neuer Start, weiterhin ueber Budget) — z.B. nach
+    # Hartdeckel-Reset + frischem Haenger
+    api._scan_status["crypto_explosion"].pop("_timeout_logged", None)
+    api._scan_status["crypto_explosion"]["_started_at"] = started1 + 600
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    assert len(sent) == 1  # Throttle: keine zweite Mail
+
+
+def test_warn_throttle_rearms_after_6h(monkeypatch, tmp_path):
+    """Throttle-Mark aelter als 6h => naechste Episode mailt wieder."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=26 * 60)
+    api._shared_email_dedupe_mark(
+        api._EMAIL_DEDUPE_FILE, "stuck_throttle_crypto_explosion",
+        now=time.time() - 7 * 3600,
+    )
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck"
+    assert len(sent) == 1
+    assert "haengt" in sent[0]["subject"]
+
+
+def test_reset_mail_suppressed_when_episode_unannounced(monkeypatch, tmp_path):
+    """Warnung war throttle-gedeckelt (Episode nie angekuendigt) => auch die
+    Hartdeckel-Reset-Mail wird unterdrueckt; die Selbstheilung laeuft trotzdem."""
+    sent, started = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
+    # Simuliere: eine fruehere Episode hat die 6h-Throttle bereits verbraucht
+    api._email_dedupe_mark("stuck_throttle_crypto_explosion")
+    api._scan_threads["crypto_explosion"] = object()
+    event = api._scan_watchdog_check("crypto_explosion")
+    assert event == "recovered"
+    assert api._scan_status["crypto_explosion"]["running"] is False
+    assert sent == []  # weder Warnung noch Reset-Mail
+
+
+def test_recovery_mail_suppressed_only_when_warn_throttled(monkeypatch, tmp_path):
+    """Entwarnungs-Logik: unterdrueckt NUR bei throttle-gedeckelter Warnung;
+    bei gescheiterter oder versandter Warnung geht die Entwarnung raus."""
+    sent, started = _setup_api(monkeypatch, tmp_path)
+    s1, s2, s3 = started, started - 3600, started - 7200
+    # 1) Warn-Versand war gescheitert (kein Mark) => Entwarnung willkommen
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s1) is True
+    # 2) Warnung throttle-gedeckelt => Entwarnung unterdrueckt (kontext-los)
+    api._email_dedupe_mark("stuck_throttle_crypto_explosion")
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s2) is False
+    # 3) Episode angekuendigt (Warn-Key) => Entwarnung trotz Throttle
+    api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(s3)}")
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s3) is True
+    assert len(sent) == 2
 
 
 if __name__ == "__main__":

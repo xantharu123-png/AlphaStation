@@ -90,6 +90,9 @@ def test_stock_strategy_mail_skips_when_us_market_closed(monkeypatch):
         "reason": "US market closed unit-test",
         "session": "CLOSED",
     })
+    # Zeitrobust (30.07.): PM-Fenster pinnen — sonst wechselt der Pfad zwischen
+    # 07:00-09:25 ET in den Pre-Market-Modus und der Skip-Event fehlt.
+    monkeypatch.setattr(api, "_premarket_window_active", lambda *args, **kwargs: False)
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent_subjects.append(subject) or True)
     monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason=None: skipped.append((subject, status, reason)))
 
