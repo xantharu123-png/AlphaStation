@@ -389,6 +389,31 @@ die irreführende „vor 18h"-Anzeige war bereits am 29.07. gefixt worden
   im-Budget/idle/kaputter Status, bg-Entscheidungslogik, Mail-Inhalte,
   Re-Arming. Suite **1182**.
 
+### 3.11 30. Juli (vormittags) — Betreiber-Entlastung: Auto-Update, JWT, Runbook, Gesundheitscheck
+
+**Anlass:** repetitives Pull/Restart-Ritual nach jedem Push + JWT-Warnung im Boot-Log
+(„ephemerer Zufalls-Secret" — alle Sessions starben bei jedem Neustart).
+
+- **JWT_SECRET auf dem Server fixiert** (generiert via `openssl rand -hex 32`,
+  in `/home/tradingbot/app/.env`, chmod 600; api.service liest EnvironmentFile).
+  Boot-Log danach warnfrei. Reines Server-Config, kein Code.
+- **`deploy/auto_update.sh` + Root-Cron `*/10`:** Server holt sich Updates selbst —
+  `git fetch`, bei neuem origin/main: Fast-Forward-Pull, `pip install` nur wenn
+  requirements.txt sich änderte, Restart beider Dienste, Verifikation
+  (`systemctl is-active` + Git-Hash), Log nach `/var/log/alpha_autoupdate.log`.
+  Schmutziger Worktree ⇒ kein Pull (Schutz). Betreiber muss nichts mehr tippen;
+  Verifikation auf dem Server: Eintrag + Skript executable, erster Lauf bestätigt.
+- **`deploy/SERVER_WARTUNG.md`:** Runbook für Ubuntu-Updates/Reboot ohne Schaden —
+  Wartungsfenster (nie Fr 22:00–Sa 06:00 wegen Wochenreport), Upgrade-Block,
+  60-Sekunden-Verifikation, enable-Fallback, TL;DR.
+- **`deploy/health_check.sh`:** Ein-Befehl-Ampel (`bash deploy/health_check.sh`):
+  Dienste active+enabled, API-Antwort, Tracebacks (2h), Scheduler-Takt,
+  Cache-Frische aller 8 Caches mit Fenster-/Wochenend-Logik (Premarket darf
+  nachts alt sein, Crypto nie), JWT, Cron + Git-Stand (HEAD vs. origin/main),
+  Disk/RAM. Pro roter Zeile steht der Fix-Befehl dabei; Exit 1 bei Fehlern
+  (monitoring-tauglich). Cache-Pfade/-Intervalle gegen api.py verifiziert.
+- **Tests:** Shell/Docs only — `bash -n` Syntax-Check; Suite-Stand unverändert **1189**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -501,6 +526,9 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | `AUDIT_PENNY_STOCK_SCANNER_2026-07-22.md` | Penny-Scanner-Audit |
 | `COMMERCIAL_LAUNCH_CHECKLIST.md` | Kommerzielle Startbereitschaft |
 | `deploy/DEPLOY_ANLEITUNG.md` | Deployment-Details (nginx, TLS, systemd) |
+| `deploy/SERVER_WARTUNG.md` (30.07.) | Wartungs-Runbook: Update-Fenster, Verifikation, Gesundheitscheck |
+| `deploy/auto_update.sh` (30.07.) | Cron-gesteuertes Selbst-Update des Servers (alle 10 min) |
+| `deploy/health_check.sh` (30.07.) | Ein-Befehl-Gesundheitscheck (Ampel, Exit-Code monitoring-tauglich) |
 | `archive/` | Alt-Versionen: Legacy-Frontend, Streamlit, alte Audits |
 
 ---

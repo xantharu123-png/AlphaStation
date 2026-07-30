@@ -6,6 +6,23 @@ Mails oder Sessions zu gefährden.
 
 ---
 
+## 0. Gesundheitscheck (Ein-Befehl-Ampel — immer zuerst)
+
+```bash
+bash /home/tradingbot/app/deploy/health_check.sh
+```
+
+Prüft in ~5 Sekunden: Dienste (active + enabled), API-Antwort, Abstürze (2h),
+Scheduler-Takt, Frische aller Scan-Caches (inkl. Wochenend-/Fenster-Logik),
+JWT_SECRET, Auto-Update-Cron + Git-Stand, Festplatte/RAM.
+Ausgabe: **grün = OK, gelb = prüfen (am Wochenende/nahtlos meist normal),
+rot = handeln** (pro Zeile steht der Fix-Befehl gleich dabei).
+Exit-Code 1 bei Fehlern — auch für Monitoring/Skripte nutzbar.
+
+Vor UND nach jeder Wartung einmal laufen lassen.
+
+---
+
 ## 1. Wann? (Timing ist der einzige heikle Punkt)
 
 Der Bot hat feste Fenster (Sommerzeit MESZ):
