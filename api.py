@@ -186,6 +186,18 @@ from modules.market_context import (
     missing_headline_risk,
 )
 
+try:
+    from modules.treasury_rates import (
+        build_rates_block,
+        fetch_fred_csv,
+        parse_fred_csv,
+    )
+except ImportError as _rates_err:
+    build_rates_block = None
+    fetch_fred_csv = None
+    parse_fred_csv = None
+    print(f"[Warning] treasury_rates module not loaded: {_rates_err}")
+
 # Import pattern detection
 try:
     from modules.patterns import find_harmonic_for_chart, detect_chart_patterns, find_pivots, detect_order_blocks, detect_liquidity_levels
@@ -7526,11 +7538,25 @@ def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade
     Kontrakt: record_alert_signals wirft nie, dedupet intern und loggt nur
     mail_class=="trade". Zusaetzlicher try/except, damit Alerts auch bei
     kaputtem/gemocktem Modul niemals am Tracking scheitern.
+
+    Annotation (2026-07-30): aktueller Zins-Block aus dem Market-Context wird
+    als rates_json mitgespeichert (Mess-First, kein Gate). Bei TypeError
+    (gemischter Code-Stand) Fallback ohne rates_context — Tracking bricht nie.
     """
     if not record_alert_signals or not rows:
         return
     try:
-        record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
+        rates_ctx = None
+        try:
+            snap = _get_market_context_snapshot()
+            if isinstance(snap, dict) and (snap.get("rates") or {}).get("status") == "ok":
+                rates_ctx = snap.get("rates")
+        except Exception:
+            rates_ctx = None
+        try:
+            record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel, rates_context=rates_ctx)
+        except TypeError:
+            record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
     except Exception as exc:
         print(f"[Alert] Signal-Tracking Fehler (ignoriert): {exc}")
 
@@ -28598,6 +28624,46 @@ def _fetch_polygon_market_headlines(limit: int = 50) -> tuple[List[Dict[str, Any
         return [], str(exc)
 
 
+TREASURY_RATES_CACHE = "/tmp/treasury_rates_cache.json"
+TREASURY_RATES_TTL_SECONDS = 6 * 3600  # FRED aktualisiert 1x taeglich — 6h reichen
+
+
+def _fetch_treasury_rates_block() -> Dict[str, Any]:
+    """Zins-Block (FRED DGS2/10/30) mit 6h-Datei-Cache. Wirft nie.
+
+    Reihenfolge: frischer Cache -> Live-Abruf (+ Cache schreiben) ->
+    Stale-Cache (besser als nichts, markiert) -> Missing-Block mit Grund.
+    """
+    if not build_rates_block or not fetch_fred_csv or not parse_fred_csv:
+        return {"status": "missing", "reason": "treasury_rates-Modul nicht geladen", "regime": None}
+    cached_series = None
+    try:
+        cached, cached_at = load_cache_file(TREASURY_RATES_CACHE)
+        if cached and isinstance(cached[0], dict):
+            cached_series = cached[0].get("series")
+            age = _cache_age_seconds(cached_at)
+            if cached_series and age is not None and age <= TREASURY_RATES_TTL_SECONDS:
+                return build_rates_block(cached_series, source="cache")
+    except Exception:
+        cached_series = None
+    try:
+        series = parse_fred_csv(fetch_fred_csv())
+        block = build_rates_block(series, source="live")
+        if block.get("status") == "ok":
+            try:
+                save_cache_file(TREASURY_RATES_CACHE, [{"series": series}])
+            except Exception:
+                pass
+        return block
+    except Exception as exc:
+        if cached_series:
+            block = build_rates_block(cached_series, source="stale_cache")
+            if block.get("status") == "ok":
+                block["stale"] = True
+                return block
+        return build_rates_block(None, fetch_error=str(exc))
+
+
 def _market_context_wrapper() -> None:
     """Build market weather from cached market internals, scheduled events and headlines."""
     headlines, headline_error = _fetch_polygon_market_headlines()
@@ -28607,11 +28673,13 @@ def _market_context_wrapper() -> None:
         headline_risk = analyze_headlines(headlines)
     event_risk = _calendar_event_risk_snapshot()
     crash_data = _load_crash_context_snapshot()
-    context = build_market_context(crash_data, headline_risk, event_risk)
+    rates_block = _fetch_treasury_rates_block()
+    context = build_market_context(crash_data, headline_risk, event_risk, rates_data=rates_block)
     context["source"] = {
         "market_internals": "crash_monitor_cache",
         "headlines": "Polygon news",
         "events": "Alpha Station economic calendar",
+        "treasury_rates": "FRED DGS2/10/30 (fredgraph.csv)",
     }
     context["headline_count"] = len(headlines)
     save_cache_file(MARKET_CONTEXT_CACHE, [context])

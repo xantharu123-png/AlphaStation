@@ -441,8 +441,14 @@ def build_market_context(
     crash_data: Optional[Dict[str, Any]] = None,
     headline_risk: Optional[Dict[str, Any]] = None,
     event_risk: Optional[Dict[str, Any]] = None,
+    rates_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Combine crash/fear, headline and event risk into one trading context."""
+    """Combine crash/fear, headline, event risk and rates annotation into one context.
+
+    rates_data (Zins-Block aus modules/treasury_rates) ist reine Annotation:
+    Er fliesst als context["rates"] durch, aendert aber weder Score noch
+    Regime (Mess-First, 2026-07-30).
+    """
     crash_data = crash_data if isinstance(crash_data, dict) else {}
     headline_risk = (
         dict(headline_risk)
@@ -567,6 +573,16 @@ def build_market_context(
     if regime in {"RISK_OFF", "PANIC"}:
         warnings.append("Risk-Off-Regime: Long-Breakouts nur mit Retest/VWAP-Hold, Shorts bevorzugt beobachten.")
 
+    if isinstance(rates_data, dict) and rates_data.get("status") == "ok":
+        rates_block = rates_data
+    else:
+        rates_block = {
+            "status": "missing",
+            "reason": (rates_data.get("reason") if isinstance(rates_data, dict) else None)
+            or "Zinsdaten nicht abgefragt (nur im Scheduler-Lauf verfuegbar)",
+            "regime": None,
+        }
+
     return {
         "status": "success",
         "regime": regime,
@@ -586,6 +602,7 @@ def build_market_context(
         },
         "headline_risk": headline_risk,
         "event_risk": event_risk,
+        "rates": rates_block,
         "warnings": warnings,
         "summary": {
             "regime": regime,

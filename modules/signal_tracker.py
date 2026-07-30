@@ -44,6 +44,7 @@ praezise ueber Daily-OHLC-Bars der Folgetage ausgewertet.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import math
 import os
@@ -304,7 +305,33 @@ _SCHEMA_MIGRATIONS = {
     "contract_symbol": "TEXT",
     "be_activated_at": "TEXT",
     "r_realized_be": "REAL",
+    "rates_json": "TEXT",
 }
+
+# Zins-Block (modules/treasury_rates) als kompakte Annotation pro Signal
+# (Mess-First 2026-07-30: Phase-2-Regime-Auswertung liest rates_json).
+_RATES_KEEP_KEYS = (
+    "as_of", "source", "stale", "dgs2", "dgs10", "dgs30",
+    "change_5d_bp", "change_20d_bp", "dgs30_change_20d_bp",
+    "curve_10s2s_bp", "curve_30s10s_bp", "regime",
+)
+
+
+def _compact_rates_json(rates_context: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Kompaktes JSON des Zins-Blocks fuer die rates_json-Spalte.
+
+    Nur status == 'ok' mit Datum wird gespeichert; Missing/Fehler -> None
+    (ehrlich leer statt erfundener Kontext). Wirft nie.
+    """
+    try:
+        if not isinstance(rates_context, dict) or rates_context.get("status") != "ok":
+            return None
+        payload = {k: rates_context.get(k) for k in _RATES_KEEP_KEYS if k in rates_context}
+        if not payload.get("as_of"):
+            return None
+        return json.dumps(payload, separators=(",", ":"))
+    except Exception:  # pragma: no cover - defensiv
+        return None
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)",
@@ -354,6 +381,7 @@ def record_alert_signals(
     rows: list,
     mail_class: str = "trade",
     channel: str = "email",
+    rates_context: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Loggt versendete Alert-Rows als offene Signale. Wirft nie.
 
@@ -369,6 +397,8 @@ def record_alert_signals(
       - Dedupe: Existiert bereits ein OPEN-Signal mit gleichem
         (scanner, ticker), wird die Row uebersprungen (gilt auch innerhalb
         eines Batches).
+      - rates_context: optionaler Zins-Block (modules/treasury_rates) aus dem
+        Market-Context; wird kompakt als rates_json annotiert (kein Gate).
 
     Returns:
         Anzahl neu geloggter Signale (0 bei Fehler/Filter).
@@ -386,6 +416,7 @@ def record_alert_signals(
         asset_class = "crypto" if scanner in CRYPTO_SCANNERS else "stock"
         channel_norm = str(channel or "email").strip().lower() or "email"
         now_iso = _utc_iso()
+        rates_json = _compact_rates_json(rates_context)
         with _DB_LOCK:
             with _db_connection() as conn:
                 for row in rows:
@@ -451,8 +482,8 @@ def record_alert_signals(
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
                                 rvol, mail_class, channel, status, outcome_detail,
                                 entry_filled_at, entry_fill_price, instrument_id,
-                                venue, contract_symbol
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                venue, contract_symbol, rates_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
@@ -460,6 +491,7 @@ def record_alert_signals(
                                 fields["price_at_alert"], fields["grade"], fields["score"],
                                 fields["rvol"], "trade", channel_norm, STATUS_OPEN, "",
                                 fill_at, fill_price, instrument_id, venue, contract_symbol,
+                                rates_json,
                             ),
                         )
                         inserted += 1

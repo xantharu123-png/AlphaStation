@@ -422,6 +422,46 @@ Fix: fenster-/wochentagsbewusster Takt-Check + Namespace-auflösender Cache-Find
 (jüngste Sicht aus /tmp, api- und bg-Namespace gewinnt). Echter Restbefund:
 `tradingbot-bg` war nicht `enabled` → per `systemctl enable` fixiert.
 
+### 3.12 30. Juli (nachmittags) — Zins-Block (FRED) als Mess-Annotation, kein Gate
+
+**Anlass Betreiber-Frage:** „30Y bei 5,21 %, höchst seit vor 2008 — soll das System
+sowas berücksichtigen?" Verifikation: 30Y 5,16–5,17 % (23./24.07.), 52W-Hoch 5,18 %
+(19.05.), **+30 bp in einem Monat** — Level plausibel, die *Geschwindigkeit* ist der
+eigentliche Befund. Analyse des Bestands: Market-Context hatte VIX, Breadth,
+Index-Momentum, Kalender-Events, Headlines — aber **kein Zins-Regime**, obwohl die
+Scanner genau das zinssensitivste Segment (Biotech/Growth-Momentum) bevorzugen.
+
+**Entscheid (Mess-First, wie 3.8→3.9):** Erst annotieren, dann auswerten, dann
+erst ggf. gaten. Statistik-Begründung: ~240 entschiedene Signale/90 d auf
+Regime-Zellen aufgeteilt ergeben zu breite Wilson-Intervalle — ein hartes Gate
+nach Zeitungsmeldung wäre Overfitting an Headlines.
+
+**Gebaut:**
+- **`modules/treasury_rates.py` (neu):** FRED-Abruf ohne API-Key
+  (`fredgraph.csv?id=DGS2,DGS10,DGS30`, '.'-Feiertage-tolerant), bp-Änderungen
+  5d/20d der DGS10, DGS30-20d, Kurven-Spreads 10s2s/30s10s, Stale-Flag (>4 Tage).
+  Regime-Label **Erstkalibrierung**: ±10 bp/20d = rising/falling, ±25 bp/20d =
+  rising_fast/falling_fast — ausdrücklich Label, kein Gate.
+- **Market-Context:** `build_market_context(..., rates_data=)` → `context["rates"]`;
+  **Invariante per Test bewiesen:** overall_risk_score/regime/trade_mode/warnings
+  bleiben identisch. `_market_context_wrapper` holt den Block mit 6h-Datei-Cache
+  (`/tmp/treasury_rates_cache.json`; Live → Cache → Stale-Cache → ehrlicher
+  Missing-Block mit Grund).
+- **Signal-Tracker:** neue Spalte `rates_json` (additive Migration);
+  `_safe_record_alert_signals` annotiert jedes neue Signal mit dem aktuellen
+  Zins-Block (kompaktes JSON: Level, Änderungen, Spreads, Regime; Missing → NULL,
+  kein erfundener Kontext; TypeError-Fallback für gemischte Code-Stände).
+- **Phase 2 (offen):** Regime-Split-Auswertung (Hit-Rate/ØR nach Zins-Regime)
+  als Skript wie `exit_efficiency_analysis.py`, sobald ≥ ~100 entschiedene
+  Signale pro Zelle; erst bei signifikantem Delta weiches Gate für
+  zinssensible Longs.
+- **Tests:** `test_rates_block.py` (24): Parsing/`.`/Trim, bp-Mathematik,
+  Regime-Grenzen inkl. Grenzfall-Semantik, Kurven, Stale, Missing-Ehrlichkeit,
+  Scoring-Invariante, Tracker-Annotation/NULL-Fälle. Suite **1213**
+  (1211 grün; 2 altbestehende Tests sind ET-Session-abhängig und nur im
+  Pre-Market-Fenster 08:00–09:25 ET rot — Stash-Gegenprobe ohne diese Änderung
+  zeigt identische Failures; Fix als eigener Punkt offen).
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -477,7 +517,9 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1189 Tests, alle grün** (30.07.). Wichtige Suiten:
+**1213 Tests, 1211 grün** (30.07.; 2 altbestehende Tests sind ET-Session-abhängig
+und nur 08:00–09:25 ET rot — pre-existing, Stash-Gegenprobe dokumentiert in 3.12).
+Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -486,6 +528,7 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 | `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
 | `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
 | `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag |
+| `test_rates_block.py` (30.07.) | Zins-Block: FRED-Parsing, Regime-Grenzen, Scoring-Invariante, rates_json |
 | `test_email_alert_audit.py` | Alert-Gates, Swing-Regeln, Chase-Gates (28.07.) |
 | `test_mail_class_api.py` | Mail-Klassen, ATR-Annotation, Kanal-Versand (28.07.) |
 | `test_commerce_hardening.py` | Auth, Billing, Kanal-Settings (28.07.) |
@@ -495,11 +538,16 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 **Regeln:** Nie ohne `--basetemp=tmp/pytest_audit` (Sandbox). Produktivcode-Änderungen
 erst nach voller Suite pushen. Keine Abhängigkeit vom echten Wirtschaftskalender in
-Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
+Tests (Market-Context mocken — 29.07., FOMC-Lehre). **Bekannte Ausnahme (30.07.):**
+`test_stock_strategy_mail_skips_when_us_market_closed` und
+`test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail` hängen an der echten
+ET-Session und sind im PM-Fenster rot — zeitrobust mocken steht noch aus (Kap. 7).
+Suite-Stand-Historie:
 985 (21.07.) → 1101 (24.07.) → 1104 (28.07. ATR-Annotation) → 1114 (28.07. Chase-Gates) →
 1120 (28.07. Mail-Kanäle) → 1126 (29.07. Orts-Gate) → 1130 (29.07. UX-Paket) →
 1147 (29.07. PM-Radar) → 1160 (30.07. Exit-Effizienz) → 1171 (30.07. BE-Trigger) →
-1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard).
+1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard) →
+1213 (30.07. Zins-Block; 1211 grün + 2 ET-Session-Flakes).
 
 ---
 
@@ -514,8 +562,10 @@ Tests (Market-Context mocken — 29.07., FOMC-Lehre). Suite-Stand-Historie:
 | 5 | ~~Exit-Effizienz — Regel abgeleitet~~ — **IMPLEMENTIERT (3.9):** BE-Trigger live (be_activated_at, r_realized_be, Stop-Update-Mail) **+ Wochenreport-Nachweis** („Ø R BE"-Spalte, Ergebnis-Box: Aktivierungen, bewahrte Verlierer, Ø R Ist vs. BE). Nächste Prüfung: Freitags-Report der kommenden Wochen gegen die Erwartung +0,14…+0,16 R/Signal | 3.8/3.9 |
 | 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
 | 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
-| 7 | JWT_SECRET als ENV setzen (Warnung bei jedem Start; Sessions invalidieren bei Neustart) | Commercial-Readiness |
-| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates | Infrastruktur, kein Bot-Thema |
+| 7 | ~~JWT_SECRET als ENV setzen~~ — **ERLEDIGT (30.07.):** per `openssl rand -hex 32` in `.env` auf dem Server fixiert, Boot-Log warnfrei | 3.11 |
+| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates — Runbook liegt bereit (`deploy/SERVER_WARTUNG.md`); Wartungsfenster beachten (nie Fr 22:00–Sa 06:00) | Infrastruktur, kein Bot-Thema |
+| 9 | **Zins-Regime Phase 2: Auswertung** — `rates_json` annotiert ab 30.07. jedes neue Signal (FRED DGS2/10/30, Regime-Label Erstkalibrierung ±10/±25 bp). Sobald ≥ ~100 entschiedene Signale pro Regime-Zelle: Skript analog `exit_efficiency_analysis.py` — Hit-Rate/ØR je Regime; nur bei signifikantem Delta weiches Gate für zinssensible Longs (Biotech/Growth). Zusatzoption: HYG-Trend als Credit-Risiko-Proxy in den Context | 3.12 |
+| 10 | **2 ET-Session-abhängige Tests zeitrobust machen** — `test_stock_strategy_mail_skips_when_us_market_closed`, `test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail` sind nur im PM-Fenster 08:00–09:25 ET rot (pre-existing, Stash-Gegenprobe 30.07.); Session-Zustand mocken statt Wall-Clock | 3.12 / Kap. 6 |
 
 ---
 
