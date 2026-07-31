@@ -70,3 +70,34 @@ def test_bg_service_alias_deckt_modul_ab():
 
     now = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
     assert bg_service._mail_timestamp_dual(now) == "31.07.2026 14:09 UTC / 16:09 MESZ"
+
+
+# ── Zeitstempel-Guard (AUDIT 2026-07-31) ─────────────────────────────────────
+# Verhindert Regression: Mail-Bodies mit nacktem UTC- oder falschem CET-Label.
+# Erlaubt ist ausschliesslich _mail_timestamp_dual() (dual UTC/MESZ) — die
+# einzige Ausnahme sind die lokalen Fallback-Definitionen selbst.
+
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO = Path(__file__).resolve().parent
+_DIRECT_STAMP = re.compile(r'datetime\.now\(\)\.strftime\(["\']%d\.\%m\.\%Y %H:%M["\']\)')
+
+
+def _offending_lines(filename: str) -> list:
+    lines = ( _REPO / filename ).read_text(encoding="utf-8").splitlines()
+    hits = []
+    for lineno, line in enumerate(lines, start=1):
+        if _DIRECT_STAMP.search(line):
+            hits.append(f"{filename}:{lineno}: {line.strip()[:90]}")
+        if "} CET" in line or " CET<" in line:
+            hits.append(f"{filename}:{lineno} (CET-Label): {line.strip()[:90]}")
+    return hits
+
+
+def test_no_direct_utc_or_cet_stamps_in_mail_builders():
+    hits = _offending_lines("api.py") + _offending_lines("bg_service.py")
+    assert not hits, (
+        "Direkte Mail-Zeitstempel gefunden (nur _mail_timestamp_dual ist erlaubt):\n"
+        + "\n".join(hits)
+    )

@@ -774,6 +774,46 @@ Woche bleibt TRADE_NOW; 9 mailtime-Tests inkl. DST-Stichtage März/Oktober +
 api/bg-Aliase; Betreff-Test erweitert um JETZT-frei + Legacy-Ersatz).
 Suite **1300, alle grün**.
 
+### 3.23 31. Juli (abends) — Tiefen-Audit: Short-Spiegelung, drei Guards, Backtest-Messschleife
+
+**Anlass (Betreiber):** „alles machen + intensives Audit — solche Fehler
+dürfen nicht mehr passieren." Vollständiges Dokument:
+`AUDIT_2026-07-31_TIEFENAUDIT.md`. Fehlerklassen: **K1 Anker** (Tag statt
+Woche), **K2 Registrierung** (Decision-Mapping = explizite Menge, kein
+Suffix), **K3 UX-Ehrlichkeit** (Betreff/Zeit).
+
+**Audit-Befund über den BHC-Fall hinaus:** Die **Short-Seite hatte dieselbe
+Lücke gespiegelt** — -38 % über 3 Tage, heute -3 % = „frischer" Short auf
+dem Boden. Mehrtages- (≥ 5/≥ 7 ATR) und Vortag-Anker (≥ 2,5 ATR + rot +
+≤ 1 % am Tagestief) jetzt symmetrisch (`swing_short_multi_day_*`,
+`swing_short_prevday_run_bottom_entry_*`), in beiden Entscheidungspfaden
+registriert.
+
+**Drei strukturelle Guards (Prävention, nicht Symptom):**
+1. **Reasons-Registry** (`test_reason_registry.py`, bidirektional): jeder
+   der 150 erzeugten Gate-Gründe muss im Decision-Mapping landen oder in
+   der eingefrorenen 81er-WATCH-Whitelist stehen — ein neuer Grund ohne
+   Mapping schlägt sofort an (genau der heutige Fast-Fehler).
+2. **Zeitstempel-Guard** (`test_mailtime.py`): verbietet direkte
+   UTC-/CET-Mail-Stempel; nur `_mail_timestamp_dual()` ist erlaubt.
+3. **Backtest-Konsistenz** (`test_chase_gate_backtest.py`):
+   `scripts/chase_gate_backtest.py` rekonstruiert Gate-Inputs aus
+   Polygon-Tages-Bars (der Tracker speichert sie nicht — ehrlicher
+   Daten-Lücken-Befund) und ruft die **echten** Produktiv-Gates; zählt,
+   wie viele der 90-Tage-Signale die neuen Gates blockiert hätten, inkl.
+   ØR-/Treffer-Vergleich („gespart oder gekostet"). Läuft auf dem Server:
+   `venv/bin/python3 scripts/chase_gate_backtest.py --days 90`.
+
+**Beobachtungspunkte (bewusst nicht gefixt, Begründung im Audit-Dok):**
+`crash_drop_too_extended` → WATCH-Kandidat; `rvol_below_bear_threshold`
+außerhalb base_blockers; Crypto-Mehrtages-Anker nur weich (Exhaustion-
+Score, kein Gate); zwei Mail-Aufrufe mit implizitem mail_class-Default.
+
+**Tests:** +10 (2 Short-Repros, 4 Backtest, 3 Registry, 1 Zeitstempel-Guard).
+Suite **1310, alle grün**. Repo-Hygiene: versehentlich getrackte
+Laufzeit-Artefakte (Insider-Cache, Report-Preview) enttrackt + gitignore
+(`adce713`) — sonst haette der naechste Server-Pull blockiert.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -873,7 +913,9 @@ Suite-Stand-Historie:
 1277 (31.07. Insider-Cluster-Detektor, alle grün) →
 1286 (31.07. ℹ️-Cluster-Mail mit Kompositions-Dedupe, alle grün) →
 1300 (31.07. BHC: Mehrtages-Chase-Gates + Vortag-Anker, SWING-Betreff ohne „JETZT",
-duale Mail-Zeitstempel `test_mailtime.py`, alle grün).
+duale Mail-Zeitstempel `test_mailtime.py`, alle grün) →
+1310 (31.07. Tiefen-Audit: Short-Spiegelung, Reasons-Registry-Guard, Zeitstempel-Guard,
+Chase-Gate-Backtest-Skript, alle grün).
 
 ---
 

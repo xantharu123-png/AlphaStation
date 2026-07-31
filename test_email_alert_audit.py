@@ -3333,6 +3333,78 @@ def test_stock_strategy_swing_fresh_breakout_with_history_stays_alertable(monkey
     assert state["decision"] == "TRADE_NOW"
 
 
+def test_stock_swing_short_blocks_multi_day_exhausted(monkeypatch):
+    """BHC-Spiegelung (Audit 2026-07-31): -38% in 5 Tagen ≈ 8,8 ATR, heute nur
+    -3% — die Short-Tages-Gates sahen den gelaufenen Drop nicht. Mehrtages-
+    und Vortag-Anker gelten jetzt symmetrisch → NO_TRADE."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SHC"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "SHC",
+        "Strategy": "Gap Momentum Short",
+        "grade": "A",
+        "score": 88,
+        "rvol": 1.9,
+        "price": 6.33,
+        "current_price": 6.33,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -3.0,
+        "close_pos": 0.1,
+        "open_to_current_pct": -2.0,
+        "Day_Low": 6.31,
+        "Change_5D": -38.0,
+        "Vortag_Pct": -30.0,
+        "trade_setup": {"atr": 0.275, "entry": 6.33, "stop": 6.6, "tp1": 5.6, "tp2": 5.3},
+        "Entry": 6.33,
+        "StopLoss": 6.6,
+        "TP1": 5.6,
+        "TP2": 5.3,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_short_multi_day_exhausted_no_chase" in state["suppression_reasons"]
+    assert "swing_short_prevday_run_bottom_entry_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "NO_TRADE"
+
+
+def test_stock_swing_short_fresh_breakdown_not_blocked_by_new_gates(monkeypatch):
+    """Gegenprobe Short: frischer Breakdown HEUTE (-5%, ruhige Woche -4%,
+    Vortag flach) — die neuen Mehrtages-/Vortag-Anker duerfen nicht feuern."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"SFD"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "SFD",
+        "Strategy": "Gap Momentum Short",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.0,
+        "price": 10.0,
+        "current_price": 10.0,
+        "direction": "SHORT",
+        "Signal_Direction": "SHORT",
+        "change_pct": -5.0,
+        "close_pos": 0.15,
+        "open_to_current_pct": -3.0,
+        "Day_Low": 9.9,
+        "Change_5D": -4.0,
+        "Vortag_Pct": -0.5,
+        "trade_setup": {"atr": 0.33, "entry": 10.0, "stop": 10.5, "tp1": 9.25, "tp2": 9.0},
+        "Entry": 10.0,
+        "StopLoss": 10.5,
+        "TP1": 9.25,
+        "TP2": 9.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert "swing_short_multi_day_exhausted_no_chase" not in state["suppression_reasons"]
+    assert "swing_short_multi_day_extended_wait_retest" not in state["suppression_reasons"]
+    assert "swing_short_prevday_run_bottom_entry_wait_retest" not in state["suppression_reasons"]
+
+
 def test_stock_strategy_swing_premarket_gap_waits_for_retest(monkeypatch):
     """Gap >= 3% + Session <= +0,5%: Move lief vorbörslich — das Gate greift
     unabhaengig vom Strategienamen (schliesst die 'Momentum Breakout Long'-Luecke)

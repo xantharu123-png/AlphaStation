@@ -2886,6 +2886,7 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
                 "swing_short_drop_too_extended_no_chase",
                 # 2026-07-31 (BHC): 5-Tage-Move >= 7 ATR = erschoepft, hartes Cap.
                 "swing_multi_day_exhausted_no_chase",
+                "swing_short_multi_day_exhausted_no_chase",
             }
             score = min(score, 45 if any(reason in no_chase for reason in swing_reasons) else 69)
     elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
@@ -6171,6 +6172,28 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_short_day_move_exhausted_no_chase")
         elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
             reasons.append("swing_short_day_move_extended_wait_retest")
+    # BHC-Spiegelung 2026-07-31: Drop ueber mehrere Tage (fette rote Kerzen
+    # von gestern/vorgestern), heute kleiner Tag = fuer Tages-Gates unsichtbar.
+    # |Change_5D| / ATR_% misst die Woche — Boden-Short nach gelaufenem Drop.
+    multi_day_atr = _swing_multi_day_move_atr(row)
+    if multi_day_atr is not None:
+        if multi_day_atr >= _SWING_MULTI_DAY_HARD_ATR:
+            reasons.append("swing_short_multi_day_exhausted_no_chase")
+        elif multi_day_atr >= _SWING_MULTI_DAY_EXTENDED_ATR:
+            reasons.append("swing_short_multi_day_extended_wait_retest")
+    # Vortag-Anker: gestriger Drop >= 2,5 ATR UND heute weiter rot UND Preis
+    # klebt am Tagestief = Tag-2-Boden-Short.
+    prevday_pct = _alert_float(_alert_get_any(row, "Vortag_Pct", "vortag_pct"), None)
+    prevday_atr = _swing_day_move_atr(row, prevday_pct)
+    if (
+        prevday_atr is not None
+        and prevday_atr >= _SWING_PREVDAY_RUN_ATR
+        and change is not None
+        and change < 0
+    ):
+        _dist = _swing_top_entry_distance_pct(row, short=True)
+        if _dist is not None and _dist <= _SWING_TOP_ENTRY_MAX_DIST_FROM_EXTREME_PCT:
+            reasons.append("swing_short_prevday_run_bottom_entry_wait_retest")
     # Orts-Gate symmetrisch (PBT): >= 2 ATR Drop UND Preis <= 1% ueberm
     # Tagestief = Boden-Short nach gelaufenem Move.
     if _top_entry_gate_active(row, change, short=True):
@@ -6872,6 +6895,8 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_short_drop_too_extended_no_chase",
         # 2026-07-31 (BHC): 5-Tage-Move >= 7 ATR — Move erschoepft, kein Chase.
         "swing_multi_day_exhausted_no_chase",
+        # 2026-07-31 (BHC-Spiegelung Short): 5-Tage-Drop >= 7 ATR.
+        "swing_short_multi_day_exhausted_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     contextual_no_trade_markers = set(no_trade_markers)
