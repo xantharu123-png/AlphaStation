@@ -275,10 +275,11 @@ def test_bg_recovery_mail_content(monkeypatch):
 
 # ── Teil 4: Anti-Spam-Throttle + Budget-Kalibrierung (30.07., Live-Flut) ────
 def test_strategy_scan_budget_kalibriert():
-    """strategy_scan (30-Min-Takt, 60+ Kandidaten) hat eigenes 25-Min-Budget
-    statt 10-Min-Default; Hartdeckel = 3x Budget."""
-    assert api._SCAN_TIMEOUTS["strategy_scan"] == 25
-    assert api._stuck_hard_cap_sec("strategy_scan") == 75 * 60
+    """strategy_scan (60-Min-Takt seit 31.07., US-Session-Laufzeit 21,5–23,3 Min
+    gemessen 30./31.07.) hat 35-Min-Budget = P95 + ~50 % Puffer;
+    Hartdeckel = 3x Budget. Erstkalibrierung war 25 Min (30.07., 10-Default)."""
+    assert api._SCAN_TIMEOUTS["strategy_scan"] == 35
+    assert api._stuck_hard_cap_sec("strategy_scan") == 105 * 60
 
 
 def test_warn_throttle_one_mail_per_scanner_per_6h(monkeypatch, tmp_path):

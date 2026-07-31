@@ -235,7 +235,7 @@ Handelsstunde; die Swing-Mails kamen erst 10:12 bzw. 10:47 ET — nach dem Move.
 |---|---|---|
 | **B1** | **PM-Modus im Strategy-Scan** (`session_name == "Pre-Market"`) | Ersetzt RVOL-/Dollar-Vol-Filter durch: **absolute PM-Liquidität ≥ $500k** (strategie-übersteuerbar via `premarket_min_dollar_volume`), **Spread-Guard > 7 %** Bid/Ask → Reject, fehlende Quote → Reject. `_premarket_rvol_proxy` ($500k→1,5 … $5M→3,0) speist als `rvol_effective` Momentum-Gate + Scoring (sonst kein Score ≥ 80 möglich). **PM-Extensions-Decke > 3,0 ATR** → Reject (PM-Äquivalent zum Orts-Gate: gelaufener Move = keine Frühwarnung). Fallback-Cap 76 greift nicht für die designed PM-Quelle. Row-Flags: `Premarket`, `PM_DollarVol`, `RVOL_PM_Raw` (Rohwert bleibt transparent), `RVOL` = effektiver Wert |
 | **B2** | **PM-Mail als eigener Kanal** `stocks_premarket` („Aktien Pre-Market") | Fenster **7:00–9:25 ET** (Mo–Fr). Dedizierter Klassifizierer `_classify_premarket_candidate` (statt Regular-Maschinerie, die PM-Rows systematisch verwerfen würde): Score ≥ **85** (strenger als 80), Top-Grade, PM-Liquidität, Extensions-Decke, valide Level, Common-Stock-Guard. Eigener Cooldown-Namespace `..._pm` → **Regular-Mail nach Open bleibt möglich**. Betreff „Aktien Pre-Market Radar", Pflicht-Warnhinweis (dünne Liquidität, nur Limit, kleine Größe, Opening-Range abwarten), RVOL-Spalte zeigt „PM $2,0M". Default **an**, in den Alert-Einstellungen abschaltbar (Frontend rendert die Optionen dynamisch — kein Frontend-Eingriff nötig) |
-| **B3** | **Dynamischer Scan-Takt** | `_effective_scan_interval_min`: `strategy_scan` im Fenster **9:25–11:30 ET** alle **10 statt 30 Minuten** (Scheduler-Hauptschleife + Smart-Startup). Alle anderen Scanner unverändert |
+| **B3** | **Dynamischer Scan-Takt** | `_effective_scan_interval_min`: `strategy_scan` im Fenster **9:25–11:30 ET** alle **10 statt 60 Minuten** (Basis-Takt seit 31.07. auf 60 Min — Swing-Horizont braucht keinen 30-Min-Takt; Opening-Takt bleibt für frische Ausbrüche). Alle anderen Scanner unverändert |
 
 **Bewusst nicht gebaut (Phase 2):** WebSocket-Trigger (Polygon-Streams). Begründung:
 Engpass war die Gate-Logik, nicht der Transport; Stream = anderes Paradigma (Event-Router,
@@ -562,6 +562,30 @@ Einzelsicht pro Mail.
 die Throttle (3.14) nur Spam verhinderte oder ob ein Scanner chronisch
 haengt — inkl. der Episoden, die bewusst NICHT gemailt wurden.
 
+### 3.16 31. Juli (früh) — Verifizierung + Zweitkalibrierung: Intervall 60 Min, Budget 35 Min
+
+**Live-Verifizierung der 3.14-Fixes (Server-Journal, 30./31.07.):**
+Vor dem Deploy (17:04–18:08): 2 WATCHDOG-Fehlalarme bei 3 Sweeps. Nach dem
+Deploy (19:00 → Folgetag 05:25, 15+ Sweeps): **0 Wächter-Einträge, 0 Mails.**
+Throttle + Erstkalibrierung wirken wie gebaut.
+
+**Neue Messerkenntnis:** US-Session-Laufzeiten des Sweeps **21,5–23,3 Min**
+(nach US-Close ~14 Min) → das 25-Min-Budget hatte nur ~2–4 Min Marge; ein
+hektischer Tag mit mehr Kandidaten hätte den Fehlalarm zurückgeholt.
+
+**Zweitkalibrierung (Betreiber-Wunsch „1x pro Stunde reicht"):**
+- **Intervall `strategy_scan` 30 → 60 Min.** Begründung: Swing-Horizont
+  (mehrtägig) — ob ein Signal 30 oder 60 Min alt ist, ist ohne Informations-
+  gewinn; der 8h-Ticker-Cooldown dominiert ohnehin. **Opening-Fenster
+  (9:25–11:30 ET) bleibt 10 Min** (B3): frische Ausbrüche am Open werden
+  weiterhin schnell gefangen — `min(base, 10)` greift automatisch.
+- **Budget 25 → 35 Min** (= P95 23,3 Min + ~50 % Puffer), Hartdeckel 105 Min.
+- Nebenbefund: doppelte DONE-Zeilen (gleiche Sekunde) nach 22:00 =
+  Nachhol-Logik des Schedulers, harmlos, Beobachtung läuft.
+- **Tests:** 4 angepasst (Budget/Hartdeckel 35/105, Basis-Takt 60 in
+  `test_premarket_radar`, `test_email_alert_audit`-Quellen-Assert,
+  Watchdog-Kalibrier-Test). Suite **1242, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -647,7 +671,8 @@ Suite-Stand-Historie:
 1182 (30.07. Scan-Wächter) → 1187 (30.07. BE im Wochenreport) → 1189 (30.07. BE im Dashboard) →
 1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün) →
 1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün) →
-1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün).
+1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün;
+31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün).
 
 ---
 

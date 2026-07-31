@@ -1532,9 +1532,9 @@ def _premarket_scan_gate_reason(
 def _effective_scan_interval_min(scan_name: str, now_utc: Optional[datetime] = None) -> float:
     """Dynamischer Scan-Takt (AUDIT 2026-07-29, Punkt C).
 
-    strategy_scan laeuft im Opening-Fenster (9:25–11:30 ET) alle 10 statt 30
+    strategy_scan laeuft im Opening-Fenster (9:25–11:30 ET) alle 10 statt 60
     Minuten — Moves, die direkt am Open starten (RITM/NVST-Muster), werden
-    ~20 Minuten frueher erfasst. Alle anderen Scanner unveraendert.
+    ~50 Minuten frueher erfasst. Alle anderen Scanner unveraendert.
     """
     try:
         base = float((_scan_status.get(scan_name) or {}).get("interval_min", 0) or 0)
@@ -14766,7 +14766,7 @@ _scan_status = {
     "penny_positions": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
-    "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
+    "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
 }
 SCAN_CACHE_MAP = {
     "bi_long": "/tmp/bi_cache_long.json",
@@ -14986,11 +14986,11 @@ _SCAN_TIMEOUTS = {
     "crypto_explosion": 25,
     "penny_stocks": 45,
     "penny_positions": 5,
-    # Erstkalibrierung 30.07. (Live-Befund): der Sweep im 30-Min-Takt ueber
-    # 60+ Kandidaten braucht regulaer >10 Min — der 10-Min-Default erzeugte
-    # eine Fehlalarm-Flut. Nachkalibrieren an '[Scheduler] strategy_scan DONE
-    # in Xs' (Server-Logs); Ziel: P95-Laufzeit + Puffer.
-    "strategy_scan": 25,
+    # Zweitkalibrierung 31.07. (Live-Messung 30./31.07.): US-Session-Laufzeiten
+    # 21,5–23,3 Min (60+ Kandidaten), nach Close ~14 Min. 25 Min hatte nur
+    # ~2 Min Marge → 35 Min (P95 + ~50 % Puffer). Intervall seit 31.07. 60 Min
+    # (Swing-Horizont: 30-Min-Takt brachte keinen Informationsgewinn).
+    "strategy_scan": 35,
 }
 
 # ── Haenge-Alarm + Selbstheilung (AUDIT 2026-07-30) ──────────────────────────

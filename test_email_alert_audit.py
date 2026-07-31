@@ -1073,7 +1073,7 @@ def test_stock_strategy_sweep_is_scheduled_and_tracked():
     assert "_AUTO_STOCK_ALERT_STRATEGIES" in source
     assert '("strategy_scan", _stock_strategy_alert_sweep_wrapper)' in source
     assert '"strategy_scan": "/tmp/strategy_scan_cache.json"' in source
-    assert '"strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 30}' in source
+    assert '"strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 60}' in source
 
 
 def test_strategy_sweep_email_keeps_row_strategy_name(monkeypatch):
