@@ -91,9 +91,11 @@ def test_tracker_mfe_1r_marks_be_exactly_once(tracker):
     assert set(act) == {
         "id", "ticker", "scanner", "direction", "entry", "entry_fill_price",
         "stop", "tp1", "tp2", "mfe", "asset_class", "activated_at",
+        "mail_class",  # AUDIT 2026-07-31 (Shadow-Tracking): bg filtert danach
     }
     assert act["ticker"] == "AAPL"
     assert act["scanner"] == "breakout"
+    assert act["mail_class"] == "trade"
     assert act["direction"] == "LONG"
     assert act["entry"] == pytest.approx(100.0)
     assert act["stop"] == pytest.approx(95.0)

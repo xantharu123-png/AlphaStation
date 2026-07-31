@@ -858,6 +858,72 @@ vorgeschlagen, noch nicht gebaut (aendert Tracker-Semantik).
 
 ---
 
+### 3.25 31. Juli (Nacht) — Shadow-Tracking gebaut: die Gate-Kosten werden ab jetzt gemessen
+
+**Auslöser:** Der in 3.24 beschriebene Selektions-Blindflug. Ohne diese
+Messung bleibt der MDR-Konflikt (Scanner-Bonus vs. Chase-Gate) dauerhaft
+unauflösbar.
+
+**Was gebaut wurde (vier harte Regeln, alle test-eingefroren):**
+
+1. **Was geloggt wird** (`api.py`, `_send_strategy_scan_alerts`): Nur
+   Aktien-Swing-Rows (`stock_strategy`/`strategy_scan`, regulaere Session,
+   kein PM-Radar), die **ausschließlich** an Swing-Timing-Gruenden
+   scheitern — fail-closed Whitelist
+   `_SHADOW_TRACKABLE_TIMING_REASONS` (34 Gruende, explizit:
+   `swing_*` inkl. Multi-Day-/Vortags-/Orts-/Day-Move-Gates, Short-Seite
+   gespiegelt). **Bewusst ausgenommen:** Base-Blocker (Score/Grade/RVOL/
+   Asset), Plan-Geometrie-Gates (kein auswertbarer Trade-Plan),
+   Cooldown/Dedupe (Signal wurde schon gemailt → Doppelzaehlung),
+   `intraday_unconfirmed_pattern` (andere Fragestellung),
+   `swing_short_not_down_enough` („kein Setup", wuerde fluten). Ein NEUER
+   Gate-Grund landet nicht automatisch im Shadow-Track — Registry-Test
+   `test_shadow_whitelist_matches_swing_rule_sources` erzwingt die
+   explizite Entscheidung.
+2. **Keine Mail, niemals:** Shadow-Rows gehen nur in den Tracker
+   (`mail_class='shadow'`, `channel='shadow'`, Block-Gruende in neuer
+   Spalte `block_reasons`, idempotente Migration). Die Exit-/BE-Mails in
+   `bg_service` filtern `mail_class != 'trade'` — zusätzlich zur
+   bestehenden Zweitsicherung `_signal_origin_was_mailed` (die fuer
+   Shadow ohnehin nie greift).
+3. **Kein Statistik-Einfluss:** `load_performance_summary` filtert hart
+   `mail_class = 'trade'` (Win-Rate, Wilson, Verdikt, Wochenreport-
+   Tabellen unveraendert). Ebenso die vier Analyse-Skripte
+   (`exit_efficiency_analysis`, `websocket_benefit_analysis`,
+   `signal_performance_breakdown`; `chase_gate_backtest` hatte den Filter
+   schon).
+4. **Kein Dedupe-Konflikt:** Der Tracker-Dedupe-Key ist jetzt
+   `(scanner, ticker, mail_class, OPEN)` — ein Shadow-Signal blockiert
+   weder eine spaetere echte Mail desselben Tickers noch umgekehrt.
+   Trade-Verhalten (ein OPEN pro Ticker) bleibt unveraendert.
+
+**Auswertung:** Shadow-Signale laufen durch denselbe stuendlichen
+Eval-Pfad (Daily-OHLC, 5-Bar-Expiry) — Transitionen/BE-Aktivierungen
+tragen jetzt `mail_class` (Vertrags-Erweiterung, in
+`test_be_activation.py`/`test_exit_update_mails.py` eingefroren).
+Neue Funktion `shadow_summary(days)`: n, offen, entschieden, Trefferquote,
+ØR/ΣR, Gruende-Verteilung, letzte Signale. **Wochenreport-Sektion
+„🕶 Shadow-Messung (Chase-Gates)"** (nur bei ≥ 1 Shadow-Signal):
+ØR geblockt vs. ØR gemailt nebeneinander, Top-3-Blockgruende,
+Vorsichts-Hinweis solange entschiedene < 30.
+
+**Erwartetes Volumen / Eval-Last:** Backtest-Quote ~10 % der Signale
+(≈ 1–3 Shadow-Signale/Tag) — die zusaetzliche Eval-Last (ein
+Daily-Bar-Fetch pro offenem Shadow-Signal) ist vernachlaessigbar.
+
+**Entscheidungsregel in ~4 Wochen** (ab n ≥ 30 entschiedenen):
+ØR_shadow deutlich < ØR_trade → Gates sparen Geld (bestaetigt);
+ØR_shadow ≥ ØR_trade → Gates kosten → Schwellen (5/7 ATR) neu justieren
+und MDR-Bonus/Gate-Konflikt mit echten Forward-Daten aufloesen.
+
+**Tests:** `test_shadow_tracking.py` (21 Tests: Whitelist-Helper,
+Registry-Guard, Record/Dedupe-Isolation, Summary-Filter, shadow_summary,
+Eval-Integration, Mail-Filter Update/BE, Wochenreport-Render,
+Pipeline-Integration inkl. „Shadow auch ohne jede Mail", Real-Classify-
+Integration). Suite **1331, alle gruen**.
+
+---
+
 ## 4. Das Mail-System (Stand 29.07., abends)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
@@ -957,7 +1023,10 @@ Suite-Stand-Historie:
 1300 (31.07. BHC: Mehrtages-Chase-Gates + Vortag-Anker, SWING-Betreff ohne „JETZT",
 duale Mail-Zeitstempel `test_mailtime.py`, alle grün) →
 1310 (31.07. Tiefen-Audit: Short-Spiegelung, Reasons-Registry-Guard, Zeitstempel-Guard,
-Chase-Gate-Backtest-Skript, alle grün).
+Chase-Gate-Backtest-Skript, alle grün) →
+1331 (31.07. Shadow-Tracking: Whitelist-Helper, Registry-Guard, Record/Dedupe-Isolation,
+Summary-Filter, shadow_summary, Eval-/Mail-Vertrag (`mail_class` in transitions/be_activations),
+Wochenreport-Sektion, Pipeline-Integration, alle grün).
 
 ---
 

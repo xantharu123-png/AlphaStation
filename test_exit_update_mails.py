@@ -95,10 +95,12 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
         "id", "ticker", "scanner", "direction", "old_status", "new_status",
         "entry", "entry_fill_price", "stop", "tp1", "tp2", "r_realized",
         "tp1_hit_this_run", "asset_class",
+        "mail_class",  # AUDIT 2026-07-31 (Shadow-Tracking): bg filtert danach
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"
     assert tr["scanner"] == "breakout"
+    assert tr["mail_class"] == "trade"
     assert tr["direction"] == "LONG"
     assert tr["old_status"] == "OPEN"
     assert tr["new_status"] == "STOP_HIT"

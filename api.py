@@ -1262,6 +1262,59 @@ _trade_reminder_running = False
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
 _BEARISH_STOCK_ALERT_SCANNERS = {"bi_short", "bear"}
 _SWING_STOCK_STRATEGY_ALERT_SCANNERS = {"stock_strategy", "strategy_scan"}
+# Shadow-Tracking (AUDIT 2026-07-31): Signale, die NUR an diesen
+# Swing-Timing-Gruenden scheitern, werden still als mail_class='shadow' in den
+# Signal-Tracker geloggt (keine Mail, kein Statistik-Einfluss) — damit wird in
+# einigen Wochen mit echter Stichprobe messbar, was die Chase-Gates kosten
+# bzw. sparen (Selektionsproblem: der Backtest 2026-07-31 konnte die geblockte
+# Teilmenge nur rekonstruieren, nicht forward messen).
+# Fail-closed: ein NEUER Gate-Grund landet nicht automatisch hier — er muss
+# bewusst aufgenommen werden. Bewusst AUSGENOMMEN:
+#   - Base-/Qualitaets-Gates (score/grade/rvol/asset/plan-Geometrie): keine
+#     verwertbare "was waere wenn"-Messung, wuerde den Tracker fluten.
+#   - Cooldown/Dedupe-Gruende: das Signal wurde bereits gemailt bzw. geloggt.
+#   - intraday_unconfirmed_pattern: Scanner-interner Bestaetigungszustand,
+#     andere Fragestellung als die Chase-Gates.
+#   - swing_short_not_down_enough / missing_current_drop /
+#     rvol_below_bear_threshold: "kein Setup"/Daten-/Volumen-Lage, kein Timing.
+_SHADOW_TRACKABLE_TIMING_REASONS = frozenset({
+    # Long-Seite (_stock_swing_rule_reasons)
+    "swing_hard_extended_no_chase",
+    "swing_extended_wait_retest",
+    "swing_extended_without_volume_wait_retest",
+    "swing_day_move_exhausted_no_chase",
+    "swing_day_move_extended_wait_retest",
+    "swing_multi_day_exhausted_no_chase",
+    "swing_multi_day_extended_wait_retest",
+    "swing_prevday_run_top_entry_wait_retest",
+    "swing_top_entry_extended_wait_retest",
+    "swing_gap_done_premarket_wait_retest",
+    "swing_current_candle_fading",
+    "swing_not_holding_highs_after_move",
+    "swing_gap_not_holding_open_wait_retest",
+    "swing_gap_not_holding_upper_range_wait_retest",
+    "swing_gap_wick_rejection_wait_retest",
+    "swing_momentum_trend_reclaim_gap_wait_retest",
+    "swing_momentum_not_holding_open_wait_retest",
+    "swing_momentum_not_holding_upper_range_wait_retest",
+    "swing_momentum_wick_rejection_wait_retest",
+    "swing_momentum_breakout_quality_wait_retest",
+    "swing_4h_extended_run_wait_retest",
+    "swing_4h_rejection_wait_reclaim",
+    "swing_4h_state_missing_wait_trigger",
+    # Short-Seite (_stock_swing_short_rule_reasons)
+    "swing_short_drop_too_extended_no_chase",
+    "swing_short_extended_wait_retest",
+    "swing_short_drop_extended_wait_failed_reclaim",
+    "swing_short_day_move_exhausted_no_chase",
+    "swing_short_day_move_extended_wait_retest",
+    "swing_short_multi_day_exhausted_no_chase",
+    "swing_short_multi_day_extended_wait_retest",
+    "swing_short_prevday_run_bottom_entry_wait_retest",
+    "swing_short_bottom_entry_extended_wait_retest",
+    "swing_short_current_candle_reclaim",
+    "swing_short_not_closing_weak",
+})
 _LONG_ENTRY_ALERT_SCANNERS = {
     "bi_long", "biotech", "turtle", "penny_stocks"
 }
@@ -8020,6 +8073,34 @@ def _strategy_rows_daily_close_confirmed(results: List[Dict[str, Any]]) -> bool:
     return True
 
 
+def _shadow_trackable_reasons(
+    scanner_key: str,
+    state: Dict[str, Any],
+    market_type: str,
+    premarket_mail_mode: bool,
+) -> Optional[List[str]]:
+    """Gruende-Liste, wenn die Row NUR an Swing-Timing-Gates scheitert — sonst None.
+
+    AUDIT 2026-07-31 (Shadow-Tracking): Liefert die suppression_reasons genau
+    dann zurueck, wenn ALLE Gruende in _SHADOW_TRACKABLE_TIMING_REASONS liegen
+    (fail-closed Whitelist). Damit ist garantiert: Basis-Qualitaet (Score/
+    Grade/RVOL/Asset/Plan-Geometrie) hat gepasst und weder Cooldown noch
+    Dedupe haben gefeuert — die Row waere ohne die Chase-Gates gemailt worden
+    und ist damit eine saubere "was waere wenn"-Messung. Laueft nur fuer
+    Aktien-Swing-Scanner in der regulaeren (nicht PM-) Mail.
+    """
+    if market_type != "stocks" or premarket_mail_mode:
+        return None
+    if scanner_key not in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        return None
+    reasons = [str(reason) for reason in (state.get("suppression_reasons") or []) if reason]
+    if not reasons:
+        return None
+    if all(reason in _SHADOW_TRACKABLE_TIMING_REASONS for reason in reasons):
+        return reasons
+    return None
+
+
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if not results:
@@ -8059,6 +8140,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 return
     now = time.time()
     alerts = []
+    # Shadow-Tracking (AUDIT 2026-07-31): Rows, die NUR an den Swing-Timing-
+    # Gates scheitern, werden still als mail_class='shadow' geloggt (keine
+    # Mail, kein Statistik-Einfluss) — Forward-Messung der Gate-Kosten.
+    shadow_rows: List[Dict[str, Any]] = []
     suppressed: Dict[str, int] = {}
     grade_counts: Dict[str, int] = {}
     seen_cooldown_keys = set()
@@ -8104,6 +8189,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if not state["alertable_now"]:
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
+            shadow_reasons = _shadow_trackable_reasons(
+                scanner_key, state, market_type, premarket_mail_mode
+            )
+            if shadow_reasons:
+                shadow_rows.append(
+                    dict(row, block_reasons=",".join(shadow_reasons))
+                )
             continue
         if state["cooldown_key"] in seen_cooldown_keys:
             suppressed["duplicate_ticker_in_scan"] = suppressed.get("duplicate_ticker_in_scan", 0) + 1
@@ -8125,6 +8217,16 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "trade_plan_html": _format_alert_plan_html(row),
             "source_row": row,  # Signal-Tracking: Row mit Entry/StopLoss/TP-Feldern
         })
+
+    # Shadow-Tracking (AUDIT 2026-07-31): geblockte Swing-Signale still in den
+    # Tracker — bewusst UNABHAENGIG davon, ob unten eine Mail rausgeht (die
+    # Messung soll gerade die Luecke zwischen "gemailt" und "geblockt" fuellen).
+    # _safe_record_alert_signals wirft nie; Dedupe/Statistik-Regeln siehe
+    # modules/signal_tracker.py (mail_class='shadow').
+    if shadow_rows:
+        _safe_record_alert_signals(
+            scanner_key, shadow_rows, mail_class="shadow", channel="shadow"
+        )
 
     if not alerts:
         if market_type == "stocks":

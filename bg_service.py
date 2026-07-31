@@ -129,12 +129,14 @@ try:
         evaluate_open_signals,
         load_performance_summary,
         scanner_verdict,
+        shadow_summary,
     )
 except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
     record_alert_signals = None
     evaluate_open_signals = None
     load_performance_summary = None
     scanner_verdict = None
+    shadow_summary = None
 # Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
 try:
     from modules.notify_telegram import (
@@ -1545,6 +1547,11 @@ def _send_signal_update_mail(transitions, secrets):
     for tr in transitions:
         if not isinstance(tr, dict):
             continue
+        # Shadow-Tracking (AUDIT 2026-07-31): geblockte Signale werden zwar
+        # evaluiert, duerfen aber NIE eine Mail ausloesen — der User hat nie
+        # eine Entry-Mail dazu bekommen.
+        if str(tr.get("mail_class") or "trade") != "trade":
+            continue
         new_status = str(tr.get("new_status") or "")
         event = _SIGNAL_UPDATE_EVENTS.get(new_status)
         if event is None:
@@ -1643,6 +1650,10 @@ def _send_be_alert_mail(activations, secrets):
     pending = []
     for act in activations:
         if not isinstance(act, dict):
+            continue
+        # Shadow-Tracking (AUDIT 2026-07-31): keine BE-Mail fuer Signale,
+        # die nie gemailt wurden.
+        if str(act.get("mail_class") or "trade") != "trade":
             continue
         if not _signal_origin_was_mailed(act.get("scanner"), act.get("ticker"), now=now):
             log.debug(f"[SignalTracker] BE-Alert unterdrueckt (kein Erst-Mail-Mark): "
@@ -1921,7 +1932,7 @@ def _watchdog_report_section(events=None):
     </div>"""
 
 
-def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdog_events=None):
+def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdog_events=None, shadow=None):
     """Baut (subject, body_html) der Wochen-Bilanz aus load_performance_summary(days=7).
 
     Hausstil wie _send_signal_update_mail (Arial, 700px, Tabellen). Subject
@@ -1932,6 +1943,9 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdo
     watchdog_events: None = selbst aus modules.watchdog_log laden (7 Tage);
     Liste = injiziert (Tests). Fehler/Lesefehler => Sektion faellt weg,
     der Report selbst geht immer raus.
+    shadow: None oder Ergebnis von modules.signal_tracker.shadow_summary(7) —
+    Shadow-Messung der Chase-Gates (AUDIT 2026-07-31). Sektion erscheint nur,
+    wenn mindestens 1 Shadow-Signal in der Woche existiert.
     """
     stamp = now_et if now_et is not None else datetime.now()
     total = summary.get("total") or {}
@@ -2119,6 +2133,42 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdo
         gesichert{saved_line}.{compare}
     </div>"""
     wd_html = _watchdog_report_section(watchdog_events)
+    # Shadow-Messung (AUDIT 2026-07-31): geblockte Signale dieser Woche neben
+    # die gemailten stellen — so wird sichtbar, was die Chase-Gates kosten/
+    # sparen. Erscheint nur, wenn Shadow-Signale existieren; die Zahlen oben
+    # im Report bleiben davon unberuehrt (reine Trade-Statistik).
+    shadow_html = ""
+    try:
+        sh_total = ((shadow or {}).get("total") or {}) if isinstance(shadow, dict) else {}
+        sh_n = _i(sh_total, "signals")
+        if sh_n >= 1:
+            sh_decided = _i(sh_total, "decided_signals")
+            sh_open = _i(sh_total, "open")
+            sh_avg = sh_total.get("avg_r")
+            sh_hit = sh_total.get("win_rate_pct")
+            sh_avg_text = f"{float(sh_avg):+.2f}R" if isinstance(sh_avg, (int, float)) else "–"
+            sh_hit_text = f"{float(sh_hit):.0f}%" if isinstance(sh_hit, (int, float)) else "–"
+            trade_avg_text = avg_r_text if n else "–"
+            reasons = (shadow or {}).get("per_reason") or {}
+            top_reasons = ", ".join(
+                f"{html.escape(str(reason))} ({count})"
+                for reason, count in list(reasons.items())[:3]
+            )
+            reason_line = (f"<br>Haeufigste Block-Gruende: {top_reasons}"
+                           if top_reasons else "")
+            hint = ("" if sh_decided >= 30 else
+                    "<br>Stichprobe &lt; 30 entschiedene — noch keine Gate-Aenderung daraus ableiten.")
+            shadow_html = f"""
+    <div style="background:#eef2ff;border:1px solid #818cf8;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>🕶 Shadow-Messung (Chase-Gates):</b> {sh_n} Signale wurden diese Woche von den
+        Swing-Timing-Gates <b>nicht</b> gemailt, laufen aber still im Tracker mit
+        ({sh_open} offen, {sh_decided} entschieden).<br>
+        Ø R geblockt: <b>{sh_avg_text}</b> (Treffer {sh_hit_text}) vs. Ø R gemailt:
+        <b>{trade_avg_text}</b> — liegen die geblockten klar darunter, sparen die
+        Gates Geld; klar darueber, kosten sie.{reason_line}{hint}
+    </div>"""
+    except Exception:
+        shadow_html = ""
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
@@ -2126,6 +2176,7 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdo
     {alarm_html}
     {be_html}
     {wd_html}
+    {shadow_html}
     {mid_html}
     <p style="color:#999;font-size:12px;margin-top:20px">
         Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
@@ -2180,8 +2231,16 @@ def _run_weekly_report(secrets=None, now_et=None):
             if scanner_verdict is not None:
                 verdict_alerts, new_verdict_state = _verdict_alerts(
                     summary, _load_verdict_state())
+            # Shadow-Messung (AUDIT 2026-07-31): defensiv wie der Rest —
+            # ein Fehler hier darf den Wochenreport nie verhindern.
+            shadow = None
+            if shadow_summary is not None:
+                try:
+                    shadow = shadow_summary(days=7)
+                except Exception:
+                    shadow = None
             subject, body_html = _build_weekly_report_mail(
-                summary, now_et=now_et, verdict_alerts=verdict_alerts)
+                summary, now_et=now_et, verdict_alerts=verdict_alerts, shadow=shadow)
             sent = _send_email_alert(
                 subject, body_html,
                 secrets if secrets is not None else _load_secrets(),

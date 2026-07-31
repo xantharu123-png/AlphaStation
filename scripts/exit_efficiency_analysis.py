@@ -180,13 +180,15 @@ def main() -> int:
         conn = sqlite3.connect(args.db)
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM signals WHERE created_at >= ? ORDER BY created_at ASC, id ASC", (cutoff_iso,)
+            "SELECT * FROM signals WHERE created_at >= ? AND mail_class = 'trade' "
+            "ORDER BY created_at ASC, id ASC", (cutoff_iso,)
         ).fetchall()]
         conn.close()
     else:
         with st._db_connection() as conn:
             rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM signals WHERE created_at >= ? ORDER BY created_at ASC, id ASC", (cutoff_iso,)
+                "SELECT * FROM signals WHERE created_at >= ? AND mail_class = 'trade' "
+            "ORDER BY created_at ASC, id ASC", (cutoff_iso,)
             ).fetchall()]
 
     print(f"Fenster: {args.days} Tage | Signale: {len(rows)}")

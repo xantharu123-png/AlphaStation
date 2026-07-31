@@ -8,7 +8,16 @@ API-Kontrakt (von api.py / bg_service.py konsumiert):
   - record_alert_signals(scanner_name, rows, mail_class, channel) -> int
   - evaluate_open_signals(stock_daily_fetcher, crypto_price_fetcher, now) -> dict
   - load_performance_summary(days) -> dict
+  - shadow_summary(days) -> dict
   - get_signal_count() -> int
+
+Shadow-Tracking (AUDIT 2026-07-31): mail_class='shadow' markiert Signale, die
+die Swing-Timing-Gates NICHT gemailt haben (Chase-Schutz). Sie werden mit
+denselben Eval-Regeln weiterverfolgt, loesen aber KEINE Mails aus (bg_service
+filtert ihre Transitionen/BE-Aktivierungen) und fliessen NIE in
+load_performance_summary ein — auswertbar nur ueber shadow_summary(). Damit
+wird in einigen Wochen messbar, was die Gates kosten bzw. sparen
+(Selektionsproblem: bisher liess sich nur die gemailte Teilmenge beobachten).
 
 Designgrundsaetze:
   - KEINE Funktion dieses Moduls wirft Exceptions nach aussen: Alert-Versand
@@ -306,6 +315,9 @@ _SCHEMA_MIGRATIONS = {
     "be_activated_at": "TEXT",
     "r_realized_be": "REAL",
     "rates_json": "TEXT",
+    # Shadow-Tracking (AUDIT 2026-07-31): bei mail_class='shadow' die Gruende,
+    # warum das Signal NICHT gemailt wurde (komma-getrennt, max. 500 Zeichen).
+    "block_reasons": "TEXT",
 }
 
 # Zins-Block (modules/treasury_rates) als kompakte Annotation pro Signal
@@ -386,7 +398,12 @@ def record_alert_signals(
     """Loggt versendete Alert-Rows als offene Signale. Wirft nie.
 
     Regeln:
-      - Nur mail_class == "trade" wird geloggt (sonst Rueckgabe 0).
+      - mail_class "trade" (gemailte Signale) und "shadow" (AUDIT 2026-07-31:
+        von den Swing-Timing-Gates NICHT gemailte Signale, still
+        weiterverfolgt) werden geloggt; alles andere -> Rueckgabe 0.
+        Shadow-Rows tragen ihre Block-Gruende im Row-Feld 'block_reasons'
+        (komma-getrennt) und fliessen NIRGENDS in Win-Rate/Verdikt ein
+        (load_performance_summary filtert mail_class='trade').
       - Felder werden tolerant extrahiert (siehe extract_signal_fields).
       - Pflichtfelder pro Row: ticker, entry, stop, tp1 und tp2 (numerisch),
         direction (Default LONG). Die komplette Trade-Geometrie muss gueltig
@@ -395,8 +412,10 @@ def record_alert_signals(
       - asset_class = 'crypto', wenn scanner_name in CRYPTO_SCANNERS,
         sonst 'stock'.
       - Dedupe: Existiert bereits ein OPEN-Signal mit gleichem
-        (scanner, ticker), wird die Row uebersprungen (gilt auch innerhalb
-        eines Batches).
+        (scanner, ticker, mail_class), wird die Row uebersprungen (gilt auch
+        innerhalb eines Batches). Die mail_class im Dedupe-Key stellt sicher,
+        dass ein Shadow-Signal weder eine spaetere echte Mail desselben
+        Tickers blockiert noch von ihr blockiert wird.
       - rates_context: optionaler Zins-Block (modules/treasury_rates) aus dem
         Market-Context; wird kompakt als rates_json annotiert (kein Gate).
 
@@ -405,7 +424,8 @@ def record_alert_signals(
     """
     inserted = 0
     try:
-        if str(mail_class or "").strip().lower() != "trade":
+        mail_norm = str(mail_class or "").strip().lower()
+        if mail_norm not in ("trade", "shadow"):
             return 0
         if not rows or not isinstance(rows, (list, tuple)):
             return 0
@@ -448,20 +468,20 @@ def record_alert_signals(
                         if asset_class == "crypto" and instrument_id:
                             exists = conn.execute(
                                 "SELECT 1 FROM signals WHERE scanner = ? AND instrument_id = ? "
-                                "AND status = ? LIMIT 1",
-                                (scanner, instrument_id, STATUS_OPEN),
+                                "AND status = ? AND mail_class = ? LIMIT 1",
+                                (scanner, instrument_id, STATUS_OPEN, mail_norm),
                             ).fetchone()
                         elif asset_class == "crypto" and venue and contract_symbol:
                             exists = conn.execute(
                                 "SELECT 1 FROM signals WHERE scanner = ? AND venue = ? "
-                                "AND contract_symbol = ? AND status = ? LIMIT 1",
-                                (scanner, venue, contract_symbol, STATUS_OPEN),
+                                "AND contract_symbol = ? AND status = ? AND mail_class = ? LIMIT 1",
+                                (scanner, venue, contract_symbol, STATUS_OPEN, mail_norm),
                             ).fetchone()
                         else:
                             exists = conn.execute(
                                 "SELECT 1 FROM signals WHERE scanner = ? AND ticker = ? "
-                                "AND status = ? LIMIT 1",
-                                (scanner, ticker, STATUS_OPEN),
+                                "AND status = ? AND mail_class = ? LIMIT 1",
+                                (scanner, ticker, STATUS_OPEN, mail_norm),
                             ).fetchone()
                         if exists:
                             continue
@@ -475,6 +495,9 @@ def record_alert_signals(
                             elif direction == "SHORT" and fields["tp1"] < alert_price <= entry:
                                 fill_at = now_iso
                                 fill_price = float(alert_price)
+                        block_reasons_text = ""
+                        if mail_norm == "shadow":
+                            block_reasons_text = str(row.get("block_reasons") or "")[:500]
                         conn.execute(
                             """
                             INSERT INTO signals (
@@ -482,16 +505,16 @@ def record_alert_signals(
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
                                 rvol, mail_class, channel, status, outcome_detail,
                                 entry_filled_at, entry_fill_price, instrument_id,
-                                venue, contract_symbol, rates_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                venue, contract_symbol, rates_json, block_reasons
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
                                 float(entry), float(stop), fields["tp1"], fields["tp2"],
                                 fields["price_at_alert"], fields["grade"], fields["score"],
-                                fields["rvol"], "trade", channel_norm, STATUS_OPEN, "",
+                                fields["rvol"], mail_norm, channel_norm, STATUS_OPEN, "",
                                 fill_at, fill_price, instrument_id, venue, contract_symbol,
-                                rates_json,
+                                rates_json, block_reasons_text,
                             ),
                         )
                         inserted += 1
@@ -1071,6 +1094,7 @@ def _transition_record(
         "id": int(sig["id"]),
         "ticker": sig.get("ticker"),
         "scanner": sig.get("scanner"),
+        "mail_class": str(sig.get("mail_class") or "trade"),
         "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
         "old_status": str(sig.get("status") or STATUS_OPEN),
         "new_status": new_status,
@@ -1228,6 +1252,7 @@ def evaluate_open_signals(
                             "id": int(sig["id"]),
                             "ticker": sig.get("ticker"),
                             "scanner": sig.get("scanner"),
+                            "mail_class": str(sig.get("mail_class") or "trade"),
                             "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
                             "entry": _to_float(sig.get("entry")),
                             "entry_fill_price": _to_float(
@@ -1428,6 +1453,7 @@ def load_performance_summary(days: int = 90) -> dict:
                     dict(row)
                     for row in conn.execute(
                         "SELECT * FROM signals WHERE created_at >= ? "
+                        "AND mail_class = 'trade' "
                         "ORDER BY created_at DESC, id DESC",
                         (cutoff_iso,),
                     ).fetchall()
@@ -1513,6 +1539,107 @@ def load_performance_summary(days: int = 90) -> dict:
         ]
     except Exception as exc:
         logger.warning("load_performance_summary fehlgeschlagen: %s", exc)
+    return summary
+
+
+def shadow_summary(days: int = 90) -> dict:
+    """Shadow-Messung (AUDIT 2026-07-31): geblockte Signale separat auswerten.
+
+    Loesung des Selektionsproblems der Chase-Gates: Signale, die die
+    Swing-Timing-Gates NICHT gemailt haben (mail_class='shadow'), werden mit
+    denselben Eval-Regeln weiterverfolgt. Diese Funktion aggregiert NUR sie —
+    getrennt von der Trade-Statistik (load_performance_summary filtert
+    mail_class='trade'). Erst ab ~30 entschiedenen Shadow-Signalen ist der
+    Vergleich geblockt-vs-gemailt belastbar (gleiche Kalibrier-Regel wie im
+    Wochenreport).
+
+    Returns:
+        {'generated_at', 'window_days',
+         'total': {'signals', 'open', 'decided_signals', 'wins',
+                   'win_rate_pct', 'avg_r', 'sum_r'},
+         'per_reason': {block_reason: anzahl_signale},
+         'per_scanner': {scanner: anzahl_signale},
+         'recent': [letzte 10 Shadow-Signale kompakt]}
+        Wirft nie (bei Fehler leere Struktur).
+    """
+    try:
+        window = max(1, int(days))
+    except (TypeError, ValueError):
+        window = 90
+    summary: Dict[str, Any] = {
+        "generated_at": _utc_iso(),
+        "window_days": window,
+        "total": {
+            "signals": 0, "open": 0, "decided_signals": 0, "wins": 0,
+            "win_rate_pct": None, "avg_r": None, "sum_r": 0.0,
+        },
+        "per_reason": {},
+        "per_scanner": {},
+        "recent": [],
+    }
+    try:
+        cutoff_iso = (_utc_now() - timedelta(days=window)).isoformat()
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM signals WHERE created_at >= ? "
+                        "AND mail_class = 'shadow' "
+                        "ORDER BY created_at DESC, id DESC",
+                        (cutoff_iso,),
+                    ).fetchall()
+                ]
+        r_values: List[float] = []
+        wins = 0
+        open_count = 0
+        per_reason: Dict[str, int] = {}
+        per_scanner: Dict[str, int] = {}
+        for row in rows:
+            scanner = str(row.get("scanner") or "unknown")
+            per_scanner[scanner] = per_scanner.get(scanner, 0) + 1
+            for reason in str(row.get("block_reasons") or "").split(","):
+                reason = reason.strip()
+                if reason:
+                    per_reason[reason] = per_reason.get(reason, 0) + 1
+            if str(row.get("status") or "") == STATUS_OPEN:
+                open_count += 1
+            r_value = _to_float(row.get("r_realized"))
+            if r_value is not None:
+                r_values.append(float(r_value))
+                if float(r_value) > 0:
+                    wins += 1
+        decided = len(r_values)
+        summary["total"] = {
+            "signals": len(rows),
+            "open": open_count,
+            "decided_signals": decided,
+            "wins": wins,
+            "win_rate_pct": round(100.0 * wins / decided, 1) if decided else None,
+            "avg_r": round(sum(r_values) / decided, 3) if decided else None,
+            "sum_r": round(sum(r_values), 3),
+        }
+        summary["per_reason"] = dict(
+            sorted(per_reason.items(), key=lambda item: item[1], reverse=True)
+        )
+        summary["per_scanner"] = dict(
+            sorted(per_scanner.items(), key=lambda item: item[1], reverse=True)
+        )
+        summary["recent"] = [
+            {
+                "id": row.get("id"),
+                "created_at": row.get("created_at"),
+                "scanner": row.get("scanner"),
+                "ticker": row.get("ticker"),
+                "direction": row.get("direction"),
+                "status": row.get("status"),
+                "r_realized": row.get("r_realized"),
+                "block_reasons": row.get("block_reasons") or "",
+            }
+            for row in rows[:10]
+        ]
+    except Exception as exc:
+        logger.warning("shadow_summary fehlgeschlagen: %s", exc)
     return summary
 
 

@@ -91,7 +91,16 @@ def main() -> int:
         return 1
 
     summary = bg_service.load_performance_summary(days=args.days)
-    subject, body_html = bg_service._build_weekly_report_mail(summary)
+    # Shadow-Messung (AUDIT 2026-07-31): Vorschau rendert dieselbe Sektion
+    # wie der Freitags-Job — defensiv, ein Fehler hier bricht die Vorschau
+    # nicht (alter Code-Stand ohne shadow_summary bleibt lauffaehig).
+    shadow = None
+    if getattr(bg_service, "shadow_summary", None):
+        try:
+            shadow = bg_service.shadow_summary(days=args.days)
+        except Exception:
+            shadow = None
+    subject, body_html = bg_service._build_weekly_report_mail(summary, shadow=shadow)
 
     out = REPO_ROOT / "weekly_report_preview.html"
     out.write_text(body_html, encoding="utf-8")

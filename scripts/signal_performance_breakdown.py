@@ -63,6 +63,7 @@ def main() -> int:
             dict(row)
             for row in conn.execute(
                 "SELECT * FROM signals WHERE created_at >= ? "
+                "AND mail_class = 'trade' "
                 "ORDER BY created_at ASC, id ASC",
                 (cutoff_iso,),
             ).fetchall()
