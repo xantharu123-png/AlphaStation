@@ -26,3 +26,5 @@ data_cache/signal_tracker.sqlite*
 data_cache/.fuse_hidden*
 backup_pre_sanierung_*.tar.gz
 *.bust
+data_cache/insider_trades_history.json
+weekly_report_preview.html
