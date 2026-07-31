@@ -624,6 +624,35 @@ Betreiber-Vorgabe: als abrufbarer Info-Block, **niemals** Trigger.
 in derselben Richtung = starkes Hintergrund-Regime für bestehende Setups.
 Allein daraus kaufen wäre genau das Chasen, das die Gates verhindern.
 
+### 3.18 31. Juli (vormittags) — Monster-Volumen Aktien: 4. Radar-Sektion mit eigener Baseline
+
+**Anlass (Betreiber):** „Und Aktien? API-Kosten OK, wenn es was bringt."
+Bei Aktien gibt es kein On-Chain — die ehrlichste Spur ist die
+Volumen-Welle im Einzelwert.
+
+**Design (Senior-Entscheid):** Statt 21 teurer Historien-Calls pro Refresh
+nutzt die Sektion den **Polygon Market-Snapshot** (ganzer US-Markt in EINEM
+Call) und baut daraus täglich eine **eigene 20-Tage-Volumen-Baseline** auf
+(`data_cache/smart_money_volumes.json`, Rolling-Store 30 Tage, idempotent je
+Handelstag). Daten-Datum = jüngster `updated`-Zeitstempel als ET-Tag →
+Wochenend-/Feiertags-Aufrufe verfälschen die Baseline nicht (Wochenend-Lehre).
+Kosten: **1 Call pro Refresh** (Radar-Cache 30 Min).
+
+**Logik:** Filter ≥ 50 M$ Tages-$-Volumen (Rauschfilter), RVOL = heute /
+Ø 20 eigene Baseline-Tage (nur mit ≥ 3 Tagen), „🌊 Welle" ab 1,8×,
+Richtung aus Tages-Change (grün Kauf-, rot Verkaufswelle), Top 15.
+Aufbauphase (< 20 Baseline-Tage): Badge „building", Ranking vorläufig nach
+$-Volumen, Hinweis im Klartext — keine versteckte Unreife.
+
+**Frontend:** Neue Karte „🏦 Monster-Volumen Aktien" auf `/smart-money`
+(zwischen ETF-Flows und Makro-Wellen), building-Badge in Amber.
+Extern-401 verifiziert als Middleware-Verhalten (Cookie-Session im Browser
+→ same-origin fetch läuft automatisch authentifiziert).
+
+**Tests:** +7 (Rolling-Store-Kürzung/Idempotenz, Baseline-Ausschluss des
+Datentags, RVOL/Filter/Richtung/Top-N, Building→Reifung, volle Baseline mit
+Welle, Fehler-Nie-werfen). Suite **1266, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -711,7 +740,8 @@ Suite-Stand-Historie:
 1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün) →
 1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün;
 31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün) →
-1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün).
+1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün) →
+1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün).
 
 ---
 

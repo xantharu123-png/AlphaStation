@@ -242,6 +242,164 @@ def fetch_volume_waves(api_key: str | None) -> dict[str, Any]:
     return out
 
 
+# ── 2b) Monster-Volumen Aktien (Polygon Snapshot + eigene Baseline) ──────────
+
+POLYGON_SNAPSHOT_URL = "https://api.polygon.io/v2/snapshot/locale/us/market/stocks/tickers"
+STOCK_WAVE_MIN_DOLLAR_VOL_MUSD = 50.0   # Rauschfilter: unter 50 M$ Tages-$ kein "Gross"
+STOCK_WAVE_TOP_N = 15
+VOLUME_HISTORY_MAX_DATES = 30           # Rolling-Store: letzte 30 Handelstage
+_BASELINE_FULL = 20                     # danach ist die RVOL-Baseline "voll"
+_BASELINE_MIN = 5                       # darunter: $-Volumen-Ranking statt RVOL
+
+_DEFAULT_VOL_HIST = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data_cache", "smart_money_volumes.json")
+)
+VOLUME_HISTORY_PATH = os.environ.get("SMART_MONEY_VOLUMES", _DEFAULT_VOL_HIST)
+
+
+def _polygon_market_snapshot(api_key: str) -> tuple[str, list[dict[str, Any]]]:
+    """Ganzer US-Markt in EINEM Call. -> (Daten-Datum ET, Zeilen).
+
+    Daten-Datum = juengster updated-Zeitstempel (nanosec) als ET-Kalendertag —
+    so landet Wochenend-/Feiertags-Abfrage unter dem letzten Handelstag und
+    verfaelscht die Baseline nicht.
+    """
+    data = _http_get_json(POLYGON_SNAPSHOT_URL,
+                          params={"include_otc": "false", "apiKey": api_key})
+    rows: list[dict[str, Any]] = []
+    max_updated = 0
+    for t in (data.get("tickers") or []):
+        day = t.get("day") or {}
+        vol = day.get("v")
+        close = day.get("c")
+        if not isinstance(vol, (int, float)) or vol <= 0:
+            continue
+        if not isinstance(close, (int, float)) or close <= 0:
+            continue
+        upd = t.get("updated") or 0
+        if isinstance(upd, (int, float)):
+            max_updated = max(max_updated, int(upd))
+        rows.append({
+            "ticker": t.get("ticker"),
+            "volume": float(vol),
+            "close": float(close),
+            "change_pct": t.get("todaysChangePerc"),
+        })
+    if max_updated:
+        try:
+            from zoneinfo import ZoneInfo
+            data_date = datetime.fromtimestamp(
+                max_updated / 1e9, tz=ZoneInfo("America/New_York")).date().isoformat()
+        except Exception:
+            data_date = datetime.now(timezone.utc).date().isoformat()
+    else:
+        data_date = datetime.now(timezone.utc).date().isoformat()
+    return data_date, rows
+
+
+def update_volume_history(history: dict[str, Any] | None, date_str: str,
+                          today_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Rolling-Store {dates, volumes{ticker:{date:vol}}} — idempotent je Tag,
+    auf die letzten VOLUME_HISTORY_MAX_DATES Tage gekuerzt (pure)."""
+    hist = history if isinstance(history, dict) else {}
+    dates = [d for d in (hist.get("dates") or []) if isinstance(d, str)]
+    volumes = hist.get("volumes") if isinstance(hist.get("volumes"), dict) else {}
+    if date_str not in dates:
+        dates.append(date_str)
+        dates.sort()
+    for row in today_rows:
+        tk = row.get("ticker")
+        if not tk:
+            continue
+        per = volumes.setdefault(tk, {})
+        per[date_str] = row["volume"]
+    if len(dates) > VOLUME_HISTORY_MAX_DATES:
+        drop = set(dates[:-VOLUME_HISTORY_MAX_DATES])
+        dates = dates[-VOLUME_HISTORY_MAX_DATES:]
+        for tk in list(volumes):
+            per = volumes[tk]
+            for d in drop:
+                per.pop(d, None)
+            if not per:
+                volumes.pop(tk, None)
+    return {"dates": dates, "volumes": volumes}
+
+
+def history_to_lists(history: dict[str, Any], before_date: str) -> dict[str, list[float]]:
+    """{ticker: [Volumen der Tage VOR before_date, chronologisch]} (pure)."""
+    dates = [d for d in (history.get("dates") or []) if d < before_date]
+    dates.sort()
+    out: dict[str, list[float]] = {}
+    for tk, per in (history.get("volumes") or {}).items():
+        series = [per[d] for d in dates if isinstance(per.get(d), (int, float))]
+        if series:
+            out[tk] = series
+    return out
+
+
+def compute_stock_waves(today_rows: list[dict[str, Any]],
+                        history_lists: dict[str, list[float]],
+                        min_dollar_vol_musd: float = STOCK_WAVE_MIN_DOLLAR_VOL_MUSD,
+                        rvol_threshold: float = WAVE_RVOL_THRESHOLD,
+                        top_n: int = STOCK_WAVE_TOP_N) -> tuple[list[dict[str, Any]], int]:
+    """Pure: heutige Zeilen + Baseline-Listen -> (Wellen, baseline_tage).
+
+    RVOL nur mit >= 3 Baseline-Tagen; sonst rvol=None und Ranking nach
+    $-Volumen. direction aus change_pct (>0 Kauf-, <0 Verkaufswelle).
+    """
+    baseline_days = max((len(v) for v in history_lists.values()), default=0)
+    waves: list[dict[str, Any]] = []
+    for row in today_rows:
+        dollar_musd = row["volume"] * row["close"] / 1e6
+        if dollar_musd < min_dollar_vol_musd:
+            continue
+        series = history_lists.get(row["ticker"]) or []
+        rvol = None
+        if len(series) >= 3:
+            base = sum(series[-_BASELINE_FULL:]) / len(series[-_BASELINE_FULL:])
+            if base > 0:
+                rvol = round(row["volume"] / base, 2)
+        chg = row.get("change_pct")
+        waves.append({
+            "ticker": row["ticker"],
+            "rvol": rvol,
+            "dollar_volume_musd": round(dollar_musd, 1),
+            "change_pct": round(float(chg), 2) if isinstance(chg, (int, float)) else None,
+            "direction": "up" if isinstance(chg, (int, float)) and chg > 0 else "down",
+            "wave": bool(rvol is not None and rvol >= rvol_threshold),
+        })
+    waves.sort(key=lambda w: (w["rvol"] or 0.0, w["dollar_volume_musd"]), reverse=True)
+    return waves[:top_n], baseline_days
+
+
+def fetch_stock_waves(api_key: str | None, history_path: str | None = None) -> dict[str, Any]:
+    """Sektion Monster-Volumen Aktien: heutige $-Riesen vs. eigene 20-Tage-Baseline."""
+    if not api_key:
+        return {"status": "disabled", "note": "POLYGON_KEY nicht gesetzt", "waves": []}
+    path = history_path or VOLUME_HISTORY_PATH
+    try:
+        data_date, rows = _polygon_market_snapshot(api_key)
+        history = _read_cache(path) or {}
+        history_lists = history_to_lists(history, data_date)
+        waves, baseline_days = compute_stock_waves(rows, history_lists)
+        _write_cache(path, update_volume_history(history, data_date, rows))
+        building = baseline_days < _BASELINE_FULL
+        note = (f"Baseline im Aufbau ({baseline_days}/{_BASELINE_FULL} Tage) — "
+                "Ranking vorlaeufig nach $-Volumen" if building else
+                f"RVOL vs. eigene {min(baseline_days, _BASELINE_FULL)}-Tage-Baseline")
+        return {
+            "status": "ok" if waves else "empty",
+            "baseline_days": baseline_days,
+            "building": building,
+            "data_date": data_date,
+            "note": (note + f" · Filter: >= ${STOCK_WAVE_MIN_DOLLAR_VOL_MUSD:.0f}M Tages-$-Volumen"
+                     f" · Welle ab {WAVE_RVOL_THRESHOLD}x"),
+            "waves": waves,
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:200], "waves": []}
+
+
 # ── 3) Whale-Alerts (optional, WHALE_ALERT_KEY) ──────────────────────────────
 
 def classify_whale_tx(tx: dict[str, Any]) -> str:
@@ -315,6 +473,7 @@ def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
             "sections": {
                 "etf_flows": fetch_etf_flows(),
                 "volume_waves": fetch_volume_waves(polygon_key),
+                "stock_waves": fetch_stock_waves(polygon_key),
                 "whale_alerts": fetch_whale_alerts(whale_key),
             },
             "_cached_at": now,

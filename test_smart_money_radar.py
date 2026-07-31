@@ -155,6 +155,8 @@ def _mock_sections(monkeypatch):
                         lambda: {"status": "ok", "rows": [{"date": "d", "total_musd": 1.0}]})
     monkeypatch.setattr(smr, "fetch_volume_waves",
                         lambda key: {"status": "ok", "waves": [{"symbol": "GLD", "wave": True}]})
+    monkeypatch.setattr(smr, "fetch_stock_waves",
+                        lambda key, history_path=None: {"status": "ok", "waves": []})
     monkeypatch.setattr(smr, "fetch_whale_alerts",
                         lambda key: {"status": "disabled", "transactions": []})
 
@@ -164,7 +166,8 @@ def test_build_radar_writes_and_reuses_cache(monkeypatch, tmp_path):
     path = str(tmp_path / "radar.json")
     first = smr.build_radar(polygon_key="K", cache_path=path)
     assert first["cache"] == "new"
-    assert set(first["sections"]) == {"etf_flows", "volume_waves", "whale_alerts"}
+    assert set(first["sections"]) == {"etf_flows", "volume_waves",
+                                      "stock_waves", "whale_alerts"}
     assert "kein Trigger" in first["disclaimer"] or "Kein Signal" in first["disclaimer"]
     # Zweiter Aufruf: aus dem Cache (Fetcher wuerden crashen, falls aufgerufen)
     monkeypatch.setattr(smr, "fetch_etf_flows",
@@ -211,7 +214,8 @@ def test_api_endpoint_smoke(monkeypatch, tmp_path):
     resp = api.get_smart_money_radar(refresh=1)
     assert resp.status_code == 200
     data = json.loads(resp.body)
-    assert set(data["sections"]) == {"etf_flows", "volume_waves", "whale_alerts"}
+    assert set(data["sections"]) == {"etf_flows", "volume_waves",
+                                     "stock_waves", "whale_alerts"}
     assert data["disclaimer"]
 
 
@@ -250,3 +254,115 @@ def test_radar_disclaimer_present_in_artifact(monkeypatch, tmp_path):
     _mock_sections(monkeypatch)
     radar = smr.build_radar(polygon_key="K", cache_path=str(tmp_path / "r.json"))
     assert "Kein Signal" in radar["disclaimer"]
+
+
+# ── Monster-Volumen Aktien (Snapshot + eigene Baseline, 31.07.) ─────────────
+
+def _row(ticker, volume, close=100.0, change_pct=1.0):
+    return {"ticker": ticker, "volume": float(volume),
+            "close": float(close), "change_pct": change_pct}
+
+
+def test_update_volume_history_rolling_and_idempotent():
+    hist = None
+    # 35 Tage einschreiben => auf 30 gekuerzt, aelteste raus
+    for i in range(35):
+        date = f"2026-06-{i + 1:02d}"
+        hist = smr.update_volume_history(hist, date, [_row("AAA", 1000 + i)])
+    assert len(hist["dates"]) == 30
+    assert "2026-06-01" not in hist["dates"]
+    assert hist["dates"][-1] == "2026-06-35"
+    # Idempotent: gleicher Tag nochmal => keine Dublette, Wert aktualisiert
+    n = len(hist["dates"])
+    hist = smr.update_volume_history(hist, "2026-06-35", [_row("AAA", 9999)])
+    assert len(hist["dates"]) == n
+    assert hist["volumes"]["AAA"]["2026-06-35"] == 9999.0
+
+
+def test_history_to_lists_excludes_today_and_orders():
+    hist = {"dates": ["2026-07-28", "2026-07-29", "2026-07-30"],
+            "volumes": {"AAA": {"2026-07-28": 1.0, "2026-07-30": 3.0},
+                        "BBB": {"2026-07-30": 5.0}}}
+    lists = smr.history_to_lists(hist, "2026-07-30")
+    assert lists == {"AAA": [1.0]}
+    lists_today = smr.history_to_lists(hist, "2026-07-31")
+    assert lists_today["AAA"] == [1.0, 3.0]
+    assert lists_today["BBB"] == [5.0]
+
+
+def test_compute_stock_waves_rvol_filter_direction():
+    today = [
+        _row("BIG", 3_000_000, close=100.0, change_pct=4.2),   # 300M$, RVOL 3x -> Welle up
+        _row("DUMP", 2_000_000, close=100.0, change_pct=-6.1), # 200M$, RVOL 2x -> Welle down
+        _row("SMALL", 100_000, close=100.0, change_pct=9.9),   # 10M$ -> Filter
+        _row("NEW", 5_000_000, close=100.0, change_pct=1.0),   # keine Baseline -> rvol None
+    ]
+    hist = {"BIG": [1_000_000.0] * 20, "DUMP": [1_000_000.0] * 20, "SMALL": [1.0] * 20}
+    waves, baseline = smr.compute_stock_waves(today, hist)
+    assert baseline == 20
+    tickers = [w["ticker"] for w in waves]
+    assert "SMALL" not in tickers  # $-Filter
+    assert tickers[0] == "BIG"     # hoechste RVOL zuerst
+    big = waves[0]
+    assert big["rvol"] == 3.0 and big["wave"] is True and big["direction"] == "up"
+    dump = waves[1]
+    assert dump["direction"] == "down" and dump["wave"] is True
+    new = [w for w in waves if w["ticker"] == "NEW"][0]
+    assert new["rvol"] is None and new["wave"] is False
+
+
+def test_fetch_stock_waves_disabled_without_key():
+    sec = smr.fetch_stock_waves(None)
+    assert sec["status"] == "disabled"
+    assert sec["waves"] == []
+
+
+def test_fetch_stock_waves_building_then_maturing(monkeypatch, tmp_path):
+    calls = {"n": 0}
+
+    def _fake_snapshot(key):
+        calls["n"] += 1
+        return "2026-07-31", [_row("AAA", 3_000_000, close=100.0, change_pct=2.5)]
+    monkeypatch.setattr(smr, "_polygon_market_snapshot", _fake_snapshot)
+    hist_path = str(tmp_path / "volumes.json")
+
+    sec = smr.fetch_stock_waves("KEY", history_path=hist_path)
+    assert sec["status"] == "ok"
+    assert sec["building"] is True            # 0 Baseline-Tage
+    assert sec["baseline_days"] == 0
+    assert "Baseline im Aufbau" in sec["note"]
+    assert sec["waves"][0]["rvol"] is None    # noch keine Referenz
+    # History wurde geschrieben
+    stored = json.loads(open(hist_path, encoding="utf-8").read())
+    assert stored["volumes"]["AAA"]["2026-07-31"] == 3_000_000.0
+
+    # Zweiter (spaeterer) Tag: Baseline 1 -> weiter building, aber Werte da
+    def _fake_snapshot2(key):
+        return "2026-08-01", [_row("AAA", 9_000_000, close=100.0, change_pct=5.0)]
+    monkeypatch.setattr(smr, "_polygon_market_snapshot", _fake_snapshot2)
+    sec2 = smr.fetch_stock_waves("KEY", history_path=hist_path)
+    assert sec2["baseline_days"] == 1
+    assert sec2["waves"][0]["rvol"] is None   # < 3 Baseline-Tage -> noch None
+
+
+def test_fetch_stock_waves_full_baseline_flags_wave(monkeypatch, tmp_path):
+    hist = {"dates": [f"2026-07-{d:02d}" for d in range(1, 21)],
+            "volumes": {"AAA": {f"2026-07-{d:02d}": 1_000_000.0 for d in range(1, 21)}}}
+    path = tmp_path / "volumes.json"
+    path.write_text(json.dumps(hist), encoding="utf-8")
+    monkeypatch.setattr(smr, "_polygon_market_snapshot",
+                        lambda key: ("2026-07-31", [_row("AAA", 5_000_000, close=100.0)]))
+    sec = smr.fetch_stock_waves("KEY", history_path=str(path))
+    assert sec["building"] is False
+    assert sec["waves"][0]["rvol"] == 5.0
+    assert sec["waves"][0]["wave"] is True
+
+
+def test_fetch_stock_waves_error_never_raises(monkeypatch, tmp_path):
+    def _boom(key):
+        raise RuntimeError("polygon down")
+    monkeypatch.setattr(smr, "_polygon_market_snapshot", _boom)
+    sec = smr.fetch_stock_waves("KEY", history_path=str(tmp_path / "v.json"))
+    assert sec["status"] == "error"
+    assert "polygon down" in sec["error"]
+    assert sec["waves"] == []

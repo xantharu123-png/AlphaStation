@@ -23,6 +23,7 @@
   .b-ok { background:#052e1f; color:var(--green); border:1px solid var(--green); }
   .b-disabled { background:#1a2236; color:var(--dim); border:1px solid var(--border); }
   .b-error, .b-stale, .b-empty { background:#2a1414; color:var(--red); border:1px solid var(--red); }
+  .b-building { background:#241a06; color:var(--amber); border:1px solid var(--amber); }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th { text-align:left; color:var(--dim); font-weight:normal; font-size:11px;
        padding:6px 8px; border-bottom:1px solid var(--border); }
@@ -61,6 +62,7 @@
   </div>
 
   <div class="card" id="sec-etf"></div>
+  <div class="card" id="sec-stock"></div>
   <div class="card" id="sec-waves"></div>
   <div class="card" id="sec-whales"></div>
 </div>
@@ -101,6 +103,24 @@ function renderWaves(sec) {
 const KIND = {exchange_inflow:["→ Börse (Verkaufsdruck)","k-in"],
               exchange_outflow:["← Börse (Akkumulation)","k-out"],
               wallet_to_wallet:["Wallet → Wallet","k-w2w"]};
+
+function renderStockWaves(sec) {
+  const rows = (sec.waves || []).map(w => `<tr class="${w.wave ? "wave" : ""}">
+    <td><b>${w.ticker}</b></td>
+    <td class="num ${w.direction === "up" ? "pos" : "neg"}">${w.change_pct == null ? "–" :
+      (w.change_pct > 0 ? "+" : "") + w.change_pct.toLocaleString("de-DE") + "%"}</td>
+    <td class="num">${w.rvol == null ? "–" : w.rvol + "×"}</td>
+    <td class="num">${(w.dollar_volume_musd || 0).toLocaleString("de-DE")} M$</td>
+    <td>${w.wave ? "🌊 Welle" : ""}</td>
+  </tr>`).join("");
+  const statusLabel = sec.building ? "building" : sec.status;
+  $("sec-stock").innerHTML = `<h2>🏦 Monster-Volumen Aktien ${badge(statusLabel)}</h2>
+    ${(sec.waves || []).length ? `<table>
+      <tr><th>Ticker</th><th class="num">Heute</th><th class="num">RVOL</th><th class="num">$-Volumen</th><th></th></tr>
+      ${rows}</table>` : `<div class="err">${sec.error || sec.note || "keine Daten"}</div>`}
+    <div class="note">${sec.note || ""}${sec.data_date ? " · Daten vom " + sec.data_date : ""}</div>`;
+}
+
 function renderWhales(sec) {
   const txs = (sec.transactions || []).map(t => {
     const [label, cls] = KIND[t.kind] || KIND.wallet_to_wallet;
@@ -124,6 +144,7 @@ async function load(refresh) {
     $("generated").textContent =
       "Stand: " + (data.generated_at || "?") + " · Cache: " + (data.cache || "?");
     renderEtf(data.sections?.etf_flows || {status:"error", error:"fehlt"});
+    renderStockWaves(data.sections?.stock_waves || {status:"error", error:"fehlt"});
     renderWaves(data.sections?.volume_waves || {status:"error", error:"fehlt"});
     renderWhales(data.sections?.whale_alerts || {status:"error", error:"fehlt"});
   } catch (e) {
