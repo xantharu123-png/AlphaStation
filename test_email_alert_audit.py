@@ -3175,6 +3175,164 @@ def test_stock_strategy_swing_fresh_breakout_stays_alertable(monkeypatch):
     assert state["decision"] == "TRADE_NOW"
 
 
+# ── AUDIT 2026-07-31: Mehrtages-Chase-Gates (BHC) ────────────────────────────
+# BHC: heute +5,1% (~1,2 ATR) = fuer die Tages-Gates "frisch", aber der Move
+# lief ueber 3 Tage (~+38% in 5 Tagen ≈ 8,8 ATR) — die fette Kerze war von
+# gestern. Alle Gates massen bisher nur den heutigen Tag; der Mehrtages-Anker
+# (Change_5D in ATR) und der Vortag-Anker schliessen diese Luecke.
+
+
+def test_stock_strategy_swing_blocks_multi_day_exhausted_bhc(monkeypatch):
+    """BHC-Repro: Tages-Change klein (1,2 ATR), aber 5-Tage-Move ≈ 8,8 ATR
+    und gestern ≈ 6,9 ATR mit Preis am Tageshoch → hartes NO_TRADE."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BHC"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "BHC",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 91,
+        "rvol": 1.7,
+        "price": 6.33,
+        "current_price": 6.33,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 5.1,
+        "gap_pct": 1.0,
+        "close_pos": 0.9,
+        "open_to_current_pct": 3.5,
+        "Day_High": 6.35,
+        "Change_5D": 38.0,
+        "Vortag_Pct": 30.0,
+        "trade_setup": {"atr": 0.275, "entry": 6.33, "stop": 6.0, "tp1": 7.14, "tp2": 7.42},
+        "Entry": 6.33,
+        "StopLoss": 6.0,
+        "TP1": 7.14,
+        "TP2": 7.42,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    # 38% / 4,34% ATR ≈ 8,8 ATR in 5 Tagen >= 7 → erschoepft:
+    assert "swing_multi_day_exhausted_no_chase" in state["suppression_reasons"]
+    # gestern 30% / 4,34% ≈ 6,9 ATR, heute gruen, 0,3% unterm Tageshoch:
+    assert "swing_prevday_run_top_entry_wait_retest" in state["suppression_reasons"]
+    assert state["decision"] == "NO_TRADE"
+
+
+def test_stock_strategy_swing_multi_day_extended_waits_for_retest(monkeypatch):
+    """Zwischenstufe: 5-Tage-Move ≈ 5,3 ATR (5–7 Band) → Retest abwarten,
+    kein hartes NO_TRADE. Vortag ruhig, Preis NICHT am Tageshoch — damit
+    nur das Mehrtages-Gate feuert."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"MDE"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "MDE",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 86,
+        "rvol": 2.0,
+        "price": 6.33,
+        "current_price": 6.33,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 4.0,
+        "gap_pct": 1.0,
+        "close_pos": 0.8,
+        "open_to_current_pct": 2.0,
+        "Day_High": 6.9,
+        "Change_5D": 23.0,
+        "Vortag_Pct": 3.0,
+        "trade_setup": {"atr": 0.275, "entry": 6.33, "stop": 6.0, "tp1": 7.14, "tp2": 7.42},
+        "Entry": 6.33,
+        "StopLoss": 6.0,
+        "TP1": 7.14,
+        "TP2": 7.42,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_multi_day_extended_wait_retest" in state["suppression_reasons"]
+    assert "swing_multi_day_exhausted_no_chase" not in state["suppression_reasons"]
+    assert "swing_prevday_run_top_entry_wait_retest" not in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_prevday_run_top_entry_blocked(monkeypatch):
+    """Vortag-Anker allein: 5-Tage-Move moderat (3,5 ATR), aber gestern
+    ≈ 2,6 ATR gelaufen UND heute gruen am Tageshoch → Tag-2-Top-Kauf."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PDR"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "PDR",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "A",
+        "score": 85,
+        "rvol": 2.0,
+        "price": 6.33,
+        "current_price": 6.33,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 2.0,
+        "gap_pct": 0.5,
+        "close_pos": 0.9,
+        "open_to_current_pct": 1.5,
+        "Day_High": 6.35,
+        "Change_5D": 15.0,
+        "Vortag_Pct": 11.3,
+        "trade_setup": {"atr": 0.275, "entry": 6.33, "stop": 6.0, "tp1": 7.14, "tp2": 7.42},
+        "Entry": 6.33,
+        "StopLoss": 6.0,
+        "TP1": 7.14,
+        "TP2": 7.42,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is False
+    assert "swing_prevday_run_top_entry_wait_retest" in state["suppression_reasons"]
+    assert "swing_multi_day_extended_wait_retest" not in state["suppression_reasons"]
+    assert state["decision"] == "WAIT_RETEST"
+
+
+def test_stock_strategy_swing_fresh_breakout_with_history_stays_alertable(monkeypatch):
+    """Gegenprobe: frischer Ausbruch HEUTE mit ruhiger Woche (5d ≈ 0,9 ATR,
+    Vortag flach) — die neuen Gates duerfen einen echten Tages-Breakout
+    nicht blockieren."""
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"FRESH2"}, "unit"))
+    monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *args, **kwargs: None)
+    row = {
+        "ticker": "FRESH2",
+        "Strategy": "Momentum Breakout Long",
+        "grade": "S",
+        "score": 89,
+        "rvol": 2.0,
+        "price": 10.0,
+        "current_price": 10.0,
+        "direction": "LONG",
+        "Signal_Direction": "LONG",
+        "change_pct": 5.0,
+        "gap_pct": 1.0,
+        "close_pos": 0.8,
+        "open_to_current_pct": 3.0,
+        "Day_High": 10.05,
+        "Change_5D": 4.0,
+        "Vortag_Pct": 0.5,
+        "trade_setup": {"atr": 0.33, "entry": 10.0, "stop": 9.5, "tp1": 10.75, "tp2": 11.0},
+        "Entry": 10.0,
+        "StopLoss": 9.5,
+        "TP1": 10.75,
+        "TP2": 11.0,
+    }
+
+    state = api._classify_alert_candidate("stock_strategy", row, 1_000_000.0)
+
+    assert state["alertable_now"] is True, state["suppression_reasons"]
+    assert state["decision"] == "TRADE_NOW"
+
+
 def test_stock_strategy_swing_premarket_gap_waits_for_retest(monkeypatch):
     """Gap >= 3% + Session <= +0,5%: Move lief vorbörslich — das Gate greift
     unabhaengig vom Strategienamen (schliesst die 'Momentum Breakout Long'-Luecke)

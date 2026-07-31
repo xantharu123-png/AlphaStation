@@ -730,12 +730,57 @@ Mail je neuem Cluster, kein Doppel am Folgetag, gewachsenes Cluster mailt,
 Verkauf mailt nie, Tages-Key ohne Fetch-Dauerfeuer, SMTP-Fehler-Retry,
 Modul-fehlt/Exception nie-werfen, Scheduler-Wiring. Suite **1286, alle grün**.
 
+### 3.22 31. Juli (nachmittags) — BHC-Audit: Mehrtages-Chase-Gates, ehrlicher Betreff, duale Zeitstempel
+
+**Anlass (Betreiber, drei Befunde an einer Live-Mail):** BHC kam 16:09 MESZ
+als „🚨 JETZT SWING" — obwohl der Chart die fette Kerze längst zeigte und
+der Body „14:09 UTC" schrieb, was mit der Postfach-Anzeige kollidierte.
+
+**Diagnose (drei getrennte Befunde):**
+1. **Tages-Anker-Blindheit (Hauptfehler):** Alle Chase-Gates (28./29.07.)
+   maßen nur den HEUTIGEN Tag. BHC: heute +5,1 % ≈ 1,2 ATR → unauffällig.
+   Der Move lief aber über ~3 Tage (+38 % in 5 Tagen ≈ **8,8 ATR** bei
+   ATR 4,34 %) — die fette Kerze war von gestern. Kein Gate sah das.
+2. **Betreff-Dissonanz:** Jede Swing-Mail trug pauschal „🚨 JETZT SWING",
+   auch wenn die Timing-Spalte nur „Swing-Setup aktiv" sagte — und obwohl
+   der eigene Mail-Disclaimer „mehrtägiger Plan" sagt.
+3. **Zeitstempel-Verwirrung:** Bodies zeigten nur UTC (das Postfach zeigt
+   Lokalzeit); bg_service-Mails zeigten UTC-Uhrzeit sogar mit **falschem
+   „CET"-Label** (Server läuft UTC).
+
+**Fixes:**
+- **Mehrtages-Gate** (`_swing_multi_day_move_atr`): |Change_5D| ÷ ATR-% —
+  das Row-Feld `Change_5D` existierte bereits (history_metrics, komplette
+  Daily-Bars; **keine neue Datenquelle**). ≥ 5 ATR/5d →
+  `swing_multi_day_extended_wait_retest`; ≥ 7 ATR/5d →
+  `swing_multi_day_exhausted_no_chase` (in beiden Entscheidungspfaden
+  registriert: `no_trade_markers` → NO_TRADE; Score-Cap 45).
+  Schwellen-Logik: 5 ATR/5 Tage = jeder Tag ein voller ATR-Tag in eine
+  Richtung (selten, heiß gelaufen); BHC 8,8 ATR = klar erschöpft.
+- **Vortag-Anker:** gestriger Tag ≥ 2,5 ATR UND heute grün UND Preis
+  ≤ 1 % am Tageshoch → `swing_prevday_run_top_entry_wait_retest`
+  (Tag-2-Top-Kauf; fängt auch Rows mit dünner 5d-Historie ab).
+- **Betreff:** `swing_trade`-Präfix „🚨 JETZT SWING: " → **„🚨 SWING: "**.
+  „JETZT" bleibt ausschließlich Intraday-Trade-Mails (15-Min-Frische-Gate).
+  Legacy-Marker ersetzt alte „JETZT SWING"-Betreffe ohne Emoji-Stapelung.
+- **Dualer Zeitstempel** (neues `modules/mailtime.py`; EU-Sommerzeit-Regel
+  fest implementiert, keine tzdata-Dependency): **alle** Mail-Bodies in
+  api.py (12 Stellen) und bg_service.py (10 Stellen) zeigen jetzt
+  „31.07.2026 14:09 UTC / 16:09 MESZ".
+
+**Tests:** +14 (4 Gate-Tests: BHC-Repro NO_TRADE, 5,3-ATR-Zwischenstufe
+WAIT_RETEST, Vortag-Anker isoliert, Gegenprobe frischer Breakout aus ruhiger
+Woche bleibt TRADE_NOW; 9 mailtime-Tests inkl. DST-Stichtage März/Oktober +
+api/bg-Aliase; Betreff-Test erweitert um JETZT-frei + Legacy-Ersatz).
+Suite **1300, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
-`info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT SWING / 👁️ WATCH.
+`info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT (nur Intraday-`trade`) /
+🚨 SWING (`swing_trade`, seit 31.07. ohne „JETZT") / 👁️ WATCH.
 
 **Empfänger-Logik (`modules/auth.get_email_alert_recipients`):**
 Plan hat E-Mail-Alerts → `email_alerts_enabled` → Watch-Opt-in (nur watch-Klasse) →
@@ -758,9 +803,14 @@ Grade/Score/RVOL → Common-Stock-Guard → 4H-Execution-State → **Volatilitä
 Momentum-spezifisch (Breakout-Typ, Frische, Continuation, Fakeout, Wick, RVOL-Floor,
 Late-Session, TP1-schon-berührt, Spike-Rejection, ≥ 8 %-Move-Chase) → Swing-Regelgründe
 (≥ 12 %/≥ 8 %+RVOL, Fading, Highs-Halten, Gap-Gates, Tagesmove-ATR,
-Pre-Market-Gap, **Top-Entry-Orts-Gate (29.07.)**) → Trade-Plan-Guard (valide Level,
+Pre-Market-Gap, Top-Entry-Orts-Gate (29.07.), **Mehrtages-ATR ≥ 5/≥ 7 +
+Vortag-Anker (31.07., BHC)**) → Trade-Plan-Guard (valide Level,
 natives Setup, R:R) →
 Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
+
+**Betreff-Präfixe (31.07.):** 🚨 JETZT nur noch Intraday-`trade` (15-Min-Frische);
+`swing_trade` = **🚨 SWING** (mehrtägige Pläne, kein „JETZT"); 👁️ WATCH; ℹ️ Info.
+**Zeitstempel (31.07.):** alle Mail-Bodies dual „UTC / MESZ" (`modules/mailtime.py`).
 
 ---
 
@@ -821,7 +871,9 @@ Suite-Stand-Historie:
 1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün) →
 1272 (31.07. SEC-Insider-Trades-Sektion (Form 4), alle grün) →
 1277 (31.07. Insider-Cluster-Detektor, alle grün) →
-1286 (31.07. ℹ️-Cluster-Mail mit Kompositions-Dedupe, alle grün).
+1286 (31.07. ℹ️-Cluster-Mail mit Kompositions-Dedupe, alle grün) →
+1300 (31.07. BHC: Mehrtages-Chase-Gates + Vortag-Anker, SWING-Betreff ohne „JETZT",
+duale Mail-Zeitstempel `test_mailtime.py`, alle grün).
 
 ---
 

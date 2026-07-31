@@ -380,7 +380,14 @@ def test_h2_no_double_emoji_for_legacy_subjects():
     once_swing = api._apply_mail_class_subject("Swing Foo", "swing_trade")
     assert api._apply_mail_class_subject(once_swing, "swing_trade") == once_swing
     assert once_swing.count("\U0001F6A8") == 1
-    assert "JETZT SWING:" in once_swing
+    assert "SWING:" in once_swing
+    # 2026-07-31: Swing-Mails tragen kein "JETZT" mehr - mehrtaegige Plaene;
+    # "JETZT" bleibt den Intraday-Trade-Mails mit Frische-Gate vorbehalten.
+    assert "JETZT" not in once_swing
+    # Alte "JETZT SWING"-Betreffe werden beim Re-Prefix ersetzt, nicht gestapelt:
+    legacy = api._apply_mail_class_subject("\U0001F6A8 JETZT SWING: Aktien Foo", "swing_trade")
+    assert legacy == api._MAIL_CLASS_SUBJECT_PREFIXES["swing_trade"] + "Aktien Foo"
+    assert "JETZT" not in legacy
 
 
 def test_h2_strategy_swing_timing_label_is_human_readable():

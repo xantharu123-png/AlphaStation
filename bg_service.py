@@ -107,6 +107,14 @@ try:
 except Exception:  # pragma: no cover
     _fetch_insider_clusters = None
 try:
+    # 2026-07-31: Mails zeigten UTC-Uhrzeit mit falschem "CET"-Label (Server
+    # laeuft UTC). Dualer Stempel UTC + Berlin, identisch zur api.
+    from modules.mailtime import mail_timestamp_dual as _mail_timestamp_dual
+except Exception:  # pragma: no cover - Zeitstempel-Ausfall darf Mails nie stoppen
+    def _mail_timestamp_dual(now_utc=None) -> str:
+        now = now_utc or datetime.now(timezone.utc)
+        return f'{now.strftime("%d.%m.%Y %H:%M")} UTC'
+try:
     from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
@@ -1582,7 +1590,7 @@ def _send_signal_update_mail(transitions, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Signal-Update — Positions-Ereignisse</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} Update(s) zu zuvor gemailten Signalen</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Update(s) zu zuvor gemailten Signalen</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
             <th style="padding:8px;text-align:left">Ticker</th>
@@ -1682,7 +1690,7 @@ def _send_be_alert_mail(activations, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#0f172a">Stop-Update — Trades auf Einstand sichern</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} Position(en) haben +1R erreicht</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Position(en) haben +1R erreicht</p>
     <p>Diese Trades sind mindestens <b>+1R</b> in deine Richtung gelaufen. Der Stop
     gehoert jetzt auf den <b>Einstand</b> — damit ist der Trade risikofrei.
     Tracker-Daten der letzten 90 Tage: 31% der Signale mit +1R MFE endeten ohne
@@ -2649,7 +2657,7 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
         body_html = f"""
         <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
-        <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} starke Setups gefunden</p>
+        <p style="color:#666">{_mail_timestamp_dual()} | {n} starke Setups gefunden</p>
         <table style="width:100%;border-collapse:collapse;font-size:14px">
             <tr style="background:#f5f5f5">
                 <th style="padding:8px;text-align:left">Ticker</th>
@@ -3268,7 +3276,7 @@ def _run_bear_scanner(poly_key, secrets):
                     )
                 _body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                 <h2 style="color:#dc2626">Short Alert — {len(crash_stocks)} Crash-Kandidaten</h2>
-                <p style="color:#666;font-size:13px">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+                <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
                 <table style="border-collapse:collapse;width:100%;font-size:13px">
                 <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
                 <th style="padding:6px 8px;text-align:left">Ticker</th>
@@ -3578,7 +3586,7 @@ def _run_strategy_scanner(poly_key, secrets):
             body_html = f"""
             <html><body style="font-family:Arial,sans-serif;max-width:750px;margin:0 auto">
             <h2 style="color:#1a73e8">📊 Strategie-Scanner Alert</h2>
-            <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {len(all_alerts)} Setups (Score >= {_ALERT_MIN_SCORE})</p>
+            <p style="color:#666">{_mail_timestamp_dual()} | {len(all_alerts)} Setups (Score >= {_ALERT_MIN_SCORE})</p>
             <table style="width:100%;border-collapse:collapse;font-size:13px">
                 <tr style="background:#f5f5f5">
                     <th style="padding:6px;text-align:left">Ticker</th>
@@ -4521,7 +4529,7 @@ def _alert_nls_signals_legacy(results, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">
     <h2 style="color:#dc3545">🔴 New Listing Dump — SHORT Signale</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} Dump-Signal{'e' if n > 1 else ''} erkannt</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Dump-Signal{'e' if n > 1 else ''} erkannt</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
             <th style="padding:8px;text-align:left">Symbol</th>
@@ -4584,7 +4592,7 @@ def _alert_nls_invalidations(results, secrets):
         body_html = f"""
         <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
         <h2 style="color:#0f172a">Signal invalidiert — {display}</h2>
-        <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | New Listing Dump Scanner</p>
+        <p style="color:#666">{_mail_timestamp_dual()} | New Listing Dump Scanner</p>
         <p>Das zuvor gemailte SHORT-Signal fuer <b>{display}</b>
         ({html.escape(str(entry.get('exchange', '') or ''))}) ist invalidiert —
         der Stop wurde gerissen.</p>
@@ -4742,7 +4750,7 @@ def _alert_nls_signals(results, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto">
     <h2 style="color:#dc3545">New Listing Dump - SHORT Signale</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET | {n} aktive SHORT-now Signale</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} aktive SHORT-now Signale</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
             <th style="padding:8px;text-align:left">Symbol</th>
@@ -4926,7 +4934,7 @@ def _send_bg_stuck_mail(current_scan, stale_sec, threshold_sec, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#b45309">Scan-Waechter (Hintergrund-Dienst)</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p style="color:#666">{_mail_timestamp_dual()}</p>
     <p>Die Hauptschleife von <b>tradingbot-bg</b> meldet seit <b>{minutes} Min</b>
     kein Lebenszeichen mehr (Schwelle {threshold_min} Min). Wahrscheinlich haengt
     der Scan <b>{scan_text}</b> in einem Netz-Aufruf ohne Antwort.</p>
@@ -4967,7 +4975,7 @@ def _send_bg_recovery_mail(current_scan, episode_sec, secrets):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p style="color:#666">{_mail_timestamp_dual()}</p>
     <p>Die Hauptschleife von <b>tradingbot-bg</b> meldet wieder Lebenszeichen —
     die Haenge-Episode ist nach ca. <b>{minutes} Min</b> beendet
     (zuletzt aktiv: <b>{scan_text}</b>).</p>

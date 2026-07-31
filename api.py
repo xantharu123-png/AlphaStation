@@ -124,6 +124,12 @@ try:
     from modules.smart_money_radar import build_radar as _smart_money_build_radar
 except Exception:  # pragma: no cover - Radar-Ausfall darf API nie stoppen
     _smart_money_build_radar = None
+try:
+    from modules.mailtime import mail_timestamp_dual as _mail_timestamp_dual
+except Exception:  # pragma: no cover - Zeitstempel-Ausfall darf Mails nie stoppen
+    def _mail_timestamp_dual(now_utc=None) -> str:
+        now = now_utc or datetime.now(timezone.utc)
+        return f'{now.strftime("%d.%m.%Y %H:%M")} UTC'
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -2875,7 +2881,12 @@ def _stock_alert_trade_score(row: Dict[str, Any], scanner_name: str) -> int:
     if swing_stock_mode:
         swing_reasons = _stock_swing_short_rule_reasons(row) if short_context else _stock_swing_rule_reasons(row)
         if swing_reasons:
-            no_chase = {"swing_hard_extended_no_chase", "swing_short_drop_too_extended_no_chase"}
+            no_chase = {
+                "swing_hard_extended_no_chase",
+                "swing_short_drop_too_extended_no_chase",
+                # 2026-07-31 (BHC): 5-Tage-Move >= 7 ATR = erschoepft, hartes Cap.
+                "swing_multi_day_exhausted_no_chase",
+            }
             score = min(score, 45 if any(reason in no_chase for reason in swing_reasons) else 69)
     elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         long_reasons = _long_entry_rule_reasons(row)
@@ -5471,7 +5482,7 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
       <b>BEOBACHTUNG — kein Einstiegssignal.</b> Warte auf Trigger/Retest.
       Diese Setups erfuellen Grade/Score/Plan-Qualitaet, sind aber im Versandmoment NICHT handelbar.
     </div>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(items)} von {len(watch_rows)} Watch-Kandidat(en)</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | Top {len(items)} von {len(watch_rows)} Watch-Kandidat(en)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fffbeb"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Aktion (Warte-Grund)</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -5755,7 +5766,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
 
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
     <h2 style="color:#059669">Crypto Early Mover LONG Digest</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {len(email_rows)} von {len(candidates)} Crypto-Swing Long/Retest Setup(s)</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | Top {len(email_rows)} von {len(candidates)} Crypto-Swing Long/Retest Setup(s)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -5910,6 +5921,14 @@ _SWING_PREMARKET_GAP_MAX_SESSION_FOLLOW_PCT = 0.5
 # Breakouts (< 2 ATR) und Ruecksetzer > 1% vom Extrem (Retest) bleiben frei.
 _SWING_TOP_ENTRY_DAY_MOVE_ATR = 2.0
 _SWING_TOP_ENTRY_MAX_DIST_FROM_EXTREME_PCT = 1.0
+# AUDIT 2026-07-31 (BHC): Alle bisherigen Gates messen nur den HEUTIGEN Tag.
+# BHC kam mit +5,1% (~1,2 ATR) durch, obwohl der Move ueber 3 Tage gelaufen
+# war (~+38% in 5 Tagen ≈ 8,8 ATR) — die fette Kerze war von gestern. Der
+# Mehrtages-Anker |Change_5D| / ATR_% sieht genau das; der Vortag-Anker
+# faengt "gestern gelaufen + heute am Hoch" (Tag-2-Top-Kauf).
+_SWING_MULTI_DAY_EXTENDED_ATR = 5.0   # 5-Tage-Move >= 5 ATR: Retest abwarten
+_SWING_MULTI_DAY_HARD_ATR = 7.0       # >= 7 ATR: Move erschoepft, kein Chase
+_SWING_PREVDAY_RUN_ATR = 2.5          # gestriger Tag >= 2,5 ATR UND heute am Hoch
 
 
 def _swing_day_move_atr(row: Dict[str, Any], change_pct: Optional[float]) -> Optional[float]:
@@ -5928,6 +5947,28 @@ def _swing_day_move_atr(row: Dict[str, Any], change_pct: Optional[float]) -> Opt
     if atr_pct <= 0:
         return None
     return abs(change_pct) / atr_pct
+
+
+def _swing_multi_day_move_atr(row: Dict[str, Any]) -> Optional[float]:
+    """5-Tage-Bewegung in ATR-Einheiten (|Change_5D| / ATR_%).
+
+    AUDIT 2026-07-31 (BHC): Tages-Gates sind blind fuer Moves, die ueber
+    2-5 Tage laufen. Change_5D wird in den history_metrics aus kompletten
+    Daily-Bars gerechnet (Schluss vor 5 Bars -> aktueller Preis) und liegt
+    auf der Scanner-Row. None, wenn Change_5D/ATR/Preis fehlen — solche Rows
+    behalten das bisherige Verhalten (fail-open wie die Tages-Gates).
+    """
+    change_5d = _alert_float(_alert_get_any(row, "Change_5D", "change_5d"), None)
+    if change_5d is None:
+        return None
+    atr = _alert_atr_value(row)
+    price = _alert_float(_extract_alert_price(row), None)
+    if not atr or not price or price <= 0:
+        return None
+    atr_pct = (atr / price) * 100.0
+    if atr_pct <= 0:
+        return None
+    return abs(change_5d) / atr_pct
 
 
 def _swing_top_entry_distance_pct(row: Dict[str, Any], *, short: bool = False) -> Optional[float]:
@@ -6013,6 +6054,29 @@ def _stock_swing_rule_reasons(row: Dict[str, Any]) -> List[str]:
             reasons.append("swing_day_move_exhausted_no_chase")
         elif day_move_atr >= _SWING_DAY_MOVE_EXTENDED_ATR:
             reasons.append("swing_day_move_extended_wait_retest")
+    # BHC 2026-07-31: heute +5,1% (~1,2 ATR) sieht frisch aus, war aber Tag 3
+    # eines ~8,8-ATR-Moves — die fette Kerze lief gestern. Der Mehrtages-Anker
+    # (Change_5D in ATR) misst die Woche, nicht nur den Tag.
+    multi_day_atr = _swing_multi_day_move_atr(row)
+    if multi_day_atr is not None:
+        if multi_day_atr >= _SWING_MULTI_DAY_HARD_ATR:
+            reasons.append("swing_multi_day_exhausted_no_chase")
+        elif multi_day_atr >= _SWING_MULTI_DAY_EXTENDED_ATR:
+            reasons.append("swing_multi_day_extended_wait_retest")
+    # Vortag-Anker: gestriger Tag >= 2,5 ATR UND heute weiter gruen UND Preis
+    # klebt am Tageshoch = Tag-2-Top-Kauf (BHC: +30% gestern, +5% heute,
+    # Entry 0,3% unterm Hoch). Faengt auch Faelle mit duenner 5d-History ab.
+    prevday_pct = _alert_float(_alert_get_any(row, "Vortag_Pct", "vortag_pct"), None)
+    prevday_atr = _swing_day_move_atr(row, prevday_pct)
+    if (
+        prevday_atr is not None
+        and prevday_atr >= _SWING_PREVDAY_RUN_ATR
+        and change is not None
+        and change > 0
+    ):
+        _dist = _swing_top_entry_distance_pct(row)
+        if _dist is not None and _dist <= _SWING_TOP_ENTRY_MAX_DIST_FROM_EXTREME_PCT:
+            reasons.append("swing_prevday_run_top_entry_wait_retest")
     # PBT 2026-07-29: 2,4 ATR rutschte unter dem 2,5er-Gate durch, aber der
     # Entry 0,4% unterm Tageshoch war ein Top-Kauf. Das Orts-Gate faengt den
     # 2,0-2,5-ATR-Korridor, sobald der Preis am Tages-Extrem klebt.
@@ -6806,6 +6870,8 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_day_move_exhausted_no_chase",
         "swing_short_day_move_exhausted_no_chase",
         "swing_short_drop_too_extended_no_chase",
+        # 2026-07-31 (BHC): 5-Tage-Move >= 7 ATR — Move erschoepft, kein Chase.
+        "swing_multi_day_exhausted_no_chase",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     contextual_no_trade_markers = set(no_trade_markers)
@@ -7486,9 +7552,14 @@ def _brand_email_html(subject: str, body_html: str) -> str:
 # AUDIT H-2: Mail-Klassen mit verbindlichem Betreff-Praefix. "trade" = im
 # Versandmoment handelbar, "watch" = Beobachtung ohne Einstiegssignal,
 # "info" = Status/Test/Marktkontext ohne Trade-Bezug.
+# 2026-07-31 (BHC): "swing_trade" verliert das Wort "JETZT" — Swing-Mails
+# sind mehrtaegige Struktur-Plaene (eigener Mail-Disclaimer), und der
+# Betreff versprach "jetzt kaufen", obwohl die Timing-Spalte "Swing-Setup
+# aktiv" sagte. "JETZT" bleibt ausschliesslich den Intraday-Trade-Mails
+# mit 15-Minuten-Frische-Gate vorbehalten.
 _MAIL_CLASS_SUBJECT_PREFIXES = {
     "trade": "\U0001F6A8 JETZT: ",
-    "swing_trade": "\U0001F6A8 JETZT SWING: ",
+    "swing_trade": "\U0001F6A8 SWING: ",
     "watch": "\U0001F441️ WATCH: ",
     "info": "ℹ️ ",
 }
@@ -7505,6 +7576,7 @@ def _apply_mail_class_subject(subject: str, mail_class: str, trade_horizon: str 
     text = str(subject or "").strip()
     legacy_markers = (
         "\U0001F6A8 JETZT SWING:",
+        "\U0001F6A8 SWING:",
         "\U0001F6A8 JETZT:",
         "\U0001F4C8 SWING:",
         "\U0001F441️ WATCH:",
@@ -7843,7 +7915,7 @@ def _check_and_alert(scanner_name, cache_file):
         _cluster_hint = _cluster_warning_html(alerts)
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
-        <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {n} starke Setups</p>
+        <p style="color:#666">{_mail_timestamp_dual()} | {n} starke Setups</p>
         {_cluster_hint}
         <table style="width:100%;border-collapse:collapse;font-size:14px">
         <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
@@ -8129,7 +8201,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     _cluster_hint = _cluster_warning_html(email_alerts) if market_type == "stocks" else ""
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
     {_cluster_hint}
     {_dailyclose_hint}
@@ -8379,7 +8451,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
         suppressed_text = "<p style='color:#777;font-size:12px'>Warum keine Jetzt-Short-Mail: " + ", ".join(f"{_safe(_alert_reason_label(k))}: {v}" for k, v in sorted(suppressed.items())) + "</p>"
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
     <h2 style="color:#f97316">Crypto New Listing Dump-Watch - NICHT SHORTEN</h2>
-    <p style="color:#666">{watch_dt.strftime("%d.%m.%Y %H:%M")} UTC | {len(candidates)} Coin(s) nur zur Beobachtung</p>
+    <p style="color:#666">{_mail_timestamp_dual(watch_dt)} | {len(candidates)} Coin(s) nur zur Beobachtung</p>
     <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px;margin:12px 0;color:#7c2d12">
       <b>Was jetzt tun?</b> Nicht shorten. Chart aktiv beobachten und auf die separate <b>Jetzt-Short-Mail</b> warten.
       Diese Dump-Watch-Mail bedeutet nur: New Listing hat bereits gepumpt, aber 5m Crack/Rejection, Safety oder Timing sind noch nicht voll bestaetigt.
@@ -8490,7 +8562,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         )
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
     <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
-    <p style="color:#666">{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC | {len(email_alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {len(email_alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
@@ -14579,7 +14651,7 @@ def _bear_scan_wrapper() -> None:
                         )
                     _crash_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                     <h2 style="color:#dc2626">⚠️ Crash Alert — {len(_crash_stocks)} Aktien</h2>
-                    <p style="color:#666;font-size:13px">{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC</p>
+                    <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
                     <table style="border-collapse:collapse;width:100%;font-size:13px">
                     <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
                     <th style="padding:6px 8px;text-align:left">Ticker</th>
@@ -14675,7 +14747,7 @@ def _bear_scan_wrapper() -> None:
                 # zum In-Memory-Cooldown (Restart-sicher).
                 _bear_claim_now = time.time()
                 if _bear_ck not in _EMAIL_COOLDOWN and _email_dedupe_claim(_bear_ck, _DAILY_SUMMARY_DEDUPE_SEC, now=_bear_claim_now):
-                    _ts = f"<p style='color:#666;font-size:13px'>{datetime.now().strftime('%d.%m.%Y %H:%M')} UTC | {_total_signals} Aktien-Shorts</p>"
+                    _ts = f"<p style='color:#666;font-size:13px'>{_mail_timestamp_dual()} | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
                         _bd_html = (
@@ -15065,7 +15137,7 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#b45309">Scan-Waechter</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p style="color:#666">{_mail_timestamp_dual()}</p>
     <p><b>{headline}</b></p>
     <p>{detail}</p>
     <p style="color:#999;font-size:12px;margin-top:20px">
@@ -15107,7 +15179,7 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
-    <p style="color:#666">{datetime.now().strftime('%d.%m.%Y %H:%M')} CET</p>
+    <p style="color:#666">{_mail_timestamp_dual()}</p>
     <p><b>{name} laeuft wieder — Episode beendet nach ca. {minutes} Min.</b></p>
     <p>Der zuletzt gemeldete Haenger ist beendet: der Scan ist erfolgreich
     durchgelaufen. <b>Kein Neustart noetig</b> — der Scheduler arbeitet
@@ -17241,7 +17313,7 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
         "TradingBot Test — Email Alerts funktionieren!",
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
-        <p>Dieser Test wurde am <b>{datetime.now().strftime("%d.%m.%Y %H:%M")} UTC</b> gesendet.</p>
+        <p>Dieser Test wurde am <b>{_mail_timestamp_dual()}</b> gesendet.</p>
         <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/A+</b> (BI + Biotech), <b>Bear/Crash</b>, <b>ORB Breakouts</b>, <b>Pump-&-Dump SHORT</b> und manuellen Aktien-/Crypto-Strategie-Scans mit Top-Grade.</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>''',
@@ -22713,7 +22785,7 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
     )
     body = f"""<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto;color:#111827">
     <h2 style="margin-bottom:4px">Alpha Station Narrative Pulse</h2>
-    <p style="color:#64748b;margin-top:0">{utc_now.strftime('%d.%m.%Y %H:%M')} UTC | Markt-Rotation, keine Einzeltrade-Freigabe.</p>
+    <p style="color:#64748b;margin-top:0">{_mail_timestamp_dual(utc_now)} | Markt-Rotation, keine Einzeltrade-Freigabe.</p>
     <p><b>Bullischstes Narrativ:</b> {html.escape(str(top_bull))}<br>
     <b>Bearischstes Narrativ:</b> {html.escape(str(top_bear))}</p>
     <h3 style="color:#059669">Bullischste Narrative</h3>
