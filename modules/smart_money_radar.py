@@ -1,0 +1,352 @@
+"""smart_money_radar.py — Smart-Money-Radar (31.07.2026, Info-Block).
+
+Beantwortet die Betreiber-Frage: "Kauft/verkauft gerade jemand Grosses
+massiv?" — ehrlich begrenzt auf das, was man MESSEN kann:
+
+  1. ETF-Flows (BTC-Spot-ETFs: IBIT/FBTC/..., tagesaktuell, Farside) —
+     das IST der institutionelle Kauf, aber erst End-of-Day sichtbar.
+  2. Volumen-Wellen (RVOL-Welle) in Makro-Instrumenten (SPY/QQQ/GLD/SLV/USO/
+     TLT/...) + BTC/ETH — die Fussspur grosser Kauefe/Verkauefe in Minuten.
+  3. Whale-Alerts (grosse On-Chain-Transfers, optional via WHALE_ALERT_KEY).
+
+EHERLICHKEITS-REGEL (Betreiber-Vorgabe 31.07.): Dieser Block ist NUR Kontext.
+Er wird von KEINEM Scoring-, Gate- oder Trigger-Pfad importiert (Guard-Test
+in test_smart_money_radar.py). Niemals "jemand kauft" als Fakt behaupten —
+wir zeigen Fussspuren (Flows, Volumen), keine Akteure.
+
+Datenquellen: Farside (HTML, ohne Key), Polygon Aggs (POLYGON_KEY aus ENV),
+Whale-Alert (optionaler Key). Jede Sektion traegt eigenen status
+(ok/stale/disabled/error) — Teilausfaelle killen den Block nie.
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from typing import Any
+
+import requests
+
+FARSIDE_BTC_URL = "https://farside.co.uk/btc/"
+WHALE_ALERT_URL = "https://api.whale-alert.io/v1/transactions"
+
+# Makro-Watchlist: hier zeigt sich die "Welle" grosser Kauefe/Verkauefe.
+MACRO_SYMBOLS = [
+    ("SPY", "S&P 500"), ("QQQ", "Nasdaq 100"), ("IWM", "Russell 2000"),
+    ("GLD", "Gold"), ("SLV", "Silber"), ("USO", "Oel (WTI)"),
+    ("UNG", "Erdgas"), ("TLT", "US-Anleihen 20+"), ("UUP", "US-Dollar"),
+    ("HYG", "High-Yield"), ("EEM", "Emerging Markets"),
+]
+CRYPTO_SYMBOLS = [("X:BTCUSD", "Bitcoin"), ("X:ETHUSD", "Ethereum")]
+
+WAVE_RVOL_THRESHOLD = 1.8      # ab 1,8x Normal-Volumen = "Welle"
+WAVE_BARS_NEEDED = 21          # 1 aktueller + 20 Referenz-Bars
+CACHE_TTL_SEC = 30 * 60        # Gesamt-Cache: max 1 Refresh / 30 Min
+HTTP_TIMEOUT = 12
+
+_DEFAULT_CACHE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data_cache", "smart_money_radar.json")
+)
+RADAR_CACHE_PATH = os.environ.get("SMART_MONEY_CACHE", _DEFAULT_CACHE)
+
+DISCLAIMER = ("Kontext-Block: zeigt Fussspuren grosser Geldbewegungen "
+              "(ETF-Flows EOD, Volumen-Wellen, Whale-Transfers). Kein Signal, "
+              "kein Trigger, keine Kauf-/Verkaufsempfehlung.")
+
+
+# ── HTTP-Helfer (einzige Netz-Stelle; Tests patchen hier) ────────────────────
+
+def _http_get_text(url: str, timeout: int = HTTP_TIMEOUT) -> str:
+    resp = requests.get(url, timeout=timeout, headers={"User-Agent": "AlphaStation/1.0"})
+    resp.raise_for_status()
+    return resp.text
+
+
+def _http_get_json(url: str, params: dict | None = None, timeout: int = HTTP_TIMEOUT) -> dict:
+    resp = requests.get(url, params=params or {}, timeout=timeout,
+                        headers={"User-Agent": "AlphaStation/1.0"})
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── 1) ETF-Flows (Farside, HTML ohne Key) ────────────────────────────────────
+
+class _TableParser(HTMLParser):
+    """Minimaler Zeilen/Zellen-Sammler fuer die Farside-Flow-Tabelle."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _flow_number(raw: str) -> float | None:
+    """'123.4' -> 123.4 | '(45.6)' -> -45.6 | '-'/'—'/'' -> None."""
+    txt = (raw or "").strip().replace(",", "")
+    if not txt or txt in {"-", "—", "–", "n/a"}:
+        return None
+    neg = txt.startswith("(") and txt.endswith(")")
+    txt = txt.strip("() ")
+    try:
+        val = float(txt)
+    except ValueError:
+        return None
+    return -val if neg else val
+
+
+def parse_farside_btc_flows(html_text: str, max_rows: int = 10) -> list[dict[str, Any]]:
+    """Parst die Farside-BTC-ETF-Tabelle -> [{date, total_musd, ibit_musd}].
+
+    Spalten werden ueber die Header ('Date', 'IBIT', 'Total') lokalisiert —
+    fehlt eine, wird tolerant uebersprungen. Wirft bei unbrauchbarem HTML.
+    """
+    parser = _TableParser()
+    parser.feed(html_text or "")
+    header_idx: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for row in parser.rows:
+        lowered = [c.strip().lower() for c in row]
+        if not header_idx and "date" in lowered and "total" in lowered:
+            header_idx = {
+                "date": lowered.index("date"),
+                "total": lowered.index("total"),
+                "ibit": lowered.index("ibit") if "ibit" in lowered else -1,
+            }
+            continue
+        if not header_idx or len(row) <= max(header_idx["date"], header_idx["total"]):
+            continue
+        date_txt = row[header_idx["date"]].strip()
+        if not date_txt or "date" in date_txt.lower() or "total" in date_txt.lower():
+            continue
+        total = _flow_number(row[header_idx["total"]])
+        if total is None:
+            continue
+        entry: dict[str, Any] = {"date": date_txt, "total_musd": total}
+        if header_idx["ibit"] >= 0 and len(row) > header_idx["ibit"]:
+            entry["ibit_musd"] = _flow_number(row[header_idx["ibit"]])
+        out.append(entry)
+        if len(out) >= max_rows:
+            break
+    if not out:
+        raise ValueError("Farside-Tabelle nicht erkannt (Layout geaendert?)")
+    return out
+
+
+def fetch_etf_flows() -> dict[str, Any]:
+    """Sektion ETF-Flows. Bei Fehler: status=error, keine Exception."""
+    try:
+        rows = parse_farside_btc_flows(_http_get_text(FARSIDE_BTC_URL))
+        return {
+            "status": "ok",
+            "as_of": rows[0]["date"],
+            "source": "farside.co.uk/btc",
+            "note": "Tagesdaten (EOD) — institutionelle ETF-Zu-/Abfluesse in Mio. USD",
+            "rows": rows,
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:200], "rows": []}
+
+
+# ── 2) Volumen-Wellen (Polygon Aggs) ─────────────────────────────────────────
+
+def compute_waves(bars_by_symbol: dict[str, list[dict[str, Any]]],
+                  rvol_threshold: float = WAVE_RVOL_THRESHOLD) -> list[dict[str, Any]]:
+    """Pure: Bars (aelteste->neueste, Keys v=Volume, c=Close) -> Wellen-Liste.
+
+    RVOL = Volumen(letzter Bar) / Ø Volumen(20 Bars davor). wave=True ab
+    threshold. Symbole mit zu wenigen Bars werden uebersprungen.
+    """
+    waves: list[dict[str, Any]] = []
+    for symbol, bars in (bars_by_symbol or {}).items():
+        if not isinstance(bars, list) or len(bars) < WAVE_BARS_NEEDED:
+            continue
+        try:
+            ref = [float(b["v"]) for b in bars[-WAVE_BARS_NEEDED:-1]]
+            last_v = float(bars[-1]["v"])
+            last_c = float(bars[-1]["c"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        base = sum(ref) / len(ref) if ref else 0.0
+        if base <= 0 or last_v <= 0:
+            continue
+        rvol = last_v / base
+        waves.append({
+            "symbol": symbol,
+            "rvol": round(rvol, 2),
+            "last_volume": last_v,
+            "dollar_volume_musd": round(last_v * last_c / 1e6, 1),
+            "wave": bool(rvol >= rvol_threshold),
+        })
+    waves.sort(key=lambda w: w["rvol"], reverse=True)
+    return waves
+
+
+def _polygon_daily_bars(symbol: str, api_key: str, days: int = 45) -> list[dict[str, Any]]:
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days)
+    data = _http_get_json(
+        f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}",
+        params={"adjusted": "true", "sort": "asc", "limit": 120, "apiKey": api_key},
+    )
+    return list(data.get("results") or [])
+
+
+def fetch_volume_waves(api_key: str | None) -> dict[str, Any]:
+    """Sektion Volumen-Wellen ueber Makro-ETFs + BTC/ETH (Tages-Restvol.)."""
+    if not api_key:
+        return {"status": "disabled", "note": "POLYGON_KEY nicht gesetzt", "waves": []}
+    labels = dict(MACRO_SYMBOLS + CRYPTO_SYMBOLS)
+    bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    errors: list[str] = []
+    for symbol in labels:
+        try:
+            bars_by_symbol[symbol] = _polygon_daily_bars(symbol, api_key)
+        except Exception as exc:
+            errors.append(f"{symbol}: {str(exc)[:80]}")
+    waves = compute_waves(bars_by_symbol)
+    for w in waves:
+        w["label"] = labels.get(w["symbol"], w["symbol"])
+    status = "ok" if waves else ("error" if errors else "empty")
+    out: dict[str, Any] = {
+        "status": status,
+        "note": f"RVOL-Welle ab {WAVE_RVOL_THRESHOLD}x 20-Tage-Ø (Tagesdaten)",
+        "threshold": WAVE_RVOL_THRESHOLD,
+        "waves": waves,
+    }
+    if errors:
+        out["partial_errors"] = errors[:5]
+        if waves:
+            out["status"] = "stale" if len(errors) >= len(labels) else "ok"
+    return out
+
+
+# ── 3) Whale-Alerts (optional, WHALE_ALERT_KEY) ──────────────────────────────
+
+def classify_whale_tx(tx: dict[str, Any]) -> str:
+    """'exchange_inflow' (Verkaufsdruck) | 'exchange_outflow' (Akkumulation) |
+    'wallet_to_wallet' (neutral)."""
+    frm = str(((tx.get("from") or {}).get("owner_type")) or "").lower()
+    to = str(((tx.get("to") or {}).get("owner_type")) or "").lower()
+    if to == "exchange" and frm != "exchange":
+        return "exchange_inflow"
+    if frm == "exchange" and to != "exchange":
+        return "exchange_outflow"
+    return "wallet_to_wallet"
+
+
+def fetch_whale_alerts(api_key: str | None, lookback_sec: int = 6 * 3600,
+                       min_value_usd: int = 5_000_000) -> dict[str, Any]:
+    """Sektion Whale-Alerts (grosse On-Chain-Transfers, letzte 6h)."""
+    if not api_key:
+        return {"status": "disabled",
+                "note": "WHALE_ALERT_KEY nicht gesetzt — Sektion deaktiviert",
+                "transactions": []}
+    try:
+        data = _http_get_json(WHALE_ALERT_URL, params={
+            "api_key": api_key,
+            "start": int(time.time()) - lookback_sec,
+            "min_value": min_value_usd,
+        })
+        txs = []
+        for tx in (data.get("transactions") or [])[:25]:
+            txs.append({
+                "symbol": tx.get("symbol"),
+                "blockchain": tx.get("blockchain"),
+                "amount_usd": tx.get("amount_usd"),
+                "kind": classify_whale_tx(tx),
+                "timestamp": tx.get("timestamp"),
+                "hash": tx.get("hash"),
+            })
+        inflow = sum(1 for t in txs if t["kind"] == "exchange_inflow")
+        outflow = sum(1 for t in txs if t["kind"] == "exchange_outflow")
+        return {
+            "status": "ok",
+            "note": (f"Transfers >= {min_value_usd // 1_000_000} Mio. USD, "
+                     f"letzte {lookback_sec // 3600}h"),
+            "summary": {"count": len(txs), "exchange_inflow": inflow,
+                        "exchange_outflow": outflow},
+            "transactions": txs,
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:200], "transactions": []}
+
+
+# ── Gesamt-Block mit Cache ───────────────────────────────────────────────────
+
+def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
+                cache_path: str | None = None, ttl_sec: int = CACHE_TTL_SEC,
+                force_refresh: bool = False) -> dict[str, Any]:
+    """Baut den Radar-Block. Wirft NIE; nutzt frischen Cache oder Stale-Fallback."""
+    path = cache_path or RADAR_CACHE_PATH
+    now = time.time()
+    if not force_refresh:
+        cached = _read_cache(path)
+        if cached and now - float(cached.get("_cached_at") or 0) < ttl_sec:
+            cached["cache"] = "fresh"
+            return cached
+    polygon_key = polygon_key if polygon_key is not None else os.environ.get("POLYGON_KEY")
+    whale_key = whale_key if whale_key is not None else os.environ.get("WHALE_ALERT_KEY")
+    try:
+        radar = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "disclaimer": DISCLAIMER,
+            "sections": {
+                "etf_flows": fetch_etf_flows(),
+                "volume_waves": fetch_volume_waves(polygon_key),
+                "whale_alerts": fetch_whale_alerts(whale_key),
+            },
+            "_cached_at": now,
+            "cache": "new",
+        }
+        _write_cache(path, radar)
+        return radar
+    except Exception as exc:  # Doppelfang — Sektionen fangen bereits selbst
+        stale = _read_cache(path)
+        if stale:
+            stale["cache"] = "stale"
+            return stale
+        return {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "disclaimer": DISCLAIMER, "sections": {}, "cache": "error",
+                "error": str(exc)[:200]}
+
+
+def _read_cache(path: str) -> dict[str, Any] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_cache(path: str, radar: dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(radar, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass

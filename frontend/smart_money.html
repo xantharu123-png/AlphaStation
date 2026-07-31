@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart-Money-Radar — Alpha Station</title>
+<style>
+  :root { --bg:#0b1220; --card:#111a2e; --border:#1f2b47; --txt:#dbe4f5;
+          --dim:#8aa0c4; --green:#10b981; --red:#ef4444; --amber:#f59e0b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:Arial,Helvetica,sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 10px; color:var(--txt); }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:10px; padding:16px; margin-bottom:16px; }
+  .disclaimer { border-color:var(--amber); background:#1c1608;
+                font-size:13px; line-height:1.5; }
+  .badge { display:inline-block; font-size:11px; padding:2px 8px;
+           border-radius:99px; margin-left:8px; vertical-align:middle; }
+  .b-ok { background:#052e1f; color:var(--green); border:1px solid var(--green); }
+  .b-disabled { background:#1a2236; color:var(--dim); border:1px solid var(--border); }
+  .b-error, .b-stale, .b-empty { background:#2a1414; color:var(--red); border:1px solid var(--red); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:normal; font-size:11px;
+       padding:6px 8px; border-bottom:1px solid var(--border); }
+  td { padding:7px 8px; border-bottom:1px solid #182238; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  .wave { color:var(--amber); font-weight:bold; }
+  .note { color:var(--dim); font-size:11px; margin-top:10px; }
+  .err { color:var(--red); font-size:12px; }
+  button { background:#1d4ed8; color:#fff; border:0; border-radius:6px;
+           padding:8px 14px; font-size:13px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  a { color:#7aa5ff; font-size:12px; }
+  .k-in { color:var(--red); } .k-out { color:var(--green); } .k-w2w { color:var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <h1>🐋 Smart-Money-Radar</h1>
+      <div class="sub" id="generated">lädt…</div>
+    </div>
+    <div>
+      <a href="/">← Dashboard</a>
+      <button id="reload" style="margin-left:10px">Aktualisieren</button>
+    </div>
+  </div>
+
+  <div class="card disclaimer" id="disclaimer">
+    <b>Nur Kontext — kein Signal.</b> Dieser Block zeigt Fußspuren großer
+    Geldbewegungen. Er löst keine Alerts aus, fließt in kein Scoring und ist
+    keine Handelsempfehlung. „Jemand kauft gerade" ist nie als Fakt lesbar —
+    sichtbar sind nur Wellen (Volumen) und Flüsse (ETF, On-Chain).
+  </div>
+
+  <div class="card" id="sec-etf"></div>
+  <div class="card" id="sec-waves"></div>
+  <div class="card" id="sec-whales"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtUsd = (v) => v == null ? "–" :
+  (v >= 0 ? "+" : "−") + Math.abs(v).toLocaleString("de-DE", {maximumFractionDigits:1}) + " M";
+const badge = (s) => `<span class="badge b-${s}">${s}</span>`;
+
+function renderEtf(sec) {
+  const rows = (sec.rows || []).map(r => `<tr>
+    <td>${r.date}</td>
+    <td class="num ${r.ibit_musd >= 0 ? "pos" : "neg"}">${r.ibit_musd == null ? "–" : fmtUsd(r.ibit_musd)}</td>
+    <td class="num ${r.total_musd >= 0 ? "pos" : "neg"}">${fmtUsd(r.total_musd)}</td>
+  </tr>`).join("");
+  $("sec-etf").innerHTML = `<h2>📈 BTC-ETF-Flows ${badge(sec.status)}</h2>
+    ${sec.status === "ok" ? `<table>
+      <tr><th>Datum</th><th class="num">IBIT (BlackRock)</th><th class="num">Alle ETFs</th></tr>
+      ${rows}</table>` : `<div class="err">${sec.error || "keine Daten"}</div>`}
+    <div class="note">${sec.note || ""} · Quelle: ${sec.source || "—"}</div>`;
+}
+
+function renderWaves(sec) {
+  const rows = (sec.waves || []).map(w => `<tr class="${w.wave ? "wave" : ""}">
+    <td>${w.label || w.symbol}</td><td>${w.symbol}</td>
+    <td class="num">${w.rvol}×</td>
+    <td class="num">${(w.dollar_volume_musd || 0).toLocaleString("de-DE")} M$</td>
+    <td>${w.wave ? "🌊 Welle" : ""}</td>
+  </tr>`).join("");
+  $("sec-waves").innerHTML = `<h2>🌊 Volumen-Wellen (Makro + Krypto) ${badge(sec.status)}</h2>
+    ${(sec.waves || []).length ? `<table>
+      <tr><th>Instrument</th><th>Symbol</th><th class="num">RVOL</th><th class="num">$-Volumen</th><th></th></tr>
+      ${rows}</table>` : `<div class="err">${sec.error || sec.note || "keine Daten"}</div>`}
+    <div class="note">${sec.note || ""}</div>`;
+}
+
+const KIND = {exchange_inflow:["→ Börse (Verkaufsdruck)","k-in"],
+              exchange_outflow:["← Börse (Akkumulation)","k-out"],
+              wallet_to_wallet:["Wallet → Wallet","k-w2w"]};
+function renderWhales(sec) {
+  const txs = (sec.transactions || []).map(t => {
+    const [label, cls] = KIND[t.kind] || KIND.wallet_to_wallet;
+    return `<tr><td>${(t.symbol || "?").toUpperCase()}</td>
+      <td class="num">${t.amount_usd ? (t.amount_usd/1e6).toLocaleString("de-DE",{maximumFractionDigits:1}) + " M$" : "–"}</td>
+      <td class="${cls}">${label}</td>
+      <td>${t.timestamp ? new Date(t.timestamp*1000).toLocaleString("de-DE") : "–"}</td></tr>`;
+  }).join("");
+  const sum = sec.summary ? ` · ${sec.summary.count} Transfers (↓${sec.summary.exchange_inflow} / ↑${sec.summary.exchange_outflow})` : "";
+  $("sec-whales").innerHTML = `<h2>🐳 Whale-Transfers ${badge(sec.status)}</h2>
+    ${txs ? `<table><tr><th>Asset</th><th class="num">Größe</th><th>Richtung</th><th>Zeit</th></tr>${txs}</table>`
+          : `<div class="${sec.status === "disabled" ? "note" : "err"}">${sec.note || sec.error || "keine Daten"}</div>`}
+    <div class="note">${sec.note || ""}${sum}</div>`;
+}
+
+async function load(refresh) {
+  $("reload").disabled = true;
+  try {
+    const res = await fetch("/api/smart-money-radar" + (refresh ? "?refresh=1" : ""));
+    const data = await res.json();
+    $("generated").textContent =
+      "Stand: " + (data.generated_at || "?") + " · Cache: " + (data.cache || "?");
+    renderEtf(data.sections?.etf_flows || {status:"error", error:"fehlt"});
+    renderWaves(data.sections?.volume_waves || {status:"error", error:"fehlt"});
+    renderWhales(data.sections?.whale_alerts || {status:"error", error:"fehlt"});
+  } catch (e) {
+    $("generated").textContent = "Fehler beim Laden: " + e;
+  } finally {
+    $("reload").disabled = false;
+  }
+}
+$("reload").addEventListener("click", () => load(true));
+load(false);
+</script>
+</body>
+</html>

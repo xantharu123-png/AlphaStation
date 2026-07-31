@@ -120,6 +120,10 @@ try:
 except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
     def _log_watchdog_event(*_args, **_kwargs):
         return None
+try:
+    from modules.smart_money_radar import build_radar as _smart_money_build_radar
+except Exception:  # pragma: no cover - Radar-Ausfall darf API nie stoppen
+    _smart_money_build_radar = None
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -15862,6 +15866,19 @@ async def serve_frontend():
     return HTMLResponse(content="<h1>Alpha Station</h1><p>Frontend not found</p>", status_code=404)
 
 
+@app.get("/smart-money", response_class=HTMLResponse)
+async def serve_smart_money_page():
+    """Smart-Money-Radar als abrufbare Info-Seite (31.07.) — kein Bundle noetig."""
+    page_path = os.path.join(_FRONTEND_DIR, "smart_money.html")
+    if os.path.exists(page_path):
+        with open(page_path, "r", encoding="utf-8") as f:
+            response = HTMLResponse(content=f.read())
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+    return HTMLResponse(content="<h1>Smart-Money-Radar</h1><p>Seite nicht gefunden</p>",
+                        status_code=404)
+
+
 # ══════════════════════════════════════════════════════════════
 # V3.4: AUTH & SUBSCRIPTION ENDPOINTS
 # ══════════════════════════════════════════════════════════════
@@ -17247,6 +17264,20 @@ def get_market_status():
         detail=detail,
         timestamp=datetime.now().isoformat(),
     )
+
+
+@app.get("/api/smart-money-radar")
+def get_smart_money_radar(refresh: int = 0):
+    """Smart-Money-Radar (31.07.): ETF-Flows + Volumen-Wellen + Whale-Alerts.
+
+    Reiner Lese-Endpunkt (oeffentlich wie /api/scan-status): Markt-Kontext,
+    keine User-Daten. NIEMALS in Scoring-/Gate-/Trigger-Pfaden verwenden —
+    Guard-Test in test_smart_money_radar.py.
+    """
+    if _smart_money_build_radar is None:
+        return JSONResponse({"sections": {}, "cache": "error",
+                             "error": "Modul nicht verfuegbar"}, status_code=503)
+    return JSONResponse(_smart_money_build_radar(force_refresh=bool(refresh)))
 
 
 @app.get("/api/scan-status")

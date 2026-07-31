@@ -586,6 +586,44 @@ hektischer Tag mit mehr Kandidaten hätte den Fehlalarm zurückgeholt.
   `test_premarket_radar`, `test_email_alert_audit`-Quellen-Assert,
   Watchdog-Kalibrier-Test). Suite **1242, alle grün**.
 
+### 3.17 31. Juli (früh) — Smart-Money-Radar: Info-Block, NIE Trigger
+
+**Anlass (Betreiber):** „Kann man überwachen, wenn jemand Großes massiv kauft/
+verkauft — BlackRock BTC, Aktien, Gold, Öl?" Ehrliche Antwort: Akteure sind
+unsichtbar (Iceberg/Dark Pool/OTC), aber ihre **Fußspuren** sind messbar.
+Betreiber-Vorgabe: als abrufbarer Info-Block, **niemals** Trigger.
+
+**Gebaut:**
+- **`modules/smart_money_radar.py`** — drei Sektionen, jede mit eigenem
+  `status` (ok/disabled/error), Teilausfälle killen den Block nie:
+  1. **BTC-ETF-Flows** (Farside-HTML, ohne Key; Std-lib-Parser, tolerant):
+     IBIT (BlackRock) + Gesamt-Flüsse in Mio. USD, tagesaktuell (EOD) — das
+     IST der institutionelle Kauf, einen Tag verspätet.
+  2. **Volumen-Wellen** (Polygon Tages-Aggs): RVOL (letzter Bar / Ø 20) für
+     SPY/QQQ/IWM/GLD/SLV/USO/UNG/TLT/UUP/HYG/EEM + BTC/ETH; „🌊 Welle" ab
+     1,8× — die Minute-genauere Fußspur in Gold/Öl/Aktien/Krypto.
+  3. **Whale-Transfers** (optional via `WHALE_ALERT_KEY`): große On-Chain-
+     Transfers, klassifiziert als Exchange-Zufluss (Verkaufsdruck) /
+     Abfluss (Akkumulation) / Wallet-to-Wallet. Ohne Key: disabled-Hinweis.
+  Cache: Gesamt-Artefakt 30 Min in `data_cache/smart_money_radar.json`
+  (atomar geschrieben), Stale-Fallback, wirft NIE.
+- **Abruf:** `GET /api/smart-money-radar` (JSON, öffentlich, `?refresh=1`
+  erzwingt Neuaufbau) + **Seite `/smart-money`** (handgeschriebenes
+  `frontend/smart_money.html` ohne React-Bundle, dunkler Alpha-Stil,
+  Aktualisieren-Button, Pflicht-Disclaimer „Nur Kontext — kein Signal").
+- **Ehrlichkeits-Guard (Test):** `test_radar_not_imported_in_trigger_paths`
+  scheitert, sobald das Modul außerhalb von `api.py` (Endpunkt) importiert
+  wird — Scoring/Gates/Mails können den Block also gar nicht „aus Versehen"
+  als Trigger nutzen.
+- **Tests:** +17 (`test_smart_money_radar.py`): Farside-Parsing (Klammer =
+  negativ), RVOL-Rechnung, Whale-Klassifizierung, Disabled-/Fehler-Pfade,
+  Cache fresh/stale, Nie-werfen, Endpunkt + Seite, Guard. Suite **1259,
+  alle grün**.
+
+**Einordnung (Trading):** ETF-Zufluss-Serie + Whale-Akkumulation + RVOL-Welle
+in derselben Richtung = starkes Hintergrund-Regime für bestehende Setups.
+Allein daraus kaufen wäre genau das Chasen, das die Gates verhindern.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -672,7 +710,8 @@ Suite-Stand-Historie:
 1213 (30.07. Zins-Block) → 1218 (30.07. Entwarnungs-Mails, alle grün) →
 1223 (30.07. Wächter-Throttle + Budget + zeitrobuste Suite, alle grün) →
 1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün;
-31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün).
+31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün) →
+1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün).
 
 ---
 
