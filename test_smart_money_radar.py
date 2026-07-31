@@ -159,6 +159,8 @@ def _mock_sections(monkeypatch):
                         lambda key, history_path=None: {"status": "ok", "waves": []})
     monkeypatch.setattr(smr, "fetch_insider_trades",
                         lambda: {"status": "ok", "trades": []})
+    monkeypatch.setattr(smr, "fetch_insider_clusters",
+                        lambda history_path=None: {"status": "ok", "clusters": []})
     monkeypatch.setattr(smr, "fetch_whale_alerts",
                         lambda key: {"status": "disabled", "transactions": []})
 
@@ -169,7 +171,8 @@ def test_build_radar_writes_and_reuses_cache(monkeypatch, tmp_path):
     first = smr.build_radar(polygon_key="K", cache_path=path)
     assert first["cache"] == "new"
     assert set(first["sections"]) == {"etf_flows", "volume_waves", "stock_waves",
-                                      "insider_trades", "whale_alerts"}
+                                      "insider_trades", "insider_clusters",
+                                      "whale_alerts"}
     assert "kein Trigger" in first["disclaimer"] or "Kein Signal" in first["disclaimer"]
     # Zweiter Aufruf: aus dem Cache (Fetcher wuerden crashen, falls aufgerufen)
     monkeypatch.setattr(smr, "fetch_etf_flows",
@@ -217,7 +220,8 @@ def test_api_endpoint_smoke(monkeypatch, tmp_path):
     assert resp.status_code == 200
     data = json.loads(resp.body)
     assert set(data["sections"]) == {"etf_flows", "volume_waves", "stock_waves",
-                                     "insider_trades", "whale_alerts"}
+                                     "insider_trades", "insider_clusters",
+                                     "whale_alerts"}
     assert data["disclaimer"]
 
 
@@ -504,3 +508,89 @@ def test_fetch_insider_trades_error_never_raises(monkeypatch):
     assert sec["status"] == "error"
     assert "sec.gov down" in sec["error"]
     assert sec["trades"] == []
+
+
+# ── Insider-Cluster (31.07.) ─────────────────────────────────────────────────
+
+def _ins_trade(ticker, insider, kind, date, value=200_000.0, link="L1"):
+    return {"issuer": f"{ticker} Corp", "ticker": ticker, "insider": insider,
+            "title": "Director", "kind": kind, "shares": 1000.0,
+            "price": value / 1000.0, "value_usd": value, "date": date, "link": link}
+
+
+def test_update_insider_history_dedupe_and_prune():
+    trades = [_ins_trade("AAA", "X", "buy", "2026-07-30"),
+              _ins_trade("AAA", "X", "buy", "2026-07-30")]  # exaktes Duplikat
+    hist = smr.update_insider_history(None, trades, "2026-07-31")
+    assert len(hist["trades"]) == 1  # Dedupe
+    # Alt-Deal (> 45 Tage) fliegt raus
+    old = [_ins_trade("OLD", "Y", "buy", "2026-06-01", link="L2")]
+    hist = smr.update_insider_history(hist, old, "2026-07-31")
+    keys = list(hist["trades"])
+    assert not any(k.startswith("L2") for k in keys)
+    assert any(k.startswith("L1") for k in keys)
+
+
+def test_detect_clusters_buy_three_insiders():
+    trades = [
+        _ins_trade("AAA", "Doe", "buy", "2026-07-28", 300_000),
+        _ins_trade("AAA", "Smith", "buy", "2026-07-29", 150_000, link="L2"),
+        _ins_trade("AAA", "Chen", "buy", "2026-07-30", 500_000, link="L3"),
+        _ins_trade("AAA", "Chen", "buy", "2026-07-30", 900_000, link="L4"),  # doppelt zählt als 1 Insider
+        _ins_trade("BBB", "Solo", "buy", "2026-07-30", 800_000, link="L5"),  # nur 1 Insider
+        _ins_trade("AAA", "Old", "buy", "2026-07-01", 400_000, link="L6"),   # ausserhalb Fenster
+    ]
+    res = smr.detect_insider_clusters(trades, today="2026-07-31")
+    assert len(res["clusters"]) == 1
+    c = res["clusters"][0]
+    assert c["symbol"] == "AAA" and c["side"] == "buy"
+    assert c["insiders"] == 3           # Chen nur einmal gezaehlt
+    assert c["trades"] == 4
+    assert c["total_value_usd"] == 1_850_000.0
+    assert set(c["names"]) == {"Doe", "Smith", "Chen"}
+
+
+def test_detect_clusters_sell_side_and_sorting():
+    trades = [
+        _ins_trade("SELL", f"V{i}", "sell", "2026-07-30", 100_000, link=f"S{i}")
+        for i in range(3)
+    ] + [
+        _ins_trade("BUY", f"K{i}", "buy", "2026-07-30", 100_000, link=f"B{i}")
+        for i in range(3)
+    ]
+    res = smr.detect_insider_clusters(trades, today="2026-07-31")
+    assert len(res["clusters"]) == 2
+    assert res["clusters"][0]["side"] == "buy"   # Kauf-Cluster zuerst
+    assert res["clusters"][1]["side"] == "sell"
+
+
+def test_detect_clusters_below_threshold_empty():
+    trades = [_ins_trade("AAA", "A", "buy", "2026-07-30"),
+              _ins_trade("AAA", "B", "buy", "2026-07-30", link="L2")]
+    res = smr.detect_insider_clusters(trades, today="2026-07-31")
+    assert res["clusters"] == []
+
+
+def test_fetch_insider_clusters_building_then_cluster(monkeypatch, tmp_path):
+    path = str(tmp_path / "insider_hist.json")
+    monkeypatch.setattr(smr, "_fetch_latest_form4_trades",
+                        lambda: ([_ins_trade("AAA", "X", "buy", "2026-07-30")], 1, 0))
+    sec = smr.fetch_insider_clusters(history_path=path)
+    assert sec["status"] == "building"   # zu wenig Verlauf-Tage
+    assert sec["building"] is True
+    assert "Verlauf im Aufbau" in sec["note"]
+    # Verlauf-Datei wurde geschrieben
+    assert json.loads(open(path, encoding="utf-8").read())["trades"]
+
+    # Vorbefuellter Verlauf mit echtem Cluster + EDGAR down -> Verlauf allein reicht
+    trades = {
+        f"k{i}": _ins_trade("AAA", f"I{i}", "buy", "2026-07-29", link=f"L{i}")
+        for i in range(3)
+    }
+    path2 = tmp_path / "hist2.json"
+    path2.write_text(json.dumps({"trades": trades, "updated": "2026-07-30"}),
+                     encoding="utf-8")
+    monkeypatch.setattr(smr, "_fetch_latest_form4_trades",
+                        lambda: (_ for _ in ()).throw(RuntimeError("edgar down")))
+    sec2 = smr.fetch_insider_clusters(history_path=str(path2))
+    assert sec2["clusters"][0]["symbol"] == "AAA"  # EDGAR-Ausfall toleriert

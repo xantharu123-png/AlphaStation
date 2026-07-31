@@ -62,6 +62,7 @@
   </div>
 
   <div class="card" id="sec-etf"></div>
+  <div class="card" id="sec-clusters"></div>
   <div class="card" id="sec-stock"></div>
   <div class="card" id="sec-insider"></div>
   <div class="card" id="sec-waves"></div>
@@ -99,6 +100,22 @@ function renderWaves(sec) {
       <tr><th>Instrument</th><th>Symbol</th><th class="num">RVOL</th><th class="num">$-Volumen</th><th></th></tr>
       ${rows}</table>` : `<div class="err">${sec.error || sec.note || "keine Daten"}</div>`}
     <div class="note">${sec.note || ""}</div>`;
+}
+
+function renderClusters(sec) {
+  const rows = (sec.clusters || []).map(c => `<tr>
+    <td><b>${c.symbol}</b></td>
+    <td class="${c.side === "buy" ? "pos" : "neg"}">${c.side === "buy" ? "🟢 KAUF-CLUSTER" : "🔴 VERKAUF-CLUSTER"}</td>
+    <td class="num"><b>${c.insiders}</b> Insider</td>
+    <td class="num">${(c.total_value_usd / 1000).toLocaleString("de-DE", {maximumFractionDigits:0})}k $</td>
+    <td style="color:var(--dim);font-size:11px">${(c.names || []).join(", ")}</td>
+  </tr>`).join("");
+  const statusLabel = sec.building ? "building" : sec.status;
+  $("sec-clusters").innerHTML = `<h2>🧩 Insider-Cluster (stärkstes Signal) ${badge(statusLabel)}</h2>
+    ${(sec.clusters || []).length ? `<table>
+      <tr><th>Firma</th><th>Richtung</th><th class="num">Breite</th><th class="num">Summe</th><th>Namen</th></tr>
+      ${rows}</table>` : `<div class="${sec.status === "error" ? "err" : "note"}">${sec.error || "Noch keine Cluster im Fenster erkannt"}</div>`}
+    <div class="note">${sec.note || ""} · Faustregel: 3+ verschiedene Insider kaufen dieselbe Firma = historisch das stärkste Insider-Signal überhaupt.</div>`;
 }
 
 function renderInsider(sec) {
@@ -160,6 +177,7 @@ async function load(refresh) {
     $("generated").textContent =
       "Stand: " + (data.generated_at || "?") + " · Cache: " + (data.cache || "?");
     renderEtf(data.sections?.etf_flows || {status:"error", error:"fehlt"});
+    renderClusters(data.sections?.insider_clusters || {status:"error", error:"fehlt"});
     renderStockWaves(data.sections?.stock_waves || {status:"error", error:"fehlt"});
     renderInsider(data.sections?.insider_trades || {status:"error", error:"fehlt"});
     renderWaves(data.sections?.volume_waves || {status:"error", error:"fehlt"});

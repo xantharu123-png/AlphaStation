@@ -505,31 +505,38 @@ def parse_form4_xml(xml_text: str, link: str = "") -> list[dict[str, Any]]:
     return rows
 
 
+def _fetch_latest_form4_trades() -> tuple[list[dict[str, Any]], int, int]:
+    """Neueste Form-4-Filings von EDGAR -> (alle P/S-Trades, geparste Filings,
+    Fehlerzahl). Geteilt von Anzeige-Sektion und Cluster-Verlauf."""
+    headers = {"User-Agent": SEC_USER_AGENT}
+    atom_resp = requests.get(EDGAR_CURRENT_F4_URL, timeout=HTTP_TIMEOUT,
+                             headers=headers)
+    atom_resp.raise_for_status()
+    entries = parse_atom_feed(atom_resp.text)
+    trades: list[dict[str, Any]] = []
+    errors = 0
+    parsed = 0
+    for entry in entries:
+        if parsed >= INSIDER_MAX_FILINGS:
+            break
+        try:
+            xml_url = _filing_xml_url(entry["link"])
+            if not xml_url:
+                continue
+            resp = requests.get(xml_url, timeout=HTTP_TIMEOUT, headers=headers)
+            resp.raise_for_status()
+            trades.extend(parse_form4_xml(resp.text, link=entry["link"]))
+            parsed += 1
+        except Exception:
+            errors += 1
+    trades.sort(key=lambda r: r["value_usd"], reverse=True)
+    return trades, parsed, errors
+
+
 def fetch_insider_trades() -> dict[str, Any]:
     """Sektion Insider-Trades: neueste Form 4 von SEC EDGAR, P/S >= $100k."""
-    headers = {"User-Agent": SEC_USER_AGENT}
     try:
-        atom_resp = requests.get(EDGAR_CURRENT_F4_URL, timeout=HTTP_TIMEOUT,
-                                 headers=headers)
-        atom_resp.raise_for_status()
-        entries = parse_atom_feed(atom_resp.text)
-        trades: list[dict[str, Any]] = []
-        errors = 0
-        parsed = 0
-        for entry in entries:
-            if parsed >= INSIDER_MAX_FILINGS:
-                break
-            try:
-                xml_url = _filing_xml_url(entry["link"])
-                if not xml_url:
-                    continue
-                resp = requests.get(xml_url, timeout=HTTP_TIMEOUT, headers=headers)
-                resp.raise_for_status()
-                trades.extend(parse_form4_xml(resp.text, link=entry["link"]))
-                parsed += 1
-            except Exception:
-                errors += 1
-        trades.sort(key=lambda r: r["value_usd"], reverse=True)
+        trades, parsed, errors = _fetch_latest_form4_trades()
         out: dict[str, Any] = {
             "status": "ok" if trades else "empty",
             "note": (f"Open-Market-Kaeufe/-Verkaeufe von Insidern (Form 4), "
@@ -542,6 +549,121 @@ def fetch_insider_trades() -> dict[str, Any]:
         return out
     except Exception as exc:
         return {"status": "error", "error": str(exc)[:200], "trades": []}
+
+
+# ── 2d) Insider-Cluster (staerkstes Insider-Signal: 3+ Kauefer, gleiche Firma) ─
+
+CLUSTER_WINDOW_DAYS = 14
+CLUSTER_MIN_INSIDERS = 3
+INSIDER_HISTORY_MAX_AGE_DAYS = 45
+
+_DEFAULT_INS_HIST = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data_cache", "insider_trades_history.json")
+)
+INSIDER_HISTORY_PATH = os.environ.get("INSIDER_HISTORY", _DEFAULT_INS_HIST)
+
+
+def _trade_key(trade: dict[str, Any]) -> str:
+    """Dedupe-Schluessel je Insider-Deal (Filing-Link + Richtung + Stueck/Kurs)."""
+    return "|".join(str(trade.get(k) or "") for k in
+                    ("link", "ticker", "insider", "kind", "date", "shares", "price"))
+
+
+def update_insider_history(history: dict[str, Any] | None,
+                           trades: list[dict[str, Any]],
+                           today: str) -> dict[str, Any]:
+    """Rolling-Verlauf {trades: {key: trade}, last_dates} — dedupliziert,
+    aelteste Eintraege > INSIDER_HISTORY_MAX_AGE_DAYS werden gekuerzt (pure)."""
+    hist = history if isinstance(history, dict) else {}
+    store = hist.get("trades") if isinstance(hist.get("trades"), dict) else {}
+    for trade in trades:
+        key = _trade_key(trade)
+        if key.strip("|"):
+            store[key] = trade
+    try:
+        cutoff = (datetime.strptime(today, "%Y-%m-%d")
+                  - timedelta(days=INSIDER_HISTORY_MAX_AGE_DAYS)).date().isoformat()
+        store = {k: t for k, t in store.items()
+                 if str(t.get("date") or "9999") >= cutoff}
+    except Exception:
+        pass
+    return {"trades": store, "updated": today}
+
+
+def detect_insider_clusters(trades: list[dict[str, Any]], today: str,
+                            window_days: int = CLUSTER_WINDOW_DAYS,
+                            min_insiders: int = CLUSTER_MIN_INSIDERS) -> dict[str, Any]:
+    """Pure: Verlauf -> Cluster (>= min_insiders verschiedene Insider, gleiche
+    Firma, gleiche Richtung, innerhalb window_days).
+
+    Kauf-Cluster sind das historisch dokumentierte Signal (Lakonishok & Lee);
+    Verkauf-Cluster werden separat ausgewiesen (schwaecheres Signal).
+    """
+    try:
+        cutoff = (datetime.strptime(today, "%Y-%m-%d")
+                  - timedelta(days=window_days)).date().isoformat()
+    except Exception:
+        return {"clusters": [], "window_days": window_days, "considered": 0}
+    recent = [t for t in trades if str(t.get("date") or "") >= cutoff]
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for t in recent:
+        key = (str(t.get("ticker") or t.get("issuer") or "?"), str(t.get("kind") or ""))
+        groups.setdefault(key, []).append(t)
+    clusters: list[dict[str, Any]] = []
+    for (symbol, kind), group in groups.items():
+        insiders = sorted({str(t.get("insider") or "?") for t in group})
+        if len(insiders) < min_insiders:
+            continue
+        total = sum(float(t.get("value_usd") or 0) for t in group)
+        sample = group[0]
+        clusters.append({
+            "symbol": symbol,
+            "issuer": sample.get("issuer") or symbol,
+            "side": kind,
+            "insiders": len(insiders),
+            "names": insiders[:6],
+            "total_value_usd": round(total, 0),
+            "trades": len(group),
+            "latest_date": max(str(t.get("date") or "") for t in group),
+        })
+    clusters.sort(key=lambda c: (c["side"] != "buy", -c["insiders"],
+                                 -c["total_value_usd"]))
+    return {"clusters": clusters, "window_days": window_days,
+            "considered": len(recent)}
+
+
+def fetch_insider_clusters(history_path: str | None = None) -> dict[str, Any]:
+    """Sektion Insider-Cluster: baut den Verlauf aus den jeweils neuesten
+    Filings auf und erkennt Kauf-/Verkauf-Cluster ueber 14 Tage."""
+    path = history_path or INSIDER_HISTORY_PATH
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        try:
+            trades, _parsed, _errors = _fetch_latest_form4_trades()
+        except Exception:
+            trades = []  # EDGAR down -> Verlauf allein weiterverwenden
+        history = _read_cache(path) or {}
+        history = update_insider_history(history, trades, today)
+        _write_cache(path, history)
+        all_trades = list((history.get("trades") or {}).values())
+        result = detect_insider_clusters(all_trades, today)
+        dates = sorted({str(t.get("date") or "") for t in all_trades if t.get("date")})
+        history_days = len(dates)
+        building = history_days < CLUSTER_WINDOW_DAYS
+        note = (f"Verlauf im Aufbau ({history_days}/{CLUSTER_WINDOW_DAYS} Tage) — "
+                "Cluster erscheinen, sobald genug Tage gesammelt sind"
+                if building else
+                f"Fenster {CLUSTER_WINDOW_DAYS} Tage · >= {CLUSTER_MIN_INSIDERS} Insider "
+                f"pro Cluster · {result['considered']} Deals im Fenster")
+        return {
+            "status": "ok" if result["clusters"] else ("building" if building else "empty"),
+            "building": building,
+            "history_days": history_days,
+            "note": note,
+            "clusters": result["clusters"],
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:200], "clusters": []}
 
 
 # ── 3) Whale-Alerts (optional, WHALE_ALERT_KEY) ──────────────────────────────
@@ -619,6 +741,7 @@ def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
                 "volume_waves": fetch_volume_waves(polygon_key),
                 "stock_waves": fetch_stock_waves(polygon_key),
                 "insider_trades": fetch_insider_trades(),
+                "insider_clusters": fetch_insider_clusters(),
                 "whale_alerts": fetch_whale_alerts(whale_key),
             },
             "_cached_at": now,

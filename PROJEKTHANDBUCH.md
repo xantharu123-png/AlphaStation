@@ -678,6 +678,32 @@ zwischen Monster-Volumen und Makro-Wellen.
 E2E mit gemocktem HTTP inkl. User-Agent-Assert, Empty-Pfad, Nie-werfen).
 Suite **1272, alle grün**.
 
+### 3.20 31. Juli (vormittags) — Insider-Cluster-Detektor: 6. Radar-Sektion
+
+**Anlass (Betreiber):** „klar" — das statistisch stärkste Insider-Signal:
+**3+ verschiedene Insider kaufen dieselbe Firma innerhalb von 14 Tagen**
+(klassische Literatur: Lakonishok & Lee; Cluster-Breite schlägt Einzel-Deals).
+
+**Design:** Gleiches Muster wie die Aktien-Baseline (3.18): rollierender
+Insider-Verlauf `data_cache/insider_trades_history.json` (45 Tage, Dedupe
+über Filing-Deal-Schlüssel, idempotent je Refresh) — Cluster-Reife wächst
+mit jedem Tag. Refactoring: `_fetch_latest_form4_trades()` teilt die volle
+Trade-Liste zwischen Anzeige-Sektion (Top 15) und Verlauf (komplett).
+
+**Logik (pure `detect_insider_clusters`):** Fenster 14 Tage, Gruppierung je
+(Firma, Richtung), Cluster ab **3 verschiedenen Insidern** (gleicher Insider
+mit 2 Deals zählt einmal), Kauf-Cluster vor Verkauf-Clustern sortiert
+(stärkeres Signal zuerst), Summenwert + Namen + Breite. **EDGAR-Ausfall
+toleriert:** Der Verlauf allein reicht für die Detektion. Aufbauphase
+(< 14 Verlauf-Tage): Badge „building" mit Klartext-Hinweis.
+
+**Frontend:** Karte „🧩 Insider-Cluster (stärkstes Signal)" direkt unter den
+ETF-Flows — bewusst weit oben, weil es das signalstärkste Element ist.
+
+**Tests:** +5 (Dedupe/Prune des Verlaufs, 3-Insider-Kauf-Cluster mit
+Mehrfach-Deal-Dedupe, Verkauf-Seite + Sortierung, Unter-Schwelle leer,
+Building→Cluster mit EDGAR-Ausfall-Toleranz). Suite **1277, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -767,7 +793,8 @@ Suite-Stand-Historie:
 31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün) →
 1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün) →
 1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün) →
-1272 (31.07. SEC-Insider-Trades-Sektion (Form 4), alle grün).
+1272 (31.07. SEC-Insider-Trades-Sektion (Form 4), alle grün) →
+1277 (31.07. Insider-Cluster-Detektor, alle grün).
 
 ---
 
