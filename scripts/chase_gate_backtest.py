@@ -326,10 +326,26 @@ def main() -> int:
     if rf:
         wins_f = len([v for v in rf if v > 0])
         print(f"  Trefferquote frei:      {wins_f}/{len(rf)} ({wins_f / len(rf) * 100:.0f}%)")
-    if rb and _avg(rb) is not None:
-        verdict = "GESPART" if _avg(rb) < 0 else "GEKOSTET"
-        print(f"\n  → Das Gate haette auf dieser Stichprobe {verdict}: "
-              f"die blockierten Signale liefen im Schnitt bei {_avg(rb):+.2f}R.")
+    # 2026-07-31 (Kalibrierung): Das Urteil ist NICHT binaer (blockiert < 0 =
+    # gespart). Relevant ist der Opportunitaetsvergleich: liefen blockierte
+    # Signale schlechter als freie, haette das Gate Kapital aus dem
+    # schwaecheren Topf in den staerkeren verschoben.
+    if rb and rf and _avg(rb) is not None and _avg(rf) is not None:
+        diff = _avg(rb) - _avg(rf)
+        effect = diff * len(rb)
+        if diff < -0.02:
+            print(f"\n  → Gate haette die EFFIZIENZ VERBESSERT: blockierte Ø {_avg(rb):+.2f}R "
+                  f"vs. freie Ø {_avg(rf):+.2f}R (Diff {diff:+.2f}R/Signal ≈ {effect:+.1f}R "
+                  f"auf {len(rb)} Signale bei voller Kapital-Umschichtung).")
+        elif diff > 0.02:
+            print(f"\n  → Gate haette GEKOSTET: blockierte Signale liefen BESSER "
+                  f"(Ø {_avg(rb):+.2f}R vs. freie Ø {_avg(rf):+.2f}R).")
+        else:
+            print(f"\n  → Neutral: blockierte/freie Signale liefen gleich (Ø-Diff {diff:+.2f}R).")
+        print("  Ehrlich: ohne Kapital-Constraint ist jeder blockierte Trade mit")
+        print("  ØR > 0 trotzdem entgangener Gewinn. Und bei dieser n/Streuung ist")
+        print("  die Differenz ein Hinweis, kein Beweis — belastbare Antwort liefert")
+        print("  nur die Shadow-Messung (blockierte Signale still weitertracken).")
 
     old_only = [m for m in measured if m["old_hits"]]
     print("\n=== C) Alt-Gates, die im Backtest ZUSAETZLICH feuern ===")

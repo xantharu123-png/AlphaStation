@@ -96,3 +96,21 @@ im Backtest seltener), kein Intraday-RVOL → Blockquote ist untere Schranke.
   gesetzt (5 ATR/5 Tage = jeder Tag ein voller ATR-Tag).
 - Der Backtest misst Long-Signale vollständig; Short-Signale des
   crash-Scanners nur, soweit Tages-Bars reichen (gleiche Rekonstruktion).
+
+---
+
+## 7. Backtest-Ergebnis (31.07., Server-Lauf, 90 Tage)
+
+288 Signale gemessen; **28 blockiert (10 %)**, davon 12 hart. Outcome:
+blockiert Ø **+0.06R** (n=25, Treffer 40 %) vs. frei Ø **+0.17R** (n=220,
+Treffer 40 %). Richtung bestätigt das Gate (blockierte Moves = heißesten
+= schwächer pro R); 7 von 15 Detail-Blockierten waren volle -1R-Stops.
+**Kein Beweis bei n=25** — Hinweis. Skript-Urteil daraufhin von binär
+(„GEKOSTET/GESPART") auf Opportunitätsvergleich korrigiert.
+
+**Neuer Befund — MDR-Konflikt:** CCXI (5d +65 %) lief +3.67R und wäre
+geblockt worden; der Scanner belohnt genau dieses Muster mit MDR-Bonus.
+Auflösung offen → **Shadow-Tracking vorgeschlagen** (blockierte Signale
+still loggen, ohne Mail, nicht in der Win-Rate): erst dann sind die
+Gate-Kosten live messbar (Selektionsproblem: geblockte Signale sieht der
+Tracker sonst nie).

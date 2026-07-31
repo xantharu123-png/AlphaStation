@@ -814,6 +814,48 @@ Suite **1310, alle grün**. Repo-Hygiene: versehentlich getrackte
 Laufzeit-Artefakte (Insider-Cache, Report-Preview) enttrackt + gitignore
 (`adce713`) — sonst haette der naechste Server-Pull blockiert.
 
+### 3.24 31. Juli (spät) — Backtest-Zahlen: Gate trifft mehrheitlich richtig, MDR-Konflikt sichtbar
+
+**Messung auf dem Server** (`chase_gate_backtest.py --days 90`): 288
+Signale gemessen (2 ohne History). **28 blockiert (10 %)** — Quote
+vernünftig, nicht überschießend; 12 davon hart (≥ 7 ATR/5d).
+
+**Outcome (nur entschiedene, n=245):**
+| Gruppe | n | ØR | Treffer |
+|---|---|---|---|
+| blockiert | 25 | **+0.06R** | 40 % |
+| frei | 220 | **+0.17R** | 40 % |
+
+**Lesart (Trading-Statistik, nicht Skript-Binarlogik):** Identische
+Trefferquote, aber blockierte Signale brachten **65 % weniger R pro Trade**
+— das Gate selektiert genau die heißesten Moves, und die performten pro
+Risikoeinheit schlechter (Mean-Reversion-These bestätigt in Richtung).
+Detail: **7 der 15 gelisteten Blockierten waren volle -1R-Stops**
+(Extended → Reversal → Stop); 60 % der Blockierten endeten ≤ 0.
+**ABER:** n=25 ist klein, R-Streuung groß — Hinweis, kein Beweis. Das
+Skript-Urteil wurde deshalb von „GEKOSTET/GESPART (binär)" auf den
+**Opportunitätsvergleich** korrigiert (blockiert-Ø vs. frei-Ø).
+
+**MDR-Konflikt (wichtigster inhaltlicher Befund):** CCXI (5d +65 %) lief
++3.67R — ein Multi-Day-Runner, den das Gate geblockt hätte. Der Scanner
+BELOHNT genau dieses Muster (MDR-Bonus bis +15 Score für Vortag+Heute-
+Kontinuität), das Gate BESTRAFT es. Beide können nicht gleichzeitig recht
+haben; die Daten (n=12 harte Blocks) reichen nicht zur Auflösung.
+**Entscheidung:** Schwellen bleiben (5/7 ATR), keine Regel-Änderung ohne
+bessere Daten — Auflösung per Shadow-Messung (Vorschlag unten).
+
+**Nebenbefund:** 102/288 Fälle, in denen ALT-Gates im Backtest zusätzlich
+feuern — die dokumentierte Ganztages-Verzerrung (High/Low des ganzen Tages
+statt Mail-Minute); bestätigt, dass die 10 %-Blockquote eine **untere
+Schranke** ist.
+
+**Selektionsproblem (ehrlich):** Ab jetzt werden geblockte Signale nie
+gemailt → der Tracker sieht sie nie → es gibt **keine** Live-Daten mehr
+über die Gate-Kosten. Dieser Backtest war die einzige Messung; die
+dauerhafte Lösung ist **Shadow-Tracking** (blockierte Signale still im
+Tracker loggen, ohne Mail, nicht in der Win-Rate) — als nächster Schritt
+vorgeschlagen, noch nicht gebaut (aendert Tracker-Semantik).
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
