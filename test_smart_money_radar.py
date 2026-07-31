@@ -238,12 +238,14 @@ def test_smart_money_page_served():
 # ── GUARD: Radar ist NIE Teil eines Trigger-/Scoring-Pfads ──────────────────
 
 def test_radar_not_imported_in_trigger_paths():
-    """modules.smart_money_radar darf nur in api.py (Endpunkt) und eigenen
-    Tests importiert werden — niemals in bg_service, Scannern, Tracker,
-    Scoring- oder Mail-Modulen."""
+    """modules.smart_money_radar darf NUR an zwei Stellen importiert werden:
+    api.py (Lese-Endpunkt /smart-money) und bg_service.py (taegliche
+    ℹ️-Cluster-Info-Mail, 31.07., Betreiber-Vorgabe — KEIN Trigger).
+    NIEMALS in Scannern, Tracker, Scoring- oder Handels-Modulen."""
     root = Path(_DIR)
     offenders = []
-    allowed = {"api.py", "test_smart_money_radar.py", "smart_money_radar.py"}
+    allowed = {"api.py", "bg_service.py", "test_smart_money_radar.py",
+               "smart_money_radar.py"}
     for py in list(root.glob("*.py")) + list((root / "modules").glob("*.py")):
         if py.name in allowed or py.name.startswith("test_"):
             continue

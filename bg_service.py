@@ -101,6 +101,12 @@ except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
     def _log_watchdog_event(*_args, **_kwargs):
         return None
 try:
+    # NUR fuer die taegliche ℹ️-Cluster-Info-Mail (31.07., Betreiber-Vorgabe).
+    # Kein Scoring-/Gate-/Trigger-Pfad — Guard-Test in test_smart_money_radar.py.
+    from modules.smart_money_radar import fetch_insider_clusters as _fetch_insider_clusters
+except Exception:  # pragma: no cover
+    _fetch_insider_clusters = None
+try:
     from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
@@ -2189,6 +2195,135 @@ def _run_weekly_report(secrets=None, now_et=None):
     except Exception as exc:
         log.warning(f"[Wochenreport] Report fehlgeschlagen (Scheduler laeuft weiter): {exc}")
         return False
+
+
+# ── Insider-Cluster-Alarm (31.07.): ℹ️-Mail nur bei NEUEM KAUF-Cluster ───────
+# Betreiber-Vorgabe: "sag mir Bescheid, wenn es zaehlt" — NIE trade-Klasse,
+# NIE als Trigger. Fenster Mo–Fr 16:30–23:00 ET (Form 4 = EOD-Daten).
+_INSIDER_CLUSTER_CHECK_INTERVAL_SEC = 15 * 60
+_INSIDER_CLUSTER_WINDOW_START_MIN = 16 * 60 + 30
+_INSIDER_CLUSTER_WINDOW_END_MIN = 23 * 60
+_INSIDER_CLUSTER_DEDUPE_SEC = 14 * 86400  # = Cluster-Fenster
+
+
+def _insider_cluster_window_open(now_et):
+    """True Mo–Fr zwischen 16:30 und 23:00 ET."""
+    if now_et.weekday() >= 5:
+        return False
+    now_min = now_et.hour * 60 + now_et.minute
+    return (_INSIDER_CLUSTER_WINDOW_START_MIN <= now_min
+            < _INSIDER_CLUSTER_WINDOW_END_MIN)
+
+
+def _insider_cluster_key(cluster):
+    """Dedupe-Key je Cluster-Zusammensetzung: neuer Insider im Verbund => neue
+    Mail (das Cluster ist gewachsen = neue Information)."""
+    import hashlib
+    names = ",".join(sorted(cluster.get("names") or []))
+    digest = hashlib.sha1(names.encode("utf-8")).hexdigest()[:10]
+    return f"insider_cluster_{cluster.get('symbol')}_{cluster.get('side')}_{digest}"
+
+
+def _build_insider_cluster_mail(clusters, now_et):
+    """(subject, body_html) im Hausstil. Subject OHNE Klassen-Praefix."""
+    symbols = ", ".join(c["symbol"] for c in clusters[:4])
+    subject = (f"Insider-Cluster: {symbols} — {len(clusters)} KAUF-Cluster"
+               if len(clusters) > 1 else
+               f"Insider-Cluster: {symbols} — {clusters[0]['insiders']} Insider kaufen")
+    rows = ""
+    for c in clusters:
+        names = ", ".join(c.get("names") or [])[:120]
+        rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{c['symbol']}</b><br>
+                <span style="color:#999;font-size:11px">{c.get('issuer') or ''}</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{c['insiders']} Insider</b><br>
+                <span style="color:#999;font-size:11px">{c['trades']} Deals</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>${c['total_value_usd'] / 1000:,.0f}k</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:11px;color:#666">{names}</td>
+        </tr>"""
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+    <h2 style="color:#0f172a">🧩 Insider-KAUF-Cluster erkannt</h2>
+    <p style="color:#666">{now_et.strftime('%d.%m.%Y %H:%M')} ET | Fenster: letzte 14 Tage</p>
+    <p>Bei diesen Firmen haben <b>mindestens 3 verschiedene Insider</b> innerhalb
+    von 14 Tagen am offenen Markt zugegriffen — historisch das staerkste
+    Insider-Signal ueberhaupt (Lakonishok &amp; Lee):</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Firma</th>
+            <th style="padding:8px;text-align:left">Breite</th>
+            <th style="padding:8px;text-align:left">Summe</th>
+            <th style="padding:8px;text-align:left">Namen</th>
+        </tr>
+        {rows}
+    </table>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Kontext aus dem Smart-Money-Radar (SEC Form 4, 1–2 Tage Meldefrist).
+        <b>Kein Signal, kein Trigger</b> — fließt in kein Scoring und ist keine
+        Kaufempfehlung. Live-Ansicht: /smart-money auf deiner Instanz.
+    </p>
+    </body></html>"""
+    return subject, body_html
+
+
+def _run_insider_cluster_alert(secrets=None, now_et=None):
+    """Taeglicher ℹ️-Alarm bei NEUEM Insider-KAUF-Cluster (self-gated).
+
+    - Fenster Mo–Fr 16:30–23:00 ET; Tages-Markier-Key unabhaengig vom Ergebnis
+      (kein Dauerfeuer innerhalb eines Tages).
+    - Pro Cluster eigener Dedupe-Key (Zusammensetzung) mit TTL = 14 Tage =>
+      dasselbe Cluster mailt nie zweimal; ein GEWACHSENES Cluster schon.
+    - Mark erst NACH erfolgreichem Versand (B2): SMTP-Fehler => Retry im Fenster.
+    - Wirft nie; Modul-Fehler => einmalige Warnung, Scheduler laeuft weiter.
+    Returns True nur bei tatsaechlich versendeter Mail.
+    """
+    global _insider_cluster_warned_missing
+    try:
+        if now_et is None:
+            try:
+                from zoneinfo import ZoneInfo
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                now_et = datetime.now()
+        if not _insider_cluster_window_open(now_et):
+            return False
+        if _fetch_insider_clusters is None:
+            if not _insider_cluster_warned_missing:
+                log.warning("[Insider-Cluster] modules.smart_money_radar fehlt — Job inaktiv")
+                _insider_cluster_warned_missing = True
+            return False
+        day_key = f"insider_cluster_scan_{now_et.strftime('%Y-%m-%d')}"
+        if _email_dedupe_active(day_key, 2 * 86400):
+            return False
+        section = _fetch_insider_clusters() or {}
+        buy_clusters = [c for c in (section.get("clusters") or [])
+                        if c.get("side") == "buy"]
+        new_clusters = [c for c in buy_clusters
+                        if not _email_dedupe_active(_insider_cluster_key(c),
+                                                    _INSIDER_CLUSTER_DEDUPE_SEC)]
+        if not new_clusters:
+            _email_dedupe_mark(day_key)  # heute gescannt, nichts Neues
+            return False
+        subject, body_html = _build_insider_cluster_mail(new_clusters, now_et)
+        sent = _send_email_alert(
+            subject, body_html,
+            secrets if secrets is not None else _load_secrets(),
+            mail_class="info",
+        )
+        if sent:
+            _email_dedupe_mark(day_key)
+            for c in new_clusters:
+                _email_dedupe_mark(_insider_cluster_key(c))
+            log.info(f"[Insider-Cluster] 📧 {len(new_clusters)} KAUF-Cluster gemeldet")
+        else:
+            log.warning("[Insider-Cluster] Mail nicht versendet — Retry im Fenster")
+        return bool(sent)
+    except Exception as exc:
+        log.warning(f"[Insider-Cluster] Job fehlgeschlagen (Scheduler laeuft weiter): {exc}")
+        return False
+
+
+_insider_cluster_warned_missing = False
 
 
 def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text="", mail_channel=""):
@@ -4972,6 +5107,12 @@ def run_service():
     log.info(f"🧾 Wochenreport-Mail: Freitag 16:15–23:00 ET aktiv "
              f"({'Modul vorhanden' if load_performance_summary is not None else 'WARTET auf modules.signal_tracker'})")
 
+    # ── Insider-Cluster-Alarm: taegliche ℹ️-Mail nur bei NEUEM KAUF-Cluster ──
+    # Self-gated (Mo–Fr 16:30–23:00 ET); Tages-Key + Cluster-Dedupe im Job.
+    SCHEDULE_INTERVAL["insider_cluster_alert"] = _INSIDER_CLUSTER_CHECK_INTERVAL_SEC
+    log.info(f"🧩 Insider-Cluster-Alarm: Mo–Fr 16:30–23:00 ET aktiv "
+             f"({'Modul vorhanden' if _fetch_insider_clusters is not None else 'WARTET auf modules.smart_money_radar'})")
+
     last_run = {}
     _today_done = {}  # Track welche festen Zeiten heute schon gelaufen sind
     _running_scanners = set()  # B-05: Prevent concurrent scanner execution
@@ -5143,6 +5284,10 @@ def run_service():
                         # Freitags-Wochenbilanz; Job ist self-gated und
                         # wirft nie (Fenster/Dedupe/try-except intern).
                         _run_weekly_report(secrets)
+                    elif scanner_name == "insider_cluster_alert":
+                        # ℹ️-Mail nur bei NEUEM KAUF-Cluster; self-gated,
+                        # wirft nie (Fenster/Tages-Key/Cluster-Dedupe intern).
+                        _run_insider_cluster_alert(secrets)
                     last_run[scanner_name] = time.time()
                 except Exception as e:
                     log.error(f"❌ {scanner_name}: {e}")

@@ -704,6 +704,32 @@ ETF-Flows — bewusst weit oben, weil es das signalstärkste Element ist.
 Mehrfach-Deal-Dedupe, Verkauf-Seite + Sortierung, Unter-Schwelle leer,
 Building→Cluster mit EDGAR-Ausfall-Toleranz). Suite **1277, alle grün**.
 
+### 3.21 31. Juli (mittags) — ℹ️-Mail nur bei NEUEM Insider-KAUF-Cluster
+
+**Anlass (Betreiber):** „sag mir Bescheid, wenn es zählt" — damit die Seite
+nicht täglich besucht werden muss. Einzige Mail, die der Radar je auslöst;
+**info-Klasse, nie Trigger** (Betreiber-Vorgabe).
+
+**Job (`bg_service._run_insider_cluster_alert`, self-gated, 15-Min-Anklopf):**
+- **Fenster Mo–Fr 16:30–23:00 ET** (Form 4 = EOD-Daten; Wochenende frei).
+- **Tages-Markier-Key** `insider_cluster_scan_{datum}` — egal ob Treffer
+  oder nicht: max. 1 Prüfung/Tag, kein Dauerfeuer; wird NUR bei erfolgreichem
+  Versand oder „nichts Neues" gesetzt (SMTP-Fehler ⇒ Retry im Fenster, B2).
+- **Cluster-Dedupe über Zusammensetzung** (Symbol + Richtung + Hash der
+  Insider-Namen, TTL 14 Tage = Cluster-Fenster): dasselbe Cluster mailt nie
+  zweimal — ein **gewachsenes** Cluster (vierter Insider) ist neue
+  Information und mailt erneut. Verkauf-Cluster mailen **nie**.
+- Mail im Hausstil: Firma, Breite, Summe, Namen, Pflicht-Disclaimer
+  „Kein Signal, kein Trigger".
+- **Guard-Test präzisiert:** `modules.smart_money_radar` darf nur noch in
+  `api.py` (Lese-Endpunkt) und `bg_service.py` (diese ℹ️-Mail) importiert
+  werden — Scanner/Tracker/Scoring bleiben hart gesperrt.
+
+**Tests:** +9 (`test_insider_cluster_mail.py`): Fenster-Gate, genau eine
+Mail je neuem Cluster, kein Doppel am Folgetag, gewachsenes Cluster mailt,
+Verkauf mailt nie, Tages-Key ohne Fetch-Dauerfeuer, SMTP-Fehler-Retry,
+Modul-fehlt/Exception nie-werfen, Scheduler-Wiring. Suite **1286, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -794,7 +820,8 @@ Suite-Stand-Historie:
 1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün) →
 1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün) →
 1272 (31.07. SEC-Insider-Trades-Sektion (Form 4), alle grün) →
-1277 (31.07. Insider-Cluster-Detektor, alle grün).
+1277 (31.07. Insider-Cluster-Detektor, alle grün) →
+1286 (31.07. ℹ️-Cluster-Mail mit Kompositions-Dedupe, alle grün).
 
 ---
 
