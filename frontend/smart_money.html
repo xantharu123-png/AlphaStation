@@ -63,6 +63,7 @@
 
   <div class="card" id="sec-etf"></div>
   <div class="card" id="sec-stock"></div>
+  <div class="card" id="sec-insider"></div>
   <div class="card" id="sec-waves"></div>
   <div class="card" id="sec-whales"></div>
 </div>
@@ -97,6 +98,21 @@ function renderWaves(sec) {
     ${(sec.waves || []).length ? `<table>
       <tr><th>Instrument</th><th>Symbol</th><th class="num">RVOL</th><th class="num">$-Volumen</th><th></th></tr>
       ${rows}</table>` : `<div class="err">${sec.error || sec.note || "keine Daten"}</div>`}
+    <div class="note">${sec.note || ""}</div>`;
+}
+
+function renderInsider(sec) {
+  const rows = (sec.trades || []).map(t => `<tr>
+    <td><b>${t.ticker || "?"}</b></td>
+    <td>${t.insider || "?"}${t.title ? ` <span style="color:var(--dim);font-size:11px">(${t.title})</span>` : ""}</td>
+    <td class="${t.kind === "buy" ? "pos" : "neg"}">${t.kind === "buy" ? "🟢 KAUF" : "🔴 VERKAUF"}</td>
+    <td class="num">${(t.value_usd / 1000).toLocaleString("de-DE", {maximumFractionDigits:0})}k $</td>
+    <td>${t.date || "–"}</td>
+  </tr>`).join("");
+  $("sec-insider").innerHTML = `<h2>🕵️ Insider-Trades (SEC Form 4) ${badge(sec.status)}</h2>
+    ${(sec.trades || []).length ? `<table>
+      <tr><th>Ticker</th><th>Insider</th><th>Richtung</th><th class="num">Wert</th><th>Datum</th></tr>
+      ${rows}</table>` : `<div class="${sec.status === "empty" ? "note" : "err"}">${sec.error || "Keine Deals ≥ $100k in den letzten Filings"}</div>`}
     <div class="note">${sec.note || ""}</div>`;
 }
 
@@ -145,6 +161,7 @@ async function load(refresh) {
       "Stand: " + (data.generated_at || "?") + " · Cache: " + (data.cache || "?");
     renderEtf(data.sections?.etf_flows || {status:"error", error:"fehlt"});
     renderStockWaves(data.sections?.stock_waves || {status:"error", error:"fehlt"});
+    renderInsider(data.sections?.insider_trades || {status:"error", error:"fehlt"});
     renderWaves(data.sections?.volume_waves || {status:"error", error:"fehlt"});
     renderWhales(data.sections?.whale_alerts || {status:"error", error:"fehlt"});
   } catch (e) {

@@ -653,6 +653,31 @@ Extern-401 verifiziert als Middleware-Verhalten (Cookie-Session im Browser
 Datentags, RVOL/Filter/Richtung/Top-N, Building→Reifung, volle Baseline mit
 Welle, Fehler-Nie-werfen). Suite **1266, alle grün**.
 
+### 3.19 31. Juli (vormittags) — Insider-Trades (SEC Form 4): 5. Radar-Sektion
+
+**Anlass (Betreiber):** „ja" zur Königsdisziplin — der einzige Fall, wo
+„jemand kauft" **namentlich** sichtbar wird: Meldepflichtige Insider-Deals.
+
+**Quelle (gratis, offiziell):** SEC EDGAR Current-Filings-Atom (neueste
+Form 4) → pro Filing `index.json` → primäres Ownership-XML. Fair-Use:
+`SEC_USER_AGENT` (ENV-übersteuerbar), max. 12 XML-Dateien pro Refresh,
+Radar-Cache 30 Min begrenzt die Last. 1–2 Tage Verspätung ist der Natur der
+Meldefrist geschuldet (Form 4 = binnen 2 Geschäftstagen).
+
+**Logik (ehrlich eng):** Nur **Open-Market**-Transaktionen (Code `P` = Kauf,
+`S` = Verkauf) — Grants (A), Option-Exercise (M) & Co. fliegen raus, weil
+sie keine Marktmeinung sind. Rauschfilter ≥ **$100k** Deal-Wert. Ausgabe:
+Ticker, Insider-Name, Rolle (Director/Officer/10%-Owner), Richtung
+(🟢 KAUF/🔴 VERKAUF), Wert, Datum, Top 15 nach Wert. Parser tolerant
+(Std-lib ElementTree, keine neuen Dependencies).
+
+**Frontend:** Karte „🕵️ Insider-Trades (SEC Form 4)" auf `/smart-money`
+zwischen Monster-Volumen und Makro-Wellen.
+
+**Tests:** +6 (Atom-Parsing, P/S-Filter & Mindestwert, Kauf/Verkauf-Richtung,
+E2E mit gemocktem HTTP inkl. User-Agent-Assert, Empty-Pfad, Nie-werfen).
+Suite **1272, alle grün**.
+
 ---
 
 ## 4. Das Mail-System (Stand 29.07., abends)
@@ -741,7 +766,8 @@ Suite-Stand-Historie:
 1242 (30.07. Wächter-Event-Log + Wochenreport-Sektion, alle grün;
 31.07. Zweitkalibrierung Intervall 60 Min / Budget 35 Min, alle grün) →
 1259 (31.07. Smart-Money-Radar Info-Block + Nie-Trigger-Guard, alle grün) →
-1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün).
+1266 (31.07. Monster-Volumen-Aktien-Sektion mit eigener Baseline, alle grün) →
+1272 (31.07. SEC-Insider-Trades-Sektion (Form 4), alle grün).
 
 ---
 

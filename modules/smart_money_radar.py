@@ -400,6 +400,150 @@ def fetch_stock_waves(api_key: str | None, history_path: str | None = None) -> d
         return {"status": "error", "error": str(exc)[:200], "waves": []}
 
 
+# ── 2c) Insider-Trades (SEC EDGAR Form 4, gratis + namentlich) ───────────────
+
+EDGAR_CURRENT_F4_URL = ("https://www.sec.gov/cgi-bin/browse-edgar"
+                        "?action=getcurrent&type=4&owner=include&count=20&output=atom")
+SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "AlphaStation/1.0 (trading-research)")
+INSIDER_MIN_VALUE_USD = 100_000.0   # Rauschfilter: nur Open-Market-Deals >= $100k
+INSIDER_MAX_FILINGS = 12            # max. XML-Dateien pro Refresh (Fair-Use)
+
+
+def parse_atom_feed(atom_text: str) -> list[dict[str, str]]:
+    """EDGAR-Atom (neueste Form-4-Filings) -> [{title, link, updated}]."""
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    root = ET.fromstring(atom_text)
+    out: list[dict[str, str]] = []
+    for entry in root.findall("a:entry", ns):
+        link_el = entry.find("a:link", ns)
+        href = (link_el.get("href") or "") if link_el is not None else ""
+        if not href:
+            continue
+        out.append({
+            "title": (entry.findtext("a:title", default="", namespaces=ns) or "").strip(),
+            "link": href,
+            "updated": (entry.findtext("a:updated", default="", namespaces=ns) or "").strip(),
+        })
+    if not out:
+        raise ValueError("EDGAR-Atom ohne Eintraege (Layout geaendert?)")
+    return out
+
+
+def _filing_xml_url(index_link: str) -> str | None:
+    """Filing-Index-URL -> primaere XML-Datei (via EDGAR index.json)."""
+    # .../data/{cik}/{acc_nodash}/{acc}-index.htm -> .../index.json
+    folder = index_link.rsplit("/", 1)[0]
+    listing = _http_get_json(folder + "/index.json")
+    for item in ((listing.get("directory") or {}).get("item") or []):
+        name = str(item.get("name") or "")
+        if name.endswith(".xml") and not name.startswith("R"):
+            return f"{folder}/{name}"
+    return None
+
+
+def _xml_value(node, *path: str) -> str:
+    """ownershipDocument-Helfer: verschachtelten .value-Text holen ('' wenn leer)."""
+    cur = node
+    for tag in path:
+        cur = cur.find(tag) if cur is not None else None
+        if cur is None:
+            return ""
+    val = cur.find("value")
+    return (val.text or "").strip() if val is not None and val.text else ""
+
+
+def parse_form4_xml(xml_text: str, link: str = "") -> list[dict[str, Any]]:
+    """ownershipDocument -> Open-Market-Deals (P=Kauf, S=Verkauf) als Zeilen.
+
+    Nur nonDerivative-Transaktionen mit Code P/S und Wert >=
+    INSIDER_MIN_VALUE_USD. Gibt [] zurueck, wenn nichts Relevantes dabei ist.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_text)
+    issuer = _xml_value(root, "issuer", "issuerName")
+    ticker = _xml_value(root, "issuer", "issuerTradingSymbol")
+    owner_el = root.find("reportingOwner")
+    insider = ""
+    title = ""
+    if owner_el is not None:
+        insider = _xml_value(owner_el, "reportingOwnerId", "rptOwnerName")
+        rel = owner_el.find("reportingOwnerRelationship")
+        if rel is not None:
+            title = _xml_value(rel, "officerTitle")
+            if not title:
+                flags = []
+                if (rel.findtext("isDirector") or "0") in ("1", "true"):
+                    flags.append("Director")
+                if (rel.findtext("isOfficer") or "0") in ("1", "true"):
+                    flags.append("Officer")
+                if (rel.findtext("isTenPercentOwner") or "0") in ("1", "true"):
+                    flags.append("10%-Owner")
+                title = "/".join(flags)
+    rows: list[dict[str, Any]] = []
+    table = root.find("nonDerivativeTable")
+    if table is None:
+        return rows
+    for tx in table.findall("nonDerivativeTransaction"):
+        code = _xml_value(tx, "transactionCoding", "transactionCode")
+        if code not in ("P", "S"):
+            continue  # nur echte Open-Market-Kaeufe/-Verkauefe
+        try:
+            shares = float(_xml_value(tx, "transactionAmounts", "transactionShares") or 0)
+            price = float(_xml_value(tx, "transactionAmounts", "transactionPricePerShare") or 0)
+        except ValueError:
+            continue
+        value = shares * price
+        if value < INSIDER_MIN_VALUE_USD:
+            continue
+        rows.append({
+            "issuer": issuer, "ticker": ticker, "insider": insider,
+            "title": title, "kind": "buy" if code == "P" else "sell",
+            "shares": shares, "price": price, "value_usd": round(value, 0),
+            "date": _xml_value(tx, "transactionDate"), "link": link,
+        })
+    return rows
+
+
+def fetch_insider_trades() -> dict[str, Any]:
+    """Sektion Insider-Trades: neueste Form 4 von SEC EDGAR, P/S >= $100k."""
+    headers = {"User-Agent": SEC_USER_AGENT}
+    try:
+        atom_resp = requests.get(EDGAR_CURRENT_F4_URL, timeout=HTTP_TIMEOUT,
+                                 headers=headers)
+        atom_resp.raise_for_status()
+        entries = parse_atom_feed(atom_resp.text)
+        trades: list[dict[str, Any]] = []
+        errors = 0
+        parsed = 0
+        for entry in entries:
+            if parsed >= INSIDER_MAX_FILINGS:
+                break
+            try:
+                xml_url = _filing_xml_url(entry["link"])
+                if not xml_url:
+                    continue
+                resp = requests.get(xml_url, timeout=HTTP_TIMEOUT, headers=headers)
+                resp.raise_for_status()
+                trades.extend(parse_form4_xml(resp.text, link=entry["link"]))
+                parsed += 1
+            except Exception:
+                errors += 1
+        trades.sort(key=lambda r: r["value_usd"], reverse=True)
+        out: dict[str, Any] = {
+            "status": "ok" if trades else "empty",
+            "note": (f"Open-Market-Kaeufe/-Verkaeufe von Insidern (Form 4), "
+                     f">= ${INSIDER_MIN_VALUE_USD / 1000:.0f}k — SEC EDGAR, "
+                     f"1–2 Tage Verspaetung · {parsed} Filings geprueft"),
+            "trades": trades[:15],
+        }
+        if errors:
+            out["partial_errors"] = errors
+        return out
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)[:200], "trades": []}
+
+
 # ── 3) Whale-Alerts (optional, WHALE_ALERT_KEY) ──────────────────────────────
 
 def classify_whale_tx(tx: dict[str, Any]) -> str:
@@ -474,6 +618,7 @@ def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
                 "etf_flows": fetch_etf_flows(),
                 "volume_waves": fetch_volume_waves(polygon_key),
                 "stock_waves": fetch_stock_waves(polygon_key),
+                "insider_trades": fetch_insider_trades(),
                 "whale_alerts": fetch_whale_alerts(whale_key),
             },
             "_cached_at": now,

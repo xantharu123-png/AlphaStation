@@ -157,6 +157,8 @@ def _mock_sections(monkeypatch):
                         lambda key: {"status": "ok", "waves": [{"symbol": "GLD", "wave": True}]})
     monkeypatch.setattr(smr, "fetch_stock_waves",
                         lambda key, history_path=None: {"status": "ok", "waves": []})
+    monkeypatch.setattr(smr, "fetch_insider_trades",
+                        lambda: {"status": "ok", "trades": []})
     monkeypatch.setattr(smr, "fetch_whale_alerts",
                         lambda key: {"status": "disabled", "transactions": []})
 
@@ -166,8 +168,8 @@ def test_build_radar_writes_and_reuses_cache(monkeypatch, tmp_path):
     path = str(tmp_path / "radar.json")
     first = smr.build_radar(polygon_key="K", cache_path=path)
     assert first["cache"] == "new"
-    assert set(first["sections"]) == {"etf_flows", "volume_waves",
-                                      "stock_waves", "whale_alerts"}
+    assert set(first["sections"]) == {"etf_flows", "volume_waves", "stock_waves",
+                                      "insider_trades", "whale_alerts"}
     assert "kein Trigger" in first["disclaimer"] or "Kein Signal" in first["disclaimer"]
     # Zweiter Aufruf: aus dem Cache (Fetcher wuerden crashen, falls aufgerufen)
     monkeypatch.setattr(smr, "fetch_etf_flows",
@@ -214,8 +216,8 @@ def test_api_endpoint_smoke(monkeypatch, tmp_path):
     resp = api.get_smart_money_radar(refresh=1)
     assert resp.status_code == 200
     data = json.loads(resp.body)
-    assert set(data["sections"]) == {"etf_flows", "volume_waves",
-                                     "stock_waves", "whale_alerts"}
+    assert set(data["sections"]) == {"etf_flows", "volume_waves", "stock_waves",
+                                     "insider_trades", "whale_alerts"}
     assert data["disclaimer"]
 
 
@@ -366,3 +368,139 @@ def test_fetch_stock_waves_error_never_raises(monkeypatch, tmp_path):
     assert sec["status"] == "error"
     assert "polygon down" in sec["error"]
     assert sec["waves"] == []
+
+
+# ── Insider-Trades (SEC EDGAR Form 4, 31.07.) ────────────────────────────────
+
+ATOM_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<entry>
+  <title>ACME Corp (ACME)</title>
+  <link href="https://www.sec.gov/Archives/edgar/data/123/0001-26-000001-index.htm"/>
+  <updated>2026-07-31T08:00:00-04:00</updated>
+</entry>
+<entry>
+  <title>BETA Inc (BETA)</title>
+  <link href="https://www.sec.gov/Archives/edgar/data/456/0002-26-000002-index.htm"/>
+  <updated>2026-07-31T07:55:00-04:00</updated>
+</entry>
+</feed>"""
+
+FORM4_FIXTURE = """<?xml version="1.0"?>
+<ownershipDocument>
+  <issuer>
+    <issuerName><value>ACME Corp</value></issuerName>
+    <issuerTradingSymbol><value>ACME</value></issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName><value>Doe Jane</value></rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>1</isDirector><isOfficer>0</isOfficer><isTenPercentOwner>0</isTenPercentOwner>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-07-30</value></transactionDate>
+      <transactionCoding><transactionCode><value>P</value></transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>10000</value></transactionShares>
+        <transactionPricePerShare><value>25.50</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-07-30</value></transactionDate>
+      <transactionCoding><transactionCode><value>A</value></transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>5000</value></transactionShares>
+        <transactionPricePerShare><value>0</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-07-29</value></transactionDate>
+      <transactionCoding><transactionCode><value>S</value></transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>100</value></transactionShares>
+        <transactionPricePerShare><value>20</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>"""
+
+
+def test_parse_atom_feed_basic():
+    entries = smr.parse_atom_feed(ATOM_FIXTURE)
+    assert len(entries) == 2
+    assert entries[0]["title"] == "ACME Corp (ACME)"
+    assert entries[0]["link"].endswith("-index.htm")
+    with pytest.raises(ValueError):
+        smr.parse_atom_feed("<feed xmlns='http://www.w3.org/2005/Atom'/>")
+
+
+def test_parse_form4_xml_filters_and_fields():
+    rows = smr.parse_form4_xml(FORM4_FIXTURE, link="L")
+    assert len(rows) == 1  # A (Grant) und S unter $100k fallen raus
+    r = rows[0]
+    assert r["kind"] == "buy"
+    assert r["insider"] == "Doe Jane"
+    assert r["title"] == "Director"
+    assert r["ticker"] == "ACME"
+    assert r["value_usd"] == 255000.0
+    assert r["date"] == "2026-07-30"
+    assert r["link"] == "L"
+
+
+def test_parse_form4_xml_sell_direction():
+    xml = FORM4_FIXTURE.replace('<transactionCode><value>P</value></transactionCode>',
+                                '<transactionCode><value>S</value></transactionCode>')
+    rows = smr.parse_form4_xml(xml)
+    assert rows[0]["kind"] == "sell"
+
+
+def test_fetch_insider_trades_e2e_mocked(monkeypatch):
+    class _Resp:
+        def __init__(self, text):
+            self.text = text
+        def raise_for_status(self):
+            return None
+
+    def _fake_get(url, timeout=12, headers=None):
+        assert "AlphaStation" in (headers or {}).get("User-Agent", "")
+        if "browse-edgar" in url:
+            return _Resp(ATOM_FIXTURE)
+        return _Resp(FORM4_FIXTURE)
+
+    monkeypatch.setattr(smr.requests, "get", _fake_get)
+    monkeypatch.setattr(smr, "_filing_xml_url", lambda link: "https://x/y.xml")
+    sec = smr.fetch_insider_trades()
+    assert sec["status"] == "ok"
+    assert sec["trades"][0]["ticker"] == "ACME"
+    assert sec["trades"][0]["kind"] == "buy"
+    assert "SEC EDGAR" in sec["note"]
+
+
+def test_fetch_insider_trades_empty_when_no_big_deals(monkeypatch):
+    xml_small = FORM4_FIXTURE.replace("<value>10000</value>", "<value>10</value>")
+    monkeypatch.setattr(smr, "_filing_xml_url", lambda link: "https://x/y.xml")
+
+    class _Resp:
+        def __init__(self, text):
+            self.text = text
+        def raise_for_status(self):
+            return None
+
+    def _fake_get(url, timeout=12, headers=None):
+        return _Resp(ATOM_FIXTURE if "browse-edgar" in url else xml_small)
+    monkeypatch.setattr(smr.requests, "get", _fake_get)
+    sec = smr.fetch_insider_trades()
+    assert sec["status"] == "empty"
+    assert sec["trades"] == []
+
+
+def test_fetch_insider_trades_error_never_raises(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("sec.gov down")
+    monkeypatch.setattr(smr.requests, "get", _boom)
+    sec = smr.fetch_insider_trades()
+    assert sec["status"] == "error"
+    assert "sec.gov down" in sec["error"]
+    assert sec["trades"] == []
