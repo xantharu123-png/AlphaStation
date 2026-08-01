@@ -2406,6 +2406,48 @@ def _run_insider_cluster_alert(secrets=None, now_et=None):
 _insider_cluster_warned_missing = False
 
 
+def _smtp_timeout_seconds(secrets):
+    """SMTP-Timeout je Socket-Operation (Sekunden).
+
+    AUDIT 2026-08-01: konfigurierbar via secrets/env SMTP_TIMEOUT, Default 15.
+    Defensiv: ungueltige Werte fallen auf den Default zurueck.
+    """
+    raw = (secrets or {}).get("SMTP_TIMEOUT", os.environ.get("SMTP_TIMEOUT", "15"))
+    try:
+        val = int(str(raw).strip())
+        return val if 3 <= val <= 120 else 15
+    except (TypeError, ValueError):
+        return 15
+
+
+def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout=15):
+    """Zustellung ueber Gmail mit Transport-Fallback.
+
+    AUDIT 2026-08-01 (Vorfall KW31-Wochenreport): bisher NUR SSL:465. Ein
+    Port-465-Problem (Provider-Block, IPv6-Haenger, Google-Rate-Limit) liess
+    JEDE Mail 3x in den Timeout laufen (~30 s/Versuch) und kostete sie
+    endgueltig. Jetzt: primaer 465/SSL, bei Fehler Fallback 587/STARTTLS —
+    Standard-Praxis und deckt die haeufigsten Transport-Ausfaelle ab.
+
+    Rueckgabe: Transport-Tag ("ssl465" | "starttls587"). Wirft nach beiden
+    Versuchen die letzte Exception (Retry-Loop des Callers entscheidet).
+    """
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=timeout) as server:
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, recipients, msg_string)
+        return "ssl465"
+    except Exception as exc465:
+        log.warning(f"⚠️ SMTP 465/SSL fehlgeschlagen ({exc465}) — Fallback 587/STARTTLS")
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=timeout) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(gmail_user, gmail_pass)
+        server.sendmail(gmail_user, recipients, msg_string)
+    return "starttls587"
+
+
 def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text="", mail_channel=""):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
 
@@ -2476,11 +2518,12 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
             msg.attach(MIMEText(plain, "plain", "utf-8"))
             msg.attach(MIMEText(body_html, "html", "utf-8"))
 
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
-                server.login(gmail_user, gmail_pass)
-                server.sendmail(gmail_user, recipients, msg.as_string())
+            transport = _smtp_transport_send(
+                msg.as_string(), gmail_user, gmail_pass, recipients,
+                timeout=_smtp_timeout_seconds(secrets),
+            )
 
-            log.info(f"📧 E-Mail Alert gesendet: {subject}")
+            log.info(f"📧 E-Mail Alert gesendet ({transport}): {subject}")
             # Telegram-Spiegel nur für trade-Mails, nur nach Mail-Erfolg;
             # subject ist hier bereits der finale (geprefixte) Betreff.
             _send_telegram_companion(subject, mail_class, telegram_text)
