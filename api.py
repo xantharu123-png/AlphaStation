@@ -130,6 +130,10 @@ except Exception:  # pragma: no cover - Zeitstempel-Ausfall darf Mails nie stopp
     def _mail_timestamp_dual(now_utc=None) -> str:
         now = now_utc or datetime.now(timezone.utc)
         return f'{now.strftime("%d.%m.%Y %H:%M")} UTC'
+try:
+    from modules import mail_outbox as _mail_outbox
+except Exception:  # pragma: no cover - Mailversand muss ohne Outbox weiterlaufen
+    _mail_outbox = None
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -160,11 +164,13 @@ try:
     from modules.signal_tracker import (
         record_alert_signals,
         load_performance_summary,
+        load_breaker_recovery_summary,
         get_signal_count,
     )
 except ImportError as _sig_track_err:
     record_alert_signals = None
     load_performance_summary = None
+    load_breaker_recovery_summary = None
     get_signal_count = None
     print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
 
@@ -1662,6 +1668,20 @@ def _email_alert_status() -> Dict[str, Any]:
             platform_recipients = []
     configured_recipients = [addr for addr in str(alert_to).split(",") if addr.strip()]
     startup_remaining = max(0, int(_EMAIL_STARTUP_DELAY - (time.time() - _EMAIL_STARTUP_TIME)))
+    outbox_status = {
+        "enabled": False,
+        "available": False,
+        "pending": 0,
+        "sent": 0,
+        "expired": 0,
+        "dead": 0,
+        "error": "module unavailable",
+    }
+    if _mail_outbox is not None:
+        try:
+            outbox_status = _mail_outbox.stats()
+        except Exception as exc:
+            outbox_status["error"] = str(exc)
     return {
         "configured": bool(gmail_user and gmail_pass),
         "sender_configured": bool(gmail_user),
@@ -1686,6 +1706,7 @@ def _email_alert_status() -> Dict[str, Any]:
         },
         "min_alert_score": _ALERT_MIN_SCORE,
         "dedupe": _email_dedupe_status(),
+        "outbox": outbox_status,
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
         "optional_keys": ["ALERT_EMAIL"],
         "config_sources_checked": [
@@ -1729,7 +1750,7 @@ def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
         if age_seconds <= window_seconds:
             recent.append(event)
 
-    counts = {"sent": 0, "skipped": 0, "error": 0}
+    counts = {"sent": 0, "skipped": 0, "error": 0, "outbox_queued": 0}
     for event in recent:
         status = str(event.get("status") or "").lower()
         counts[status] = counts.get(status, 0) + 1
@@ -1739,6 +1760,20 @@ def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
         (event for event in reversed(events) if str(event.get("status") or "").lower() == "sent"),
         None,
     )
+    outbox_status = {
+        "enabled": False,
+        "available": False,
+        "pending": 0,
+        "sent": 0,
+        "expired": 0,
+        "dead": 0,
+        "error": "module unavailable",
+    }
+    if _mail_outbox is not None:
+        try:
+            outbox_status = _mail_outbox.stats()
+        except Exception as exc:
+            outbox_status["error"] = str(exc)
     return {
         "window_seconds": window_seconds,
         "events_recorded_since_start": len(events),
@@ -1746,9 +1781,14 @@ def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
         "sent": counts.get("sent", 0),
         "skipped": counts.get("skipped", 0),
         "errors": counts.get("error", 0),
+        "queued_since_start": counts.get("outbox_queued", 0),
+        "outbox": outbox_status,
         "last_event": last_event,
         "last_sent_at": last_sent.get("timestamp") if last_sent else None,
-        "note": "In-memory events since the current API process started.",
+        "note": (
+            "Process events plus persistent retry outbox. "
+            "Outbox counters survive API restarts."
+        ),
     }
 
 
@@ -7822,6 +7862,29 @@ def _send_email_alert(
             else:
                 print(f"[Alert] Email FEHLER nach 3 Versuchen: {e}")
                 _record_email_event(subject, "error", str(e))
+                # Der Outbox-Worker liefert mit Backoff nach; die TTL verhindert
+                # dabei zu spaete Zustellungen zeitkritischer Trading-Signale.
+                if _mail_outbox is not None:
+                    try:
+                        _ob_id = _mail_outbox.enqueue(
+                            subject,
+                            branded_body_html,
+                            recipients,
+                            mail_class=mail_class,
+                            telegram_text=telegram_text or "",
+                        )
+                        if _ob_id:
+                            print(
+                                f"[Alert] Mail in Outbox eingereiht "
+                                f"(id={_ob_id}): {subject}"
+                            )
+                            _record_email_event(
+                                subject,
+                                "outbox_queued",
+                                f"id={_ob_id}",
+                            )
+                    except Exception as _ob_exc:
+                        print(f"[Alert] Outbox-Enqueue Fehler (ignoriert): {_ob_exc}")
                 return False
 
 
@@ -8149,11 +8212,30 @@ def _regime_mail_decision(
                     summary = None
         state = _rf.load_state()
         breakers = dict(state.get("breakers") or {})
+        recovery_metrics = None
+        state_entry = breakers.get(scanner_key) or {}
+        tripped_at = state_entry.get("tripped_at")
+        if (
+            breaker_enabled
+            and tripped_at
+            and load_breaker_recovery_summary is not None
+        ):
+            try:
+                recovery_metrics = load_breaker_recovery_summary(
+                    scanner_key,
+                    tripped_at,
+                )
+            except Exception as exc:
+                print(
+                    "[Regime-Filter] Post-trip-Recovery nicht ladbar "
+                    f"(fail-closed fuer Release): {exc}"
+                )
         decision = _rf.decide_mail_regime(
             scanner_key,
             context=context,
             summary=summary,
             state=breakers,
+            recovery_metrics=recovery_metrics,
             now=now_utc,
             market_gate_enabled=market_enabled,
             breaker_enabled=breaker_enabled,
@@ -15339,71 +15421,63 @@ _SCAN_TIMEOUTS = {
     "strategy_scan": 35,
 }
 
-# ── Haenge-Alarm + Selbstheilung (AUDIT 2026-07-30) ──────────────────────────
-# Ein Scan gilt als "stuck", wenn er laenger als sein Zeitbudget laeuft
-# (wahrscheinlich ein Netz-Aufruf ohne Antwort). Beim ERSTEN Budget-Riss geht
-# eine Warn-Mail an den Betreiber (einmal je Episode, persistentes Dedupe).
-# Am Hartdeckel (3x Budget, mindestens Budget + 15 Min) setzt der Waechter den
-# Zustand zurueck, damit der naechste Intervall-Takt einen frischen Worker
-# startet. Der alte Thread bleibt isoliert (Python-Threads kann man nicht
-# sicher toeten); sein finally erkennt an der _run_id, dass er veraltet ist,
-# und ruehrt den neuen Zustand nicht mehr an.
+# Haenge-Alarm ohne unsicheren Parallelstart.
+# Python-Threads koennen nicht sicher beendet werden. Ein lebender Worker bleibt
+# bis zu seinem echten Ende exklusiver Owner des Scanners. Am Hartdeckel wird
+# ein kontrollierter Dienst-Neustart verlangt, aber niemals ein zweiter Worker
+# fuer denselben Scanner gestartet.
 _STUCK_HARD_CAP_MULT = 3
 _STUCK_HARD_CAP_MIN_EXTRA_SEC = 15 * 60
 
 
 def _stuck_hard_cap_sec(name) -> int:
-    """Hartdeckel in Sekunden: ab hier wird ein Haenger automatisch freigegeben."""
+    """Hartdeckel in Sekunden: ab hier ist ein kontrollierter Neustart noetig."""
     budget_sec = _SCAN_TIMEOUTS.get(name, 10) * 60
     return max(budget_sec * _STUCK_HARD_CAP_MULT, budget_sec + _STUCK_HARD_CAP_MIN_EXTRA_SEC)
 
 
 # Anti-Spam (30.07., Live-Befund strategy_scan): unabhaengig vom Episoden-
 # Dedupe hoechstens EINE Warn-Mail je Scanner und 6h — ein chronisch
-# langsamer Scan darf den Betreiber nicht zuspamen. Reset-/Entwarnungs-Mails
-# gehen nur raus, wenn die Episode auch angekuendigt wurde (Warnung haengt
-# sonst in der Throttle und die Folge-Mail waere kontext-los).
+# langsamer Scan darf den Betreiber nicht zuspamen. Die Entwarnung wird erst
+# nach dem tatsaechlichen Ende des betroffenen Workers gesendet.
 _STUCK_WARN_THROTTLE_SEC = 6 * 3600
 
 
-def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode_key="", episode_started_at=None):
+def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=""):
     """Betreiber-Warn-Mail bei haengendem Scan. Einmal je Episode (Dedupe-Key
     enthaelt den Epochen-Start, damit JEDE Episode genau eine Mail bekommt —
     auch ueber Prozess-Neustarts hinweg). Mark erst NACH erfolgreichem Versand.
-    Zusaetzlich 6h-Throttle je Scanner (Anti-Spam 30.07.); Reset-Mail nur
-    fuer angekuendigte Episoden."""
+    Zusaetzlich gilt ein 6h-Throttle je Scanner (Anti-Spam)."""
     minutes = max(1, int(stuck_sec // 60))
     dedupe_key = episode_key or f"stuck_scan_{name}"
     if _email_dedupe_active(dedupe_key, 7 * 86400):
         return False
-    if not recovered:
+    if not hard:
         if _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC):
             print(f"[Scheduler] WATCHDOG: {name} Warnung unterdrueckt "
                   f"(max 1 Mail/{_STUCK_WARN_THROTTLE_SEC // 3600}h je Scanner)")
             _log_watchdog_event("warn", name, stuck_min=minutes, mailed=False, throttled=True)
             return False
-    elif (
-        episode_started_at is not None
-        and _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC)
-        and not _email_dedupe_active(f"stuck_scan_{name}_{int(episode_started_at)}", 7 * 86400)
-    ):
-        print(f"[Scheduler] WATCHDOG: {name} Reset-Mail unterdrueckt "
-              "(Warnung dieser Episode war throttle-gedeckelt)")
-        _log_watchdog_event("reset", name, stuck_min=minutes, mailed=False, throttled=True)
-        return False
-    if recovered:
-        subject = f"Scan-Waechter: {name} automatisch zurueckgesetzt"
-        headline = f"{name} wurde nach {minutes} Min automatisch zurueckgesetzt"
-        detail = ("Der Haenger hat das Hartdeckel (3x Zeitbudget) ueberschritten. "
-                  "Der Zustand wurde freigegeben — beim naechsten Intervall-Takt "
-                  "startet der Scan automatisch frisch. <b>Ein Neustart ist NICHT noetig.</b>")
+    if hard:
+        subject = f"Scan-Waechter: {name} braucht kontrollierten Neustart"
+        headline = f"{name} laeuft seit {minutes} Min und hat das Hartlimit erreicht"
+        detail = (
+            "Der laufende Python-Thread kann nicht sicher abgebrochen werden. "
+            "Zum Schutz vor doppelten Cache-Schreibvorgaengen und doppelten Alerts "
+            "wird <b>kein paralleler Ersatzlauf</b> gestartet. Bitte den API-Dienst "
+            "kontrolliert neu starten: <code>systemctl restart tradingbot-api</code>."
+        )
     else:
         subject = f"Scan-Waechter: {name} haengt"
         headline = f"{name} laeuft seit {minutes} Min (Budget {timeout_min} Min)"
-        detail = ("Der Scan hat sein Zeitbudget gerissen und haengt wahrscheinlich in "
-                  "einem Netz-Aufruf ohne Antwort. Ueberschreitet er das Hartdeckel, "
-                  "setzt der Waechter ihn automatisch zurueck — <b>du musst nichts tun.</b><br>"
-                  "Sofort-Abhilfe, falls gewuenscht: <code>systemctl restart tradingbot-api</code>")
+        detail = (
+            "Der Scan hat sein Zeitbudget gerissen und haengt wahrscheinlich in "
+            "einem Netz-Aufruf. Es wird kein paralleler Ersatzlauf gestartet. "
+            "Endet der Worker nicht selbst, meldet der Waechter am Hartlimit, dass "
+            "ein kontrollierter Dienst-Neustart erforderlich ist. Der sichere "
+            "Serverbefehl dafuer lautet: "
+            "<code>systemctl restart tradingbot-api</code>."
+        )
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#b45309">Scan-Waechter</h2>
@@ -15418,9 +15492,9 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, recovered=False, episode
     sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
     if sent:
         _email_dedupe_mark(dedupe_key)
-        if not recovered:
+        if not hard:
             _email_dedupe_mark(f"stuck_throttle_{name}")
-    _log_watchdog_event("reset" if recovered else "warn", name,
+    _log_watchdog_event("hard_timeout" if hard else "warn", name,
                         stuck_min=minutes, mailed=bool(sent))
     return bool(sent)
 
@@ -15469,8 +15543,8 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
 def _scan_watchdog_check(name, now=None):
     """Haenge-Check fuer EINEN Scanner (wird im Scheduler-Takt aufgerufen).
 
-    Returns None oder "stuck" (Budget erstmals gerissen, Warn-Mail raus) bzw.
-    "recovered" (Hartdeckel erreicht, Zustand fuer frischen Start freigegeben).
+    Returns None oder "stuck" (Budget erstmals gerissen) bzw.
+    "stuck_hard" (Hartdeckel erreicht; kontrollierter Neustart erforderlich).
     Setzt die bekannten Status-Felder (_timeout_logged, last_error) wie der
     fruehere Inline-Watchdog. Wirft nie — ein Waechter-Fehler darf den
     Scheduler unter keinen Umstaenden abbrechen.
@@ -15500,39 +15574,40 @@ def _scan_watchdog_check(name, now=None):
             # Reset und Folge-Runs, wird erst nach echtem Erfolg geloest.
             current.setdefault("_episode_started_at", started_at)
         if stuck_sec > _stuck_hard_cap_sec(name):
-            # Selbstheilung: Zustand freigeben, damit der naechste Takt frisch
-            # starten kann. Der alte Thread bleibt isoliert (s. Modul-Kommentar).
             with _scan_lock:
                 current = _scan_status.get(name)
                 if current is None or current.get("_started_at") != started_at:
                     return None
-                current["running"] = False
-                current["_recovered_at"] = now
                 current.setdefault("_episode_started_at", started_at)
+                hard_first = not current.get("_hard_timeout_logged")
+                current["_hard_timeout_logged"] = True
                 current["last_error"] = (
-                    f"Haenger nach {max(1, int(stuck_sec // 60))} Min automatisch "
-                    "zurueckgesetzt; neuer Versuch beim naechsten Takt"
+                    f"Scan haengt seit {max(1, int(stuck_sec // 60))} Min; "
+                    "kontrollierter Dienst-Neustart erforderlich; kein Parallelstart"
                 )
-                thread = _scan_threads.get(name)
-                if thread is not None and thread is not threading.current_thread():
-                    _scan_threads.pop(name, None)
-            print(f"[Scheduler] WATCHDOG: {name} Hartdeckel nach {int(stuck_sec)}s — "
-                  "Zustand zurueckgesetzt, naechster Takt startet frisch")
-            try:
-                _send_stuck_scan_mail(
-                    name, stuck_sec, timeout_min, recovered=True,
-                    episode_key=f"stuck_scan_recover_{name}_{int(started_at)}",
-                    episode_started_at=started_at,
+            if hard_first:
+                print(
+                    f"[Scheduler] WATCHDOG: {name} Hartdeckel nach {int(stuck_sec)}s; "
+                    "Worker bleibt exklusiv, kontrollierter Neustart erforderlich"
                 )
-            except Exception as exc:
-                print(f"[Scheduler] Stuck-Mail (recover) fehlgeschlagen: {exc}")
-            return "recovered"
+                try:
+                    _send_stuck_scan_mail(
+                        name,
+                        stuck_sec,
+                        timeout_min,
+                        hard=True,
+                        episode_key=f"stuck_scan_hard_{name}_{int(started_at)}",
+                    )
+                except Exception as exc:
+                    print(f"[Scheduler] Stuck-Mail (hard) fehlgeschlagen: {exc}")
+                return "stuck_hard"
+            return None
         if first:
             print(f"[Scheduler] WATCHDOG: {name} exceeds {timeout_min}min; "
                   "no overlapping restart")
             try:
                 _send_stuck_scan_mail(
-                    name, stuck_sec, timeout_min, recovered=False,
+                    name, stuck_sec, timeout_min, hard=False,
                     episode_key=f"stuck_scan_{name}_{int(started_at)}",
                 )
             except Exception as exc:
@@ -15575,6 +15650,7 @@ def _run_scan_safe(name, func, timeout_min=None):
         _scan_status[name]["_started_at"] = time.time()
         _scan_status[name]["_run_id"] = run_id
         _scan_status[name].pop("_timeout_logged", None)
+        _scan_status[name].pop("_hard_timeout_logged", None)
         _scan_status[name]["last_attempt_at"] = datetime.now().isoformat()
         _scan_status[name].pop("last_error", None)
 
@@ -15604,16 +15680,13 @@ def _run_scan_safe(name, func, timeout_min=None):
                     state["_started_at"] = None
                     state.pop("_run_id", None)
                     state.pop("_timeout_logged", None)
+                    state.pop("_hard_timeout_logged", None)
                     # Nur ein erfolgreicher Lauf darf Cache-/Scheduler-Frische signalisieren.
                     if succeeded:
                         state["last_run"] = datetime.now().isoformat()
                         state.pop("last_error", None)
-                        # Entwarnung nach gemeldeter Haenge-Episode (30.07.):
-                        # der Episode-Marker ueberlebt Hartdeckel-Reset und
-                        # Folge-Runs im Status und wird erst hier — nach
-                        # echtem Erfolg — geloest.
+                        # Entwarnung erst nach dem echten Ende desselben Workers.
                         episode_started = state.pop("_episode_started_at", None)
-                        state.pop("_recovered_at", None)
                         if episode_started is not None:
                             recovery = (time.time() - float(episode_started), float(episode_started))
                     else:
@@ -17248,6 +17321,20 @@ def _build_system_health() -> Dict[str, Any]:
     last_email_event = email_pipeline.get("last_event") or {}
     if str(last_email_event.get("status") or "").lower() == "error":
         warnings.append("Der letzte Mail-Versuch ist technisch fehlgeschlagen")
+    outbox = email_pipeline.get("outbox") or {}
+    if email_alerts.get("configured") and not outbox.get("available", False):
+        warnings.append("Mail-Outbox ist nicht verfuegbar - fehlgeschlagene Mails koennen verloren gehen")
+    if int(outbox.get("dead") or 0) > 0:
+        warnings.append(f"{int(outbox.get('dead') or 0)} Mail(s) sind nach allen Wiederholungen fehlgeschlagen")
+    oldest_pending_age = int(outbox.get("oldest_pending_age_seconds") or 0)
+    queued_count = int(
+        outbox.get("queued")
+        or (int(outbox.get("pending") or 0) + int(outbox.get("sending") or 0))
+    )
+    if queued_count > 0 and oldest_pending_age > 900:
+        warnings.append(
+            f"{queued_count} Mail(s) warten seit mehr als 15 Minuten auf Versand"
+        )
 
     overall = "critical" if critical else ("warning" if warnings else "healthy")
     return {

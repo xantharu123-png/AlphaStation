@@ -12,11 +12,11 @@ Fail-open bei unbekanntem/fehlendem Regime — niemals ein erfundenes ROT.
 
 Layer 2 BREAKER (endogen): rollierende 7-Tage-Eigen-Performance je Scanner
 aus dem Signal-Tracker (load_performance_summary). Trip: n >= 10 entschieden
-UND ØR <= -0.3R UND Win% <= 25 %. Release: ØR > -0.1R ODER 5 Handelstage
-verstrichen. Selbstheilend: waehrend COOLDOWN keine Trade-Mails => keine neuen
-Trade-Signale => die alten Verlierer altern aus dem 7d-Fenster und ØR
-normalisiert sich von selbst Richtung 0; die 5-Handelstage-Frist deckt den
-Rest ab. Kein Deadlock moeglich.
+UND ØR <= -0.3R UND Win% <= 25 %. Release erfolgt ausschliesslich mit nach
+dem Trip entschiedener Trade-/Shadow-Evidenz: n >= 5, ØR > -0.1R und
+Win% >= 30 %. Nach 5 Handelstagen wird nur eine manuelle Pruefung faellig;
+Zeit allein hebt den Breaker niemals auf. Shadow-Signale werden waehrend ROT
+weiter ausgewertet und liefern die Recovery-Evidenz ohne Blindflug.
 
 Wirkung (Design-Entscheid Owner, 01.08.): Degradierung statt Abschaltung.
 Der Scanner scannt weiter taeglich; bei ROT geht die Swing-Mail als
@@ -53,6 +53,8 @@ BREAKER_TRIP_AVG_R = -0.3
 BREAKER_TRIP_WIN_PCT = 25.0
 BREAKER_RELEASE_AVG_R = -0.1
 BREAKER_RELEASE_TRADING_DAYS = 5
+BREAKER_RELEASE_MIN_DECIDED = 5
+BREAKER_RELEASE_MIN_WIN_PCT = 30.0
 
 # Gelb-Verschaerfung (Layer 1 RISK_OFF_LIGHT)
 YELLOW_SCORE_BOOST = 5
@@ -124,11 +126,14 @@ def trading_days_between(start_date, end_date) -> int:
 
 
 def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *,
+                     recovery_metrics: dict | None = None,
                      min_decided: int = BREAKER_MIN_DECIDED,
                      trip_avg_r: float = BREAKER_TRIP_AVG_R,
                      trip_win_pct: float = BREAKER_TRIP_WIN_PCT,
                      release_avg_r: float = BREAKER_RELEASE_AVG_R,
-                     release_trading_days: int = BREAKER_RELEASE_TRADING_DAYS) -> dict:
+                     release_trading_days: int = BREAKER_RELEASE_TRADING_DAYS,
+                     release_min_decided: int = BREAKER_RELEASE_MIN_DECIDED,
+                     release_min_win_pct: float = BREAKER_RELEASE_MIN_WIN_PCT) -> dict:
     """Trip-/Release-Logik des Breakers (rein).
 
     state_entry: {"tripped_at": iso} aus dem State-File (oder None).
@@ -141,18 +146,83 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
     win_pct = float(m.get("win_pct") or 0.0)
     avg_r = float(m.get("avg_r") or 0.0)
     tripped_at = _parse_dt((state_entry or {}).get("tripped_at"))
-    base = {"metrics": {"decided": decided, "win_pct": win_pct, "avg_r": avg_r}}
+    recovery = recovery_metrics or {}
+    recovery_available = recovery.get("available") is True
+    recovery_decided = int(recovery.get("decided") or 0)
+    try:
+        recovery_avg_r = float(recovery.get("avg_r"))
+    except (TypeError, ValueError):
+        recovery_avg_r = None
+    try:
+        recovery_win_pct = float(recovery.get("win_pct"))
+    except (TypeError, ValueError):
+        recovery_win_pct = None
+    recovery_view = {
+        "available": recovery_available,
+        "decided": recovery_decided,
+        "win_pct": recovery_win_pct,
+        "avg_r": recovery_avg_r,
+        "trade_decided": int(recovery.get("trade_decided") or 0),
+        "shadow_decided": int(recovery.get("shadow_decided") or 0),
+        "error": recovery.get("error"),
+    }
+    base = {
+        "metrics": {"decided": decided, "win_pct": win_pct, "avg_r": avg_r},
+        "recovery_metrics": recovery_view,
+        "review_due": False,
+    }
 
     if tripped_at is not None:
-        if avg_r > release_avg_r:
-            return {**base, "state": GREEN, "tripped_at": None,
-                    "reason": f"breaker_release_recovered (ØR {avg_r:+.2f} > {release_avg_r:+.2f})"}
-        if trading_days_between(tripped_at.date(), now.date()) >= release_trading_days:
-            return {**base, "state": GREEN, "tripped_at": None,
-                    "reason": f"breaker_release_time ({release_trading_days} Handelstage)"}
-        return {**base, "state": RED, "tripped_at": tripped_at.isoformat(),
-                "reason": (f"breaker_cooldown seit {tripped_at.date().isoformat()} "
-                           f"(7d: n={decided}, ØR {avg_r:+.2f}, Win {win_pct:.0f}%)")}
+        recovery_passes = (
+            recovery_available
+            and recovery_decided >= release_min_decided
+            and recovery_avg_r is not None
+            and recovery_avg_r > release_avg_r
+            and recovery_win_pct is not None
+            and recovery_win_pct >= release_min_win_pct
+        )
+        if recovery_passes:
+            return {
+                **base,
+                "state": GREEN,
+                "tripped_at": None,
+                "reason": (
+                    "breaker_release_recovered "
+                    f"(post-trip n={recovery_decided}, "
+                    f"AvgR {recovery_avg_r:+.2f} > {release_avg_r:+.2f}, "
+                    f"Win {recovery_win_pct:.0f}% >= {release_min_win_pct:.0f}%)"
+                ),
+            }
+
+        review_due = (
+            trading_days_between(tripped_at.date(), now.date())
+            >= release_trading_days
+        )
+        if review_due:
+            return {
+                **base,
+                "state": RED,
+                "tripped_at": tripped_at.isoformat(),
+                "review_due": True,
+                "reason": (
+                    f"breaker_review_due seit {tripped_at.date().isoformat()} "
+                    f"({release_trading_days} Handelstage; Freigabe erst mit "
+                    f"post-trip n>={release_min_decided}, "
+                    f"AvgR>{release_avg_r:+.2f}, "
+                    f"Win>={release_min_win_pct:.0f}%)"
+                ),
+            }
+
+        return {
+            **base,
+            "state": RED,
+            "tripped_at": tripped_at.isoformat(),
+            "reason": (
+                f"breaker_cooldown seit {tripped_at.date().isoformat()} "
+                f"(7d: n={decided}, AvgR {avg_r:+.2f}, Win {win_pct:.0f}%; "
+                f"post-trip n={recovery_decided})"
+            ),
+        }
 
     if decided >= min_decided and avg_r <= trip_avg_r and win_pct <= trip_win_pct:
         return {**base, "state": RED, "tripped_at": now.isoformat(),
@@ -204,8 +274,12 @@ def build_banner(decision: dict) -> str:
             "#fef2f2", "#fca5a5", "#991b1b",
             f"🟥 EIGEN-PERFORMANCE COOLDOWN ({decision.get('scanner', '')}): "
             f"{decision.get('reason', '')}. Trip-Schwellen unterschritten — "
-            "diese Mail ist NUR BEOBACHTUNG. Auto-Release bei Erholung (ØR > "
-            f"{BREAKER_RELEASE_AVG_R:+.1f}R) oder nach {BREAKER_RELEASE_TRADING_DAYS} Handelstagen. "
+            "diese Mail ist NUR BEOBACHTUNG. Freigabe erst nach mindestens "
+            f"{BREAKER_RELEASE_MIN_DECIDED} post-trip Ergebnissen mit AvgR > "
+            f"{BREAKER_RELEASE_AVG_R:+.1f}R und Winrate >= "
+            f"{BREAKER_RELEASE_MIN_WIN_PCT:.0f} %. "
+            f"Nach {BREAKER_RELEASE_TRADING_DAYS} Handelstagen wird nur eine manuelle "
+            "Pruefung faellig; Zeit allein gibt nicht frei. "
             "Setups laufen als Shadow-Messung weiter.")
     if decision.get("state") == YELLOW:
         return _banner_html(
@@ -220,6 +294,7 @@ def build_banner(decision: dict) -> str:
 
 def decide_mail_regime(scanner_key: str, *, context: dict | None = None,
                        summary: dict | None = None, state: dict | None = None,
+                       recovery_metrics: dict | None = None,
                        now=None, market_gate_enabled: bool = True,
                        breaker_enabled: bool = True) -> dict:
     """Kombiniert Layer 1 + 2 zu einer Mail-Entscheidung fuer einen Scanner.
@@ -240,6 +315,7 @@ def decide_mail_regime(scanner_key: str, *, context: dict | None = None,
             breaker_metrics(summary, scanner_key),
             (state or {}).get(scanner_key),
             now,
+            recovery_metrics=recovery_metrics,
         )
 
     new_entry = ({"tripped_at": breaker_eval["tripped_at"]}

@@ -27,7 +27,14 @@ WATCHDOG_EVENTS_PATH = os.environ.get("WATCHDOG_EVENTS_PATH", _DEFAULT_PATH)
 MAX_LINES = 2000
 TRIM_TO = 1500
 
-VALID_KINDS = ("warn", "reset", "recovery", "bg_warn", "bg_recovery")
+VALID_KINDS = (
+    "warn",
+    "hard_timeout",
+    "reset",
+    "recovery",
+    "bg_warn",
+    "bg_recovery",
+)
 
 
 def _now() -> float:
@@ -118,7 +125,7 @@ def summarize_watchdog_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         if b is None:
             b = {
                 "episodes": 0, "mailed": 0, "throttled": 0,
-                "resets": 0, "recoveries": 0, "_durs": [],
+                "hard_timeouts": 0, "resets": 0, "recoveries": 0, "_durs": [],
             }
             per[name] = b
         return b
@@ -133,6 +140,13 @@ def summarize_watchdog_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                 b["mailed"] += 1
             if ev.get("throttled"):
                 b["throttled"] += 1
+            d = ev.get("stuck_min")
+            if isinstance(d, (int, float)):
+                b["_durs"].append(float(d))
+        elif kind == "hard_timeout":
+            b["hard_timeouts"] += 1
+            if ev.get("mailed"):
+                b["mailed"] += 1
             d = ev.get("stuck_min")
             if isinstance(d, (int, float)):
                 b["_durs"].append(float(d))
@@ -159,6 +173,7 @@ def summarize_watchdog_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "episodes": sum(b["episodes"] for b in rows.values()),
         "mailed": sum(b["mailed"] for b in rows.values()),
         "throttled": sum(b["throttled"] for b in rows.values()),
+        "hard_timeouts": sum(b["hard_timeouts"] for b in rows.values()),
         "resets": sum(b["resets"] for b in rows.values()),
         "recoveries": sum(b["recoveries"] for b in rows.values()),
     }

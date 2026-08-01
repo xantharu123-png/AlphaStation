@@ -115,6 +115,12 @@ except Exception:  # pragma: no cover - Zeitstempel-Ausfall darf Mails nie stopp
         now = now_utc or datetime.now(timezone.utc)
         return f'{now.strftime("%d.%m.%Y %H:%M")} UTC'
 try:
+    # AUDIT F-10 (2026-08-01): persistente Mail-Outbox. gescheiterte Mails
+    # werden eingereiht (hier + api) und vom Worker unten nachgeliefert.
+    from modules import mail_outbox as _mail_outbox
+except Exception:  # pragma: no cover - Outbox-Ausfall darf Mail-Pfad nie stoppen
+    _mail_outbox = None
+try:
     from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
@@ -2448,7 +2454,19 @@ def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout
     return "starttls587"
 
 
-def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_text="", mail_channel=""):
+def _send_email_alert(
+    subject,
+    body_html,
+    secrets,
+    mail_class="trade",
+    telegram_text="",
+    mail_channel="",
+    recipient_emails=None,
+    bypass_startup_delay=False,
+    enqueue_on_failure=True,
+    subject_is_final=False,
+    body_is_final=False,
+):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
 
     mail_class (B6, mit api-Team abgestimmt): "trade" -> '🚨 JETZT: ',
@@ -2457,13 +2475,14 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
     Telegram-Spiegel; bei trade-Mails wird nach Erfolg zusätzlich Telegram
     benachrichtigt (sofern modules.notify_telegram konfiguriert ist).
     """
-    subject = _apply_mail_class_prefix(subject, mail_class)
+    if not subject_is_final:
+        subject = _apply_mail_class_prefix(subject, mail_class)
     if _email_has_blocked_etf_content(subject, body_html):
         log.warning(f"E-Mail Alert blockiert (ETF/ETP-Inhalt): {subject}")
         return False
     # Startup-Delay wie api: nach Restart 5 Min keine Mails (alte Cache-Daten
     # wuerden Phantom-Alerts / Restart-Spam erzeugen).
-    if time.time() - _BG_STARTED_AT < _BG_STARTUP_MAIL_DELAY:
+    if not bypass_startup_delay and time.time() - _BG_STARTED_AT < _BG_STARTUP_MAIL_DELAY:
         log.info(f"E-Mail Alert unterdrueckt (Startup-Delay {_BG_STARTUP_MAIL_DELAY}s): {subject}")
         return False
     gmail_user = secrets.get("GMAIL_USER", "")
@@ -2476,13 +2495,21 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
         )
     ).strip().lower() in {"1", "true", "yes", "on"}
     operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
-    if mail_channel and mail_channel_enabled:
+    if recipient_emails is not None:
+        recipients = [
+            str(addr).strip().lower()
+            for addr in recipient_emails
+            if "@" in str(addr)
+        ]
+    elif mail_channel and mail_channel_enabled:
         # AUDIT 2026-07-28: Kanal-Opt-out gilt auch fuer die Betreiber-Mailbox
         # (Adresse hat als User-Konto den Kanal abgeschaltet).
         operator_recipients = [addr for addr in operator_recipients if mail_channel_enabled(addr, mail_channel)]
-    recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
+        recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
+    else:
+        recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
     send_to_subscribers = str(secrets.get("ALERT_SEND_TO_SUBSCRIBERS", os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"))).strip().lower() not in {"0", "false", "no", "off"}
-    if send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
+    if recipient_emails is None and send_to_subscribers and HAS_AUTH_ALERT_RECIPIENTS and get_email_alert_recipients:
         try:
             # B7: swing-Horizont wie api; mail_class nur defensiv via
             # TypeError-Fallback mitgeben (api-Team rollt den Parameter parallel aus).
@@ -2501,6 +2528,17 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
         log.warning("E-Mail Alert: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         return False
 
+    disclaimer = (
+        "<p style='color:#999;font-size:11px;margin-top:18px'>"
+        "Automatischer Analyse-Alert. Keine Anlageberatung, keine "
+        "Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</p>"
+    )
+    final_body_html = (
+        str(body_html or "")
+        if body_is_final
+        else str(body_html or "") + disclaimer
+    )
+
     # B-03: Retry logic with exponential backoff
     max_retries = 3
     for attempt in range(max_retries):
@@ -2509,14 +2547,12 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
             msg["From"] = f"TradingBot Alert <{gmail_user}>"
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
-            body_html = body_html + "<p style='color:#999;font-size:11px;margin-top:18px'>Automatischer Analyse-Alert. Keine Anlageberatung, keine Kauf-/Verkaufsempfehlung. Trading erfolgt eigenverantwortlich.</p>"
-
             # Plain-Text Fallback
-            plain = body_html.replace("<br>", "\n").replace("</tr>", "\n")
+            plain = final_body_html.replace("<br>", "\n").replace("</tr>", "\n")
             import re
             plain = re.sub(r"<[^>]+>", "", plain)
             msg.attach(MIMEText(plain, "plain", "utf-8"))
-            msg.attach(MIMEText(body_html, "html", "utf-8"))
+            msg.attach(MIMEText(final_body_html, "html", "utf-8"))
 
             transport = _smtp_transport_send(
                 msg.as_string(), gmail_user, gmail_pass, recipients,
@@ -2535,7 +2571,53 @@ def _send_email_alert(subject, body_html, secrets, mail_class="trade", telegram_
                 time.sleep(wait_time)
             else:
                 log.error(f"❌ E-Mail Fehler nach {max_retries} Versuchen: {e}")
+                if enqueue_on_failure and _mail_outbox is not None:
+                    queued_id = _mail_outbox.enqueue(
+                        subject,
+                        final_body_html,
+                        recipients,
+                        mail_class=mail_class,
+                        telegram_text=telegram_text,
+                    )
+                    if queued_id is not None:
+                        log.warning(
+                            "E-Mail Alert persistent vorgemerkt "
+                            f"(Outbox #{queued_id}): {subject}"
+                        )
                 return False
+
+
+def _run_mail_outbox_job(secrets):
+    """Deliver pending mail without changing its original content or recipients."""
+    if _mail_outbox is None:
+        return {"sent": 0, "failed": 0, "expired": 0, "dead": 0}
+
+    def _deliver(item):
+        sent = _send_email_alert(
+            item.get("subject", ""),
+            item.get("body_html", ""),
+            secrets,
+            mail_class=item.get("mail_class", "info"),
+            telegram_text=item.get("telegram_text", ""),
+            recipient_emails=item.get("recipients", []),
+            bypass_startup_delay=True,
+            enqueue_on_failure=False,
+            subject_is_final=True,
+            body_is_final=True,
+        )
+        if not sent:
+            raise RuntimeError("persistent mail delivery failed")
+
+    result = _mail_outbox.process_outbox(_deliver, limit=10)
+    if any(int(result.get(key, 0) or 0) for key in ("sent", "failed", "expired", "dead")):
+        log.info(
+            "Mail-Outbox: "
+            f"{result.get('sent', 0)} gesendet, "
+            f"{result.get('failed', 0)} fehlgeschlagen, "
+            f"{result.get('expired', 0)} abgelaufen, "
+            f"{result.get('dead', 0)} dauerhaft fehlgeschlagen"
+        )
+    return result
 
 
 def _alert_cache_path(scanner_name):
@@ -4942,6 +5024,14 @@ def _run_new_listing_scanner():
 # ══════════════════════════════════════════════════════════════
 
 _running = True
+try:
+    _MAIL_OUTBOX_POLL_SECONDS = max(
+        15, int(os.environ.get("MAIL_OUTBOX_POLL_SECONDS", "60"))
+    )
+except (TypeError, ValueError):
+    _MAIL_OUTBOX_POLL_SECONDS = 60
+_mail_outbox_worker_thread = None
+_mail_outbox_worker_lock = threading.Lock()
 
 def _signal_handler(sig, frame):
     global _running
@@ -5164,6 +5254,42 @@ def _start_bg_stuck_monitor(secrets):
     return monitor
 
 
+def _mail_outbox_worker_loop(secrets):
+    """Outbox unabhaengig von langsamen Scanner-Jobs nachliefern."""
+    while _running:
+        try:
+            _run_mail_outbox_job(secrets)
+        except Exception as exc:  # Worker darf nach einem Einzelfehler nicht sterben
+            log.warning(f"Mail-Outbox-Worker: {exc}")
+        for _ in range(_MAIL_OUTBOX_POLL_SECONDS):
+            if not _running:
+                return
+            time.sleep(1)
+
+
+def _start_mail_outbox_worker(secrets):
+    """Genau einen daemonisierten Outbox-Worker pro Prozess starten."""
+    global _mail_outbox_worker_thread
+    with _mail_outbox_worker_lock:
+        if (
+            _mail_outbox_worker_thread is not None
+            and _mail_outbox_worker_thread.is_alive()
+        ):
+            return _mail_outbox_worker_thread
+        _mail_outbox_worker_thread = threading.Thread(
+            target=_mail_outbox_worker_loop,
+            args=(secrets,),
+            name="mail-outbox-worker",
+            daemon=True,
+        )
+        _mail_outbox_worker_thread.start()
+    log.info(
+        "Mail-Outbox-Worker aktiv "
+        f"(Intervall {_MAIL_OUTBOX_POLL_SECONDS}s, atomarer DB-Lease)"
+    )
+    return _mail_outbox_worker_thread
+
+
 def run_service():
     global _running
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -5181,6 +5307,7 @@ def run_service():
     _update_status("_service", "running", f"PID {os.getpid()}")
     _bg_heartbeat_touch("start")
     _start_bg_stuck_monitor(secrets)
+    _start_mail_outbox_worker(secrets)
 
     # ── Zeitplan: Feste Uhrzeiten (ET = US Eastern) ──
     # Aktien-Scanner basieren auf Daily Bars → ändern sich kaum untertägig
@@ -5483,4 +5610,3 @@ if __name__ == "__main__":
     else:
         print(__doc__)
         print("Befehle: start | once  (Default ohne Argument: start)")
-

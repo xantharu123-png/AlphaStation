@@ -8,7 +8,7 @@ per monkeypatch ueberschrieben — die Funktionen lesen den Pfad pro Aufruf).
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -114,7 +114,11 @@ def test_record_basic_fields_and_status(tracker):
 def test_record_only_trade_mail_class(tracker):
     assert tracker.record_alert_signals("breakout", [_base_row()], mail_class="watch") == 0
     assert tracker.record_alert_signals("breakout", [_base_row()], mail_class="info") == 0
-    assert tracker.get_signal_count() == 0
+    assert tracker.record_alert_signals(
+        "breakout", [_base_row(Ticker="SHADOW")], mail_class="shadow"
+    ) == 1
+    assert tracker.get_signal_count() == 1
+    assert _signal("SHADOW")["mail_class"] == "shadow"
 
 
 def test_record_skips_rows_without_required_fields(tracker):
@@ -506,6 +510,56 @@ def test_performance_summary_math(tracker):
             assert key in entry
 
 
+def test_breaker_recovery_summary_uses_only_post_trip_trade_and_shadow(tracker):
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    before_trip = since - timedelta(days=1)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = [
+        _base_row(Ticker="POSTWIN"),
+        _base_row(Ticker="POSTLOSS"),
+        _base_row(Ticker="OLDWIN"),
+    ]
+    assert tracker.record_alert_signals("breakout", rows, mail_class="trade") == 3
+    assert tracker.record_alert_signals(
+        "breakout", [_base_row(Ticker="SHADOWWIN")], mail_class="shadow"
+    ) == 1
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE signals SET status='TP2_HIT', r_realized=2.0, created_at=? "
+            "WHERE ticker='POSTWIN'",
+            (now_iso,),
+        )
+        conn.execute(
+            "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, created_at=? "
+            "WHERE ticker='POSTLOSS'",
+            (now_iso,),
+        )
+        conn.execute(
+            "UPDATE signals SET status='TP1_HIT', r_realized=0.5, created_at=? "
+            "WHERE ticker='SHADOWWIN'",
+            (now_iso,),
+        )
+        conn.execute(
+            "UPDATE signals SET status='TP2_HIT', r_realized=5.0, created_at=? "
+            "WHERE ticker='OLDWIN'",
+            (before_trip.isoformat(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = tracker.load_breaker_recovery_summary("breakout", since)
+    assert summary["available"] is True
+    assert summary["decided"] == 3
+    assert summary["wins"] == 2
+    assert summary["win_pct"] == pytest.approx(66.67)
+    assert summary["avg_r"] == pytest.approx(0.5)
+    assert summary["sum_r"] == pytest.approx(1.5)
+    assert summary["trade_decided"] == 2
+    assert summary["shadow_decided"] == 1
+
+
 def test_summary_and_count_safe_on_empty_or_broken_db(tracker, tmp_path, monkeypatch):
     summary = tracker.load_performance_summary()
     assert summary["window_days"] == 90
@@ -525,6 +579,18 @@ def test_summary_and_count_safe_on_empty_or_broken_db(tracker, tmp_path, monkeyp
     assert tracker.evaluate_open_signals(stock_daily_fetcher=lambda t, s: []) == {
         "evaluated": 0, "closed": 0, "errors": 1,
     }
+    recovery = tracker.load_breaker_recovery_summary("breakout", datetime.now(timezone.utc))
+    assert recovery["available"] is False
+    assert recovery["error"]
+
+
+def test_breaker_recovery_summary_rejects_invalid_input(tracker):
+    assert tracker.load_breaker_recovery_summary("", datetime.now(timezone.utc))[
+        "error"
+    ] == "scanner_missing"
+    assert tracker.load_breaker_recovery_summary("breakout", "not-a-date")[
+        "error"
+    ] == "invalid_since"
 
 
 if __name__ == "__main__":

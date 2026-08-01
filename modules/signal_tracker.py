@@ -76,6 +76,7 @@ __all__ = [
     "record_alert_signals",
     "evaluate_open_signals",
     "load_performance_summary",
+    "load_breaker_recovery_summary",
     "get_signal_count",
     "breakeven_win_rate_pct",
     "scanner_verdict",
@@ -1539,6 +1540,71 @@ def load_performance_summary(days: int = 90) -> dict:
         ]
     except Exception as exc:
         logger.warning("load_performance_summary fehlgeschlagen: %s", exc)
+    return summary
+
+
+def load_breaker_recovery_summary(scanner_key: str, since: Any) -> dict:
+    """Return decided post-trip trade/shadow results for one scanner.
+
+    A breaker may only recover from evidence generated after it tripped.
+    Open signals are excluded because they contain no realized outcome.
+    The function is deliberately fail-closed and never raises.
+    """
+    scanner = str(scanner_key or "").strip()
+    since_dt = _parse_utc_datetime(since)
+    summary: Dict[str, Any] = {
+        "available": False,
+        "scanner": scanner,
+        "since": since_dt.isoformat() if since_dt else None,
+        "decided": 0,
+        "wins": 0,
+        "win_pct": None,
+        "avg_r": None,
+        "sum_r": 0.0,
+        "trade_decided": 0,
+        "shadow_decided": 0,
+        "error": None,
+    }
+    if not scanner:
+        summary["error"] = "scanner_missing"
+        return summary
+    if since_dt is None:
+        summary["error"] = "invalid_since"
+        return summary
+
+    try:
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                rows = conn.execute(
+                    "SELECT mail_class, r_realized FROM signals "
+                    "WHERE scanner = ? AND created_at >= ? "
+                    "AND mail_class IN ('trade', 'shadow') "
+                    "AND r_realized IS NOT NULL",
+                    (scanner, since_dt.isoformat()),
+                ).fetchall()
+
+        realized = [float(row["r_realized"]) for row in rows]
+        decided = len(realized)
+        wins = sum(1 for value in realized if value > 0.0)
+        summary.update(
+            {
+                "available": True,
+                "decided": decided,
+                "wins": wins,
+                "win_pct": round((wins / decided) * 100.0, 2) if decided else None,
+                "avg_r": round(sum(realized) / decided, 4) if decided else None,
+                "sum_r": round(sum(realized), 4),
+                "trade_decided": sum(
+                    1 for row in rows if str(row["mail_class"] or "").lower() == "trade"
+                ),
+                "shadow_decided": sum(
+                    1 for row in rows if str(row["mail_class"] or "").lower() == "shadow"
+                ),
+            }
+        )
+    except Exception as exc:
+        summary["error"] = str(exc)
+        logger.warning("load_breaker_recovery_summary fehlgeschlagen: %s", exc)
     return summary
 
 

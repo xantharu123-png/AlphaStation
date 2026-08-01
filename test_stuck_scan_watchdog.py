@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Pytest-Suite Scan-Waechter (Haenge-Alarm + Selbstheilung, AUDIT 2026-07-30).
+"""Pytest-Suite Scan-Waechter (Haenge-Alarm + Exklusivitaet, AUDIT 2026-08-01).
 
 Teil 1 (api.py): _scan_watchdog_check erkennt Budget-Risse, mailt EINMAL je
-Episode an den Betreiber (persistentes Dedupe) und setzt am Hartdeckel
-(3x Budget, min. +15 Min) den Zustand zurueck, damit der naechste Takt
-frisch startet. Isolierter Alt-Thread wird nie dupliziert-gekillt.
+Episode an den Betreiber (persistentes Dedupe) und verlangt am Hartdeckel
+(3x Budget, min. +15 Min) einen kontrollierten Dienst-Neustart. Ein noch
+lebender Worker bleibt registriert und darf niemals parallel ersetzt werden.
 
 Teil 2 (bg_service.py): Herzschlag-Waechter fuer die sequenzielle
 Hauptschleife — _bg_stuck_decision (pure) + Alarm-Mail mit Scan-Namen und
@@ -85,21 +85,25 @@ def test_api_stuck_mail_only_once_per_episode(monkeypatch, tmp_path):
     assert len(sent) == 1  # Dedupe-Key stuck_scan_{name}_{started_at} bekannt
 
 
-def test_api_hard_cap_recovers_state_for_fresh_start(monkeypatch, tmp_path):
-    """Hartdeckel (3x Budget, min. +15 Min): 'recovered', running=False,
-    Thread-Register frei, zweite Mail mit 'automatisch zurueckgesetzt'."""
+def test_api_hard_cap_keeps_worker_exclusive_until_restart(monkeypatch, tmp_path):
+    """Hartdeckel: Worker bleibt exklusiv registriert und der Betreiber
+    erhaelt genau die kontrollierte Neustart-Anweisung."""
     name = "crypto_explosion"  # Budget 25 Min => Hartdeckel 75 Min
     sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
-    api._scan_threads[name] = object()  # Platzhalter: isolierter Alt-Thread
+    worker = object()  # Platzhalter fuer den noch lebenden isolierten Worker
+    api._scan_threads[name] = worker
     event = api._scan_watchdog_check(name)
-    assert event == "recovered"
+    assert event == "stuck_hard"
     state = api._scan_status[name]
-    assert state["running"] is False
-    assert "automatisch zurueckgesetzt" in state["last_error"]
-    assert name not in api._scan_threads
+    assert state["running"] is True
+    assert "Dienst-Neustart erforderlich" in state["last_error"]
+    assert api._scan_threads[name] is worker
     assert len(sent) == 1
-    assert "automatisch zurueckgesetzt" in sent[0]["subject"]
-    assert "NICHT noetig" in sent[0]["body"]
+    assert "kontrollierten Neustart" in sent[0]["subject"]
+    assert "kein paralleler Ersatzlauf" in sent[0]["body"]
+    assert "systemctl restart tradingbot-api" in sent[0]["body"]
+    assert api._scan_watchdog_check(name) is None
+    assert len(sent) == 1
 
 
 def test_api_hard_cap_minimum_is_budget_plus_15min(monkeypatch, tmp_path):
@@ -289,7 +293,7 @@ def test_warn_throttle_one_mail_per_scanner_per_6h(monkeypatch, tmp_path):
     assert api._scan_watchdog_check("crypto_explosion") == "stuck"
     assert len(sent) == 1
     # Neue Episode (neuer Start, weiterhin ueber Budget) — z.B. nach
-    # Hartdeckel-Reset + frischem Haenger
+    # Echtes Worker-Ende oder kontrollierter Neustart + frischer Haenger.
     api._scan_status["crypto_explosion"].pop("_timeout_logged", None)
     api._scan_status["crypto_explosion"]["_started_at"] = started1 + 600
     assert api._scan_watchdog_check("crypto_explosion") == "stuck"
@@ -308,17 +312,19 @@ def test_warn_throttle_rearms_after_6h(monkeypatch, tmp_path):
     assert "haengt" in sent[0]["subject"]
 
 
-def test_reset_mail_suppressed_when_episode_unannounced(monkeypatch, tmp_path):
-    """Warnung war throttle-gedeckelt (Episode nie angekuendigt) => auch die
-    Hartdeckel-Reset-Mail wird unterdrueckt; die Selbstheilung laeuft trotzdem."""
-    sent, started = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
-    # Simuliere: eine fruehere Episode hat die 6h-Throttle bereits verbraucht
+def test_hard_timeout_mail_bypasses_soft_warning_throttle(monkeypatch, tmp_path):
+    """Ein Hartlimit ist ein eigener Betreiber-Alarm und wird nicht von der
+    weichen 6h-Warnungsdrossel verschluckt."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
     api._email_dedupe_mark("stuck_throttle_crypto_explosion")
-    api._scan_threads["crypto_explosion"] = object()
+    worker = object()
+    api._scan_threads["crypto_explosion"] = worker
     event = api._scan_watchdog_check("crypto_explosion")
-    assert event == "recovered"
-    assert api._scan_status["crypto_explosion"]["running"] is False
-    assert sent == []  # weder Warnung noch Reset-Mail
+    assert event == "stuck_hard"
+    assert api._scan_status["crypto_explosion"]["running"] is True
+    assert api._scan_threads["crypto_explosion"] is worker
+    assert len(sent) == 1
+    assert "kontrollierten Neustart" in sent[0]["subject"]
 
 
 def test_recovery_mail_suppressed_only_when_warn_throttled(monkeypatch, tmp_path):
@@ -379,26 +385,27 @@ def test_throttled_warn_event_logged(monkeypatch, tmp_path):
     assert evs[0]["mailed"] is False
 
 
-def test_reset_event_logged(monkeypatch, tmp_path):
-    """Hartdeckel-Reset mit versandter Mail => Event kind=reset, mailed=True."""
+def test_hard_timeout_event_logged(monkeypatch, tmp_path):
+    """Hartdeckel mit versandter Mail => hard_timeout, Worker bleibt exklusiv."""
+    sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
+    worker = object()
+    api._scan_threads["crypto_explosion"] = worker
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck_hard"
+    assert [e["kind"] for e in _wd_events()] == ["hard_timeout"]
+    assert _wd_events()[0]["mailed"] is True
+    assert api._scan_threads["crypto_explosion"] is worker
+
+
+def test_hard_timeout_event_is_deduped_per_episode(monkeypatch, tmp_path):
+    """Derselbe Hartlimit-Zustand erzeugt weder Doppel-Mail noch Doppel-Event."""
     sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
     api._scan_threads["crypto_explosion"] = object()
-    assert api._scan_watchdog_check("crypto_explosion") == "recovered"
-    assert [e["kind"] for e in _wd_events()] == ["reset"]
-    assert _wd_events()[0]["mailed"] is True
-
-
-def test_suppressed_reset_event_logged_throttled(monkeypatch, tmp_path):
-    """Reset-Mail throttle-gedeckelt => Event kind=reset, throttled=True."""
-    sent, started = _setup_api(monkeypatch, tmp_path, started_ago_sec=80 * 60)
-    api._email_dedupe_mark("stuck_throttle_crypto_explosion")
-    api._scan_threads["crypto_explosion"] = object()
-    assert api._scan_watchdog_check("crypto_explosion") == "recovered"
-    assert sent == []
+    assert api._scan_watchdog_check("crypto_explosion") == "stuck_hard"
+    assert api._scan_watchdog_check("crypto_explosion") is None
+    assert len(sent) == 1
     evs = _wd_events()
-    assert [e["kind"] for e in evs] == ["reset"]
-    assert evs[0]["throttled"] is True
-    assert evs[0]["mailed"] is False
+    assert [e["kind"] for e in evs] == ["hard_timeout"]
+    assert evs[0]["mailed"] is True
 
 
 def test_recovery_event_logged(monkeypatch, tmp_path):

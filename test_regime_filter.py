@@ -3,8 +3,8 @@
 
 Beweist die zwei Layer und ihre Mail-Wirkung:
 - Layer 1 MARKET: Mapping market_context-Regime -> GREEN/YELLOW/RED (fail-open)
-- Layer 2 BREAKER: Trip (n>=10, ØR<=-0.3, Win<=25%), Release (ØR>-0.1 oder
-  5 Handelstage), Persistenz des Trip-Zustands, Selbstheilung ohne Deadlock
+- Layer 2 BREAKER: Trip (n>=10, ØR<=-0.3, Win<=25%), Release nur durch
+  belastbare Post-Trip-Evidenz; Zeitablauf markiert lediglich Review-Bedarf
 - Dominanz ROT-Markt > ROT-Breaker > GELB > GREEN; Banner-Inhalte
 - api.py-Integration: RED degradiert swing_trade -> watch + Shadow-Tracking
   (send-unabhaengig), Breaker-Watch-Kappe 1/Tag, YELLOW filtert + kappt
@@ -76,22 +76,67 @@ def test_breaker_cooldown_persists_and_recovers():
                              MON + timedelta(days=1))
     assert ev["state"] == rf.RED and ev["tripped_at"] == MON.isoformat()
     assert "breaker_cooldown" in ev["reason"]
-    # Erholung => Release, Trip geloescht
+    # Nur echte Post-Trip-Erholung => Release, Trip geloescht
     ev2 = rf.evaluate_breaker({"decided": 12, "win_pct": 40.0, "avg_r": -0.05}, entry,
-                              MON + timedelta(days=2))
+                              MON + timedelta(days=2),
+                              recovery_metrics={
+                                  "available": True,
+                                  "decided": 5,
+                                  "win_pct": 40.0,
+                                  "avg_r": -0.05,
+                                  "trade_decided": 3,
+                                  "shadow_decided": 2,
+                              })
     assert ev2["state"] == rf.GREEN and ev2["tripped_at"] is None
     assert "breaker_release_recovered" in ev2["reason"]
+    assert ev2["recovery_metrics"]["trade_decided"] == 3
+    assert ev2["recovery_metrics"]["shadow_decided"] == 2
 
 
-def test_breaker_release_after_5_trading_days():
+def test_breaker_stays_blocked_after_5_trading_days_without_recovery_evidence():
     entry = {"tripped_at": MON.isoformat()}
     bad = {"decided": 12, "win_pct": 0.0, "avg_r": -0.6}
     # Freitag derselben Woche: erst 4 Werktage => haelt
     assert rf.evaluate_breaker(bad, entry, FRI)["state"] == rf.RED
-    # naechster Montag: 5 Werktage (Di–Fr + Mo) => Zeit-Release trotz schlechter Werte
+    # Naechster Montag: Review ist faellig, aber Zeit allein darf nie freigeben.
     ev = rf.evaluate_breaker(bad, entry, NXT_MON)
-    assert ev["state"] == rf.GREEN and ev["tripped_at"] is None
-    assert "breaker_release_time" in ev["reason"]
+    assert ev["state"] == rf.RED and ev["tripped_at"] == MON.isoformat()
+    assert ev["review_due"] is True
+    assert "breaker_review_due" in ev["reason"]
+
+
+def test_breaker_ignores_recovered_rolling_window_without_post_trip_evidence():
+    entry = {"tripped_at": MON.isoformat()}
+    recovered_rolling_window = {"decided": 20, "win_pct": 55.0, "avg_r": 0.4}
+    ev = rf.evaluate_breaker(
+        recovered_rolling_window,
+        entry,
+        NXT_MON,
+        recovery_metrics={"available": False, "error": "db unavailable"},
+    )
+    assert ev["state"] == rf.RED
+    assert ev["review_due"] is True
+    assert ev["recovery_metrics"]["error"] == "db unavailable"
+
+
+def test_breaker_requires_minimum_post_trip_sample_before_release():
+    entry = {"tripped_at": MON.isoformat()}
+    ev = rf.evaluate_breaker(
+        {"decided": 20, "win_pct": 60.0, "avg_r": 0.5},
+        entry,
+        NXT_MON,
+        recovery_metrics={
+            "available": True,
+            "decided": 4,
+            "win_pct": 75.0,
+            "avg_r": 0.8,
+            "trade_decided": 2,
+            "shadow_decided": 2,
+        },
+    )
+    assert ev["state"] == rf.RED
+    assert ev["review_due"] is True
+    assert ev["recovery_metrics"]["decided"] == 4
 
 
 def test_trading_days_between_edges():
