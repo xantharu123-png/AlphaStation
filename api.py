@@ -8101,6 +8101,81 @@ def _shadow_trackable_reasons(
     return None
 
 
+def _regime_mail_decision(
+    scanner_key: str,
+    market_type: str,
+    premarket_mail_mode: bool,
+    now_utc,
+) -> Optional[Dict[str, Any]]:
+    """Regime-Filter (AUDIT 2026-08-01, F-14): kombinierte Mail-Entscheidung.
+
+    Kapselt modules.regime_filter: Markt-Gate (nur Aktien, via
+    _get_market_context_snapshot) + Eigen-Performance-Breaker (Tracker 7d,
+    State data_cache/regime_state.json). Liefert die Decision oder None bei
+    GREEN / deaktiviert / nicht zustaendig / Fehler — fail-open: ein
+    Regime-Fehler darf niemals Mails blockieren oder erfinden.
+
+    Env-Schalter: REGIME_FILTER_ENABLED, REGIME_MARKET_GATE_ENABLED,
+    REGIME_BREAKER_ENABLED (Default jeweils "1").
+    PM-Radar bleibt bewusst aussen vor (eigener Fruehwarn-Kanal, K-Design).
+    """
+    if premarket_mail_mode or market_type not in ("stocks", "crypto"):
+        return None
+    if str(os.environ.get("REGIME_FILTER_ENABLED", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    try:
+        from modules import regime_filter as _rf
+        market_enabled = (
+            market_type == "stocks"
+            and str(os.environ.get("REGIME_MARKET_GATE_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        )
+        breaker_enabled = str(os.environ.get("REGIME_BREAKER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        context = None
+        if market_enabled:
+            try:
+                context = _get_market_context_snapshot()
+            except Exception as exc:
+                print(f"[Regime-Filter] Market-Context nicht ladbar (fail-open): {exc}")
+                market_enabled = False
+        summary = None
+        if breaker_enabled:
+            if load_performance_summary is None:
+                breaker_enabled = False
+            else:
+                try:
+                    summary = load_performance_summary(days=7)
+                except Exception as exc:
+                    print(f"[Regime-Filter] Tracker-Summary nicht ladbar (fail-open): {exc}")
+                    summary = None
+        state = _rf.load_state()
+        breakers = dict(state.get("breakers") or {})
+        decision = _rf.decide_mail_regime(
+            scanner_key,
+            context=context,
+            summary=summary,
+            state=breakers,
+            now=now_utc,
+            market_gate_enabled=market_enabled,
+            breaker_enabled=breaker_enabled,
+        )
+        # Breaker-State persistieren, wenn geaendert (Trip/Release)
+        new_entry = decision.get("new_state_entry")
+        if (breakers.get(scanner_key) or None) != new_entry:
+            if new_entry:
+                breakers[scanner_key] = new_entry
+            else:
+                breakers.pop(scanner_key, None)
+            if not _rf.save_state({"breakers": breakers}):
+                print("[Regime-Filter] State-File nicht schreibbar (Trip nicht persistent)")
+        if decision.get("state") == "GREEN":
+            return None
+        print(f"[Regime-Filter] {decision['state']}/{decision.get('layer')} fuer {scanner_key}: {decision.get('reason')}")
+        return decision
+    except Exception as exc:
+        print(f"[Regime-Filter] Entscheidung fehlgeschlagen (fail-open): {exc}")
+        return None
+
+
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if not results:
@@ -8254,6 +8329,70 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         )
         return
 
+    # Regime-Filter (AUDIT 2026-08-01, F-14): Markt-Gate + Eigen-Performance-
+    # Breaker. ROT degradiert die Mail zu watch (Banner statt SWING-Praefix,
+    # Setups laufen als Shadow-Messung weiter), GELB verschaerft die Auswahl.
+    _regime = _regime_mail_decision(scanner_key, market_type, premarket_mail_mode, send_time_utc)
+    _regime_banner = ""
+    _regime_shadow_tag = ""
+    _regime_score_floor = None
+    if _regime:
+
+        def _regime_shadow_rows(alert_list, reason_tag):
+            return [
+                dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"],
+                     score=a["score"], price=a["price"],
+                     strategy=a.get("strategy", strategy_name),
+                     block_reasons=reason_tag)
+                for a in alert_list
+            ]
+
+        _regime_banner = _regime.get("banner") or ""
+        if _regime.get("state") == "YELLOW":
+            _boosted = _ALERT_MIN_SCORE + int(_regime.get("score_boost") or 5)
+            _max_rows = max(1, int(_regime.get("max_rows") or 2))
+            _kept = [a for a in email_alerts if _alert_float(a.get("score"), 0) >= _boosted][:_max_rows]
+            _dropped = [a for a in email_alerts if a not in _kept]
+            if _dropped:
+                for a in _dropped:
+                    _email_dedupe_release(a["cooldown_key"], claimed_at=now)
+                _safe_record_alert_signals(
+                    scanner_key,
+                    _regime_shadow_rows(_dropped, str(_regime.get("reason_tag") or "market_regime_yellow")),
+                    mail_class="shadow", channel="shadow",
+                )
+            email_alerts = _kept
+            if not email_alerts:
+                _record_email_event(
+                    f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+                    "skipped",
+                    "market_regime_yellow_filtered_all",
+                )
+                return
+            _regime_score_floor = _boosted
+        elif _regime.get("state") == "RED":
+            _regime_shadow_tag = str(_regime.get("reason_tag") or "market_regime_red")
+            # Shadow-Messung sofort — unabhaengig davon, ob die Watch-Mail
+            # (Kanal-Einstellung/SMTP) tatsaechlich rausgeht (Gegenprobe!).
+            _safe_record_alert_signals(
+                scanner_key,
+                _regime_shadow_rows(email_alerts, _regime_shadow_tag),
+                mail_class="shadow", channel="shadow",
+            )
+            if _regime.get("layer") == "breaker":
+                _watch_key = f"regime_cooldown_watch_{scanner_key}"
+                _watch_cap = int(_regime.get("watch_cap_seconds") or 20 * 3600)
+                if _email_dedupe_remaining(_watch_key, _watch_cap, now) > 0:
+                    for a in email_alerts:
+                        _email_dedupe_release(a["cooldown_key"], claimed_at=now)
+                    _record_email_event(
+                        f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+                        "skipped",
+                        "regime_cooldown_watch_daily_cap",
+                    )
+                    return
+                _email_dedupe_claim(_watch_key, _watch_cap, now=now)
+
     rows = ""
     for a in email_alerts:
         timing_label = html.escape(_format_alert_timing_label(a.get("entry_quality"), market_type))
@@ -8308,7 +8447,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         else "Nur Score, Grade, frische Trigger-Qualitaet und Cooldown-Gates."
     )
     count_text = f"{len(email_alerts)} von {total_alerts}" if total_alerts > len(email_alerts) else str(len(email_alerts))
-    _score_floor_shown = _PREMARKET_MIN_SCORE if premarket_mail_mode else _ALERT_MIN_SCORE
+    _score_floor_shown = _PREMARKET_MIN_SCORE if premarket_mail_mode else (_regime_score_floor or _ALERT_MIN_SCORE)
     # AUDIT K-2b: Daily-Close-Bestaetigung klar labeln (Betreff + Body-Hinweis).
     _dailyclose_subject_suffix = ""
     _dailyclose_hint = ""
@@ -8330,6 +8469,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
     <p style="color:#666">{_mail_timestamp_dual()} | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
+    {_regime_banner}
     {_cluster_hint}
     {_dailyclose_hint}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -8343,7 +8483,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     </body></html>'''
     _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
     try:
-        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class="swing_trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade; 2026-07-29: PM-Radar eigener Kanal
+        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class=("watch" if _regime_shadow_tag else "swing_trade"), telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade; 2026-07-29: PM-Radar eigener Kanal; 2026-08-01 F-14: ROT => watch-Klasse (👁 WATCH, kein Telegram-Mirror, Tracking shadow statt trade)
     except Exception:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -8353,7 +8493,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             if alert.get("cooldown_key"):
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
-        _safe_record_alert_signals(scanner_key, _signal_rows)
+        # F-14: Bei ROT ist die Shadow-Messung bereits erfolgt (send-unabhaengig)
+        # — trade-Tracking entfaellt hier bewusst (watch ist kein Trade-Signal).
+        if not _regime_shadow_tag:
+            _safe_record_alert_signals(scanner_key, _signal_rows)
     else:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
