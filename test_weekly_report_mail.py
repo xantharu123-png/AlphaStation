@@ -167,6 +167,46 @@ def test_failed_send_retries_later_in_window(monkeypatch, tmp_path):
     assert len(sent) == 1 and attempts["n"] == 2
 
 
+# ── Diagnose-Heartbeat (2026-08-01, stiller Freitag-Nichtversand) ────────────
+
+def test_tick_heartbeat_logged_even_when_window_closed(monkeypatch, tmp_path):
+    """Jeder Job-Aufruf schreibt eine Tick-Zeile mit Fenster-Zustand — auch
+    am Samstag. Damit ist beweisbar, dass der Scheduler den Job erreicht."""
+    sent = _setup(monkeypatch, tmp_path, now=SATURDAY_1700)
+    logs = []
+    monkeypatch.setattr(bg_service.log, "info",
+                        lambda *a, **k: logs.append(a))
+    assert bg_service._run_weekly_report({}) is False
+    assert sent == []
+    ticks = [a for a in logs if a and "Wochenreport] Tick" in str(a[0])]
+    assert len(ticks) == 1
+    assert "Fenster: %s" in str(ticks[0][0]) and ticks[0][-1] == "zu"
+
+
+def test_tick_heartbeat_window_open_on_friday(monkeypatch, tmp_path):
+    """Freitag im Fenster => Tick meldet 'offen'."""
+    _setup(monkeypatch, tmp_path)
+    logs = []
+    monkeypatch.setattr(bg_service.log, "info",
+                        lambda *a, **k: logs.append(a))
+    assert bg_service._run_weekly_report({}) is True
+    ticks = [a for a in logs if a and "Wochenreport] Tick" in str(a[0])]
+    assert len(ticks) == 1 and ticks[0][-1] == "offen"
+
+
+def test_dedupe_active_exit_is_logged(monkeypatch, tmp_path):
+    """Zweiter Lauf in derselben Woche => Dedupe-Ausstieg steht im Log
+    (war vorher ein stiller return False)."""
+    _setup(monkeypatch, tmp_path)
+    assert bg_service._run_weekly_report({}) is True
+    logs = []
+    monkeypatch.setattr(bg_service.log, "info",
+                        lambda *a, **k: logs.append(a))
+    _FakeDatetime._now = FRIDAY_2000
+    assert bg_service._run_weekly_report({}) is False
+    assert any("Dedupe aktiv" in str(a[0]) for a in logs if a)
+
+
 # ── Mail-Inhalt ──────────────────────────────────────────────────────────────
 
 def test_subject_format_and_seven_day_window(monkeypatch, tmp_path):

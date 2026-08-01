@@ -2214,7 +2214,17 @@ def _run_weekly_report(secrets=None, now_et=None):
                 now_et = datetime.now(ZoneInfo("America/New_York"))
             except Exception:
                 now_et = datetime.now()
-        if not _weekly_report_window_open(now_et):
+        fenster_offen = _weekly_report_window_open(now_et)
+        # Diagnose-Heartbeat (2026-08-01): einmalig trat der Fall ein, dass der
+        # Report am Freitag still ausblieb und KEINERLEI Job-Zeile im Log stand.
+        # Dieser Tick beweist je Intervall, dass der Scheduler den Job erreicht,
+        # und zeigt den Fenster-Zustand — stille Naechte sind damit ausgeschlossen.
+        log.info(
+            "[Wochenreport] Tick: %s | Fenster: %s",
+            now_et.strftime("%a %Y-%m-%d %H:%M"),
+            "offen" if fenster_offen else "zu",
+        )
+        if not fenster_offen:
             return False
         if load_performance_summary is None:
             if not _weekly_report_warned_missing:
@@ -2224,6 +2234,9 @@ def _run_weekly_report(secrets=None, now_et=None):
         dedupe_key = _weekly_report_dedupe_key(now_et)
         claim_now = time.time()
         if not _email_dedupe_claim(dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC, now=claim_now):
+            # Bisher stiller Ausstieg — jetzt sichtbar (z. B. nach erfolgreichem
+            # Versand oder nach Claim durch einen anderen Prozess).
+            log.info("[Wochenreport] Dedupe aktiv (%s) — kein erneuter Versand", dedupe_key)
             return False
         try:
             summary = load_performance_summary(days=7) or {}
