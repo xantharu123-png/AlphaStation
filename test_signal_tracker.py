@@ -496,6 +496,14 @@ def test_performance_summary_math(tracker):
     # r-Werte: +2.0 (TP2), -1.0 (Stop), +0.4 (PART: Close 102 -> (102-100)/5)
     assert bucket["avg_r"] == pytest.approx((2.0 - 1.0 + 0.4) / 3.0, abs=1e-3)
     assert bucket["sum_r"] == pytest.approx(1.4, abs=1e-3)
+    # Empfohlenes Modell: WIN 1.5R, LOSS -1R, PART 0.7R.
+    assert bucket["managed_be_decided_signals"] == 3
+    assert bucket["managed_be_wins"] == 2
+    assert bucket["managed_be_losses"] == 1
+    assert bucket["managed_be_breakevens"] == 0
+    assert bucket["avg_r_managed_50_50_be"] == pytest.approx(0.4, abs=1e-3)
+    assert bucket["sum_r_managed_50_50_be"] == pytest.approx(1.2, abs=1e-3)
+    assert bucket["profit_factor_managed_be"] == pytest.approx(2.2, abs=1e-3)
     assert bucket["alerts_per_day"] == pytest.approx(4.0 / 30.0, abs=1e-3)
     assert summary["per_scanner"]["bi_scanner"]["signals"] == 1
     assert summary["per_scanner"]["bi_scanner"]["win_rate_pct"] is None
@@ -508,6 +516,57 @@ def test_performance_summary_math(tracker):
     for entry in summary["recent"]:
         for key in ("created_at", "scanner", "status", "entry", "stop", "r_realized"):
             assert key in entry
+
+
+def test_recommended_payoff_statistics_treats_breakevens_consistently(tracker):
+    stats = tracker._recommended_payoff_statistics([1.5, -1.0, 0.0])
+    assert stats["decided"] == 3
+    assert stats["wins"] == 1
+    assert stats["losses"] == 1
+    assert stats["breakevens"] == 1
+    assert stats["win_rate_pct"] == pytest.approx(33.3, abs=0.05)
+    assert stats["win_rate_ex_breakeven_pct"] == pytest.approx(50.0)
+    assert stats["breakeven_outcome_rate_pct"] == pytest.approx(33.3, abs=0.05)
+    # Bedingte Schwelle ohne 0R = 1 / (1.5 + 1) = 40%.
+    assert stats["breakeven_win_rate_ex_breakeven_pct"] == pytest.approx(40.0)
+    # Gesamt-Schwelle mit beobachteter 0R-Quote = 40% * 2/3.
+    assert stats["breakeven_win_rate_pct"] == pytest.approx(26.7, abs=0.05)
+    assert stats["avg_r"] == pytest.approx(1.0 / 6.0, abs=1e-3)
+    assert stats["profit_factor"] == pytest.approx(1.5)
+
+
+def test_mature_summary_excludes_right_censored_recent_signals(tracker):
+    as_of = datetime.now(timezone.utc)
+    assert tracker.record_alert_signals(
+        "breakout",
+        [_base_row(Ticker="MATURE"), _base_row(Ticker="FRESH")],
+    ) == 2
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, created_at=? "
+            "WHERE ticker='MATURE'",
+            ((as_of - timedelta(days=15)).isoformat(),),
+        )
+        conn.execute(
+            "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, created_at=? "
+            "WHERE ticker='FRESH'",
+            ((as_of - timedelta(days=2)).isoformat(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = tracker.load_performance_summary(
+        days=30,
+        mature_only=True,
+        as_of=as_of,
+    )
+    assert summary["cohort_mode"] == "fully_observed"
+    assert summary["excluded_not_mature"] == 1
+    assert summary["total"]["signals"] == 1
+    assert summary["total"]["managed_be_decided_signals"] == 1
+    assert [row["ticker"] for row in summary["recent"]] == ["MATURE"]
 
 
 def test_breaker_recovery_summary_uses_only_post_trip_trade_and_shadow(tracker):
@@ -536,9 +595,10 @@ def test_breaker_recovery_summary_uses_only_post_trip_trade_and_shadow(tracker):
             (now_iso,),
         )
         conn.execute(
-            "UPDATE signals SET status='TP1_HIT', r_realized=0.5, created_at=? "
+            "UPDATE signals SET status='EXPIRED', r_realized=0.5, "
+            "tp1_hit_at=?, created_at=? "
             "WHERE ticker='SHADOWWIN'",
-            (now_iso,),
+            (now_iso, now_iso),
         )
         conn.execute(
             "UPDATE signals SET status='TP2_HIT', r_realized=5.0, created_at=? "
@@ -554,8 +614,10 @@ def test_breaker_recovery_summary_uses_only_post_trip_trade_and_shadow(tracker):
     assert summary["decided"] == 3
     assert summary["wins"] == 2
     assert summary["win_pct"] == pytest.approx(66.67)
-    assert summary["avg_r"] == pytest.approx(0.5)
-    assert summary["sum_r"] == pytest.approx(1.5)
+    # 50/50+BE: TP2 1.5R, Stop -1R, TP1+Expiry 0.75R.
+    assert summary["avg_r"] == pytest.approx(1.25 / 3.0, abs=1e-4)
+    assert summary["sum_r"] == pytest.approx(1.25)
+    assert summary["r_model"] == "managed_50_50_plus_breakeven"
     assert summary["trade_decided"] == 2
     assert summary["shadow_decided"] == 1
 

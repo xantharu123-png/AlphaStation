@@ -1938,7 +1938,254 @@ def _watchdog_report_section(events=None):
     </div>"""
 
 
-def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdog_events=None, shadow=None):
+def _build_mature_weekly_report_mail(
+    activity_summary,
+    performance_summary,
+    now_et=None,
+    verdict_alerts=None,
+    watchdog_events=None,
+    shadow=None,
+):
+    """Wochenmail mit getrennter Aktivitaets- und Performance-Kohorte.
+
+    Die Aktivitaet umfasst die letzten sieben Tage. Die Performance verwendet
+    nur Signale aus den letzten 30 Tagen, deren komplettes Beobachtungsfenster
+    bereits abgelaufen ist. Hauptkennzahl ist das tatsaechlich empfohlene
+    Management: 50 Prozent am TP1, Rest bis TP2/Stop/Expiry und Einstand ab +1R.
+    """
+    stamp = now_et if now_et is not None else datetime.now()
+    activity_total = (activity_summary or {}).get("total") or {}
+    perf_total = (performance_summary or {}).get("total") or {}
+
+    def _int(bucket, key):
+        try:
+            return int(bucket.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _number(bucket, key):
+        value = bucket.get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _r_text(value, decimals=2):
+        return f"{float(value):+.{decimals}f}R" if isinstance(value, (int, float)) else "-"
+
+    def _pct_text(value, decimals=1):
+        return f"{float(value):.{decimals}f}%" if isinstance(value, (int, float)) else "-"
+
+    activity_signals = _int(activity_total, "signals")
+    activity_open = _int(activity_total, "open")
+    activity_decided = _int(activity_total, "decided_signals")
+    mature_signals = _int(perf_total, "signals")
+    mature_decided = _int(perf_total, "managed_be_decided_signals")
+    mature_wins = _int(perf_total, "managed_be_wins")
+    mature_losses = _int(perf_total, "managed_be_losses")
+    mature_flat = _int(perf_total, "managed_be_breakevens")
+    mature_hit = _number(perf_total, "managed_be_win_rate_pct")
+    mature_hit_ex_be = _number(perf_total, "managed_be_win_rate_ex_breakeven_pct")
+    mature_sum = _number(perf_total, "sum_r_managed_50_50_be") or 0.0
+    mature_avg = _number(perf_total, "avg_r_managed_50_50_be")
+    mature_pf = _number(perf_total, "profit_factor_managed_be")
+    mature_be = _number(perf_total, "breakeven_win_rate_managed_be_pct")
+    excluded = int((performance_summary or {}).get("excluded_not_mature") or 0)
+
+    ci = perf_total.get("managed_be_win_rate_wilson_95") or {}
+    ci_low = ci.get("lower_pct")
+    ci_high = ci.get("upper_pct")
+    ci_text = ""
+    if isinstance(ci_low, (int, float)) and isinstance(ci_high, (int, float)):
+        ci_text = f" (95%-KI {_pct_text(ci_low, 0)} bis {_pct_text(ci_high, 0)})"
+
+    subject = (
+        f"Wochenreport Signal-Tracker: {mature_sum:+.1f}R | "
+        f"{mature_decided} reife Signale | 50/50+BE"
+    )
+
+    alarm_html = ""
+    if verdict_alerts:
+        items = "<br>".join(
+            f"&bull; {line}" for line in verdict_alerts if isinstance(line, str)
+        )
+        if items:
+            alarm_html = f"""
+    <div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px;color:#0f172a">
+        <b>Kalibrierungs-Alarm</b><br>{items}
+    </div>"""
+
+    activity_html = f"""
+    <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Aktivitaet der letzten 7 Tage</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Neue Signale</th>
+            <th style="padding:8px;text-align:left">Bereits entschieden</th>
+            <th style="padding:8px;text-align:left">Noch offen</th>
+            <th style="padding:8px;text-align:left">Alerts/Tag</th>
+        </tr>
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{activity_signals}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{activity_decided}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{activity_open}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{float(activity_total.get('alerts_per_day') or 0.0):.1f}</td>
+        </tr>
+    </table>
+    <p style="color:#64748b;font-size:12px;margin-top:4px;margin-bottom:18px">
+        Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote. Frische
+        Gewinner koennen noch offen sein, waehrend schnelle Stops bereits
+        entschieden sind.
+    </p>"""
+
+    if mature_decided:
+        performance_html = f"""
+    <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Ausgereifte 30-Tage-Kohorte</h3>
+    <p style="font-size:12px;color:#64748b;margin-top:0">
+        Nur Versandkohorten nach Ablauf des vorgesehenen Beobachtungsfensters;
+        {excluded} noch unreife Signale wurden ausgeschlossen.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+        <tr style="background:#eef2ff">
+            <th style="padding:8px;text-align:left">Reife Signale</th>
+            <th style="padding:8px;text-align:left">Entschieden</th>
+            <th style="padding:8px;text-align:left">W / L / 0R</th>
+            <th style="padding:8px;text-align:left">Trefferquote</th>
+            <th style="padding:8px;text-align:left">Summe R</th>
+            <th style="padding:8px;text-align:left">Durchschnitt R</th>
+            <th style="padding:8px;text-align:left">Profit Factor</th>
+            <th style="padding:8px;text-align:left">Break-even</th>
+        </tr>
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #eee">{mature_signals}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_decided}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{mature_wins} / {mature_losses} / {mature_flat}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">
+                {_pct_text(mature_hit)}{ci_text}
+                <br><span style="color:#64748b;font-size:10px">ohne 0R: {_pct_text(mature_hit_ex_be)}</span>
+            </td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{_r_text(mature_sum, 1)}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_r_text(mature_avg)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{f'{mature_pf:.2f}' if mature_pf is not None else '-'}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_pct_text(mature_be)}</td>
+        </tr>
+    </table>"""
+    else:
+        performance_html = f"""
+    <div style="background:#f8fafc;border:1px solid #cbd5e1;padding:12px;border-radius:6px;margin-bottom:18px;font-size:13px;color:#0f172a">
+        <b>Noch keine ausgereifte 30-Tage-Kohorte.</b><br>
+        {excluded} Signal(e) haben ihr Beobachtungsfenster noch nicht beendet. Sie werden erst
+        nach Ablauf ihres kompletten Stock- bzw. Krypto-Zeitfensters gewertet.
+    </div>"""
+
+    scanner_rows = ""
+    per_scanner = (performance_summary or {}).get("per_scanner") or {}
+    for scanner, bucket in sorted(
+        per_scanner.items(),
+        key=lambda item: float(
+            ((item[1] or {}).get("sum_r_managed_50_50_be") or 0.0)
+        ),
+        reverse=True,
+    ):
+        bucket = bucket or {}
+        row_decided = _int(bucket, "managed_be_decided_signals")
+        if row_decided <= 0:
+            continue
+        row_sum = _number(bucket, "sum_r_managed_50_50_be") or 0.0
+        row_avg = _number(bucket, "avg_r_managed_50_50_be")
+        row_hit = _number(bucket, "managed_be_win_rate_pct")
+        row_pf = _number(bucket, "profit_factor_managed_be")
+        tint = "#ecfdf5" if row_sum >= 0 else "#fff1f2"
+        scanner_rows += f"""<tr style="background:{tint}">
+            <td style="padding:7px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{row_decided}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{_pct_text(row_hit)}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{_r_text(row_avg)}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee"><b>{_r_text(row_sum, 1)}</b></td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{f'{row_pf:.2f}' if row_pf is not None else '-'}</td>
+        </tr>"""
+    scanner_html = ""
+    if scanner_rows:
+        scanner_html = f"""
+    <h3 style="color:#0f172a;font-size:15px">Reife Bilanz je Scanner</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:7px;text-align:left">Scanner</th>
+            <th style="padding:7px;text-align:left">Entschieden</th>
+            <th style="padding:7px;text-align:left">Trefferquote</th>
+            <th style="padding:7px;text-align:left">Durchschnitt R</th>
+            <th style="padding:7px;text-align:left">Summe R</th>
+            <th style="padding:7px;text-align:left">Profit Factor</th>
+        </tr>
+        {scanner_rows}
+    </table>"""
+
+    recent_rows = ""
+    for sig in ((activity_summary or {}).get("recent") or [])[:10]:
+        if not isinstance(sig, dict):
+            continue
+        ticker = html.escape(str(sig.get("ticker") or "?"))
+        scanner = html.escape(str(sig.get("scanner") or "?"))
+        direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
+        status = html.escape(str(sig.get("status") or "?"))
+        managed = sig.get("r_managed_50_50_be")
+        recent_rows += f"""<tr>
+            <td style="padding:6px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#64748b;font-size:11px">{direction}</span></td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{scanner}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{status}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee">{_r_text(managed)}</td>
+        </tr>"""
+    recent_html = ""
+    if recent_rows:
+        recent_html = f"""
+    <h3 style="color:#0f172a;font-size:15px">Letzte Signale</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:6px;text-align:left">Ticker</th>
+            <th style="padding:6px;text-align:left">Scanner</th>
+            <th style="padding:6px;text-align:left">Status</th>
+            <th style="padding:6px;text-align:left">50/50+BE R</th>
+        </tr>
+        {recent_rows}
+    </table>"""
+
+    watchdog_html = _watchdog_report_section(watchdog_events)
+    small_sample = ""
+    if mature_decided < 30:
+        small_sample = (
+            "<br><b>Stichprobe unter 30 entschiedenen Signalen:</b> "
+            "noch keine harte Strategieentscheidung allein daraus ableiten."
+        )
+
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+    <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
+    <p style="color:#64748b">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]}</p>
+    {alarm_html}
+    {watchdog_html}
+    {activity_html}
+    {performance_html}
+    {scanner_html}
+    {recent_html}
+    <p style="color:#64748b;font-size:12px;margin-top:20px;line-height:1.5">
+        Hauptmodell: 1R Anfangsrisiko, 50% Teilverkauf am TP1, Rest bis
+        TP2/Stop/Expiry und Stop auf Einstand ab +1R. Aktien werden mit
+        nachfolgenden Tages-OHLC ausgewertet; wenn Stop und Ziel am selben Tag
+        beruehrt werden, gilt konservativ Stop zuerst. Krypto wird aus
+        periodischen Kurs-Snapshots bewertet, nicht aus einer lueckenlosen
+        Tick-Reihenfolge; Beruehrungen zwischen zwei Auswertungen koennen daher
+        fehlen. Trefferquote zaehlt 0R-Einstandsausgaenge im Nenner; die
+        Break-even-Schwelle beruecksichtigt dieselbe 0R-Quote. Dies ist ein
+        Forward-Track-Record, kein Backtest.{small_sample}
+    </p>
+    </body></html>"""
+    return subject, body_html
+
+
+def _build_weekly_report_mail(
+    summary,
+    now_et=None,
+    verdict_alerts=None,
+    watchdog_events=None,
+    shadow=None,
+    performance_summary=None,
+):
     """Baut (subject, body_html) der Wochen-Bilanz aus load_performance_summary(days=7).
 
     Hausstil wie _send_signal_update_mail (Arial, 700px, Tabellen). Subject
@@ -1953,6 +2200,16 @@ def _build_weekly_report_mail(summary, now_et=None, verdict_alerts=None, watchdo
     Shadow-Messung der Chase-Gates (AUDIT 2026-07-31). Sektion erscheint nur,
     wenn mindestens 1 Shadow-Signal in der Woche existiert.
     """
+    if performance_summary is not None:
+        return _build_mature_weekly_report_mail(
+            summary,
+            performance_summary,
+            now_et=now_et,
+            verdict_alerts=verdict_alerts,
+            watchdog_events=watchdog_events,
+            shadow=shadow,
+        )
+
     stamp = now_et if now_et is not None else datetime.now()
     total = summary.get("total") or {}
 
@@ -2246,10 +2503,20 @@ def _run_weekly_report(secrets=None, now_et=None):
             return False
         try:
             summary = load_performance_summary(days=7) or {}
+            performance_summary = None
+            try:
+                performance_summary = (
+                    load_performance_summary(days=30, mature_only=True) or {}
+                )
+            except TypeError:
+                # Rueckwaertskompatibel zu externen/alten Loadern. Der echte
+                # Tracker unterstuetzt mature_only; Tests/Plugins koennen noch
+                # die fruehere Ein-Parameter-Signatur bereitstellen.
+                performance_summary = None
             verdict_alerts, new_verdict_state = [], {}
             if scanner_verdict is not None:
                 verdict_alerts, new_verdict_state = _verdict_alerts(
-                    summary, _load_verdict_state())
+                    performance_summary or summary, _load_verdict_state())
             # Shadow-Messung (AUDIT 2026-07-31): defensiv wie der Rest —
             # ein Fehler hier darf den Wochenreport nie verhindern.
             shadow = None
@@ -2259,7 +2526,12 @@ def _run_weekly_report(secrets=None, now_et=None):
                 except Exception:
                     shadow = None
             subject, body_html = _build_weekly_report_mail(
-                summary, now_et=now_et, verdict_alerts=verdict_alerts, shadow=shadow)
+                summary,
+                now_et=now_et,
+                verdict_alerts=verdict_alerts,
+                shadow=shadow,
+                performance_summary=performance_summary,
+            )
             sent = _send_email_alert(
                 subject, body_html,
                 secrets if secrets is not None else _load_secrets(),

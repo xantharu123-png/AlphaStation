@@ -53,9 +53,37 @@ def test_market_layer_mapping():
 
 def test_breaker_metrics_extraction():
     m = rf.breaker_metrics(_summary(decided=12, win=33.3, avg_r=-0.51), "stock_strategy")
-    assert m == {"decided": 12, "win_pct": 33.3, "avg_r": -0.51}
-    assert rf.breaker_metrics({}, "stock_strategy") == {"decided": 0, "win_pct": 0.0, "avg_r": 0.0}
+    assert m == {
+        "decided": 12,
+        "win_pct": 33.3,
+        "avg_r": -0.51,
+        "r_model": "managed_50_50_plus_breakeven",
+    }
+    assert rf.breaker_metrics({}, "stock_strategy") == {
+        "decided": 0,
+        "win_pct": 0.0,
+        "avg_r": 0.0,
+        "r_model": "managed_50_50_plus_breakeven",
+    }
     assert rf.breaker_metrics(None, "x")["decided"] == 0
+
+
+def test_breaker_metrics_prefers_recommended_management_model():
+    summary = {"per_scanner": {"stock_strategy": {
+        "decided_signals": 20,
+        "win_rate_pct": 10.0,
+        "avg_r": -0.8,
+        "managed_be_decided_signals": 12,
+        "managed_be_win_rate_pct": 41.7,
+        "avg_r_managed_50_50_be": 0.18,
+    }}}
+
+    assert rf.breaker_metrics(summary, "stock_strategy") == {
+        "decided": 12,
+        "win_pct": 41.7,
+        "avg_r": 0.18,
+        "r_model": "managed_50_50_plus_breakeven",
+    }
 
 
 def test_breaker_trip_exact_boundaries():
@@ -211,7 +239,12 @@ def test_api_decision_market_red_and_state_path(monkeypatch, tmp_path):
     monkeypatch.delenv("REGIME_FILTER_ENABLED", raising=False)
     monkeypatch.setattr(api, "_get_market_context_snapshot",
                         lambda: {"regime": "RISK_OFF", "overall_risk_score": 68})
-    monkeypatch.setattr(api, "load_performance_summary", lambda days=7: _summary(), raising=False)
+    monkeypatch.setattr(
+        api,
+        "load_performance_summary",
+        lambda days=30, mature_only=False: _summary(),
+        raising=False,
+    )
     d = api._regime_mail_decision("stock_strategy", "stocks", False, MON)
     assert d["state"] == rf.RED and d["layer"] == rf.LAYER_MARKET
 
@@ -228,8 +261,14 @@ def test_api_decision_breaker_trip_persists_state(monkeypatch, tmp_path):
     monkeypatch.setattr(rf, "DEFAULT_STATE_PATH", state_path)
     monkeypatch.delenv("REGIME_FILTER_ENABLED", raising=False)
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {"regime": "RISK_ON"})
-    monkeypatch.setattr(api, "load_performance_summary",
-                        lambda days=7: _summary(decided=12, win=10.0, avg_r=-0.5), raising=False)
+    monkeypatch.setattr(
+        api,
+        "load_performance_summary",
+        lambda days=30, mature_only=False: _summary(
+            decided=12, win=10.0, avg_r=-0.5
+        ),
+        raising=False,
+    )
     d = api._regime_mail_decision("stock_strategy", "stocks", False, MON)
     assert d["state"] == rf.RED and d["layer"] == rf.LAYER_BREAKER
     persisted = rf.load_state(state_path)
@@ -240,7 +279,12 @@ def test_api_decision_crypto_has_no_market_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(rf, "DEFAULT_STATE_PATH", tmp_path / "regime_state.json")
     monkeypatch.delenv("REGIME_FILTER_ENABLED", raising=False)
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {"regime": "PANIC"})
-    monkeypatch.setattr(api, "load_performance_summary", lambda days=7: _summary(scanner="crypto_strategy"), raising=False)
+    monkeypatch.setattr(
+        api,
+        "load_performance_summary",
+        lambda days=30, mature_only=False: _summary(scanner="crypto_strategy"),
+        raising=False,
+    )
     # PANIC gilt nicht fuer Crypto; Breaker ohne Daten => GREEN
     assert api._regime_mail_decision("crypto_strategy", "crypto", False, MON) is None
     # PM-Radar wird nie vom Regime-Filter angefasst

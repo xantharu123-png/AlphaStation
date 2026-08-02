@@ -86,6 +86,54 @@ def _summary(**total_overrides):
     }
 
 
+def _mature_summary(**total_overrides):
+    """Ausgereifte 30-Tage-Kohorte im empfohlenen 50/50+BE-Modell."""
+    total = {
+        "signals": 18,
+        "open": 0,
+        "managed_be_decided_signals": 10,
+        "managed_be_wins": 4,
+        "managed_be_losses": 5,
+        "managed_be_breakevens": 1,
+        "managed_be_win_rate_pct": 40.0,
+        "managed_be_win_rate_ex_breakeven_pct": 44.4,
+        "managed_be_breakeven_outcome_rate_pct": 10.0,
+        "managed_be_win_rate_wilson_95": {
+            "lower_pct": 16.8,
+            "upper_pct": 68.7,
+        },
+        "sum_r_managed_50_50_be": -1.5,
+        "avg_r_managed_50_50_be": -0.15,
+        "profit_factor_managed_be": 0.8,
+        "breakeven_win_rate_managed_be_pct": 43.0,
+    }
+    total.update(total_overrides)
+    return {
+        "generated_at": "2026-06-12T20:20:00+00:00",
+        "window_days": 30,
+        "cohort_mode": "fully_observed",
+        "excluded_not_mature": 8,
+        "total": total,
+        "per_scanner": {
+            "stock_strategy": {
+                "managed_be_decided_signals": 6,
+                "managed_be_win_rate_pct": 33.3,
+                "sum_r_managed_50_50_be": -1.8,
+                "avg_r_managed_50_50_be": -0.3,
+                "profit_factor_managed_be": 0.6,
+            },
+            "early_movers": {
+                "managed_be_decided_signals": 4,
+                "managed_be_win_rate_pct": 50.0,
+                "sum_r_managed_50_50_be": 0.3,
+                "avg_r_managed_50_50_be": 0.075,
+                "profit_factor_managed_be": 1.1,
+            },
+        },
+        "recent": [],
+    }
+
+
 def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     """Dedupe auf tmp, Startup-Delay aus, Uhr fixiert, Versand aufgezeichnet."""
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
@@ -543,3 +591,55 @@ def test_build_mail_watchdog_events_injected():
         _summary(), now_et=FRIDAY_1620, watchdog_events=_wd_events_sample())
     assert "Scan-Waechter diese Woche" in body
     assert "Entwarnungen" in body
+
+
+def test_mature_report_separates_activity_from_performance():
+    """Frische 7-Tage-Aktivitaet darf nicht als fertige Hit-Rate erscheinen."""
+    activity = _summary(
+        signals=56,
+        open=35,
+        tp1_hit=0,
+        tp2_hit=0,
+        stop_hit=21,
+        expired=0,
+        win_rate_pct=0.0,
+        avg_r=-1.25,
+        sum_r=-26.2,
+        alerts_per_day=8.0,
+    )
+    subject, body = bg_service._build_mature_weekly_report_mail(
+        activity,
+        _mature_summary(),
+        now_et=FRIDAY_1620,
+        watchdog_events=[],
+    )
+
+    assert "50/50+BE" in subject
+    assert "10 reife Signale" in subject
+    assert "Aktivitaet der letzten 7 Tage" in body
+    assert "Ausgereifte 30-Tage-Kohorte" in body
+    assert "Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote" in body
+    assert "56" in body
+    assert "35" in body
+    assert "W / L / 0R" in body
+    assert "4 / 5 / 1" in body
+    assert "8 noch unreife Signale wurden ausgeschlossen" in body
+    assert "periodischen Kurs-Snapshots" in body
+
+
+def test_weekly_job_loads_activity_and_mature_cohorts(monkeypatch, tmp_path):
+    """Der produktive Job fordert 7d-Aktivitaet und reife 30d-Daten."""
+    sent = _setup(monkeypatch, tmp_path)
+    calls = []
+
+    def _loader(days=90, mature_only=False, as_of=None):
+        calls.append((days, mature_only))
+        return _mature_summary() if mature_only else _summary()
+
+    monkeypatch.setattr(bg_service, "load_performance_summary", _loader)
+
+    assert bg_service._run_weekly_report({}) is True
+    assert calls == [(7, False), (30, True)]
+    assert len(sent) == 1
+    assert "50/50+BE" in sent[0]["subject"]
+    assert "Ausgereifte 30-Tage-Kohorte" in sent[0]["body"]

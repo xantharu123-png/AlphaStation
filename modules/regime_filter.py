@@ -10,7 +10,7 @@ Layer 1 MARKET (exogen): mappt das bestehende modules.market_context-Regime
 (PANIC/RISK_OFF/RISK_OFF_LIGHT/NEUTRAL/RISK_ON) auf GREEN/YELLOW/RED.
 Fail-open bei unbekanntem/fehlendem Regime — niemals ein erfundenes ROT.
 
-Layer 2 BREAKER (endogen): rollierende 7-Tage-Eigen-Performance je Scanner
+Layer 2 BREAKER (endogen): voll beobachtete 30-Tage-Eigen-Performance je Scanner
 aus dem Signal-Tracker (load_performance_summary). Trip: n >= 10 entschieden
 UND ØR <= -0.3R UND Win% <= 25 %. Release erfolgt ausschliesslich mit nach
 dem Trip entschiedener Trade-/Shadow-Evidenz: n >= 5, ØR > -0.1R und
@@ -87,13 +87,23 @@ def market_layer_state(context: dict | None) -> dict:
 # ── Layer 2: Eigen-Performance-Breaker ───────────────────────────────────────
 
 def breaker_metrics(summary: dict | None, scanner_key: str) -> dict:
-    """7d-Metriken eines Scanners aus load_performance_summary(days=7)."""
+    """Belastbare Scanner-Metriken im tatsaechlich empfohlenen Exit-Modell."""
     per = (summary or {}).get("per_scanner") or {}
     row = per.get(scanner_key) or {}
+    decided = row.get("managed_be_decided_signals")
+    win_pct = row.get("managed_be_win_rate_pct")
+    avg_r = row.get("avg_r_managed_50_50_be")
+    if not isinstance(decided, int):
+        decided = int(row.get("decided_signals") or 0)
+    if not isinstance(win_pct, (int, float)):
+        win_pct = float(row.get("win_rate_pct") or 0.0)
+    if not isinstance(avg_r, (int, float)):
+        avg_r = float(row.get("avg_r") or 0.0)
     return {
-        "decided": int(row.get("decided_signals") or 0),
-        "win_pct": float(row.get("win_rate_pct") or 0.0),
-        "avg_r": float(row.get("avg_r") or 0.0),
+        "decided": int(decided),
+        "win_pct": float(win_pct),
+        "avg_r": float(avg_r),
+        "r_model": "managed_50_50_plus_breakeven",
     }
 
 
@@ -219,14 +229,14 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
             "tripped_at": tripped_at.isoformat(),
             "reason": (
                 f"breaker_cooldown seit {tripped_at.date().isoformat()} "
-                f"(7d: n={decided}, AvgR {avg_r:+.2f}, Win {win_pct:.0f}%; "
+                f"(30d reif: n={decided}, AvgR {avg_r:+.2f}, Win {win_pct:.0f}%; "
                 f"post-trip n={recovery_decided})"
             ),
         }
 
     if decided >= min_decided and avg_r <= trip_avg_r and win_pct <= trip_win_pct:
         return {**base, "state": RED, "tripped_at": now.isoformat(),
-                "reason": (f"breaker_trip (7d: n={decided} >= {min_decided}, "
+                "reason": (f"breaker_trip (30d reif: n={decided} >= {min_decided}, "
                            f"ØR {avg_r:+.2f} <= {trip_avg_r:+.2f}, "
                            f"Win {win_pct:.0f}% <= {trip_win_pct:.0f}%)")}
     return {**base, "state": GREEN, "tripped_at": None, "reason": ""}

@@ -631,6 +631,87 @@ def simulate_managed_5050_breakeven(row: Dict[str, Any]) -> Optional[float]:
     return round(base - 0.5 * realized, 4)
 
 
+def _recommended_payoff_statistics(values: List[float]) -> Dict[str, Any]:
+    """Exakte Payoff-Metriken fuer das empfohlene 50/50-plus-BE-Modell."""
+    clean: List[float] = []
+    for value in values:
+        parsed = _to_float(value)
+        if parsed is not None and math.isfinite(parsed):
+            clean.append(parsed)
+    wins = [value for value in clean if value > 0.0]
+    losses = [value for value in clean if value < 0.0]
+    breakevens = [value for value in clean if value == 0.0]
+    decided = len(clean)
+    decisive = len(wins) + len(losses)
+    avg_win = sum(wins) / len(wins) if wins else None
+    avg_loss = abs(sum(losses) / len(losses)) if losses else None
+    if avg_win is not None and avg_loss is not None and (avg_win + avg_loss) > 0.0:
+        conditional_breakeven = 100.0 * avg_loss / (avg_win + avg_loss)
+        # Die berichtete Trefferquote zaehlt 0R-Ausgaenge im Nenner mit.
+        # Deshalb muss auch die erforderliche Gesamt-Trefferquote um die
+        # beobachtete Einstandsquote bereinigt werden.
+        decisive_share = decisive / decided if decided else 0.0
+        breakeven = conditional_breakeven * decisive_share
+    elif avg_win is not None and avg_loss is None:
+        conditional_breakeven = 0.0
+        breakeven = 0.0
+    elif avg_win is None and avg_loss is not None:
+        conditional_breakeven = 100.0
+        breakeven = 100.0
+    else:
+        conditional_breakeven = None
+        breakeven = None
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0.0 else None
+    return {
+        "decided": decided,
+        "wins": len(wins),
+        "losses": len(losses),
+        "breakevens": len(breakevens),
+        "win_rate_pct": round(100.0 * len(wins) / decided, 1) if decided else None,
+        "win_rate_ex_breakeven_pct": (
+            round(100.0 * len(wins) / decisive, 1) if decisive else None
+        ),
+        "breakeven_outcome_rate_pct": (
+            round(100.0 * len(breakevens) / decided, 1) if decided else None
+        ),
+        "win_rate_wilson_95": _wilson_interval_95(len(wins), decided),
+        "avg_r": round(sum(clean) / decided, 3) if decided else None,
+        "sum_r": round(sum(clean), 3) if decided else 0.0,
+        "avg_win_r": round(avg_win, 3) if avg_win is not None else None,
+        "avg_loss_r": round(avg_loss, 3) if avg_loss is not None else None,
+        "profit_factor": round(profit_factor, 3) if profit_factor is not None else None,
+        "breakeven_win_rate_pct": round(breakeven, 1) if breakeven is not None else None,
+        "breakeven_win_rate_ex_breakeven_pct": (
+            round(conditional_breakeven, 1)
+            if conditional_breakeven is not None
+            else None
+        ),
+    }
+
+
+def _signal_has_full_observation_window(row: Dict[str, Any], as_of: datetime) -> bool:
+    """Rechtszensierte Signale aus belastbaren Performance-Kohorten fernhalten.
+
+    Krypto wird 120 Stunden beobachtet. Aktien brauchen fuenf abgeschlossene
+    Handelstage; zehn Kalendertage sind dafuer ein konservativer Proxy, der
+    Wochenenden und einzelne Feiertage einschliesst. Ein frueher Stop wird bewusst nicht
+    vorzeitig als reifes Ergebnis gewertet, solange potenzielle Gewinner aus
+    derselben Versandkohorte noch offen sein koennen.
+    """
+    created_at = _parse_utc_datetime(row.get("created_at"))
+    if created_at is None:
+        return False
+    asset_class = str(row.get("asset_class") or "stock").strip().lower()
+    horizon = (
+        timedelta(hours=CRYPTO_EXPIRY_HOURS)
+        if asset_class == "crypto"
+        else timedelta(days=max(10, STOCK_EXPIRY_BARS + 5))
+    )
+    return created_at + horizon <= as_of
+
+
 def _register_eval_failure(sig: Dict[str, Any], now_dt: datetime) -> Dict[str, Any]:
     """Fehlversuch zaehlen; ab MAX_EVAL_FAILS Fehlversuchen -> UNTRACKED."""
     fail_count = int(sig.get("eval_fail_count") or 0) + 1
@@ -1283,7 +1364,25 @@ _METRIC_KEYS = (
 
 def _empty_bucket() -> Dict[str, Any]:
     bucket: Dict[str, Any] = {key: 0 for key in _METRIC_KEYS}
-    bucket.update({"win_rate_pct": None, "avg_r": None, "sum_r": 0.0, "alerts_per_day": 0.0})
+    bucket.update(
+        {
+            "win_rate_pct": None,
+            "avg_r": None,
+            "sum_r": 0.0,
+            "alerts_per_day": 0.0,
+            "managed_be_decided_signals": 0,
+            "managed_be_wins": 0,
+            "managed_be_losses": 0,
+            "managed_be_breakevens": 0,
+            "managed_be_win_rate_pct": None,
+            "managed_be_win_rate_ex_breakeven_pct": None,
+            "managed_be_breakeven_outcome_rate_pct": None,
+            "avg_r_managed_50_50_be": None,
+            "sum_r_managed_50_50_be": 0.0,
+            "breakeven_win_rate_managed_be_pct": None,
+            "breakeven_win_rate_ex_breakeven_managed_be_pct": None,
+        }
+    )
     return bucket
 
 
@@ -1336,6 +1435,7 @@ def _finalize_bucket(
     be_values: Optional[List[float]] = None,
     be_activations: int = 0,
     be_saved: int = 0,
+    managed_be_values: Optional[List[float]] = None,
 ) -> None:
     wins = sum(1 for value in r_values if value > 0)
     decided = len(r_values)
@@ -1357,6 +1457,29 @@ def _finalize_bucket(
     bucket["avg_r_be"] = round(sum(be) / len(be), 3) if be else None
     bucket["be_activations"] = int(be_activations)
     bucket["be_saved"] = int(be_saved)
+    recommended = _recommended_payoff_statistics(managed_be_values or [])
+    bucket["managed_be_decided_signals"] = recommended["decided"]
+    bucket["managed_be_wins"] = recommended["wins"]
+    bucket["managed_be_losses"] = recommended["losses"]
+    bucket["managed_be_breakevens"] = recommended["breakevens"]
+    bucket["managed_be_win_rate_pct"] = recommended["win_rate_pct"]
+    bucket["managed_be_win_rate_ex_breakeven_pct"] = recommended[
+        "win_rate_ex_breakeven_pct"
+    ]
+    bucket["managed_be_breakeven_outcome_rate_pct"] = recommended[
+        "breakeven_outcome_rate_pct"
+    ]
+    bucket["managed_be_win_rate_wilson_95"] = recommended["win_rate_wilson_95"]
+    bucket["managed_be_sample_reliable"] = bool(recommended["decided"] >= 30)
+    bucket["avg_r_managed_50_50_be"] = recommended["avg_r"]
+    bucket["sum_r_managed_50_50_be"] = recommended["sum_r"]
+    bucket["avg_win_r_managed_be"] = recommended["avg_win_r"]
+    bucket["avg_loss_r_managed_be"] = recommended["avg_loss_r"]
+    bucket["profit_factor_managed_be"] = recommended["profit_factor"]
+    bucket["breakeven_win_rate_managed_be_pct"] = recommended["breakeven_win_rate_pct"]
+    bucket["breakeven_win_rate_ex_breakeven_managed_be_pct"] = recommended[
+        "breakeven_win_rate_ex_breakeven_pct"
+    ]
     bucket["alerts_per_day"] = round(bucket["signals"] / float(window_days), 3)
 
 
@@ -1385,17 +1508,29 @@ def scanner_verdict(bucket: Dict[str, Any]) -> Tuple[str, str]:
                    Breakeven)
       beobachten — alles andere / zu kleine Stichprobe
     """
-    decided = bucket.get("decided_signals") or 0
+    decided = bucket.get("managed_be_decided_signals")
+    if not isinstance(decided, int):
+        decided = bucket.get("decided_signals") or 0
     if decided < 30:
         return "beobachten", f"Stichprobe {decided} < 30"
-    avg_r = bucket.get("avg_r")
-    win = bucket.get("win_rate_pct")
+    avg_r = bucket.get("avg_r_managed_50_50_be")
+    win = bucket.get("managed_be_win_rate_pct")
+    if not isinstance(avg_r, (int, float)):
+        avg_r = bucket.get("avg_r")
+    if not isinstance(win, (int, float)):
+        win = bucket.get("win_rate_pct")
     if not isinstance(avg_r, (int, float)) or not isinstance(win, (int, float)):
         return "beobachten", "keine verwertbaren R-Daten"
     if avg_r <= -1.0:
         return "abschalten", "Ø R <= -1R, strukturell defizitär"
-    be = breakeven_win_rate_pct(win, avg_r)
-    wilson = bucket.get("win_rate_wilson_95") or {}
+    be = bucket.get("breakeven_win_rate_managed_be_pct")
+    if not isinstance(be, (int, float)):
+        be = breakeven_win_rate_pct(win, avg_r)
+    wilson = (
+        bucket.get("managed_be_win_rate_wilson_95")
+        or bucket.get("win_rate_wilson_95")
+        or {}
+    )
     lo, hi = wilson.get("lower_pct"), wilson.get("upper_pct")
     if (avg_r > 0 and isinstance(lo, (int, float))
             and isinstance(be, (int, float)) and lo > be):
@@ -1406,8 +1541,24 @@ def scanner_verdict(bucket: Dict[str, Any]) -> Tuple[str, str]:
     return "beobachten", "Erwartungswert nicht signifikant"
 
 
-def load_performance_summary(days: int = 90) -> dict:
+def load_performance_summary(
+    days: int = 90,
+    mature_only: bool = False,
+    as_of: Any = None,
+) -> dict:
     """Track-Record-Zusammenfassung ueber die letzten `days` Tage. Wirft nie.
+
+    Mit `mature_only=True` werden nur Signale ausgewertet, deren komplettes
+    Beobachtungsfenster am `as_of`-Zeitpunkt abgelaufen ist. Das verhindert,
+    dass schnelle Stops gegen noch offene potenzielle Gewinner als fertige
+    Trefferquote erscheinen.
+
+    Die `managed_be_*`-Felder bilden das empfohlene Modell ab: 50 Prozent am
+    TP1, Rest bis TP2/Stop/Expiry und Stop auf Einstand ab +1R. Die gemeldete
+    Trefferquote behaelt 0R-Einstandsausgaenge im Nenner; die zusaetzliche
+    `managed_be_win_rate_ex_breakeven_pct` betrachtet nur Gewinne/Verluste.
+    Die Break-even-Schwellen verwenden jeweils denselben Nenner wie die
+    zugehoerige Trefferquote.
 
     Returns:
         {'generated_at', 'window_days', 'total': {...}, 'per_scanner':
@@ -1439,15 +1590,24 @@ def load_performance_summary(days: int = 90) -> dict:
         window = max(1, int(days))
     except (TypeError, ValueError):
         window = 90
+    if isinstance(as_of, datetime):
+        as_of_dt = _coerce_now(as_of)
+    elif as_of is not None:
+        as_of_dt = _parse_utc_datetime(as_of) or _utc_now()
+    else:
+        as_of_dt = _utc_now()
     summary: Dict[str, Any] = {
-        "generated_at": _utc_iso(),
+        "generated_at": as_of_dt.isoformat(),
         "window_days": window,
+        "cohort_mode": "fully_observed" if mature_only else "created_in_window",
+        "as_of": as_of_dt.isoformat(),
+        "excluded_not_mature": 0,
         "total": _empty_bucket(),
         "per_scanner": {},
         "recent": [],
     }
     try:
-        cutoff_iso = (_utc_now() - timedelta(days=window)).isoformat()
+        cutoff_iso = (as_of_dt - timedelta(days=window)).isoformat()
         with _DB_LOCK:
             with _db_connection() as conn:
                 rows = [
@@ -1459,10 +1619,19 @@ def load_performance_summary(days: int = 90) -> dict:
                         (cutoff_iso,),
                     ).fetchall()
                 ]
+        if mature_only:
+            mature_rows = [
+                row for row in rows
+                if _signal_has_full_observation_window(row, as_of_dt)
+            ]
+            summary["excluded_not_mature"] = len(rows) - len(mature_rows)
+            rows = mature_rows
         total_r: List[float] = []
         total_managed: List[float] = []
+        total_managed_be: List[float] = []
         scanner_r: Dict[str, List[float]] = {}
         scanner_managed: Dict[str, List[float]] = {}
+        scanner_managed_be: Dict[str, List[float]] = {}
         # BE-Trigger (AUDIT 2026-07-30): live-Wirkung der Einstand-Regel
         total_be: List[float] = []
         scanner_be: Dict[str, List[float]] = {}
@@ -1485,6 +1654,10 @@ def load_performance_summary(days: int = 90) -> dict:
                 if managed_value is not None:
                     total_managed.append(managed_value)
                     scanner_managed.setdefault(scanner, []).append(managed_value)
+                managed_be_value = simulate_managed_5050_breakeven(row)
+                if managed_be_value is not None:
+                    total_managed_be.append(managed_be_value)
+                    scanner_managed_be.setdefault(scanner, []).append(managed_be_value)
                 if row.get("be_activated_at"):
                     be_act_total += 1
                     be_act_scanner[scanner] = be_act_scanner.get(scanner, 0) + 1
@@ -1497,13 +1670,22 @@ def load_performance_summary(days: int = 90) -> dict:
                     if float(r_value) < 0.0 and be_value >= 0.0:
                         be_saved_total += 1
                         be_saved_scanner[scanner] = be_saved_scanner.get(scanner, 0) + 1
-        _finalize_bucket(summary["total"], total_r, window, total_managed,
-                         total_be, be_act_total, be_saved_total)
+        _finalize_bucket(
+            summary["total"],
+            total_r,
+            window,
+            total_managed,
+            total_be,
+            be_act_total,
+            be_saved_total,
+            total_managed_be,
+        )
         for scanner, bucket in summary["per_scanner"].items():
             _finalize_bucket(
                 bucket, scanner_r.get(scanner, []), window, scanner_managed.get(scanner, []),
                 scanner_be.get(scanner, []), be_act_scanner.get(scanner, 0),
                 be_saved_scanner.get(scanner, 0),
+                scanner_managed_be.get(scanner, []),
             )
         summary["r_semantics"] = (
             "avg_r = Level-R (TP2 volles Geometrie-R, unmanaged); "
@@ -1511,6 +1693,13 @@ def load_performance_summary(days: int = 90) -> dict:
             "(50% Teilverkauf am TP1, Rest Stop/TP2/Expiry). "
             "avg_r_be = live gemessenes R unter der Einstand-Regel "
             "(Stop auf Einstand ab MFE >= +1R; seit 30.07., kein Backtest); "
+            "avg_r_managed_50_50_be = einheitliches Empfehlungsmodell: "
+            "50% am TP1, Rest bis TP2/Stop/Expiry und Stop auf Einstand ab +1R. "
+            "Die exakte Breakeven-Trefferquote stammt aus realisiertem "
+            "Durchschnittsgewinn, Durchschnittsverlust und der beobachteten "
+            "0R-Einstandsquote dieses Modells. "
+            "mature_only=true schliesst rechtszensierte, noch nicht voll "
+            "beobachtbare Versandkohorten aus. "
             "be_activations/be_saved = BE-Markierungen / verhinderte Verlierer. "
             "win_rate_wilson_95 = Wilson-Konfidenzintervall der Trefferquote; "
             "sample_reliable ab 30 entschiedenen Signalen. AUDIT 2026-07-24 (T1 + Kalibrier-Loop)."
@@ -1534,6 +1723,7 @@ def load_performance_summary(days: int = 90) -> dict:
                 "r_realized": row.get("r_realized"),
                 "r_realized_be": row.get("r_realized_be"),
                 "r_managed_50_50": _managed_r_50_50(row),
+                "r_managed_50_50_be": simulate_managed_5050_breakeven(row),
                 "tp1_hit_at": row.get("tp1_hit_at"),
             }
             for row in rows[:20]
@@ -1556,6 +1746,7 @@ def load_breaker_recovery_summary(scanner_key: str, since: Any) -> dict:
         "available": False,
         "scanner": scanner,
         "since": since_dt.isoformat() if since_dt else None,
+        "r_model": "managed_50_50_plus_breakeven",
         "decided": 0,
         "wins": 0,
         "win_pct": None,
@@ -1575,15 +1766,23 @@ def load_breaker_recovery_summary(scanner_key: str, since: Any) -> dict:
     try:
         with _DB_LOCK:
             with _db_connection() as conn:
-                rows = conn.execute(
-                    "SELECT mail_class, r_realized FROM signals "
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                    "SELECT * FROM signals "
                     "WHERE scanner = ? AND created_at >= ? "
                     "AND mail_class IN ('trade', 'shadow') "
                     "AND r_realized IS NOT NULL",
                     (scanner, since_dt.isoformat()),
-                ).fetchall()
+                    ).fetchall()
+                ]
 
-        realized = [float(row["r_realized"]) for row in rows]
+        realized = [
+            value
+            for row in rows
+            for value in [simulate_managed_5050_breakeven(row)]
+            if value is not None
+        ]
         decided = len(realized)
         wins = sum(1 for value in realized if value > 0.0)
         summary.update(

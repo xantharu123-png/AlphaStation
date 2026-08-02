@@ -8206,7 +8206,9 @@ def _regime_mail_decision(
                 breaker_enabled = False
             else:
                 try:
-                    summary = load_performance_summary(days=7)
+                    # Breaker nur aus voll beobachteten Kohorten und demselben
+                    # 50/50-plus-Einstand-Modell ableiten, das die Mail empfiehlt.
+                    summary = load_performance_summary(days=30, mature_only=True)
                 except Exception as exc:
                     print(f"[Regime-Filter] Tracker-Summary nicht ladbar (fail-open): {exc}")
                     summary = None
