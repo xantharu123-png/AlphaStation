@@ -19,7 +19,7 @@ if (!sourceMatch) {
   throw new Error("frontend/index.html does not contain #app-source");
 }
 
-const source = sourceMatch[1].replace(/^\r?\n/, "");
+const source = sourceMatch[1].replace(/\r\n/g, "\n").replace(/^\n/, "");
 const sourceHash = crypto.createHash("sha256").update(source, "utf8").digest("hex");
 const babelCode = fs.readFileSync(babelPath, "utf8");
 const context = { console };

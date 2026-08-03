@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Alpha Station — Auto-Update (fuer Cron).
 #
-# Prueft, ob origin/main neuer ist als der Server-Stand. Wenn ja:
-# git pull (fast-forward only) + Neustart beider Dienste + Logzeile.
-# Fehlschlag => KEIN Neustart, nur Log (Betrieb laeuft auf altem Stand weiter).
+# Prueft, ob origin/main neuer ist als der Server-Stand. Wenn ja, uebernimmt
+# safe_deploy.sh Preflight, Tests, Pull, Service-Sync, Healthcheck und Rollback.
+# Fehlschlag => automatischer Rollback bzw. alter Stand bleibt aktiv.
 #
 # Einmalig installieren (auf dem Server, als root):
 #   chmod +x /home/tradingbot/app/deploy/auto_update.sh
@@ -29,11 +29,10 @@ LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
 [ "$LOCAL" = "$REMOTE" ] && exit 0   # nichts zu tun — Normalfall
 
-logger -t "$LOG_TAG" "Neue Version: $LOCAL -> $REMOTE — pulle + starte neu"
+logger -t "$LOG_TAG" "Neue Version: $LOCAL -> $REMOTE — starte sicheren Deploy"
 
-if git pull --ff-only origin main >>/dev/null 2>&1; then
-    systemctl restart tradingbot-api tradingbot-bg
-    logger -t "$LOG_TAG" "Deploy OK: $(git rev-parse --short HEAD) aktiv, Dienste neu gestartet"
+if APP_DIR="$APP_DIR" BRANCH="main" bash "$APP_DIR/deploy/safe_deploy.sh"; then
+    logger -t "$LOG_TAG" "Deploy OK: $(git rev-parse --short HEAD) getestet und aktiv"
 else
-    logger -t "$LOG_TAG" -p user.err "git pull fehlgeschlagen (kein fast-forward?) — Dienste NICHT angefasst, manuell pruefen: cd $APP_DIR && git status"
+    logger -t "$LOG_TAG" -p user.err "Sicherer Deploy fehlgeschlagen/rollback — manuell pruefen: cd $APP_DIR && git status"
 fi

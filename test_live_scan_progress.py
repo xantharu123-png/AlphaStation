@@ -25,4 +25,6 @@ def test_frontend_renders_and_polls_live_scan_results():
     assert "Live-Zwischenstand:" in FRONTEND_SOURCE
     assert "finale Freigaben und Alerts erst nach abgeschlossenem Scan" in FRONTEND_SOURCE
     assert "setTimeout(() => pollResults(attempts + 1), 2000)" in FRONTEND_SOURCE
-    assert FRONTEND_SOURCE.count("<LiveScanStatus") >= 5
+    # BI uses the scheduler-bound ScanControl progress only; four other
+    # long-running scanners still render their dedicated live result panels.
+    assert FRONTEND_SOURCE.count("<LiveScanStatus") >= 4

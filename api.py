@@ -889,6 +889,67 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
     return None, "unavailable"
 
 
+def _orb_intraday_candidate_limit() -> int:
+    """Cap expensive 5m requests only after common-stock validation."""
+    try:
+        configured = int(os.getenv("ORB_INTRADAY_CANDIDATE_LIMIT", "75"))
+    except (TypeError, ValueError):
+        configured = 75
+    return max(25, min(configured, 100))
+
+
+def _select_orb_common_stock_candidates(
+    ranked_candidates: List[Dict[str, Any]],
+    limit: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, str]], Dict[str, Any]]:
+    """Select ranked common stocks without truncating before asset validation."""
+    candidate_limit = _orb_intraday_candidate_limit() if limit is None else max(1, int(limit))
+    common_stock_universe, universe_source = _load_common_stock_universe()
+    universe_available = bool(common_stock_universe)
+    universe_is_fresh = universe_available and not str(universe_source).startswith("stale")
+
+    selected: List[Dict[str, Any]] = []
+    excluded: List[Dict[str, str]] = []
+    reference_checked = 0
+
+    for candidate in ranked_candidates:
+        ticker = str(candidate.get("ticker", "") or "").upper().strip()
+        if not ticker:
+            excluded.append({"ticker": "", "reason": "missing ticker"})
+            continue
+
+        if common_stock_universe is not None and ticker in common_stock_universe:
+            is_stock = True
+            asset_reason = f"common-stock universe ({universe_source})"
+        elif universe_is_fresh:
+            # A fresh full reference universe is both faster and safer than
+            # hundreds of per-ticker calls that can fail under rate limits.
+            is_stock = False
+            asset_reason = f"not in common-stock universe ({universe_source})"
+        else:
+            reference_checked += 1
+            is_stock, asset_reason = _is_orb_common_stock_candidate(ticker)
+
+        if is_stock:
+            row = dict(candidate)
+            row["asset_check"] = asset_reason
+            selected.append(row)
+            if len(selected) >= candidate_limit:
+                break
+        else:
+            excluded.append({"ticker": ticker, "reason": asset_reason})
+
+    diagnostics = {
+        "prefiltered": len(ranked_candidates),
+        "selected": len(selected),
+        "excluded_checked": len(excluded),
+        "reference_checked": reference_checked,
+        "candidate_limit": candidate_limit,
+        "asset_universe_source": universe_source,
+    }
+    return selected, excluded, diagnostics
+
+
 def _adr_ticker_set() -> set[str]:
     """ADR-Ticker (ADRC/ADRP) fuer die Klumpenrisiko-Warnung — lazy aus dem Universe-Cache.
 
@@ -975,13 +1036,13 @@ def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, per
 def _orb_volume_score(
     breakout_confirmed: bool,
     breakout_bar_volume: Any,
-    opening_range_average_volume: Any,
+    pre_breakout_average_volume: Any,
     volume_available: bool,
 ) -> Tuple[int, str]:
-    """Score ORB volume only when a complete, positive baseline exists."""
+    """Score the launch bar against a comparable pre-breakout 5m baseline."""
     try:
         breakout_volume = float(breakout_bar_volume or 0)
-        baseline = float(opening_range_average_volume or 0)
+        baseline = float(pre_breakout_average_volume or 0)
     except (TypeError, ValueError):
         return 0, "Vol N/A"
     if not volume_available or baseline <= 0 or breakout_volume <= 0:
@@ -991,9 +1052,85 @@ def _orb_volume_score(
         if ratio >= 2.0:
             return 25, "Vol 2x+"
         if ratio >= 1.5:
-            return 20, "Vol 1.5x"
-        return 12, "Vol OK"
+            return 22, "Vol 1.5x"
+        if ratio >= 1.15:
+            return 18, "Vol bestaetigt"
+        return 14, "Vol + Tages-RVOL"
     return 5, "Vol unconfirmed"
+
+
+def _orb_active_excursion_volume(
+    or_bars: List[Dict[str, Any]],
+    post_or_bars: List[Dict[str, Any]],
+    direction: str,
+    or_high: float,
+    or_low: float,
+    day_rvol: float,
+) -> Dict[str, Any]:
+    """Measure the launch bar of the current outside-range excursion.
+
+    A late 5m bar must not be compared with the 09:30 opening-auction spike.
+    The baseline therefore uses completed 5m bars immediately before the
+    active excursion and excludes the first opening bar whenever possible.
+    """
+    direction = str(direction or "").upper()
+
+    def _is_outside(bar: Dict[str, Any]) -> bool:
+        close = float(bar.get("c", 0) or 0)
+        return close > or_high if direction == "LONG" else close < or_low
+
+    if direction not in {"LONG", "SHORT"} or not post_or_bars or not _is_outside(post_or_bars[-1]):
+        return {
+            "confirmed": False,
+            "launch_volume": 0.0,
+            "baseline_volume": 0.0,
+            "volume_ratio": 0.0,
+            "baseline_source": "none",
+            "breakout_age_bars": 0,
+        }
+
+    launch_index = len(post_or_bars) - 1
+    while launch_index > 0 and _is_outside(post_or_bars[launch_index - 1]):
+        launch_index -= 1
+
+    launch_bar = post_or_bars[launch_index]
+    launch_volume = float(launch_bar.get("v", 0) or 0)
+    prior_post_volumes = [
+        float(bar.get("v", 0) or 0)
+        for bar in post_or_bars[max(0, launch_index - 6):launch_index]
+        if float(bar.get("v", 0) or 0) > 0
+    ]
+    late_open_volumes = [
+        float(bar.get("v", 0) or 0)
+        for bar in or_bars[-2:]
+        if float(bar.get("v", 0) or 0) > 0
+    ]
+
+    if len(prior_post_volumes) >= 3:
+        baseline_values = prior_post_volumes
+        baseline_source = "pre_breakout_5m_median"
+    elif prior_post_volumes:
+        baseline_values = prior_post_volumes + late_open_volumes
+        baseline_source = "blended_prebreakout_5m_median"
+    else:
+        baseline_values = late_open_volumes
+        baseline_source = "late_open_5m_median"
+
+    baseline = float(statistics.median(baseline_values)) if baseline_values else 0.0
+    ratio = launch_volume / baseline if baseline > 0 and launch_volume > 0 else 0.0
+    confirmed = bool(
+        ratio >= 1.15
+        or (ratio >= 1.05 and float(day_rvol or 0) >= 2.0)
+    )
+    return {
+        "confirmed": confirmed,
+        "launch_volume": launch_volume,
+        "baseline_volume": baseline,
+        "volume_ratio": ratio,
+        "baseline_source": baseline_source,
+        "breakout_age_bars": len(post_or_bars) - launch_index,
+        "launch_timestamp": launch_bar.get("t"),
+    }
 
 
 # ── Email Alert System ──
@@ -6947,6 +7084,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_short_not_closing_weak",
         "early_mover_retest_not_near_entry",
         "trade_health_wait_for_retest",
+        "orb_recent_hold_weak",
     }
     wait_trigger_markers = {
         "trade_health_wait_for_trigger",
@@ -6960,6 +7098,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "momentum_breakout_freshness_unconfirmed",
         "swing_4h_state_missing_wait_trigger",
         "momentum_breakout_stale_wait_trigger",
+        "orb_breakout_volume_unconfirmed",
+        "orb_no_active_breakout",
+        "orb_waiting_for_entry_confirmation",
     }
     no_trade_markers = {
         "drop_too_extended_no_chase",
@@ -6990,6 +7131,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_multi_day_exhausted_no_chase",
         # 2026-07-31 (BHC-Spiegelung Short): 5-Tage-Drop >= 7 ATR.
         "swing_short_multi_day_exhausted_no_chase",
+        "orb_not_tradeable",
+        "orb_range_break_stale",
+        "orb_tp1_already_reached",
     }
     no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
     contextual_no_trade_markers = set(no_trade_markers)
@@ -7022,6 +7166,39 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "decision_label": "Beobachten",
         "decision_reason": ", ".join(reasons[:4]),
     }
+
+
+_ORB_ACTIONABLE_WAIT_DECISIONS = {
+    "WAIT_FOR_RETEST",
+    "WAIT_FOR_CONTINUATION",
+    "WAIT_FOR_TRIGGER",
+}
+
+
+def _orb_signal_gate_reasons(row: Dict[str, Any]) -> List[str]:
+    """Return blockers that separate a raw range break from an ORB signal."""
+    reasons: List[str] = []
+    if not bool(row.get("vol_confirmed")):
+        reasons.append("orb_breakout_volume_unconfirmed")
+    if str(row.get("breakout_state") or "").strip().lower() != "active_breakout":
+        reasons.append("orb_no_active_breakout")
+
+    age_bars = int(_alert_float(row.get("breakout_age_bars"), 0) or 0)
+    decision = str(
+        row.get("trade_decision")
+        or (row.get("trade_health") or {}).get("decision")
+        or ""
+    ).upper()
+    max_age_bars = 9 if decision in _ORB_ACTIONABLE_WAIT_DECISIONS else 6
+    if age_bars <= 0 or age_bars > max_age_bars:
+        reasons.append("orb_range_break_stale")
+
+    recent_hold = _alert_float(row.get("recent_hold_pct"), None)
+    if recent_hold is None or recent_hold < 0.34:
+        reasons.append("orb_recent_hold_weak")
+    if bool(row.get("late_to_tp1")):
+        reasons.append("orb_tp1_already_reached")
+    return list(dict.fromkeys(reasons))
 
 
 def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
@@ -7122,6 +7299,17 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.extend(_bear_short_rule_reasons(row))
     if quality_gate_actionable and not swing_stock_mode and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
+    if quality_gate_actionable and scanner_name == "orb":
+        reasons.extend(_orb_signal_gate_reasons(row))
+        orb_decision = str(
+            row.get("trade_decision")
+            or (row.get("trade_health") or {}).get("decision")
+            or ""
+        ).upper()
+        if orb_decision in _ORB_ACTIONABLE_WAIT_DECISIONS:
+            reasons.append("orb_waiting_for_entry_confirmation")
+        elif orb_decision != "TRADEABLE":
+            reasons.append("orb_not_tradeable")
     if base_actionable and scanner_name == "crypto_strategy":
         if not _CRYPTO_STRATEGY_ALERTS_ENABLED:
             reasons.append("crypto_strategy_watch_only")
@@ -7309,8 +7497,10 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
         flat = []
         for container in rows:
             if isinstance(container, dict):
-                for key in ("breakouts", "failed_breakouts", "candidates"):
-                    flat.extend([r for r in container.get(key, []) or [] if isinstance(r, dict)])
+                source_rows = container.get("actionable_breakouts")
+                if not isinstance(source_rows, list):
+                    source_rows = container.get("breakouts", [])
+                flat.extend([r for r in source_rows or [] if isinstance(r, dict)])
         return flat
     if scanner_name == "bear":
         flat = []
@@ -10454,9 +10644,15 @@ def _normalize_orb_display_state(row: Dict[str, Any]) -> None:
         row["score_details"] = " | ".join(dict.fromkeys(details))
         return
 
-    if decision in {"WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION", "WAIT_FOR_TRIGGER", "WATCH_ONLY"}:
+    if decision in {"WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION", "WAIT_FOR_TRIGGER"}:
         row["entry_badge_label"] = "Warten"
         row["entry_badge_tone"] = "warning"
+        row["orb_display_state"] = decision
+        return
+
+    if decision == "WATCH_ONLY":
+        row["entry_badge_label"] = "Nur Beobachtung"
+        row["entry_badge_tone"] = "neutral"
         row["orb_display_state"] = decision
         return
 
@@ -10516,15 +10712,40 @@ def _decorate_orb_results(results: List[Dict[str, Any]], cache_age_seconds: Opti
                         _normalize_orb_display_state(row)
                 if list_key == "breakouts":
                     decorated_rows = sorted(decorated_rows, key=_orb_trade_rank)
+                    tradeable_rows = [
+                        row for row in decorated_rows
+                        if str(row.get("trade_decision") or "").upper() == "TRADEABLE"
+                        and not _orb_signal_gate_reasons(row)
+                    ]
+                    wait_rows = [
+                        row for row in decorated_rows
+                        if str(row.get("trade_decision") or "").upper()
+                        in _ORB_ACTIONABLE_WAIT_DECISIONS
+                        and not _orb_signal_gate_reasons(row)
+                    ]
+                    rejected_rows = [
+                        row for row in decorated_rows
+                        if row not in tradeable_rows and row not in wait_rows
+                    ]
+                    for row in rejected_rows:
+                        row["orb_gate_reasons"] = _orb_signal_gate_reasons(row)
+                    payload["actionable_breakouts"] = tradeable_rows + wait_rows
+                    payload["rejected_range_breaks"] = rejected_rows
                     payload["breakout_decision_counts"] = {
-                        "tradeable": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "TRADEABLE"),
-                        "wait": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() in {"WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION", "WAIT_FOR_TRIGGER", "WATCH_ONLY"}),
-                        "no_trade": sum(1 for row in decorated_rows if str(row.get("trade_decision") or "").upper() == "NO_TRADE"),
+                        "tradeable": len(tradeable_rows),
+                        "wait": len(wait_rows),
+                        "no_trade": len(rejected_rows),
                     }
+                    stats = payload.get("stats")
+                    if isinstance(stats, dict):
+                        stats["range_breaks"] = len(decorated_rows)
+                        stats["volume_confirmed"] = sum(
+                            1 for row in decorated_rows if row.get("vol_confirmed")
+                        )
+                        stats["tradeable"] = len(tradeable_rows)
+                        stats["wait"] = len(wait_rows)
+                        stats["rejected"] = len(rejected_rows)
                 payload[list_key] = decorated_rows
-    # ORB is an intraday decision board: users need to see tradeable rows first
-    # and no-trade/wait rows behind them. Hiding all non-tradeable rows made the
-    # UI show "Breakouts: 16" in stats but "Breakouts (0)" in the table.
     return decorated
 
 
@@ -27396,19 +27617,16 @@ def _orb_scanner_wrapper() -> None:
             })
 
         candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.5 + min(x["rvol"], 5) * 0.3 + min(abs(x["prev_atr_pct"]), 5) * 0.2, reverse=True)
-        stock_candidates = []
-        non_stock_excluded = []
-        for cand in candidates[:120]:
-            is_stock, reason = _is_orb_common_stock_candidate(cand["ticker"])
-            if is_stock:
-                cand["asset_check"] = reason
-                stock_candidates.append(cand)
-            else:
-                non_stock_excluded.append({"ticker": cand["ticker"], "reason": reason})
-                print(f"[ORB] Exclude non-stock {cand['ticker']}: {reason}")
-            if len(stock_candidates) >= 50:
-                break
-        candidates = stock_candidates
+        candidates, non_stock_excluded, candidate_diagnostics = (
+            _select_orb_common_stock_candidates(candidates)
+        )
+        print(
+            "[ORB] Kandidatenauswahl: "
+            f"{candidate_diagnostics['prefiltered']} vorgefiltert, "
+            f"{candidate_diagnostics['selected']} Common Stocks fuer 5m, "
+            f"{candidate_diagnostics['excluded_checked']} Asset-Ausschluesse "
+            f"(Quelle: {candidate_diagnostics['asset_universe_source']})"
+        )
 
         # ── 5-Min Candles für Breakout Detection ──
         market_open_ms = int(now_et.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() * 1000)
@@ -27469,15 +27687,6 @@ def _orb_scanner_wrapper() -> None:
                 total_vol = sum(b.get("v", 0) for b in bars)
                 vwap = total_vwap_num / total_vol if total_vol > 0 else (or_high + or_low) / 2
 
-                # ── OR Volume (für Volume-Confirmation) ──
-                or_avg_vol_raw = historical_volume_baseline(
-                    (b.get("v", 0) for b in or_bars),
-                    lookback=3,
-                    minimum_periods=3,
-                )
-                or_volume_available = or_avg_vol_raw is not None
-                or_avg_vol = or_avg_vol_raw or 0.0
-
                 signal_price = float(bars[-1].get("c", 0) or 0)
                 current_price = float(cand.get("current", 0) or signal_price)
                 post_or = [b for b in bars if b.get("t", 0) >= or_end_ms]
@@ -27500,7 +27709,10 @@ def _orb_scanner_wrapper() -> None:
                 # ══════════════════════════════════════════════════════
                 breakout_dir = None
                 breakout_confirmed = False
-                breakout_bar_vol = 0
+                breakout_bar_vol = 0.0
+                breakout_volume_baseline = 0.0
+                breakout_volume_ratio = 0.0
+                breakout_age_bars = 0
                 or_mid = (or_high + or_low) / 2
                 breakout_state = "in_range"
                 volume_scope = "none"
@@ -27516,25 +27728,31 @@ def _orb_scanner_wrapper() -> None:
                 # ── Schritt 1: Aktueller Preis bestimmt Richtung ──
                 if signal_price > or_high:
                     breakout_dir = "LONG"
-                    breakout_state = "active_breakout"
+                    breakout_state = "range_break_unconfirmed"
                 elif signal_price < or_low:
                     breakout_dir = "SHORT"
-                    breakout_state = "active_breakout"
+                    breakout_state = "range_break_unconfirmed"
 
-                # ── Schritt 2: Volume Confirmation — gab es einen Bar mit Volume? ──
+                # Nur der Start der aktuellen Outside-Range-Phase darf den
+                # Breakout bestaetigen. Alte Spikes und die 09:30-Auktion sind
+                # keine belastbare Live-Bestaetigung.
                 if breakout_dir:
-                    recent_relevant_bars = []
-                    for b in post_or[-3:]:
-                        bc = b.get("c", 0)
-                        if breakout_dir == "LONG" and bc > or_high:
-                            recent_relevant_bars.append(b)
-                        elif breakout_dir == "SHORT" and bc < or_low:
-                            recent_relevant_bars.append(b)
-                    if recent_relevant_bars:
-                        breakout_bar_vol = recent_relevant_bars[-1].get("v", 0)
-                        volume_scope = "latest_3_post_or"
-                    if or_avg_vol > 0 and breakout_bar_vol >= or_avg_vol * 0.8:
-                        breakout_confirmed = True
+                    volume_context = _orb_active_excursion_volume(
+                        or_bars,
+                        post_or,
+                        breakout_dir,
+                        or_high,
+                        or_low,
+                        cand.get("rvol", 0),
+                    )
+                    breakout_confirmed = bool(volume_context["confirmed"])
+                    breakout_bar_vol = float(volume_context["launch_volume"])
+                    breakout_volume_baseline = float(volume_context["baseline_volume"])
+                    breakout_volume_ratio = float(volume_context["volume_ratio"])
+                    breakout_age_bars = int(volume_context["breakout_age_bars"])
+                    volume_scope = str(volume_context["baseline_source"])
+                    if breakout_confirmed:
+                        breakout_state = "active_breakout"
 
                 # Failed breakouts are reversal setups only after a completed
                 # candle is back through the OR midpoint. Their stop is behind
@@ -27697,8 +27915,8 @@ def _orb_scanner_wrapper() -> None:
                 volume_points, volume_label = _orb_volume_score(
                     breakout_confirmed,
                     breakout_bar_vol,
-                    or_avg_vol,
-                    or_volume_available,
+                    breakout_volume_baseline,
+                    breakout_volume_baseline > 0,
                 )
                 score += volume_points
                 score_details.append(volume_label)
@@ -27853,6 +28071,10 @@ def _orb_scanner_wrapper() -> None:
                     "entry_quality_score": entry_quality_score,
                     "late_to_tp1": late_to_tp1,
                     "vol_confirmed": breakout_confirmed,
+                    "breakout_bar_volume": round(breakout_bar_vol, 2),
+                    "volume_baseline": round(breakout_volume_baseline, 2),
+                    "volume_ratio": round(breakout_volume_ratio, 2),
+                    "breakout_age_bars": breakout_age_bars,
                     "hold_pct": round(hold_pct, 3),
                     "recent_hold_pct": round(recent_hold_pct, 3),
                     "volume_scope": volume_scope,
@@ -27874,19 +28096,42 @@ def _orb_scanner_wrapper() -> None:
             "stats": {
                 "scanned": len(prev_data), "candidates": len(candidates),
                 "breakouts": len(breakouts), "failed": len(failed_breakouts),
+                "range_breaks": len(breakouts),
+                "volume_confirmed": sum(1 for row in breakouts if row.get("vol_confirmed")),
                 "debug": _dbg,
                 "excluded_non_stocks": non_stock_excluded[:25],
+                "candidate_selection": candidate_diagnostics,
             },
             "or_phase": orb_phase,
             "session_quality": session_quality,
             "market_time": now_et.strftime("%H:%M ET"),
         }
-        save_cache_file(ORB_CACHE, [result])
-        print(f"[ORB] V3.0 Fertig: {len(breakouts)} Breakouts, {len(failed_breakouts)} Failed (von {len(candidates)} Kandidaten)")
+        decorated_result = _decorate_orb_results([result], 0)[0]
+        actionable_breakouts = [
+            row
+            for row in decorated_result.get("actionable_breakouts", [])
+            if isinstance(row, dict)
+        ]
+        save_cache_file(ORB_CACHE, [decorated_result])
+        _orb_counts = decorated_result.get("breakout_decision_counts", {})
+        print(
+            "[ORB] V3.1 Fertig: "
+            f"{len(breakouts)} Range-Brueche, "
+            f"{sum(1 for row in breakouts if row.get('vol_confirmed'))} volumenbestaetigt, "
+            f"{_orb_counts.get('tradeable', 0)} handelbar, "
+            f"{_orb_counts.get('wait', 0)} warten, "
+            f"{len(failed_breakouts)} Failed "
+            f"(von {len(candidates)} Kandidaten)"
+        )
         print(f"[ORB] Filter-Stats: {_dbg}")
 
         # ── Alert bei Grade S/A Breakouts ──
-        alert_breakouts = [b for b in breakouts if b.get("grade") in ("S", "A")]
+        alert_breakouts = [
+            row
+            for row in actionable_breakouts
+            if row.get("grade") in ("S", "A")
+            and str(row.get("trade_decision") or "").upper() == "TRADEABLE"
+        ]
         _alert_now = time.time()
         _fresh_alert_breakouts = []
         _orb_alert_cooldown_keys: List[str] = []

@@ -1014,6 +1014,11 @@ def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch
             "stop": 19.5,
             "target1": 22.0,
             "target2": 23.5,
+            "vol_confirmed": True,
+            "breakout_state": "active_breakout",
+            "breakout_age_bars": 2,
+            "recent_hold_pct": 0.8,
+            "trade_decision": "TRADEABLE",
         }]
     }))
 
@@ -1473,6 +1478,11 @@ def test_alert_classifier_respects_cooldown():
         "ticker": "ORB1", "grade": "A", "score": 80, "price": 12, "direction": "LONG",
         "Entry": 12.0, "StopLoss": 11.4, "TP1": 12.9, "TP2": 13.5,
         "DayHigh": 12.4, "DayLow": 11.4,
+        "vol_confirmed": True,
+        "breakout_state": "active_breakout",
+        "breakout_age_bars": 2,
+        "recent_hold_pct": 0.8,
+        "trade_decision": "TRADEABLE",
     }
 
     first = api._classify_alert_candidate("orb", row, now)
