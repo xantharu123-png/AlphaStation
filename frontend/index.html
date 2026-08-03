@@ -2536,6 +2536,37 @@ function LiveScanStatus({ active = false, partial = false, checked = null, total
     );
 }
 
+function stockCompanyName(row = {}, fallbackName = '') {
+    const ticker = String(row?.ticker || row?.Ticker || '').trim();
+    const value = row?.company_name
+        || row?.CompanyName
+        || row?.companyName
+        || row?.issuer_name
+        || row?.security_name
+        || fallbackName
+        || '';
+    const clean = String(value).trim().replace(/\s+/g, ' ');
+    return clean && clean.toUpperCase() !== ticker.toUpperCase() ? clean : '';
+}
+
+function StockIdentity({ row = {}, ticker = '', fallbackName = '', compact = false }) {
+    const symbol = String(ticker || row?.ticker || row?.Ticker || '').trim();
+    const companyName = stockCompanyName({...row, ticker: symbol}, fallbackName);
+    return (
+        <div className="min-w-0">
+            <div className="font-semibold">{symbol || '-'}</div>
+            {companyName && (
+                <div
+                    className={`${compact ? 'text-[10px]' : 'text-xs'} text-gray-500 truncate`}
+                    title={companyName}
+                >
+                    {companyName}
+                </div>
+            )}
+        </div>
+    );
+}
+
 // DetailSidebar Component
 function DetailSidebar({ ticker, onClose, scannerData }) {
     const [tickerData, setTickerData] = useState(null);
@@ -3267,7 +3298,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             <div className={`detail-sidebar sidebar-${sidebarMode}`} style={customWidth ? {width: customWidth + 'px'} : {}}>
                 <div className="detail-sidebar-content" style={{ padding: '24px' }}>
                     <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-xl font-bold">{ticker}</h2>
+                        <div>
+                            <h2 className="text-xl font-bold">{ticker}</h2>
+                            {stockCompanyName({...scannerData, ticker}) && (
+                                <div className="text-xs text-gray-500">{stockCompanyName({...scannerData, ticker})}</div>
+                            )}
+                        </div>
                         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
                     </div>
                     <div style={{ width: '100%', height: '4px', backgroundColor: '#e5e7eb', borderRadius: '2px', overflow: 'hidden', marginBottom: '12px' }}>
@@ -3281,6 +3317,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
     const d = tickerData || {};
     const cd = scannerData || {};  // crypto data from Early Movers
+    const sidebarCompanyName = stockCompanyName({...d, ...cd, ticker});
     const quality = cd._quality || d._quality || null;
     const tradeHealth = cd.trade_health || d.trade_health || null;
     const marketContext = cd.market_context || d.market_context || tradeHealth?.market_context || quality?.market_context || null;
@@ -3756,6 +3793,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 <div className="flex justify-between items-start mb-4">
                     <div>
                         <h2 className="text-2xl font-bold">{ticker}</h2>
+                        {sidebarCompanyName && <div className="text-sm text-gray-500 mt-0.5">{sidebarCompanyName}</div>}
                         <p className="text-2xl font-bold mt-1">
                             ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
                         </p>
@@ -5262,7 +5300,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <div className="flex items-start justify-between gap-3">
                                     <div>
                                         <div className="flex items-center gap-2 flex-wrap">
-                                            <div className="text-base font-bold">{item.ticker}</div>
+                                            {marketType === 'stocks'
+                                                ? <StockIdentity row={item} ticker={item.ticker} />
+                                                : <div className="text-base font-bold">{item.ticker}</div>}
                                             <span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span>
                                             {item.mdr_tag && <span style={{fontSize:10,padding:'2px 6px',borderRadius:999,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                         </div>
@@ -5309,7 +5349,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker {sortKey === 'ticker' && '↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>{marketType === 'stocks' ? 'Ticker / Unternehmen' : 'Ticker'} {sortKey === 'ticker' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis {sortKey === 'price' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
@@ -5330,7 +5370,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => marketType === 'crypto' ? onSelectTicker({ticker: item.ticker, isCrypto: true, ...item}) : onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2 font-semibold">
-                                    {item.ticker}
+                                    {marketType === 'stocks'
+                                        ? <StockIdentity row={item} ticker={item.ticker} />
+                                        : item.ticker}
                                     {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                 </td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
@@ -5489,7 +5531,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker {sortKey === 'ticker' && '↓'}</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker / Unternehmen {sortKey === 'ticker' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis {sortKey === 'price' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
@@ -5537,7 +5579,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">
-                                        {item.ticker}
+                                        <StockIdentity row={item} ticker={item.ticker} />
                                         {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                     </td>
                                     <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
@@ -5756,7 +5798,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker / Unternehmen</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung%</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI</th>
@@ -5780,8 +5822,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             return (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                 <td className="py-3 px-2">
-                                    <div className="font-semibold">{item.ticker}</div>
-                                    <div className="text-xs text-gray-400 truncate" style={{maxWidth:'120px'}}>{item.name}</div>
+                                    <StockIdentity row={item} ticker={item.ticker} fallbackName={item.name} />
                                 </td>
                                 <td className="py-3 px-2 text-right font-mono">${(item.price || item.preis)?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${Number(changePct || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{changePct != null ? Number(changePct).toFixed(2) + '%' : '-'}</td>
@@ -7014,7 +7055,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     <table className="w-full text-sm">
                         <thead className="border-b border-gray-200">
                             <tr>
-                                <th className="text-left py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('ticker')}>Ticker</th>
+                                <th className="text-left py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('ticker')}>Ticker / Unternehmen</th>
                                 <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('price')}>Preis</th>
                                 <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('change_pct')}>Änderung%</th>
                                 <th className="text-right py-2 px-1 sortable-header" onClick={() => toggleBreakdownSort('rsi')}>RSI</th>
@@ -7034,7 +7075,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 const dvStr = dv >= 1e6 ? (dv / 1e6).toFixed(1) + 'M' : dv >= 1e3 ? (dv / 1e3).toFixed(0) + 'K' : dv > 0 ? dv.toFixed(0) : '–';
                                 return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)} title={item.score_details || ''}>
-                                    <td className="py-3 px-1 font-semibold">{item.ticker}</td>
+                                    <td className="py-3 px-1"><StockIdentity row={item} ticker={item.ticker} /></td>
                                     <td className="py-3 px-1 text-right">${item.price?.toFixed(2)}</td>
                                     <td className="py-3 px-1 text-right color-negative font-medium">{item.change_pct?.toFixed(1)}%</td>
                                     <td className="py-3 px-1 text-right">{item.rsi != null ? Number(item.rsi).toFixed(1) : '-'}</td>
@@ -7980,7 +8021,7 @@ function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker / Unternehmen</th>
                             <th className="text-right py-2 px-2">Preis</th>
                             <th className="text-right py-2 px-2">1D%</th>
                             <th className="text-right py-2 px-2">5D%</th>
@@ -7994,7 +8035,7 @@ function WatchlistTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             const price = tickerPrices[ticker];
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{ticker}</td>
+                                    <td className="py-3 px-2"><StockIdentity row={price || {}} ticker={ticker} /></td>
                                     <td className="py-3 px-2 text-right">${price?.price?.toFixed(2) || '-'}</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_pct || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_pct?.toFixed(2) || '-'}%</td>
                                     <td className={`py-3 px-2 text-right ${(price?.change_5d || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{price?.change_5d?.toFixed(2) || '-'}%</td>
@@ -9111,7 +9152,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 {sorted.map(item => (
                     <button key={item.ticker} onClick={() => openRow(item)} className="scanner-mobile-card card w-full rounded-xl border border-gray-200 p-4 text-left">
                         <div className="flex items-start justify-between gap-3">
-                            <div><div className="text-lg font-bold">{item.ticker}</div><div className="text-xs text-gray-500">{item.lifecycle}</div></div>
+                            <div><StockIdentity row={item} ticker={item.ticker} /><div className="text-xs text-gray-500">{item.lifecycle}</div></div>
                             <span className={`rounded px-2 py-1 text-xs font-bold ${actionTone(item.trade_action)}`}>{(item.signal_label || item.trade_action || '').replaceAll('_', ' ')}</span>
                         </div>
                         <div className="mt-3 grid grid-cols-4 gap-2 text-xs">
@@ -9135,7 +9176,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="py-2 px-2 text-left">Ticker</th>
+                            <th className="py-2 px-2 text-left">Ticker / Unternehmen</th>
                             <th className="py-2 px-2 text-center">Grade / Trade</th>
                             <th className="py-2 px-2 text-right">Preis</th>
                             <th className="py-2 px-2 text-right">Aend.%</th>
@@ -9154,7 +9195,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const setup = item.trade_setup || {};
                             return (
                                 <tr key={item.ticker} onClick={() => openRow(item)} className="table-row cursor-pointer border-b border-gray-200">
-                                    <td className="py-3 px-2"><span className="font-bold">{item.ticker}</span><div className="text-[11px] text-gray-500">{Number(item.float_m || 0) > 0 ? `${Number(item.float_m).toFixed(1)}M Float gemeldet` : 'Float nicht gemeldet'}</div></td>
+                                    <td className="py-3 px-2"><StockIdentity row={item} ticker={item.ticker} /><div className="text-[11px] text-gray-500">{Number(item.float_m || 0) > 0 ? `${Number(item.float_m).toFixed(1)}M Float gemeldet` : 'Float nicht gemeldet'}</div></td>
                                     <td className="py-3 px-2 text-center"><span className="rounded bg-violet-100 px-2 py-1 text-xs font-bold text-violet-800">{item.grade} {item.trade_score ?? item.score}</span></td>
                                     <td className="py-3 px-2 text-right">{price(item.price)}</td>
                                     <td className={`py-3 px-2 text-right font-semibold ${Number(item.change_pct) >= 0 ? 'color-positive' : 'color-negative'}`}>{Number(item.change_pct || 0).toFixed(1)}%</td>
@@ -9267,7 +9308,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
                         <tr>
-                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker</th>
+                            <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('ticker')}>Ticker / Unternehmen</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('price')}>Preis</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung%</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI</th>
@@ -9285,7 +9326,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             const derivedGrade = item.grade || (derivedScore >= 80 ? 'S' : derivedScore >= 65 ? 'A' : derivedScore >= 50 ? 'B' : derivedScore >= 35 ? 'C' : 'D');
                             return (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
-                                <td className="py-3 px-2 font-semibold">{item.ticker}</td>
+                                <td className="py-3 px-2"><StockIdentity row={item} ticker={item.ticker} /></td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_pct >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_pct?.toFixed(2)}%</td>
                                 <td className="py-3 px-2 text-right">{item.rsi != null ? Number(item.rsi).toFixed(1) : '-'}</td>
@@ -9482,7 +9523,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         <div key={i} className="card orb-result-card p-3 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                             <div className="flex justify-between items-start">
                                 <div>
-                                    <span className="font-bold text-base">{b.ticker}</span>
+                                    <StockIdentity row={b} ticker={b.ticker} compact />
                                     <span className={`ml-2 ${gradeColor(b.grade)}`}>{b.grade}</span>
                                     <span className="ml-2 text-sm">{dirEmoji(b.direction)} {b.direction}</span>
                                     {b.vol_confirmed && <span className="ml-1 text-xs text-green-600">🔊 Vol✓</span>}
@@ -9548,7 +9589,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <div key={i} className="card orb-result-card p-3 border-l-4 border-gray-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                                 <div className="flex justify-between items-start gap-3">
                                     <div>
-                                        <span className="font-bold">{b.ticker}</span>
+                                        <StockIdentity row={b} ticker={b.ticker} compact />
                                         <span className={`ml-2 text-sm ${b.direction === 'LONG' ? 'text-green-600' : 'text-red-500'}`}>{b.direction}</span>
                                         <span className="ml-2 text-xs px-2 py-0.5 rounded bg-red-50 text-red-600">Abgelehnt</span>
                                     </div>
@@ -9578,7 +9619,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         <div key={i} className="card orb-result-card p-3 border-l-4 border-red-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                             <div className="flex justify-between">
                                 <div>
-                                    <span className="font-bold">{b.ticker}</span>
+                                    <StockIdentity row={b} ticker={b.ticker} compact />
                                     <span className="ml-2 text-sm text-red-500">🔄 {b.direction}</span>
                                 </div>
                                 <span className="font-bold">${b.current_price}</span>
@@ -9603,7 +9644,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                     <p className="text-xs text-gray-500 mb-1">Pre-ORB Kandidaten (Gap + RVOL Filter, warten auf Breakout)</p>
                     {candidates.map((c, i) => (
                         <div key={i} className="card orb-result-card p-2 flex justify-between items-center cursor-pointer hover:bg-gray-50 text-sm" onClick={() => onSelectTicker({ticker: c.ticker, ...c})}>
-                            <span className="font-medium w-16">{c.ticker}</span>
+                            <div className="w-44"><StockIdentity row={c} ticker={c.ticker} compact /></div>
                             <span className={c.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{c.gap_pct > 0 ? '+' : ''}{c.gap_pct}%</span>
                             <span className={c.rvol >= 2 ? 'text-green-600 font-medium' : 'text-gray-500'}>{c.rvol}x</span>
                             <span className="text-gray-500">${c.current}</span>

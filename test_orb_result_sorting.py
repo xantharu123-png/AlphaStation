@@ -41,7 +41,11 @@ def _orb_row(
 
 def test_orb_breakouts_keeps_all_rows_visible_and_sorts_tradeable_first(monkeypatch):
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {"summary": {}})
-    monkeypatch.setattr(api, "_load_common_stock_universe", lambda: ({"GOOD", "WAIT", "NOPE"}, "test"))
+    monkeypatch.setattr(
+        api,
+        "_load_common_stock_universe",
+        lambda **_kwargs: ({"GOOD", "WAIT", "NOPE"}, "test"),
+    )
     payload = [{
         "breakouts": [
             _orb_row("NOPE", current=11.25, entry=10.0, stop=9.5, target1=11.0, target2=12.0, score=99, rvol=1.0),
@@ -72,7 +76,11 @@ def test_orb_breakouts_keeps_all_rows_visible_and_sorts_tradeable_first(monkeypa
 
 def test_orb_unconfirmed_range_break_is_not_an_actionable_signal(monkeypatch):
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {"summary": {}})
-    monkeypatch.setattr(api, "_load_common_stock_universe", lambda: ({"RAW"}, "test"))
+    monkeypatch.setattr(
+        api,
+        "_load_common_stock_universe",
+        lambda **_kwargs: ({"RAW"}, "test"),
+    )
     payload = [{
         "breakouts": [
             _orb_row(

@@ -781,22 +781,44 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
 
 
 COMMON_STOCK_UNIVERSE_CACHE = "/tmp/polygon_common_stock_universe.json"
-_COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {"loaded_at": 0, "tickers": None, "source": "not_loaded", "adr_tickers": None}
+_COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {
+    "loaded_at": 0,
+    "tickers": None,
+    "source": "not_loaded",
+    "adr_tickers": None,
+    "names": None,
+    "names_refresh_attempted_at": 0,
+}
 
 
-def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optional[set[str]], str]:
+def _load_common_stock_universe(
+    max_age_seconds: int = 24 * 3600,
+    require_names: bool = False,
+) -> tuple[Optional[set[str]], str]:
     """Return active common-stock/ADR tickers for breadth filtering without per-symbol reference calls."""
     now_ts = time.time()
     mem_tickers = _COMMON_STOCK_UNIVERSE_MEM.get("tickers")
     mem_loaded_at = float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0)
+    mem_names = dict(_COMMON_STOCK_UNIVERSE_MEM.get("names") or {})
+    names_refresh_attempted_at = float(
+        _COMMON_STOCK_UNIVERSE_MEM.get("names_refresh_attempted_at", 0) or 0
+    )
     stale_mem_tickers = set(mem_tickers or []) if mem_tickers is not None else set()
-    if stale_mem_tickers and now_ts - mem_loaded_at < max_age_seconds:
+    if stale_mem_tickers and now_ts - mem_loaded_at < max_age_seconds and (mem_names or not require_names):
+        return stale_mem_tickers, str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+    if (
+        stale_mem_tickers
+        and require_names
+        and not mem_names
+        and now_ts - names_refresh_attempted_at < 15 * 60
+    ):
         return stale_mem_tickers, str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
 
     stale_cached_tickers: set[str] = stale_mem_tickers
     stale_cached_source = str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
     stale_cached_at = mem_loaded_at
     stale_cached_adr: set[str] = set(_COMMON_STOCK_UNIVERSE_MEM.get("adr_tickers") or [])
+    stale_cached_names: Dict[str, str] = mem_names
     try:
         if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
             with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as f:
@@ -805,14 +827,27 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             cached_tickers = set(cached.get("tickers", []) or [])
             # Abwaertskompatibel: altes Cache-Format ohne "adr_tickers" => leeres Set, KEIN Re-Fetch-Zwang
             cached_adr = set(cached.get("adr_tickers", []) or [])
-            if cached_tickers and now_ts - cached_at < max_age_seconds:
-                _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(cached_tickers), "source": "file_cache", "adr_tickers": sorted(cached_adr)})
+            raw_cached_names = cached.get("names", {}) or {}
+            cached_names = {
+                str(ticker).upper().strip(): str(name).strip()
+                for ticker, name in raw_cached_names.items()
+                if str(ticker).strip() and str(name).strip()
+            } if isinstance(raw_cached_names, dict) else {}
+            if cached_tickers and now_ts - cached_at < max_age_seconds and (cached_names or not require_names):
+                _COMMON_STOCK_UNIVERSE_MEM.update({
+                    "loaded_at": now_ts,
+                    "tickers": sorted(cached_tickers),
+                    "source": "file_cache",
+                    "adr_tickers": sorted(cached_adr),
+                    "names": cached_names,
+                })
                 return cached_tickers, "file_cache"
             if cached_tickers:
                 stale_cached_tickers = cached_tickers
                 stale_cached_source = "stale_file_cache"
                 stale_cached_at = cached_at
                 stale_cached_adr = cached_adr
+                stale_cached_names = cached_names
     except Exception as cache_err:
         print(f"[Common Stock Universe] cache read error: {cache_err}")
 
@@ -823,12 +858,17 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
                 "tickers": sorted(stale_cached_tickers),
                 "source": stale_cached_source,
                 "adr_tickers": sorted(stale_cached_adr),
+                "names": stale_cached_names,
             })
             return stale_cached_tickers, stale_cached_source
         return None, "missing_polygon_key"
 
+    if require_names:
+        _COMMON_STOCK_UNIVERSE_MEM["names_refresh_attempted_at"] = now_ts
+
     tickers: set[str] = set()
     adr_tickers: set[str] = set()
+    company_names: Dict[str, str] = {}
     try:
         for asset_type in sorted(ORB_ALLOWED_POLYGON_TYPES):
             url = "https://api.polygon.io/v3/reference/tickers"
@@ -852,12 +892,15 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
                     tk = str(item.get("ticker", "") or "").upper().strip()
                     market = str(item.get("market", "") or "").lower()
                     item_type = str(item.get("type", "") or "").upper()
-                    name = str(item.get("name", "") or "").upper()
+                    raw_name = str(item.get("name", "") or "").strip()
+                    name = raw_name.upper()
                     if not tk or market != "stocks" or item_type not in ORB_ALLOWED_POLYGON_TYPES:
                         continue
                     if _looks_like_non_stock_etp_symbol(tk) or _name_has_non_stock_product_keyword(name):
                         continue
                     tickers.add(tk)
+                    if raw_name:
+                        company_names[tk] = raw_name
                     if item_type in STOCK_ADR_REFERENCE_TYPES:
                         adr_tickers.add(tk)
                 next_url = payload.get("next_url")
@@ -869,10 +912,22 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             try:
                 os.makedirs(os.path.dirname(COMMON_STOCK_UNIVERSE_CACHE) or ".", exist_ok=True)
                 with open(COMMON_STOCK_UNIVERSE_CACHE, "w", encoding="utf-8") as f:
-                    json.dump({"cached_at": now_ts, "tickers": sorted(tickers), "adr_tickers": sorted(adr_tickers)}, f)
+                    json.dump({
+                        "cached_at": now_ts,
+                        "tickers": sorted(tickers),
+                        "adr_tickers": sorted(adr_tickers),
+                        "names": company_names,
+                    }, f)
             except Exception as write_err:
                 print(f"[Common Stock Universe] cache write error: {write_err}")
-            _COMMON_STOCK_UNIVERSE_MEM.update({"loaded_at": now_ts, "tickers": sorted(tickers), "source": "polygon_reference", "adr_tickers": sorted(adr_tickers)})
+            _COMMON_STOCK_UNIVERSE_MEM.update({
+                "loaded_at": now_ts,
+                "tickers": sorted(tickers),
+                "source": "polygon_reference",
+                "adr_tickers": sorted(adr_tickers),
+                "names": company_names,
+                "names_refresh_attempted_at": now_ts,
+            })
             return tickers, "polygon_reference"
     except Exception as e:
         print(f"[Common Stock Universe] fetch error: {e}")
@@ -883,10 +938,69 @@ def _load_common_stock_universe(max_age_seconds: int = 24 * 3600) -> tuple[Optio
             "tickers": sorted(stale_cached_tickers),
             "source": stale_cached_source,
             "adr_tickers": sorted(stale_cached_adr),
+            "names": stale_cached_names,
         })
         return stale_cached_tickers, stale_cached_source
 
     return None, "unavailable"
+
+
+_STOCK_COMPANY_NAME_KEYS = (
+    "company_name",
+    "CompanyName",
+    "companyName",
+    "issuer_name",
+    "security_name",
+)
+
+
+def _clean_company_name(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _stock_company_name(ticker: str, row: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve a verified stock issuer name without treating generic crypto names as companies."""
+    tk = str(ticker or "").upper().strip()
+    source_row = row if isinstance(row, dict) else {}
+    for key in _STOCK_COMPANY_NAME_KEYS:
+        company_name = _clean_company_name(source_row.get(key))
+        if company_name and company_name.upper() != tk:
+            return company_name
+
+    cached_names = _COMMON_STOCK_UNIVERSE_MEM.get("names") or {}
+    company_name = _clean_company_name(cached_names.get(tk)) if isinstance(cached_names, dict) else ""
+    return company_name if company_name.upper() != tk else ""
+
+
+def _attach_stock_company_name(
+    row: Dict[str, Any],
+    ticker: Optional[str] = None,
+    allow_generic_name: bool = False,
+) -> Dict[str, Any]:
+    """Return a copied stock row with a canonical company_name field."""
+    item = dict(row or {})
+    tk = str(ticker or item.get("ticker") or item.get("Ticker") or "").upper().strip()
+    company_name = _stock_company_name(tk, item)
+    if not company_name and allow_generic_name:
+        generic_name = _clean_company_name(item.get("name"))
+        if generic_name and generic_name.upper() != tk:
+            company_name = generic_name
+    if company_name:
+        item["company_name"] = company_name
+    return item
+
+
+def _format_stock_identity_html(ticker: str, row: Optional[Dict[str, Any]] = None) -> str:
+    """Render ticker plus issuer name compactly for stock alert tables."""
+    tk = str(ticker or "").upper().strip()
+    company_name = _stock_company_name(tk, row)
+    ticker_html = f"<b>{html.escape(tk)}</b>"
+    if not company_name:
+        return ticker_html
+    return (
+        f"{ticker_html}<br>"
+        f"<span style='font-size:11px;color:#64748b'>{html.escape(company_name)}</span>"
+    )
 
 
 def _orb_intraday_candidate_limit() -> int:
@@ -8228,6 +8342,7 @@ def _check_and_alert(scanner_name, cache_file):
             allowed, _reason = _stock_trade_email_allowed(scanner_name)
             if not allowed:
                 return
+            _load_common_stock_universe(require_names=True)
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
         # V2.6: Grade-Schwellen VERSCHÄRFT — nur noch hochkarätige Setups
         # BI: S/A (kein B mehr!), Biotech: A (hat kein S)
@@ -8239,6 +8354,11 @@ def _check_and_alert(scanner_name, cache_file):
                 continue
             if scanner_name in _STOCK_ALERT_SCANNERS:
                 r = _enrich_stock_alert_5m_state(scanner_name, r)
+                r = _attach_stock_company_name(
+                    r,
+                    _extract_alert_ticker(r),
+                    allow_generic_name=True,
+                )
             elif scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
                 ticker_probe = _extract_alert_ticker(r)
                 grade_probe = _extract_alert_grade(r)
@@ -8307,7 +8427,10 @@ def _check_and_alert(scanner_name, cache_file):
         rows = ""
         for a in alerts:
             emoji = _grade_emoji.get(a["grade"], "📊")
-            rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
+            rows += (
+                '<tr><td style="padding:8px;border-bottom:1px solid #eee">'
+                f'{_format_stock_identity_html(a["ticker"], a.get("source_row"))}</td>'
+            )
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
@@ -8321,7 +8444,7 @@ def _check_and_alert(scanner_name, cache_file):
         <p style="color:#666">{_mail_timestamp_dual()} | {n} starke Setups</p>
         {_cluster_hint}
         <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+        <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker / Unternehmen</th>
         <th style="padding:8px;text-align:left">Grade</th><th style="padding:8px;text-align:left">Score</th>
         <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">RVOL</th>
         <th style="padding:8px;text-align:left">Entry / Stop / TP</th><th style="padding:8px;text-align:left">Timing</th></tr>
@@ -8535,6 +8658,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     send_time_utc = datetime.now(timezone.utc)
     market_status: Dict[str, Any] = {}
     if market_type == "stocks":
+        _load_common_stock_universe(require_names=True)
         try:
             market_status = _stock_trade_email_status(send_time_utc)
         except TypeError:
@@ -8571,6 +8695,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     for row in results[:50]:
         if not isinstance(row, dict):
             continue
+        if market_type == "stocks":
+            row = _attach_stock_company_name(
+                row,
+                _extract_alert_ticker(row),
+                allow_generic_name=True,
+            )
         grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
         grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
         if scanner_key in _STOCK_ALERT_SCANNERS and not premarket_mail_mode:
@@ -8758,8 +8888,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             _rvol_cell = f'PM ${a["pm_dollar_vol"] / 1_000_000:.1f}M'
         else:
             _rvol_cell = f'{a["rvol"]:.1f}x'
+        _identity_cell = (
+            _format_stock_identity_html(a["ticker"], _src_row)
+            if market_type == "stocks"
+            else f"<b>{html.escape(str(a['ticker']))}</b>"
+        )
         rows += (
-            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["ticker"]}</b></td>'
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee">{_identity_cell}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["strategy"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
@@ -8819,7 +8954,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {_cluster_hint}
     {_dailyclose_hint}
     <table style="width:100%;border-collapse:collapse;font-size:13px">
-    <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+    <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">{"Ticker / Unternehmen" if market_type == "stocks" else "Coin"}</th>
     <th style="padding:8px;text-align:left">Strategie</th><th style="padding:8px;text-align:left">Grade</th>
     <th style="padding:8px;text-align:left">Score</th><th style="padding:8px;text-align:left">Preis</th>
     <th style="padding:8px;text-align:left">Change</th><th style="padding:8px;text-align:left">RVOL</th>
@@ -10218,7 +10353,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
     stock_guard_universe = None
     stock_guard_source = ""
     if scanner_name in STOCK_SCANNER_ASSET_GUARD_NAMES:
-        stock_guard_universe, stock_guard_source = _load_common_stock_universe()
+        stock_guard_universe, stock_guard_source = _load_common_stock_universe(require_names=True)
     for raw in results or []:
         if not isinstance(raw, dict):
             decorated.append(raw)
@@ -10237,6 +10372,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             )
             if exclusion_reason:
                 continue
+            item = _attach_stock_company_name(item, ticker_for_guard, allow_generic_name=True)
 
         score = item.get("score", item.get("Score", item.get("BI_Score", item.get("exhaustion_score", item.get("fear_score")))))
         grade = item.get("grade", item.get("Grade", item.get("BI_Grade")))
@@ -15194,7 +15330,11 @@ def _bear_scan_wrapper() -> None:
                         print(f"[Warning] Error processing breakdown stock: {e}")
                         continue
                 losers.sort(key=lambda x: x.get("score", 0), reverse=True)
-                result["breakdown_stocks"] = losers[:30]
+                _load_common_stock_universe(require_names=True)
+                result["breakdown_stocks"] = [
+                    _attach_stock_company_name(row, allow_generic_name=True)
+                    for row in losers[:30]
+                ]
                 _diagnostics["breakdown_count"] = len(result["breakdown_stocks"])
                 result["asset_filter"] = {
                     "source": _common_stock_source,
@@ -15223,7 +15363,7 @@ def _bear_scan_wrapper() -> None:
                     _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
                     _bd_rows.append(
                         f"<tr><td style='padding:4px 8px;font-weight:bold;color:{_gc}'>{_gr}</td>"
-                        f"<td style='padding:4px 8px;font-weight:bold'>{bd.get('ticker','?')}</td>"
+                        f"<td style='padding:4px 8px;font-weight:bold'>{_format_stock_identity_html(bd.get('ticker','?'), bd)}</td>"
                         f"<td style='padding:4px 8px;text-align:right'>${bd.get('price',0):.2f}</td>"
                         f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
                         f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
@@ -15289,7 +15429,7 @@ def _bear_scan_wrapper() -> None:
                         _gc = {"S": "#7c3aed", "A": "#16a34a"}.get(_cs.get("grade", ""), "#666")
                         _crash_rows += (
                             f"<tr><td style='padding:6px 8px;font-weight:bold;color:{_gc}'>{_cs.get('grade','?')}</td>"
-                            f"<td style='padding:6px 8px;font-weight:bold'>{_cs.get('ticker','?')}</td>"
+                            f"<td style='padding:6px 8px;font-weight:bold'>{_format_stock_identity_html(_cs.get('ticker','?'), _cs)}</td>"
                             f"<td style='padding:6px 8px;text-align:right'>${_cs.get('price',0):.2f}</td>"
                             f"<td style='padding:6px 8px;text-align:right;color:#dc2626;font-weight:bold'>{_cs.get('change_pct',0):.1f}%</td>"
                             f"<td style='padding:6px 8px;text-align:right'>{_cs.get('rvol',0):.1f}x</td>"
@@ -15301,7 +15441,7 @@ def _bear_scan_wrapper() -> None:
                     <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
                     <table style="border-collapse:collapse;width:100%;font-size:13px">
                     <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
-                    <th style="padding:6px 8px;text-align:left">Ticker</th>
+                    <th style="padding:6px 8px;text-align:left">Ticker / Unternehmen</th>
                     <th style="padding:6px 8px;text-align:right">Preis</th>
                     <th style="padding:6px 8px;text-align:right">Drop</th>
                     <th style="padding:6px 8px;text-align:right">RVOL</th>
@@ -15371,7 +15511,7 @@ def _bear_scan_wrapper() -> None:
                 _bear_alert_rows.append(bd)
                 _bd_rows.append(
                     f"<tr><td style='padding:4px 8px;font-weight:bold;color:{_gc}'>{_gr}</td>"
-                    f"<td style='padding:4px 8px;font-weight:bold'>{bd.get('ticker','?')}</td>"
+                    f"<td style='padding:4px 8px;font-weight:bold'>{_format_stock_identity_html(bd.get('ticker','?'), bd)}</td>"
                     f"<td style='padding:4px 8px;text-align:right'>${bd.get('price',0):.2f}</td>"
                     f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
@@ -15402,7 +15542,7 @@ def _bear_scan_wrapper() -> None:
                             "<table style='border-collapse:collapse;width:100%;font-size:13px'>"
                             "<tr style='background:#fef2f2;border-bottom:1px solid #ddd'>"
                             "<th style='padding:6px 8px;text-align:left'>Grd</th>"
-                            "<th style='padding:6px 8px;text-align:left'>Ticker</th>"
+                            "<th style='padding:6px 8px;text-align:left'>Ticker / Unternehmen</th>"
                             "<th style='padding:6px 8px;text-align:right'>Preis</th>"
                             "<th style='padding:6px 8px;text-align:right'>Chg%</th>"
                             "<th style='padding:6px 8px;text-align:right'>RVOL</th>"
@@ -25554,6 +25694,12 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     allowed, _ = _stock_trade_email_allowed("penny_stocks")
     if not allowed:
         return False
+    _load_common_stock_universe(require_names=True)
+    rows = [
+        _attach_stock_company_name(row, allow_generic_name=True)
+        if isinstance(row, dict) else row
+        for row in rows
+    ]
     table_rows = ""
     for row in rows[:5]:
         setup = row.get("trade_setup") or {}
@@ -25564,7 +25710,7 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
         cost_bps = _alert_float(row.get("execution_cost_bps"), 0.0) or 0.0
         table_rows += f"""
         <tr>
-          <td style="padding:9px;border-bottom:1px solid #e5e7eb"><b>{html.escape(str(row.get('ticker') or ''))}</b></td>
+          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{_format_stock_identity_html(row.get('ticker'), row)}</td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('grade')} / {row.get('trade_score')}</td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{setup_quality}<br><span style="color:#64748b">Float {float_label}</span></td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('entry_quality_score')}</td>
@@ -25577,7 +25723,7 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     <h2 style="color:#0f766e;margin-top:0">Pennystock - bestaetigter 5m Entry</h2>
     <p><b>Kein Pump-Potential allein:</b> Diese Mail wird nur nach einer abgeschlossenen 5m-Breakout-/Retest-Bestaetigung, Liquiditaetscheck und strukturellen Stop-/Zielpruefung versendet.</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <tr style="background:#ecfdf5"><th style="padding:9px;text-align:left">Ticker</th><th>Grade/Trade</th><th>Setup-Qualitaet</th><th>Entry</th><th>Dump-Risiko</th><th>Live Entry / Stop</th><th>TP1 / TP2</th><th>Trigger</th></tr>
+      <tr style="background:#ecfdf5"><th style="padding:9px;text-align:left">Ticker / Unternehmen</th><th>Grade/Trade</th><th>Setup-Qualitaet</th><th>Entry</th><th>Dump-Risiko</th><th>Live Entry / Stop</th><th>TP1 / TP2</th><th>Trigger</th></tr>
       {table_rows}
     </table>
     <p style="font-size:12px;color:#64748b">Management: Teilgewinn am TP1; Rest unter dem letzten bestaetigten 5m-Higher-Low/EMA9 nachziehen. Ein einzelnes Warnmerkmal ist noch kein Exit. Verkaufen erst am Schutz-Stop/TP2 oder wenn der Scanner einen bestaetigten Strukturbruch als separates VERKAUFEN-Signal meldet.</p>
@@ -25598,8 +25744,14 @@ def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
     allowed, _ = _stock_trade_email_allowed("penny_stocks_management")
     if not allowed:
         return False
+    _load_common_stock_universe(require_names=True)
+    rows = [
+        _attach_stock_company_name(row, allow_generic_name=True)
+        if isinstance(row, dict) else row
+        for row in rows
+    ]
     items = "".join(
-        f"<li><b>{html.escape(str(row.get('ticker') or ''))}</b>: TP1 "
+        f"<li>{_format_stock_identity_html(row.get('ticker'), row)}: TP1 "
         f"{_format_alert_price((row.get('trade_setup') or {}).get('tp1'))} erreicht. "
         f"Modell: 50% Teilgewinn; Rest-Stop auf "
         f"{_format_alert_price(row.get('active_stop') or row.get('entry'))}.</li>"
@@ -25627,6 +25779,12 @@ def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
     allowed, _ = _stock_trade_email_allowed("penny_stocks_exit")
     if not allowed:
         return False
+    _load_common_stock_universe(require_names=True)
+    rows = [
+        _attach_stock_company_name(row, allow_generic_name=True)
+        if isinstance(row, dict) else row
+        for row in rows
+    ]
     reason_labels = {
         "protective_stop_reached": "Schutz-Stop erreicht",
         "tp2_reached": "TP2 erreicht",
@@ -25644,7 +25802,7 @@ def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
         reasons = [reason_labels.get(str(reason), str(reason).replace("_", " ")) for reason in raw_reasons[:4]]
         setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
         items += (
-            f"<li><b>{html.escape(str(row.get('ticker') or ''))}</b> bei {_format_alert_price(row.get('price'))}: "
+            f"<li>{_format_stock_identity_html(row.get('ticker'), row)} bei {_format_alert_price(row.get('price'))}: "
             f"{html.escape(', '.join(reasons) or 'bestaetigte Invalidation')}. "
             f"Aktiver Stop {_format_alert_price(row.get('active_stop') or setup.get('stop_loss'))}.</li>"
         )
@@ -26278,6 +26436,12 @@ def _penny_stock_scanner_wrapper() -> None:
             diagnostics["duration_seconds"] > soft_budget_seconds
         )
         diagnostics["universe_source"] = universe_source
+        _load_common_stock_universe(require_names=True)
+        cache_rows = [
+            _attach_stock_company_name(row, allow_generic_name=True)
+            if isinstance(row, dict) else row
+            for row in cache_rows
+        ]
         finalize_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
         _penny_save_trigger_pool(trigger_pool_candidates, now_ts=now_ts)
         ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=now_ts)
@@ -27001,6 +27165,12 @@ def _penny_position_monitor_wrapper() -> None:
         ))
         diagnostics["new_buy_now"] = len(buy_candidates)
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
+        _load_common_stock_universe(require_names=True)
+        rows = [
+            _attach_stock_company_name(row, allow_generic_name=True)
+            if isinstance(row, dict) else row
+            for row in rows
+        ]
         save_cache_file(PENNY_STOCKS_MONITOR_CACHE, rows, metadata={"diagnostics": diagnostics})
         ticker_state = _penny_merge_state_tickers(state_updates, now_ts=time.time())
         _penny_save_dict(PENNY_STOCKS_REFERENCE_CACHE, reference_cache)
@@ -28196,6 +28366,20 @@ def _orb_scanner_wrapper() -> None:
             "market_time": now_et.strftime("%H:%M ET"),
         }
         decorated_result = _decorate_orb_results([result], 0)[0]
+        _load_common_stock_universe(require_names=True)
+        for _orb_row_key in (
+            "breakouts",
+            "actionable_breakouts",
+            "failed_breakouts",
+            "candidates",
+        ):
+            _orb_rows = decorated_result.get(_orb_row_key)
+            if isinstance(_orb_rows, list):
+                decorated_result[_orb_row_key] = [
+                    _attach_stock_company_name(row, allow_generic_name=True)
+                    if isinstance(row, dict) else row
+                    for row in _orb_rows
+                ]
         actionable_breakouts = [
             row
             for row in decorated_result.get("actionable_breakouts", [])
@@ -28253,7 +28437,7 @@ def _orb_scanner_wrapper() -> None:
                 or_high = _alert_float(b.get("or_high"), 0) or 0
                 or_size = _alert_float(b.get("or_size"), abs(or_high - or_low)) or abs(or_high - or_low)
                 or_size_pct = _alert_float(b.get("or_size_pct"), 0) or 0
-                rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{b["ticker"]}</b></td>'
+                rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee">{_format_stock_identity_html(b["ticker"], b)}</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {b["direction"]} ({b["grade"]})</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${b["current_price"]}</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{b["gap_pct"]:+.1f}%</td>'
@@ -28272,7 +28456,7 @@ def _orb_scanner_wrapper() -> None:
             <h2 style="color:#1a73e8">🔔 ORB Breakouts — {now_et.strftime("%H:%M")} ET</h2>
             <p style="color:#666">{len(alert_breakouts)} Top-Setups (Grade S/A)</p>
             <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker</th>
+            <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker / Unternehmen</th>
             <th style="padding:8px;text-align:left">Setup</th><th style="padding:8px;text-align:left">Preis</th>
             <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th>
             <th style="padding:8px;text-align:left">Entry / Stop / TP</th></tr>

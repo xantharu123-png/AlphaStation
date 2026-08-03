@@ -187,6 +187,23 @@ def _format_price(value: Any) -> str:
     return formatted
 
 
+def _telegram_stock_identity(row: Any, ticker: str) -> str:
+    """Return ticker plus an explicit stock-company field when available."""
+    if not isinstance(row, dict):
+        return ticker
+    for key in (
+        "company_name",
+        "CompanyName",
+        "companyName",
+        "issuer_name",
+        "security_name",
+    ):
+        company_name = re.sub(r"\s+", " ", str(row.get(key) or "")).strip()
+        if company_name and company_name.upper() != ticker.upper():
+            return f"{ticker} - {company_name}"
+    return ticker
+
+
 def format_alert_rows_for_telegram(rows: list, max_rows: int = 5) -> str:
     """Formatiert Alert-Rows als kompakte Telegram-Textzeilen. Wirft nie.
 
@@ -210,11 +227,12 @@ def format_alert_rows_for_telegram(rows: list, max_rows: int = 5) -> str:
             ticker = fields.get("ticker")
             if not ticker:
                 continue
+            identity = _telegram_stock_identity(row, str(ticker))
             direction = "SHORT" if fields.get("direction") == "SHORT" else "LONG"
             formatted.append(
                 "%s %s | Entry %s | Stop %s | TP1 %s | TP2 %s"
                 % (
-                    ticker,
+                    identity,
                     direction,
                     _format_price(fields.get("entry")),
                     _format_price(fields.get("stop")),

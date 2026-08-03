@@ -774,7 +774,11 @@ def test_stock_alert_asset_guard_uses_common_stock_universe():
 
 
 def test_strategy_scan_decoration_filters_single_stock_etps(monkeypatch):
-    monkeypatch.setattr(api, "_load_common_stock_universe", lambda: ({"REAL"}, "unit"))
+    monkeypatch.setattr(
+        api,
+        "_load_common_stock_universe",
+        lambda **_kwargs: ({"REAL"}, "unit"),
+    )
     rows = [
         {"Ticker": "NVBD", "score": 99, "grade": "S"},
         {"Ticker": "NVDB", "score": 99, "grade": "S"},
