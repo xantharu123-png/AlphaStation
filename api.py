@@ -2703,6 +2703,12 @@ def _humanize_alert_level_source(value: Any) -> str:
         return ""
     text = raw.replace("_", " ").replace("-", " ")
     normalized = text.lower()
+    if "or measured move 1.0x range" in normalized:
+        return "Opening Range +1,0x"
+    if "or measured move 1.5x range" in normalized:
+        return "Opening Range +1,5x"
+    if "or midpoint tactical stop" in normalized:
+        return "OR-Mitte (taktischer Stop)"
     specific = {
         "vrvp hvn low": "VRVP HVN-Unterkante (naechste Volumen-Zone)",
         "vrvp hvn high": "VRVP HVN-Oberkante (naechste Volumen-Zone)",
@@ -7134,8 +7140,16 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "orb_not_tradeable",
         "orb_range_break_stale",
         "orb_tp1_already_reached",
+        "orb_invalid_target_geometry",
     }
-    no_trade_prefixes = ("grade_below", "missing_", "partial_", "not_tradeable", "trade_invalid_")
+    no_trade_prefixes = (
+        "grade_below",
+        "missing_",
+        "partial_",
+        "not_tradeable",
+        "trade_invalid_",
+        "orb_target_plan_",
+    )
     contextual_no_trade_markers = set(no_trade_markers)
     if scanner_name == "early_movers" and "early_mover_wait_entry_confirmation" in reasons:
         # Retest/trigger-watch rows are not active trades yet. A Trade-Health
@@ -7175,6 +7189,58 @@ _ORB_ACTIONABLE_WAIT_DECISIONS = {
 }
 
 
+def _orb_target_plan_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return transparent ORB target geometry after all structure adjustments."""
+    # Accept current and legacy cache keys, but never invent ORB levels.
+    levels = normalize_alert_trade_levels(
+        row,
+        price_fallback=None,
+        allow_estimated=False,
+    )
+    direction = str(levels.get("direction") or row.get("direction") or "").strip().upper()
+    entry = _alert_float(levels.get("entry"), None)
+    stop = _alert_float(levels.get("stop"), None)
+    target1 = _alert_float(levels.get("tp1"), None)
+    target2 = _alert_float(levels.get("tp2"), None)
+    geometry = trade_geometry(entry, stop, target1, target2, direction)
+    if not geometry.get("valid"):
+        return {
+            "valid": False,
+            "geometry_valid": False,
+            "effective_rr": None,
+            "tp1_rr": None,
+            "tp2_rr": None,
+            "tp1_move_pct": None,
+            "tp2_move_pct": None,
+            "target_gap_r": None,
+            "issues": list(geometry.get("errors") or ["invalid_target_geometry"]),
+        }
+
+    quality = trade_plan_quality(
+        {**geometry, "entry": entry},
+        min_primary_tp_rr=_ALERT_MIN_PRIMARY_TP_RR,
+        min_tp_gap_r=_ALERT_MIN_TP_GAP_R,
+        min_tp_gap_pct=_ALERT_MIN_TP_GAP_PCT,
+        runner_rr_cap=_ALERT_RUNNER_RR_CAP,
+        max_runner_to_tp1_ratio=_ALERT_MAX_RUNNER_TO_TP1_RATIO,
+    )
+    risk = float(geometry["risk"])
+    reward1 = float(geometry["reward1"])
+    reward2 = float(geometry["reward2"])
+    issues = list(quality.get("issues") or [])
+    return {
+        "valid": not issues,
+        "geometry_valid": True,
+        "effective_rr": quality.get("effective_rr"),
+        "tp1_rr": round(float(geometry["rr_tp1"]), 2),
+        "tp2_rr": round(float(geometry["rr_tp2"]), 2),
+        "tp1_move_pct": round((reward1 / float(entry)) * 100.0, 2),
+        "tp2_move_pct": round((reward2 / float(entry)) * 100.0, 2),
+        "target_gap_r": round((reward2 - reward1) / risk, 2),
+        "issues": issues,
+    }
+
+
 def _orb_signal_gate_reasons(row: Dict[str, Any]) -> List[str]:
     """Return blockers that separate a raw range break from an ORB signal."""
     reasons: List[str] = []
@@ -7198,6 +7264,12 @@ def _orb_signal_gate_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("orb_recent_hold_weak")
     if bool(row.get("late_to_tp1")):
         reasons.append("orb_tp1_already_reached")
+
+    target_plan = _orb_target_plan_metrics(row)
+    if not target_plan.get("geometry_valid"):
+        reasons.append("orb_invalid_target_geometry")
+    for issue in target_plan.get("issues") or []:
+        reasons.append(f"orb_target_plan_{issue}")
     return list(dict.fromkeys(reasons))
 
 
@@ -27858,8 +27930,8 @@ def _orb_scanner_wrapper() -> None:
                         "target2": target2,
                         "direction": breakout_dir,
                         "level_model": "orb_range_projection",
-                        "tp1_source": "OR measured move",
-                        "tp2_source": "OR measured move",
+                        "tp1_source": "OR measured move 1.0x range",
+                        "tp2_source": "OR measured move 1.5x range",
                         "stop_source": "OR midpoint tactical stop",
                     },
                     _orb_vrvp,
@@ -28035,9 +28107,18 @@ def _orb_scanner_wrapper() -> None:
                 else:
                     grade = "C"
 
+                target_plan = _orb_target_plan_metrics({
+                    "entry": entry,
+                    "stop": stop,
+                    "target1": target1,
+                    "target2": target2,
+                    "direction": breakout_dir,
+                })
                 breakouts.append({
                     **cand,
                     "or_high": round(or_high, 2), "or_low": round(or_low, 2),
+                    "or_mid": round(or_mid, 2),
+                    "or_size": round(or_size, 2),
                     "or_size_pct": round(or_size_pct, 2),
                     "atr_pct": round(atr_pct, 2),
                     "atr_model": atr_model,
@@ -28064,6 +28145,14 @@ def _orb_scanner_wrapper() -> None:
                     "tp2_source": _orb_setup.get("tp2_source"),
                     "stop_source": _orb_setup.get("stop_source"),
                     "rr_ratio": rr_ratio,
+                    "effective_rr": target_plan.get("effective_rr"),
+                    "tp1_rr": target_plan.get("tp1_rr"),
+                    "tp2_rr": target_plan.get("tp2_rr"),
+                    "tp1_move_pct": target_plan.get("tp1_move_pct"),
+                    "tp2_move_pct": target_plan.get("tp2_move_pct"),
+                    "target_gap_r": target_plan.get("target_gap_r"),
+                    "target_plan_valid": target_plan.get("valid"),
+                    "target_plan_issues": target_plan.get("issues"),
                     "live_rr_ratio": live_rr_ratio,
                     "rr_model": "50/50 TP1/TP2",
                     "distance_to_entry_r": round(distance_to_entry_r, 2),
@@ -28155,6 +28244,15 @@ def _orb_scanner_wrapper() -> None:
             for b in alert_breakouts:
                 emoji = "🏆" if b["grade"] == "S" else ("⬆️" if b["direction"] == "LONG" else "⬇️")
                 vol_icon = "🔊" if b.get("vol_confirmed") else "🔇"
+                target_plan = _orb_target_plan_metrics(b)
+                tp1_move = _alert_float(target_plan.get("tp1_move_pct"), 0) or 0
+                tp2_move = _alert_float(target_plan.get("tp2_move_pct"), 0) or 0
+                tp1_rr = _alert_float(target_plan.get("tp1_rr"), 0) or 0
+                tp2_rr = _alert_float(target_plan.get("tp2_rr"), 0) or 0
+                or_low = _alert_float(b.get("or_low"), 0) or 0
+                or_high = _alert_float(b.get("or_high"), 0) or 0
+                or_size = _alert_float(b.get("or_size"), abs(or_high - or_low)) or abs(or_high - or_low)
+                or_size_pct = _alert_float(b.get("or_size_pct"), 0) or 0
                 rows += f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{b["ticker"]}</b></td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {b["direction"]} ({b["grade"]})</td>'
                 rows += f'<td style="padding:8px;border-bottom:1px solid #eee">${b["current_price"]}</td>'
@@ -28163,7 +28261,10 @@ def _orb_scanner_wrapper() -> None:
                 rows += (
                     f'<td style="padding:8px;border-bottom:1px solid #eee">'
                     f'Entry ${b["entry"]}<br>Stop <span style="color:#dc2626">${b["stop"]}</span><br>'
-                    f'TP1/TP2 <span style="color:#059669">${b["target1"]} / ${b["target2"]}</span>'
+                    f'TP1 <span style="color:#059669">${b["target1"]} (+{tp1_move:.1f}%, {tp1_rr:.2f}R)</span><br>'
+                    f'TP2 <span style="color:#059669">${b["target2"]} (+{tp2_move:.1f}%, {tp2_rr:.2f}R)</span><br>'
+                    f'<span style="color:#64748b;font-size:11px">OR ${or_low:.2f}-${or_high:.2f} | '
+                    f'Breite ${or_size:.2f} ({or_size_pct:.2f}%)</span>'
                     f'{_alert_level_source_line(b)}'
                     f'</td></tr>'
                 )
@@ -28176,7 +28277,11 @@ def _orb_scanner_wrapper() -> None:
             <th style="padding:8px;text-align:left">Gap</th><th style="padding:8px;text-align:left">RVOL</th>
             <th style="padding:8px;text-align:left">Entry / Stop / TP</th></tr>
             {rows}</table>
-            <p style="color:#999;font-size:11px;margin-top:15px">ORB V2 — Volume Confirmed | VWAP Aligned | R:R optimiert</p>
+            <p style="color:#64748b;font-size:11px;margin-top:15px">
+            Standardprojektion: TP1 = 1,0x Opening Range, TP2 = 1,5x Opening Range.
+            VRVP darf ein Ziel nur durch ein valides naechstes Strukturlevel ersetzen.
+            Ein Alert wird blockiert, wenn TP1 unter 1,5R liegt oder die Ziele zu eng/ungueltig sind.
+            </p>
             </body></html>'''
             # AUDIT H-3: ORB ist intraday-only — Empfaenger-Routing "intraday".
             try:
