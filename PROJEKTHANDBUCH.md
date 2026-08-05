@@ -1,8 +1,10 @@
 # Alpha Station — Projekthandbuch
 
-**Stand:** 29. Juli 2026 · **Endstand Code:** `2c66d4f` auf `main` · **Tests:** 1130 (alle grün)
+**Stand:** 5. August 2026 · **Endstand Code:** `5aea225` auf GitHub `main` · **Tests:** 1400 (alle grün)
 **Repository:** `C:\Users\miros\Desktop\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`
+**Produktionsnachweis:** GitHub enthält `5aea225`; der Server-Rollout dieses Commits wurde
+in der aktuellen Sitzung wegen fehlender SSH-Anmeldung **nicht verifiziert**.
 
 > Dieses Handbuch ist das Master-Dokument. Es ersetzt keine Detail-Lektüre, sondern
 > verweist auf die Einzel-Dokumente (Abschnitt 8). Es trennt strikt zwischen
@@ -35,11 +37,11 @@ Turtle, New Listing, Crypto Early Movers/Explosion/Strategie.
 
 | Komponente | Was | Wo |
 |---|---|---|
-| `api.py` | FastAPI-Backend: Scanner, Alerts, Auth, Versand, Scheduler (30-Min-Takt Strategie-Sweep) | Service `tradingbot-api` |
-| `bg_service.py` | Hintergrunddienst: bi_long/bi_short/biotech (Mail-Ownership), Wochenreport | Service `tradingbot-bg` |
+| `api.py` | FastAPI-Backend: Scanner, Alerts, Auth, Versand, zentraler Scheduler und Health-Endpunkte | Service `tradingbot-api` |
+| `bg_service.py` | Hintergrunddienst: BI/Biotech, Signal-Auswertung, Stop-Updates, Wochenreport und Mail-Outbox-Worker | Service `tradingbot-bg` |
 | `frontend/index.html` | React-SPA (statisch ausgeliefert) | über nginx/api |
-| `modules/` | auth, signal_tracker, patterns, stock_execution, trade_levels, trade_health, email_dedupe u. a. | shared |
-| `data_cache/` | Scan-Caches, `signal_tracker.sqlite` | Server |
+| `modules/` | auth, signal_tracker, mail_outbox, regime_filter, patterns, stock_execution, trade_levels, trade_health, email_dedupe u. a. | shared |
+| `data_cache/` | Scan-Caches, `signal_tracker.sqlite`, Mail-Outbox und persistenter Regime-Zustand | Server |
 | `scripts/` | Smoke-Tests, Report-Preview, Deploy-Helfer | Server |
 
 **Scan-Ownership (Audit H-9):** api-owned: strategy_scan, crash_monitor, bear, orb,
@@ -49,9 +51,15 @@ Override per `BG_SCAN_SET`.
 **Deploy-Workflow (der einzige gültige Weg):**
 1. Lokal entwickeln + volle Suite grün.
 2. `git push origin HEAD:main` (Arbeitsbranch `nachaudit-fixes-2026-07-21`).
-3. Auf dem Server: `cd /home/tradingbot/app && git pull`.
-4. `systemctl restart tradingbot-api` (bei bg-Änderungen auch `tradingbot-bg`).
-5. Verifizieren: `git log --oneline -1` + Logs (`journalctl -u tradingbot-api`).
+3. Der Server darf über `deploy/auto_update.sh` (Cron) aktualisieren oder manuell mit
+   `cd /home/tradingbot/app && git pull --ff-only origin main` aktualisiert werden.
+4. Deployment ausschließlich über `bash deploy/safe_deploy.sh`: Runtime erkennen,
+   Abhängigkeiten/Compile/Tests prüfen, Services neu starten, Healthcheck abwarten;
+   bei Fehlern nicht still weiterlaufen.
+5. **Immer separat verifizieren:** `git log --oneline -1`,
+   `systemctl status tradingbot-api tradingbot-bg tradingbot-frontend` sowie
+   `/api/health`/`/api/system-health` und Journald-Logs. Ein erfolgreicher Push ist
+   noch kein Beleg für einen erfolgreichen Produktions-Rollout.
 
 **Lokale Tests (Windows):**
 ```bash
@@ -922,9 +930,91 @@ Eval-Integration, Mail-Filter Update/BE, Wochenreport-Render,
 Pipeline-Integration inkl. „Shadow auch ohne jede Mail", Real-Classify-
 Integration). Suite **1331, alle gruen**.
 
+### 3.26 1. August — Performance-Einbruch offengelegt, Mail-Outbox und Regime-Gate
+
+**Anlass:** Der Forward-Tracker zeigte einen realen Qualitätsbruch: 7 Tage mit
+56 Signalen/21 Entscheidungen, 0 % Trefferquote und −26,2 R; 14 Tage mit
+101 Signalen/57 Entscheidungen, 16 % Trefferquote und −44,6 R. Diese Zahlen wurden
+nicht beschönigt. Gleichzeitig konnte ein SMTP-Fehler eine Mail im flüchtigen
+Versandpfad verlieren.
+
+**Gebaut:**
+
+- SMTP-Fallback von Port 465 auf 587/STARTTLS.
+- Persistente SQLite-Mail-Outbox (`modules/mail_outbox.py`) mit atomarem Claim,
+  Lease, Retry, Ablauf und Dead-Letter-Status. Semantik: at least once; bei einem
+  Prozessabsturz exakt zwischen SMTP-Erfolg und Outbox-Acknowledge ist eine
+  Doppelmail möglich, ein stiller Verlust aber nicht mehr der Normalfall.
+- Persistenter Markt-/Performance-Regime-Filter (`modules/regime_filter.py`):
+  Scanner laufen immer weiter, aber RED kann Swing-Mails zu Watch/Shadow
+  degradieren; YELLOW verlangt +5 Score und begrenzt die Mail auf höchstens zwei
+  Zeilen. Der Markt-Kontext selbst bleibt bei Datenfehlern fail-open, der
+  Performance-Breaker nicht.
+- Breaker-Erstkalibrierung: Trip ab mindestens 10 entschiedenen Signalen bei
+  ØR ≤ −0,30 und Trefferquote ≤ 25 %; Freigabe erst nach mindestens fünf neuen
+  Trade-/Shadow-Beobachtungen mit ØR > −0,10 und Trefferquote ≥ 30 %.
+
+Detailbericht: `AUDIT_2026-08-01.md`.
+
+### 3.27 2. August — Scanner-Recovery, Lauf-ID-Schutz und Tracker-Kohorten
+
+- Scannerläufe erhalten eindeutige Lauf-Identitäten; ein noch lebender Thread darf
+  nicht parallel ein zweites Mal gestartet werden. Timeouts werden als hängender
+  Lauf sichtbar statt den Status fälschlich auf „fertig/Cache-Fehler" zu setzen.
+- Leichte Jobs blockieren die zentrale Scheduler-Schleife nicht mehr; schwere Jobs
+  besitzen Laufzeitbudgets und veröffentlichen nur abgeschlossene, ehrlich
+  gekennzeichnete Ergebnisse.
+- Signal-Tracker trennt jetzt **created-in-window** von **fully-observed**. Ein
+  Signal zählt nur dann als vollständig beobachtet, wenn sein Beobachtungsfenster
+  abgeschlossen ist; offene junge Signale verfälschen keine Trefferquote.
+- 50/50-Management wird als tatsächlicher Payoff gerechnet: 50 % bei TP1, Rest bis
+  TP2/Stop/BE. Geometrisches Level-R und realisiertes Managed-R bleiben getrennt.
+
+### 3.28 3. August — ORB-Laufzeit, Signalvalidierung und Zielpläne
+
+- ORB-UI und Backend verwenden denselben finalen Handelsstatus; Breakout erkannt,
+  Entry-Lage und Trade-Freigabe sind getrennte Aussagen und dürfen sich nicht mehr
+  als „Entry gut" neben „No Trade" widersprechen.
+- ORB-Targets werden auf gültige Richtung, Mindestabstand, Invalidation und
+  nutzbares R:R geprüft. Zu enge Cent-Ziele oder identische TP1/TP2 werden nicht als
+  fertiger Plan akzeptiert.
+- Scanner-Runtime/Progress wurde gegen überlappende Läufe und rückspringende
+  Fortschrittsanzeigen gehärtet; Ergebnis-Sortierung zeigt handelbar vor warten und
+  blockiert.
+
+### 3.29 4. August — Unternehmensidentität in Aktien-Signalen
+
+- Aktien-Scanner, Detailansicht, E-Mails und Telegram führen neben dem Ticker den
+  vollständigen Unternehmensnamen, soweit die Referenzdaten ihn liefern.
+- Die Identität wird aus geprüften Common-Stock-Referenzdaten übernommen; das
+  reduziert Verwechslungen bei ähnlichen Symbolen und erschwert, dass Fonds,
+  Warrants oder strukturierte Produkte als Aktie dargestellt werden.
+
+### 3.30 5. August — Tracker-/Dedupe-Härtung und ausfallsichere Stop-Update-Mail
+
+- Alert-Dedupe arbeitet atomar und trennt Signal-, Update- und Stop-Update-
+  Namespaces. Ein Update verbraucht nicht mehr versehentlich den Schlüssel einer
+  anderen Mailklasse.
+- Der Signal-Tracker speichert für BE-Aktivierungen zusätzlich
+  `be_mail_sent_at`. `load_pending_be_activations()` lädt nicht zugestellte
+  Aktivierungen bis zu sieben Tage nach; `mark_be_alerts_sent()` bestätigt sie erst
+  nach erfolgreichem Versand.
+- Aktuelle und nachgeladene BE-Aktivierungen werden je Signal-ID zusammengeführt.
+  Schlägt SMTP fehl oder startet der Dienst neu, wird die Stop-Update-Mail im
+  nächsten Eval-Lauf erneut versucht. Der DB-Zustand ist hier bewusst die einzige
+  Retry-Quelle; die allgemeine Outbox wird für diese Mail nicht parallel verwendet.
+- Stop-Update und allgemeines Signal-Update bleiben zwei getrennte Mailtypen. Eine
+  ausbleibende Stop-Mail ist damit diagnostizierbar und nicht mehr vom zufälligen
+  Timing genau eines Auswertungslaufs abhängig.
+
+**Verifikation dieses Endstands:** `test_be_activation.py` gezielt 17/17 grün,
+volle Suite **1400/1400 grün**, Python-Compile und `git diff --check` grün.
+Commit `5aea225` ist auf GitHub `main`; der Produktions-Rollout wurde in dieser
+Sitzung nicht per SSH bestätigt.
+
 ---
 
-## 4. Das Mail-System (Stand 29.07., abends)
+## 4. Das Mail-System (Stand 05.08.2026)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
 `info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT (nur Intraday-`trade`) /
@@ -960,17 +1050,56 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 `swing_trade` = **🚨 SWING** (mehrtägige Pläne, kein „JETZT"); 👁️ WATCH; ℹ️ Info.
 **Zeitstempel (31.07.):** alle Mail-Bodies dual „UTC / MESZ" (`modules/mailtime.py`).
 
+**Zustellsicherheit (01.–05.08.):** Allgemeine Mails werden über die persistente
+SQLite-Outbox versendet. Der Worker claimt fällige Zeilen atomar, besitzt eine
+Lease und verschiebt wiederholt fehlgeschlagene oder abgelaufene Zustellungen in
+einen nachvollziehbaren Status. SMTP 465 fällt auf 587/STARTTLS zurück. Die
+Outbox garantiert keine mathematische Exactly-once-Zustellung, verhindert aber den
+früheren stillen Verlust bei temporären SMTP-/Prozessfehlern.
+
+**Stop-Update-Mail:** Sobald ein getracktes, ursprünglich versendetes Signal +1 R
+erreicht, wird `be_activated_at` persistiert. Die gesonderte Stop-Mail fordert auf,
+den Rest auf Einstand zu sichern. Ihre Zustellung wird über `be_mail_sent_at` in
+`signal_tracker.sqlite` bestätigt. Nicht bestätigte Aktivierungen werden bis zu
+sieben Tage erneut geladen und erst nach erfolgreichem Mailversand quittiert. Das
+allgemeine „Signal-Update" und das „Stop-Update" sind fachlich und technisch
+getrennt.
+
+**Regime vor Mailfreigabe:** Scanner-Score allein löst keine Mail aus. Asset-Guard,
+Trade-Plan, Timing/Chase/Fakeout, Liquidität, Datenfrische und Markt-/Performance-
+Regime müssen zusammenpassen. RED unterdrückt neue Swing-Käufe bzw. führt sie nur
+als Shadow-Beobachtung; YELLOW verschärft Score und Zeilenzahl. Der Tracker misst
+auch blockierte, grundsätzlich qualifizierte Shadow-Signale, damit die Kosten der
+Gates später belegbar sind.
+
+**Identität:** Aktienmails führen Ticker und Unternehmensname. Bei fehlender oder
+unklarer Common-Stock-Referenz darf der Name nicht aus einem ähnlich klingenden
+Symbol geraten werden; Asset-Typ und Ticker bleiben die verbindliche Identität.
+
 ---
 
 ## 5. Signal-Qualität und statistische Ehrlichkeit
 
+- **Kohorten sind explizit:** `created_in_window` beantwortet, welche Signale im
+  Berichtsfenster entstanden; `fully_observed` bewertet nur Signale, deren gesamtes
+  Beobachtungsfenster abgeschlossen ist. Offene junge Signale werden weder als
+  Treffer noch als Verlust in eine abgeschlossene Trefferquote gedrückt.
 - **Zwei R-Semantiken:** Level-R (`avg_r`, geometrisch) und Managed-R 50/50
-  (`avg_r_managed_50_50`, befolgbares Management: TP1 = halb raus). Beide in
-  Tracker, UI, Wochenreport; maschinenlesbar in `summary["r_semantics"]`.
+  (`avg_r_managed_50_50`, befolgbares Management: 50 % bei TP1, Rest bis
+  TP2/Stop/BE). Beide in Tracker, UI, Wochenreport; maschinenlesbar in
+  `summary["r_semantics"]`. Ein TP1-Treffer ist nicht automatisch ein voller
+  Gewinner und ein späterer BE-Exit des Reststücks wird entsprechend gewichtet.
 - **Wilson-95 %-KI** um jede Hit-Rate; **`sample_reliable`** ab 30 entschiedenen Signalen;
   UI-Warnbanner bei kleiner Stichprobe.
 - **Scanner-Verdikt** (behalten/beobachten/abschalten) aus KI-Untergrenze vs. Breakeven;
   zentral in `signal_tracker`, mit Alarm im Wochenreport.
+- **Regime-/Shadow-Nachweis:** Mailfreigaben und blockierte qualifizierte Setups
+  werden getrennt getrackt. Erst ein ausreichend großer Forward-Datensatz darf
+  entscheiden, ob ein Gate verbessert oder nur gute Trades verhindert hat.
+- **Betriebsmetriken sind keine Performance:** Scannerlauf, Cache-Frische,
+  Mail-Zustellung und Trading-Ergebnis werden separat berichtet. „System gesund"
+  bedeutet nicht „Strategie profitabel" und ein hoher Setup-Score ist keine
+  Eintrittswahrscheinlichkeit in Prozent.
 - **Server-Verifikation:** `scripts/smoke_signal_performance.py` prüft die Felder live
   gegen `signal_tracker.sqlite`; `scripts/preview_weekly_report.py` rendert den Report
   ohne Versand; `scripts/signal_performance_breakdown.py` (29.07.) bricht dieselbe
@@ -983,15 +1112,21 @@ Trade-Health → K-2a (Intraday-unbestätigt) → Cooldown/Dedupe (8 h/Ticker).
 
 ## 6. Testlandschaft
 
-**1242 Tests, alle grün** (30.07.) — seit dem PM-Fenster-Mock (3.14) erstmals
-zu jeder Tageszeit. Wichtige Suiten:
+**1400 Tests, alle grün** (05.08.2026). Der Stand umfasst Rechenkern,
+Scanner-/Mail-Verträge, Scheduler-Recovery, Tracker-Kohorten, Regime-Filter,
+ORB-Zielpläne, Aktienidentität und ausfallsichere Stop-Updates. Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
 | `test_math_invariants.py` | Rechenkern gegen Lehrbuch-Referenzen |
 | `test_tracker_calibration.py` | Managed-R, Wilson-KI, sample_reliable |
 | `test_exit_efficiency.py` (30.07.) | Giveback-Messung, BE-/50-50-Simulation |
-| `test_be_activation.py` (30.07.) | BE-Trigger: be_activated_at, r_realized_be, Stop-Update-Mail |
+| `test_be_activation.py` | BE-Trigger, persistente Aktivierung, offene Zustellung, Retry und Versand-Acknowledge |
+| `test_mail_outbox.py` | Persistente Mail-Outbox: Claim/Lease, Retry, Ablauf und Dead Letter |
+| `test_email_dedupe_atomic.py` | Atomisches Dedupe und getrennte Namespaces je Mailklasse |
+| `test_regime_filter.py` | Persistenter Markt-/Performance-Breaker, RED/YELLOW-Gates und Erholung |
+| `test_orb_target_plan.py`, `test_orb_result_sorting.py` | ORB-Zielgeometrie, Mindest-R:R, finaler Handelsstatus und Sortierung |
+| `test_stock_company_identity.py` | Common-Stock-Identität sowie Firmennamen in Aktien-Signalen |
 | `test_stuck_scan_watchdog.py` (30.07.) | Scan-Wächter: Hänge-Mail, Hartdeckel-Reset, bg-Herzschlag, Entwarnungs-Mails, **Event-Log** |
 | `test_watchdog_log.py` (30.07.) | JSONL-Event-Log: Roundtrip, Filter, Rotation, Summarize, Nie-werfen |
 | `test_rates_block.py` (30.07.) | Zins-Block: FRED-Parsing, Regime-Grenzen, Scoring-Invariante, rates_json |
@@ -1026,7 +1161,10 @@ duale Mail-Zeitstempel `test_mailtime.py`, alle grün) →
 Chase-Gate-Backtest-Skript, alle grün) →
 1331 (31.07. Shadow-Tracking: Whitelist-Helper, Registry-Guard, Record/Dedupe-Isolation,
 Summary-Filter, shadow_summary, Eval-/Mail-Vertrag (`mail_class` in transitions/be_activations),
-Wochenreport-Sektion, Pipeline-Integration, alle grün).
+Wochenreport-Sektion, Pipeline-Integration, alle grün) →
+1400 (05.08. Regime-/Outbox-Härtung, Scanner-Recovery, korrekte Tracker-Kohorten und
+50/50-Payoffs, ORB-Zielpläne/Sortierung, Unternehmensidentität, atomisches Dedupe
+und persistente Stop-Update-Retries; alle grün).
 
 ---
 
@@ -1034,17 +1172,15 @@ Wochenreport-Sektion, Pipeline-Integration, alle grün).
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **PM-Radar live beobachten** — Schwellen ($500k PM-Liquidität, 7 % Spread, 3,0 ATR Decke, Score 85) sind Erstkalibrierung; nach einigen Handelstagen an Server-Logs prüfen (`premarket_*` Reject-Gründe in der Scan-Diagnostik) und PM-Signale im Tracker gegen Regular-Signale vergleichen. Bei Spam → Schwelle hoch / Kanal aus; bei zu wenig Treffern → Beleglage prüfen | 3.7 |
-| 2 | **Schwellen-Verifikation** — 2,5/3,5 ATR, 2,0 %-Budget und 2,0-ATR-Orts-Gate sind an 7 Produktivfällen kalibriert; an Server-Logs prüfen (`swing_day_move_*`, `swing_top_entry_*`, `top_entry_*`, `bottom_entry_*`, `low_volatility`). Falls `top_entry`/`bottom_entry` nie auftauchen: Crypto-Rows ohne `day_high`/`day_low` → Anreicherung nachbauen | Commits `cdeff7e`, `da6c4be` |
-| 3 | **Retest-Plan-Mail** — Chase-Gates unterdrücken Zeilen aktuell ganz; eine WATCH-Mail mit konkretem Retest-Entry (statt Market-Entry) wäre ein eigenes Feature | Betreiber will keine Watch-Mails — nur falls er es sich anders überlegt |
-| 4 | **Gate-Wirkung auswerten** — nach 1–2 Wochen Produktivlauf `scripts/signal_performance_breakdown.py` laufen lassen: Hit-Rate/R je Monat vor vs. nach den Chase-/Orts-Gates vergleichen | Commit `da6c4be` |
-| 5 | ~~Exit-Effizienz — Regel abgeleitet~~ — **IMPLEMENTIERT (3.9):** BE-Trigger live (be_activated_at, r_realized_be, Stop-Update-Mail) **+ Wochenreport-Nachweis** („Ø R BE"-Spalte, Ergebnis-Box: Aktivierungen, bewahrte Verlierer, Ø R Ist vs. BE). Nächste Prüfung: Freitags-Report der kommenden Wochen gegen die Erwartung +0,14…+0,16 R/Signal | 3.8/3.9 |
-| 5a | ~~Phase 2: WebSocket-Trigger~~ — **ENTSCIEDEN: nicht bauen.** Alle drei Entscheidungsregeln verfehlt (TP1 < 30 min: 0 %; Extension ≥ 2 ATR: 16 %; T-10-Vorteil: +0,1 %). Restfälle durch Orts-Gate + PM-Radar abgedeckt. Zahlen in 3.7 | Messung 29.07. |
-| 6 | **EN/DE-Sprach-Toggle existiert nicht** — UI ist fest deutsch (29.07. vereinheitlicht); ein echter Toggle wäre ein eigenes Feature, falls gewünscht | Betreiber-Frage 29.07. |
-| 7 | ~~JWT_SECRET als ENV setzen~~ — **ERLEDIGT (30.07.):** per `openssl rand -hex 32` in `.env` auf dem Server fixiert, Boot-Log warnfrei | 3.11 |
-| 8 | Server-Grundpflege: „System restart required", ausstehende Ubuntu-Updates — **Ein-Befehl-Skript liegt bereit (3.13):** `bash deploy/os_maintenance.sh` (Update → Reboot mit @reboot-Selbstverifikation → Log). Wartungsfenster beachten (nie Fr 22:00–Sa 06:00) | Infrastruktur, kein Bot-Thema |
-| 9 | **Zins-Regime Phase 2: Auswertung** — `rates_json` annotiert ab 30.07. jedes neue Signal (FRED DGS2/10/30, Regime-Label Erstkalibrierung ±10/±25 bp). Sobald ≥ ~100 entschiedene Signale pro Regime-Zelle: Skript analog `exit_efficiency_analysis.py` — Hit-Rate/ØR je Regime; nur bei signifikantem Delta weiches Gate für zinssensible Longs (Biotech/Growth). Zusatzoption: HYG-Trend als Credit-Risiko-Proxy in den Context | 3.12 |
-| 10 | ~~2 ET-Session-abhängige Tests zeitrobust machen~~ — **ERLEDIGT (30.07., 3.14):** `_premarket_window_active` in `_mock_mail_env` + Einzeltest gemockt; Suite jetzt rund um die Uhr grün | 3.14 |
+| 1 | **Produktion auf `5aea225` verifizieren:** Server-HEAD, alle drei Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30 |
+| 2 | **Mail-Zustellung beobachten:** Outbox-Zahlen (`pending`, `retry`, `dead_letter`) und offene `be_mail_sent_at`-Aktivierungen prüfen; Testmail plus absichtlich simulierten temporären Fehler nachvollziehen. | 3.26/3.30, Abschnitt 4 |
+| 3 | **Forward-Kalibrierung statt Bauchgefühl:** je Scanner und Regime mindestens 30 vollständig beobachtete Signale sammeln; freigegebene Signale gegen Shadow-Kohorte mit Hit-Rate, Wilson-KI, Level-R und Managed-R vergleichen. Erst dann Schwellen verändern. | Abschnitt 5 |
+| 4 | **PM-/Swing-/Orts-Gates produktiv messen:** Reject-Gründe und Ergebnisdaten nach mehreren Handelstagen auswerten. Lockerung nur, wenn verpasster Erwartungswert statistisch höher als vermiedener Verlust ist. | 3.7, Commits `cdeff7e`/`da6c4be` |
+| 5 | **Stop-Management nachweisen:** kommende Wochenreports auf Aktivierungen, zugestellte Stop-Mails, bewahrte Verlierer und realisiertes Managed-R prüfen; theoretische +R-Annahme nicht als erreicht ausgeben. | 3.8/3.9/3.30 |
+| 6 | **Regime- und Zinssegmentierung auswerten:** ab ausreichend großen Zellen Marktregime und `rates_json` gegen Forward-Ergebnisse prüfen; zusätzliche Gates nur bei belastbarem Delta. | 3.12/3.26 |
+| 7 | **Auto-Update überwachen:** Cron-/Deploy-Log muss Pull, sicheren Testlauf, Service-Neustart und Health-Nachweis enthalten; bei Fehlern kein stilles Teil-Deployment. | `deploy/auto_update.sh`, `deploy/safe_deploy.sh` |
+| 8 | **Server-Grundpflege:** ausstehende Ubuntu-Updates/Reboot in einem Wartungsfenster über `bash deploy/os_maintenance.sh`; danach vollständige Service- und Health-Verifikation. | Infrastruktur |
+| 9 | **EN/DE-Sprach-Toggle:** UI bleibt derzeit bewusst deutsch; nur als eigenes Produktfeature umsetzen, nicht als Launch-Blocker. | UX |
 
 ---
 
@@ -1058,6 +1194,7 @@ Wochenreport-Sektion, Pipeline-Integration, alle grün).
 | `AUDIT_MATHEMATIK_2026-07-24.md` | Rechenkern-Prüfung im Detail |
 | `AUDIT_TIEFENAUDIT_TRADINGLOGIK_2026-07-24.md` | Befunde T1/T2 im Detail |
 | `AUDIT_GESAMT_2026-07-24.md` | Gesamtaudit + Legacy-Bereinigung |
+| `AUDIT_2026-08-01.md` | Performance-Einbruch, Mail-Outbox, Regime-Filter und statistische Konsequenzen |
 | `AUDIT_SCANNER_VOLLAUDIT_2026-07-19.md` / `AUDIT_SCANNER_FIXSTATUS_2026-07-20.md` | Scanner-Vollaudit + Fixstatus |
 | `CODEX_HANDOFF_NACHAUDIT_2026-07-21.md` | Übergabe Nachaudit (Codex ↔ Claude) |
 | `AUDIT_PENNY_STOCK_SCANNER_2026-07-22.md` | Penny-Scanner-Audit |
