@@ -56,6 +56,8 @@ try:
         handle_stripe_webhook, PLANS, SCANNER_TABS_BY_PLAN,
         get_email_alert_recipients, get_user_alert_settings,
         update_user_alert_settings, auth_security_status,
+        get_user_personal_positions, upsert_user_personal_position,
+        remove_user_personal_position,
         mail_channel_enabled, scanner_mail_channel,
         change_password, create_password_reset_request,
         confirm_password_reset, revoke_token,
@@ -16907,6 +16909,17 @@ class AlertSettingsRequest(BaseModel):
     watch_mail_optin: Optional[bool] = None  # AUDIT H-3
     penny_show_watch_rows: Optional[bool] = None
     mail_channels: Optional[Dict[str, bool]] = None  # AUDIT 2026-07-28
+    position_update_scope: Optional[str] = None
+
+
+class PersonalPositionRequest(BaseModel):
+    id: Optional[str] = None
+    ticker: str
+    direction: str = "LONG"
+    signal_id: Optional[int] = None
+    scanner: str = ""
+    asset_type: str = ""
+    company_name: str = ""
 
 
 # ── Admin Models ──
@@ -17325,9 +17338,52 @@ async def api_update_alert_settings(req_body: AlertSettingsRequest, authorizatio
         watch_mail_optin=req_body.watch_mail_optin,  # AUDIT H-3
         penny_show_watch_rows=req_body.penny_show_watch_rows,
         mail_channels=req_body.mail_channels,  # AUDIT 2026-07-28
+        position_update_scope=req_body.position_update_scope,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not update alert settings"))
+    return result
+
+
+@app.get("/api/auth/personal-positions")
+async def api_get_personal_positions(authorization: str = Header(None)):
+    """List trades the authenticated user marked as actually executed."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token or not verify_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    result = get_user_personal_positions(token)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Could not load positions"))
+    return result
+
+
+@app.post("/api/auth/personal-positions")
+async def api_upsert_personal_position(req_body: PersonalPositionRequest, authorization: str = Header(None)):
+    """Mark one scanner signal as a trade the user actually took."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token or not verify_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    result = upsert_user_personal_position(token, req_body.model_dump())
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Could not save position"))
+    return result
+
+
+@app.delete("/api/auth/personal-positions/{position_id}")
+async def api_remove_personal_position(position_id: str, authorization: str = Header(None)):
+    """Remove one previously marked personal trade."""
+    if not HAS_AUTH:
+        raise HTTPException(status_code=503, detail="Auth system not available")
+    token = _get_token_from_header(authorization)
+    if not token or not verify_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    result = remove_user_personal_position(token, position_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Could not remove position"))
     return result
 
 

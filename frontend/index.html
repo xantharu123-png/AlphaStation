@@ -1720,6 +1720,9 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
     const [portalLoading, setPortalLoading] = useState(false);
     const [alertSettings, setAlertSettings] = useState(null);
     const [alertSaving, setAlertSaving] = useState(false);
+    const [personalPositions, setPersonalPositions] = useState([]);
+    const [positionsLoading, setPositionsLoading] = useState(true);
+    const [positionBusy, setPositionBusy] = useState('');
     const [currentPassword, setCurrentPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
     const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
@@ -1775,13 +1778,23 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
 
     useEffect(() => {
         let cancelled = false;
-        const loadAlertSettings = async () => {
+        const loadAccountSettings = async () => {
             try {
-                const res = await fetch(`${API}/api/auth/alert-settings`);
-                if (res.ok && !cancelled) setAlertSettings(await res.json());
-            } catch (e) {}
+                const [settingsRes, positionsRes] = await Promise.all([
+                    fetch(`${API}/api/auth/alert-settings`),
+                    fetch(`${API}/api/auth/personal-positions`)
+                ]);
+                if (settingsRes.ok && !cancelled) setAlertSettings(await settingsRes.json());
+                if (positionsRes.ok && !cancelled) {
+                    const data = await positionsRes.json();
+                    setPersonalPositions(Array.isArray(data.positions) ? data.positions : []);
+                }
+            } catch (e) {
+            } finally {
+                if (!cancelled) setPositionsLoading(false);
+            }
         };
-        loadAlertSettings();
+        loadAccountSettings();
         return () => { cancelled = true; };
     }, [getToken]);
 
@@ -1800,6 +1813,7 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                     scanner_trade_horizon: next.scanner_trade_horizon || 'swing',
                     watch_mail_optin: !!next.watch_mail_optin,
                     penny_show_watch_rows: !!next.penny_show_watch_rows,
+                    position_update_scope: next.position_update_scope || 'all',
                     mail_channels: next.mail_channels || {}
                 })
             });
@@ -1814,6 +1828,26 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
             if (window.addToast) window.addToast('Verbindungsfehler', 'error');
         }
         setAlertSaving(false);
+    };
+
+    const removePersonalPosition = async (positionId) => {
+        if (!positionId || positionBusy) return;
+        setPositionBusy(positionId);
+        try {
+            const res = await fetch(`${API}/api/auth/personal-positions/${encodeURIComponent(positionId)}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                setPersonalPositions(Array.isArray(data.positions) ? data.positions : []);
+                if (window.addToast) window.addToast('Position aus persoenlichen Updates entfernt', 'success');
+            } else if (window.addToast) {
+                window.addToast(data.detail || 'Position konnte nicht entfernt werden', 'error');
+            }
+        } catch (e) {
+            if (window.addToast) window.addToast('Verbindungsfehler', 'error');
+        }
+        setPositionBusy('');
     };
 
     const planColors = { free: '#64748b', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
@@ -1992,6 +2026,66 @@ function AccountPage({ user, limits, getToken, onPlanChange }) {
                                 </div>
                             </div>
                         ))}
+                        <div style={{ padding: 12, border: '1px solid #e2e8f0', borderRadius: 10, background: '#f8fafc' }}>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 3 }}>Folge- und Stop-Mails</div>
+                            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10, lineHeight: 1.45 }}>
+                                Waehle, ob Positions-Updates fuer alle gemailten Signale oder nur fuer deine markierten Trades kommen. Erstsignal-Mails und die globale Performance bleiben immer vollstaendig.
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                {[
+                                    ['all', 'Alle Systemsignale'],
+                                    ['mine', 'Nur meine Trades']
+                                ].map(([value, label]) => {
+                                    const active = (alertSettings?.position_update_scope || 'all') === value;
+                                    return (
+                                        <button
+                                            key={value}
+                                            onClick={() => saveAlertSettings({ position_update_scope: value })}
+                                            disabled={alertSaving}
+                                            style={{
+                                                padding: '7px 11px',
+                                                border: `1px solid ${active ? '#2563eb' : '#cbd5e1'}`,
+                                                borderRadius: 999,
+                                                background: active ? '#dbeafe' : '#fff',
+                                                color: active ? '#1d4ed8' : '#475569',
+                                                fontSize: 12,
+                                                fontWeight: 800,
+                                                cursor: alertSaving ? 'wait' : 'pointer'
+                                            }}>
+                                            {label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <div style={{ marginTop: 12, fontSize: 11, fontWeight: 800, color: '#334155' }}>
+                                Markierte Trades ({personalPositions.length})
+                            </div>
+                            {positionsLoading ? (
+                                <div style={{ marginTop: 7, fontSize: 11, color: '#64748b' }}>Positionen werden geladen...</div>
+                            ) : personalPositions.length === 0 ? (
+                                <div style={{ marginTop: 7, fontSize: 11, color: '#64748b' }}>
+                                    Noch kein Trade markiert. Markiere ihn direkt in der Aktien- oder Krypto-Detailansicht.
+                                </div>
+                            ) : (
+                                <div style={{ marginTop: 7, display: 'grid', gap: 6 }}>
+                                    {personalPositions.map(position => (
+                                        <div key={position.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: 8, background: '#fff' }}>
+                                            <div style={{ minWidth: 0 }}>
+                                                <span style={{ fontSize: 12, fontWeight: 800, color: '#0f172a' }}>{position.ticker}</span>
+                                                <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: position.direction === 'SHORT' ? '#b91c1c' : '#047857' }}>{position.direction}</span>
+                                                {position.company_name && <div style={{ fontSize: 10, color: '#64748b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{position.company_name}</div>}
+                                            </div>
+                                            <button
+                                                onClick={() => removePersonalPosition(position.id)}
+                                                disabled={positionBusy === position.id}
+                                                style={{ border: '1px solid #fecaca', borderRadius: 7, background: '#fff', color: '#b91c1c', padding: '5px 8px', fontSize: 10, fontWeight: 800, cursor: positionBusy ? 'wait' : 'pointer' }}>
+                                                Entfernen
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
             </div>
@@ -2581,6 +2675,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
     const [reminderBusy, setReminderBusy] = useState(false);
     const [activeReminder, setActiveReminder] = useState(null);
+    const [personalPositions, setPersonalPositions] = useState([]);
+    const [positionBusy, setPositionBusy] = useState(false);
     const chartContainer = useRef(null);
     const chart = useRef(null);
     const candleSeries = useRef(null);
@@ -2678,6 +2774,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         loadActiveReminder();
         return () => { cancelled = true; };
     }, [ticker, isCrypto]);
+
+    useEffect(() => {
+        let cancelled = false;
+        setPersonalPositions([]);
+        const loadPersonalPositions = async () => {
+            try {
+                const res = await fetch(`${API}/api/auth/personal-positions`);
+                if (!res.ok) return;
+                const payload = await res.json();
+                if (!cancelled) {
+                    setPersonalPositions(Array.isArray(payload.positions) ? payload.positions : []);
+                }
+            } catch (err) {
+                if (!cancelled) setPersonalPositions([]);
+            }
+        };
+        loadPersonalPositions();
+        return () => { cancelled = true; };
+    }, [ticker]);
 
     useEffect(() => {
         if (isCrypto && !hasCryptoIntradayChart && timeframe !== '1D') {
@@ -3417,6 +3532,27 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 ? 'text-amber-800'
                 : 'text-sky-800';
     const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
+    const personalPositionTicker = String(ticker || cd.ticker || cd.symbol || d.ticker || '')
+        .trim()
+        .toUpperCase()
+        .replace(/USDT$/, '');
+    const personalPositionDirection = ['LONG', 'SHORT'].includes(viewDirection)
+        ? viewDirection
+        : String(activeTradeSetup?.direction || cd.direction || d.direction || '').trim().toUpperCase();
+    const personalPositionSignalIdRaw = Number(
+        cd.signal_id ?? cd.tracker_signal_id ?? d.signal_id ?? d.tracker_signal_id ?? 0
+    );
+    const personalPositionSignalId = Number.isInteger(personalPositionSignalIdRaw) && personalPositionSignalIdRaw > 0
+        ? personalPositionSignalIdRaw
+        : null;
+    const currentPersonalPosition = personalPositions.find(position => {
+        const positionTicker = String(position?.ticker || '').trim().toUpperCase().replace(/USDT$/, '');
+        const positionDirection = String(position?.direction || '').trim().toUpperCase();
+        if (positionTicker !== personalPositionTicker || positionDirection !== personalPositionDirection) return false;
+        const savedSignalId = Number(position?.signal_id || 0);
+        if (personalPositionSignalId && savedSignalId > 0) return savedSignalId === personalPositionSignalId;
+        return true;
+    }) || null;
     const formatSidebarPrice = (value) => {
         const n = Number(value);
         if (!Number.isFinite(n) || n <= 0) return '-';
@@ -3736,6 +3872,96 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             setReminderBusy(false);
         }
     };
+    const markPersonalPosition = async () => {
+        if (!personalPositionTicker || !['LONG', 'SHORT'].includes(personalPositionDirection) || positionBusy) return;
+        setPositionBusy(true);
+        try {
+            const res = await fetch(`${API}/api/auth/personal-positions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ticker: personalPositionTicker,
+                    direction: personalPositionDirection,
+                    signal_id: personalPositionSignalId,
+                    scanner: '',
+                    asset_type: isCrypto ? 'crypto' : 'stock',
+                    company_name: sidebarCompanyName || '',
+                }),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok || !payload.success) {
+                throw new Error(payload.detail || payload.message || 'Trade konnte nicht markiert werden');
+            }
+            setPersonalPositions(Array.isArray(payload.positions) ? payload.positions : []);
+            if (window.addToast) {
+                window.addToast(
+                    `${personalPositionTicker} als ${personalPositionDirection === 'SHORT' ? 'geshortet' : 'gekauft'} markiert`,
+                    'success'
+                );
+            }
+        } catch (err) {
+            if (window.addToast) window.addToast(err.message || 'Trade-Markierung fehlgeschlagen', 'error');
+        } finally {
+            setPositionBusy(false);
+        }
+    };
+    const removeCurrentPersonalPosition = async () => {
+        if (!currentPersonalPosition?.id || positionBusy) return;
+        setPositionBusy(true);
+        try {
+            const res = await fetch(`${API}/api/auth/personal-positions/${encodeURIComponent(currentPersonalPosition.id)}`, {
+                method: 'DELETE',
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok || !payload.success) {
+                throw new Error(payload.detail || payload.message || 'Markierung konnte nicht entfernt werden');
+            }
+            setPersonalPositions(Array.isArray(payload.positions) ? payload.positions : []);
+            if (window.addToast) window.addToast(`${personalPositionTicker} aus Meine Trades entfernt`, 'success');
+        } catch (err) {
+            if (window.addToast) window.addToast(err.message || 'Entfernen fehlgeschlagen', 'error');
+        } finally {
+            setPositionBusy(false);
+        }
+    };
+    const renderPersonalPositionControl = () => {
+        if (!activeTradeSetup || !personalPositionTicker || !['LONG', 'SHORT'].includes(personalPositionDirection)) return null;
+        const actionLabel = personalPositionDirection === 'SHORT' ? 'Als geshortet markieren' : 'Als gekauft markieren';
+        return (
+            <div className="mt-3 border-t border-white/60 pt-2">
+                <div className="flex items-center justify-between gap-2">
+                    <div>
+                        <div className="font-semibold">Meine Position</div>
+                        <div className="mt-1 text-[11px] opacity-75">
+                            Steuert im Modus „Nur meine Trades“ deine Folge- und Stop-Mails. Es wird keine Broker-Order ausgeführt.
+                        </div>
+                    </div>
+                    {currentPersonalPosition ? (
+                        <button
+                            type="button"
+                            onClick={removeCurrentPersonalPosition}
+                            disabled={positionBusy}
+                            className="rounded border border-red-300 bg-white/80 px-2 py-1 text-[11px] font-bold text-red-700 disabled:opacity-50">
+                            Markierung entfernen
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={markPersonalPosition}
+                            disabled={positionBusy}
+                            className="rounded border border-emerald-300 bg-emerald-100 px-2 py-1 text-[11px] font-bold text-emerald-800 disabled:opacity-50">
+                            {positionBusy ? 'Speichert...' : actionLabel}
+                        </button>
+                    )}
+                </div>
+                {currentPersonalPosition && (
+                    <div className="mt-2 rounded border border-emerald-200 bg-emerald-50/80 px-2 py-1 text-[11px] font-semibold text-emerald-800">
+                        Markiert: {personalPositionTicker} {personalPositionDirection}
+                    </div>
+                )}
+            </div>
+        );
+    };
     const renderReminderControls = () => {
         if (!reminderEligible) return null;
         return (
@@ -3977,6 +4203,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         {(cd.risk_flags && cd.risk_flags.length > 0) && (
                             <div className="mt-2 text-amber-800">Hinweis: {compactRiskText(cd.risk_flags)}</div>
                         )}
+                        {renderPersonalPositionControl()}
                         {renderReminderControls()}
                     </div>
                 )}
@@ -4380,6 +4607,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 {activeTradeSetup.notes.slice(0, 3).join(' | ')}
                             </div>
                         )}
+                        {renderPersonalPositionControl()}
                         {renderReminderControls()}
                     </div>
                 )}

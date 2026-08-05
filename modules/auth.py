@@ -845,6 +845,8 @@ def register_user(
         "scanner_trade_horizon": "swing",
         "watch_mail_optin": False,  # AUDIT H-3: Watch-Mails nur mit Opt-in
         "penny_show_watch_rows": False,
+        "position_update_scope": "all",
+        "personal_positions": [],
         "created_at": _utc_iso(),
         "last_login": _utc_iso(),
         "trial_ends_at": None,
@@ -893,6 +895,7 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
             "trade_alert_horizon": "swing", "scanner_trade_horizon": "swing",
             "watch_mail_optin": False,  # AUDIT H-3
             "penny_show_watch_rows": False,
+            "position_update_scope": "all", "personal_positions": [],
             "created_at": _utc_iso(), "last_login": _utc_iso(),
             "trial_ends_at": None,
             "trial_used_at": None,
@@ -1788,6 +1791,68 @@ MAIL_CHANNELS: Dict[str, str] = {
     "new_listing": "New Listing",
 }
 
+POSITION_UPDATE_SCOPES = {"all", "mine"}
+_MAX_PERSONAL_POSITIONS = 250
+
+
+def _normalize_position_update_scope(value: Any) -> str:
+    return "mine" if str(value or "").strip().lower() == "mine" else "all"
+
+
+def _normalize_personal_position(position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return one compact, safe personal-position record."""
+    if not isinstance(position, dict):
+        return None
+    ticker = re.sub(r"[^A-Z0-9._-]", "", str(position.get("ticker") or "").upper())[:32]
+    direction = str(position.get("direction") or "LONG").strip().upper()
+    if not ticker or direction not in {"LONG", "SHORT"}:
+        return None
+    scanner = re.sub(r"[^a-z0-9_.-]", "", str(position.get("scanner") or "").strip().lower())[:48]
+    asset_type = re.sub(r"[^a-z0-9_.-]", "", str(position.get("asset_type") or "").strip().lower())[:24]
+    company_name = re.sub(r"[\x00-\x1f\x7f]", "", str(position.get("company_name") or "").strip())[:160]
+    try:
+        signal_id = int(position.get("signal_id"))
+    except (TypeError, ValueError):
+        signal_id = 0
+    if signal_id < 1:
+        signal_id = 0
+    supplied_id = re.sub(r"[^A-Za-z0-9._-]", "", str(position.get("id") or ""))[:64]
+    if supplied_id:
+        position_id = supplied_id
+    elif signal_id:
+        position_id = f"signal-{signal_id}"
+    else:
+        fingerprint = f"{ticker}|{direction}|{scanner}".encode("utf-8")
+        position_id = "position-" + hashlib.sha256(fingerprint).hexdigest()[:20]
+    marked_at = str(position.get("marked_at") or "").strip()[:40] or _utc_iso()
+    return {
+        "id": position_id,
+        "ticker": ticker,
+        "direction": direction,
+        "signal_id": signal_id or None,
+        "scanner": scanner,
+        "asset_type": asset_type,
+        "company_name": company_name,
+        "marked_at": marked_at,
+    }
+
+
+def _effective_personal_positions(user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    positions: List[Dict[str, Any]] = []
+    seen = set()
+    stored = user.get("personal_positions")
+    if not isinstance(stored, list):
+        return positions
+    for raw in stored:
+        position = _normalize_personal_position(raw)
+        if not position or position["id"] in seen:
+            continue
+        seen.add(position["id"])
+        positions.append(position)
+        if len(positions) >= _MAX_PERSONAL_POSITIONS:
+            break
+    return positions
+
 _SCANNER_MAIL_CHANNEL: Dict[str, str] = {
     "stock_strategy": "stocks_swing",
     "strategy_scan": "stocks_swing",
@@ -1891,6 +1956,105 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
             recipients.append(alert_email)
     return sorted(set(recipients))
 
+
+def get_followup_alert_recipient_profiles() -> List[Dict[str, Any]]:
+    """Return recipient-specific filtering rules for tracker follow-up mails.
+
+    Initial signal mails and the global track record deliberately do not use
+    this function. When several accounts route to the same address, an
+    ``all`` preference wins; otherwise their marked positions are combined.
+    """
+    merged: Dict[str, Dict[str, Any]] = {}
+    for email, user in _load_effective_users_atomic().items():
+        if not isinstance(user, dict):
+            continue
+        effective_plan = "elite" if email in ADMIN_EMAILS else str(user.get("plan") or "expired")
+        if not get_plan_features(effective_plan).get("has_email_alerts"):
+            continue
+        if user.get("email_alerts_enabled", True) is False:
+            continue
+        alert_email = str(user.get("alert_email") or email).strip().lower()
+        if "@" not in alert_email:
+            continue
+        scope = _normalize_position_update_scope(user.get("position_update_scope"))
+        profile = merged.setdefault(
+            alert_email,
+            {"email": alert_email, "position_update_scope": "mine", "personal_positions": []},
+        )
+        if scope == "all":
+            profile["position_update_scope"] = "all"
+        known_ids = {item.get("id") for item in profile["personal_positions"]}
+        for position in _effective_personal_positions(user):
+            if position["id"] not in known_ids:
+                profile["personal_positions"].append(position)
+                known_ids.add(position["id"])
+    return sorted(merged.values(), key=lambda item: item["email"])
+
+
+def get_user_personal_positions(token: str) -> Dict[str, Any]:
+    payload = verify_token(token)
+    if not payload:
+        return {"success": False, "message": "Invalid token", "positions": []}
+    email = str(payload.get("email") or "").strip().lower()
+    try:
+        user = _load_effective_users_atomic().get(email)
+    except Exception:
+        user = None
+    if not isinstance(user, dict):
+        return {"success": False, "message": "User not found", "positions": []}
+    return {"success": True, "positions": _effective_personal_positions(user)}
+
+
+def upsert_user_personal_position(token: str, position: Dict[str, Any]) -> Dict[str, Any]:
+    payload = verify_token(token)
+    normalized = _normalize_personal_position(position)
+    if not payload:
+        return {"success": False, "message": "Invalid token"}
+    if not normalized:
+        return {"success": False, "message": "Invalid personal position"}
+    email = str(payload.get("email") or "").strip().lower()
+
+    def updater(current: Dict[str, Any]) -> None:
+        positions = _effective_personal_positions(current)
+        positions = [item for item in positions if item["id"] != normalized["id"]]
+        positions.insert(0, normalized)
+        current["personal_positions"] = positions[:_MAX_PERSONAL_POSITIONS]
+
+    user = _update_user_atomic(email, updater)
+    if not isinstance(user, dict):
+        return {"success": False, "message": "User not found"}
+    return {
+        "success": True,
+        "position": normalized,
+        "positions": _effective_personal_positions(user),
+    }
+
+
+def remove_user_personal_position(token: str, position_id: str) -> Dict[str, Any]:
+    payload = verify_token(token)
+    if not payload:
+        return {"success": False, "message": "Invalid token"}
+    normalized_id = re.sub(r"[^A-Za-z0-9._-]", "", str(position_id or ""))[:64]
+    if not normalized_id:
+        return {"success": False, "message": "Invalid position id"}
+    email = str(payload.get("email") or "").strip().lower()
+    removed = {"value": False}
+
+    def updater(current: Dict[str, Any]) -> None:
+        positions = _effective_personal_positions(current)
+        kept = [item for item in positions if item["id"] != normalized_id]
+        removed["value"] = len(kept) != len(positions)
+        current["personal_positions"] = kept
+
+    user = _update_user_atomic(email, updater)
+    if not isinstance(user, dict):
+        return {"success": False, "message": "User not found"}
+    return {
+        "success": True,
+        "removed": removed["value"],
+        "positions": _effective_personal_positions(user),
+    }
+
 # User alert settings
 def get_user_alert_settings(token: str) -> Dict[str, Any]:
     payload = verify_token(token)
@@ -1917,6 +2081,9 @@ def get_user_alert_settings(token: str) -> Dict[str, Any]:
         "mail_channels": _effective_mail_channels(user),  # AUDIT 2026-07-28
         "mail_channel_options": [{"key": k, "label": v} for k, v in MAIL_CHANNELS.items()],
         "penny_show_watch_rows": bool(user.get("penny_show_watch_rows", False)),
+        "position_update_scope": _normalize_position_update_scope(user.get("position_update_scope")),
+        "position_update_scope_options": ["all", "mine"],
+        "personal_position_count": len(_effective_personal_positions(user)),
         "has_email_alerts": get_plan_features(effective_plan).get("has_email_alerts", False),
     }
 
@@ -1931,6 +2098,7 @@ def update_user_alert_settings(
     watch_mail_optin: Optional[bool] = None,
     penny_show_watch_rows: Optional[bool] = None,
     mail_channels: Optional[Dict[str, Any]] = None,
+    position_update_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = verify_token(token)
     if not payload:
@@ -1972,6 +2140,11 @@ def update_user_alert_settings(
             return {"success": False, "message": "Unknown mail channels: " + ", ".join(unknown)}
         # AUDIT 2026-07-28: nur bekannte Keys, strikt als bool speichern.
         updates["mail_channels"] = {k: bool(v) for k, v in mail_channels.items()}
+    if position_update_scope is not None:
+        scope = str(position_update_scope or "").strip().lower()
+        if scope not in POSITION_UPDATE_SCOPES:
+            return {"success": False, "message": "Invalid position update scope"}
+        updates["position_update_scope"] = scope
 
     user = _update_user_atomic(email, lambda current: current.update(updates))
     if not isinstance(user, dict):

@@ -35,6 +35,7 @@ import atexit
 import tempfile
 import math
 import glob
+import hashlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
@@ -121,11 +122,17 @@ try:
 except Exception:  # pragma: no cover - Outbox-Ausfall darf Mail-Pfad nie stoppen
     _mail_outbox = None
 try:
-    from modules.auth import get_email_alert_recipients, mail_channel_enabled, scanner_mail_channel
+    from modules.auth import (
+        get_email_alert_recipients,
+        get_followup_alert_recipient_profiles,
+        mail_channel_enabled,
+        scanner_mail_channel,
+    )
     HAS_AUTH_ALERT_RECIPIENTS = True
 except Exception as _auth_alert_err:
     HAS_AUTH_ALERT_RECIPIENTS = False
     get_email_alert_recipients = None
+    get_followup_alert_recipient_profiles = None
     mail_channel_enabled = None
     scanner_mail_channel = None
 # Signal-Tracking (Team-A-Kontrakt) — defensiv: bg muss auch ohne Modul laufen.
@@ -1661,6 +1668,244 @@ def _signal_origin_was_mailed(scanner, ticker, now=None):
     return False
 
 
+def _followup_recipient_profiles(secrets):
+    """Resolve recipient-specific rules for tracker follow-up emails."""
+    config = secrets if isinstance(secrets, dict) else {}
+    profiles = {}
+    send_to_subscribers = str(
+        config.get(
+            "ALERT_SEND_TO_SUBSCRIBERS",
+            os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"),
+        )
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+    if (
+        send_to_subscribers
+        and HAS_AUTH_ALERT_RECIPIENTS
+        and get_followup_alert_recipient_profiles is not None
+    ):
+        try:
+            for raw in get_followup_alert_recipient_profiles() or []:
+                if not isinstance(raw, dict):
+                    continue
+                email = str(raw.get("email") or "").strip().lower()
+                if "@" not in email:
+                    continue
+                scope = "mine" if str(raw.get("position_update_scope") or "").lower() == "mine" else "all"
+                positions = raw.get("personal_positions")
+                profiles[email] = {
+                    "email": email,
+                    "position_update_scope": scope,
+                    "personal_positions": positions if isinstance(positions, list) else [],
+                }
+        except Exception as exc:
+            log.warning(f"Persoenliche Folge-Mail-Empfaenger konnten nicht geladen werden: {exc}")
+
+    operator_value = config.get("ALERT_EMAIL") or config.get("GMAIL_USER") or ""
+    for raw_email in str(operator_value).split(","):
+        email = raw_email.strip().lower()
+        if "@" not in email or email in profiles:
+            continue
+        profiles[email] = {
+            "email": email,
+            "position_update_scope": "all",
+            "personal_positions": [],
+        }
+    return sorted(profiles.values(), key=lambda item: item["email"])
+
+
+def _followup_event_matches_position(event, position):
+    """Match one tracker event against one user-marked executed trade."""
+    if not isinstance(event, dict) or not isinstance(position, dict):
+        return False
+    try:
+        event_signal_id = int(event.get("id") or 0)
+    except (TypeError, ValueError):
+        event_signal_id = 0
+    try:
+        position_signal_id = int(position.get("signal_id") or 0)
+    except (TypeError, ValueError):
+        position_signal_id = 0
+    if event_signal_id > 0 and position_signal_id > 0:
+        return event_signal_id == position_signal_id
+
+    if str(event.get("ticker") or "").strip().upper() != str(position.get("ticker") or "").strip().upper():
+        return False
+    event_direction = "SHORT" if str(event.get("direction") or "").upper() == "SHORT" else "LONG"
+    position_direction = "SHORT" if str(position.get("direction") or "").upper() == "SHORT" else "LONG"
+    if event_direction != position_direction:
+        return False
+    position_scanner = str(position.get("scanner") or "").strip().lower()
+    event_scanner = str(event.get("scanner") or "").strip().lower()
+    return not position_scanner or position_scanner == event_scanner
+
+
+def _followup_recipient_dedupe_key(base_key, email):
+    recipient_hash = hashlib.sha256(str(email).strip().lower().encode("utf-8")).hexdigest()[:16]
+    return f"{base_key}_recipient_{recipient_hash}"
+
+
+def _dispatch_followup_digest(
+    pending,
+    secrets,
+    build_digest,
+    event_from_item,
+    base_key_from_item,
+    *,
+    enqueue_on_failure=True,
+):
+    """Send a follow-up digest globally or filtered per recipient.
+
+    The global event key is finalized only after every relevant recipient was
+    either delivered successfully or intentionally excluded by their personal
+    position filter.
+    """
+    profiles = _followup_recipient_profiles(secrets)
+    personalized = any(
+        profile.get("position_update_scope") == "mine" for profile in profiles
+    )
+    now = time.time()
+
+    if not personalized:
+        subject, body_html = build_digest(pending)
+        send_kwargs = {"mail_class": "info"}
+        if not enqueue_on_failure:
+            send_kwargs["enqueue_on_failure"] = False
+        sent = _send_email_alert(subject, body_html, secrets, **send_kwargs)
+        if sent:
+            for item in pending:
+                _email_dedupe_mark(base_key_from_item(item), now=now)
+        return bool(sent), bool(sent)
+
+    any_sent = False
+    all_complete = True
+    for profile in profiles:
+        email = profile["email"]
+        if profile.get("position_update_scope") == "mine":
+            positions = profile.get("personal_positions") or []
+            selected = [
+                item
+                for item in pending
+                if any(
+                    _followup_event_matches_position(event_from_item(item), position)
+                    for position in positions
+                )
+            ]
+        else:
+            selected = list(pending)
+
+        unsent = []
+        for item in selected:
+            recipient_key = _followup_recipient_dedupe_key(base_key_from_item(item), email)
+            if not _email_dedupe_active(recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+                unsent.append((recipient_key, item))
+        if not unsent:
+            continue
+
+        recipient_pending = [item for _, item in unsent]
+        subject, body_html = build_digest(recipient_pending)
+        sent = _send_email_alert(
+            subject,
+            body_html,
+            secrets,
+            mail_class="info",
+            recipient_emails=[email],
+            enqueue_on_failure=enqueue_on_failure,
+        )
+        if sent:
+            any_sent = True
+            for recipient_key, _ in unsent:
+                _email_dedupe_mark(recipient_key, now=now)
+        else:
+            all_complete = False
+
+    if all_complete:
+        for item in pending:
+            _email_dedupe_mark(base_key_from_item(item), now=now)
+    return any_sent, all_complete
+
+
+def _build_signal_update_digest(pending):
+    """Build one tracker transition digest for the selected recipient rows."""
+    n = len(pending)
+    stop_count = sum(1 for _, _, tr in pending if tr.get("new_status") == "STOP_HIT")
+    tp_count = sum(
+        1
+        for _, _, tr in pending
+        if tr.get("new_status") in ("TP1_HIT_OPEN", "TP2_HIT")
+    )
+    subject = f"Signal-Update: {n} Position(en) — {stop_count} Stop / {tp_count} TP"
+
+    rows = ""
+    for _, event, tr in pending:
+        ticker = html.escape(str(tr.get("ticker") or "?"))
+        scanner = html.escape(str(tr.get("scanner") or "?"))
+        direction = "SHORT" if str(tr.get("direction")) == "SHORT" else "LONG"
+        r_realized = tr.get("r_realized")
+        r_text = (
+            f"{float(r_realized):+.2f}R"
+            if isinstance(r_realized, (int, float))
+            else "offen"
+        )
+        plan = " | ".join(
+            f"{label} {_format_alert_price(tr.get(key))}"
+            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
+            if tr.get(key) is not None
+        )
+        fill = tr.get("entry_fill_price")
+        fill_quality = str(tr.get("fill_quality") or "UNAVAILABLE").upper()
+        if fill is None:
+            execution = "Fill nicht verfuegbar"
+        else:
+            execution_parts = [f"Fill {_format_alert_price(fill)}"]
+            slip_r = tr.get("adverse_slippage_r")
+            slip_pct = tr.get("adverse_slippage_pct")
+            if isinstance(slip_r, (int, float)):
+                slip_text = f"Slippage {float(slip_r):+.2f}R"
+                if isinstance(slip_pct, (int, float)):
+                    slip_text += f" / {float(slip_pct):+.2f}%"
+                execution_parts.append(slip_text)
+            live_rr = tr.get("live_effective_rr")
+            if isinstance(live_rr, (int, float)):
+                execution_parts.append(f"Live R:R {float(live_rr):.2f}")
+            execution_parts.append(f"Fill-Qualitaet {fill_quality}")
+            rejection = str(tr.get("fill_rejection_reason") or "").strip()
+            if rejection:
+                execution_parts.append(rejection)
+            execution = "<br>".join(html.escape(part) for part in execution_parts)
+        rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{event}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{r_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#444;font-size:12px">{execution}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{plan}</td>
+        </tr>"""
+
+    body_html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+    <h2 style="color:#0f172a">Signal-Update - Positions-Ereignisse</h2>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Update(s) zu zuvor gemailten Signalen</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Ticker</th>
+            <th style="padding:8px;text-align:left">Scanner</th>
+            <th style="padding:8px;text-align:left">Ereignis</th>
+            <th style="padding:8px;text-align:left">R</th>
+            <th style="padding:8px;text-align:left">Ausfuehrung</th>
+            <th style="padding:8px;text-align:left">Plan-Level</th>
+        </tr>
+        {rows}
+    </table>
+    <p style="color:#999;font-size:12px;margin-top:20px">
+        Automatisches Update vom Signal-Tracker (15-Minuten-Evaluierung).<br>
+        'TP1 erreicht' = Teilgewinn-Zone erreicht, Restposition risikofrei Richtung TP2 (Stop auf Entry).<br>
+        Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
+    </p>
+    </body></html>"""
+    return subject, body_html
+
+
 def _send_signal_update_mail(transitions, secrets):
     """ℹ️-Sammel-Update fuer Exits bereits gemailter Tracker-Signale.
 
@@ -1704,87 +1949,94 @@ def _send_signal_update_mail(transitions, secrets):
     if not pending:
         return False
 
-    n = len(pending)
-    stop_count = sum(1 for _, _, tr in pending if tr.get("new_status") == "STOP_HIT")
-    tp_count = sum(1 for _, _, tr in pending
-                   if tr.get("new_status") in ("TP1_HIT_OPEN", "TP2_HIT"))
-    subject = f"Signal-Update: {n} Position(en) — {stop_count} Stop / {tp_count} TP"
-
-    rows = ""
-    for _, event, tr in pending:
-        ticker = html.escape(str(tr.get("ticker") or "?"))
-        scanner = html.escape(str(tr.get("scanner") or "?"))
-        direction = "SHORT" if str(tr.get("direction")) == "SHORT" else "LONG"
-        r_realized = tr.get("r_realized")
-        r_text = (f"{float(r_realized):+.2f}R"
-                  if isinstance(r_realized, (int, float)) else "offen")
-        plan = " | ".join(
-            f"{label} {_format_alert_price(tr.get(key))}"
-            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
-            if tr.get(key) is not None
+    sent, complete = _dispatch_followup_digest(
+        pending,
+        secrets,
+        _build_signal_update_digest,
+        lambda item: item[2],
+        lambda item: item[0],
+    )
+    tickers = ", ".join(str(tr.get("ticker") or "?") for _, _, tr in pending)
+    if sent:
+        log.info(
+            f"[SignalTracker] Update-Mail gesendet: {len(pending)} Transition(en) "
+            f"({tickers})"
         )
-        fill = tr.get("entry_fill_price")
-        fill_quality = str(tr.get("fill_quality") or "UNAVAILABLE").upper()
-        if fill is None:
-            execution = "Fill nicht verfuegbar"
+    elif not complete:
+        log.warning(
+            f"[SignalTracker] Update-Mail nicht vollstaendig versendet "
+            f"({len(pending)} Transition(en) offen)"
+        )
+    else:
+        log.info(
+            f"[SignalTracker] Kein persoenlicher Empfaenger fuer "
+            f"{len(pending)} Transition(en); Ereignisse abgeschlossen"
+        )
+    return bool(sent)
+
+
+def _build_be_update_digest(pending):
+    """Build one breakeven-management digest for selected recipient rows."""
+    n = len(pending)
+    subject = f"Stop-Update: {n} Trade(s) auf Einstand sichern (+1R gelaufen)"
+    rows = ""
+    for _, act in pending:
+        ticker = html.escape(str(act.get("ticker") or "?"))
+        scanner = html.escape(str(act.get("scanner") or "?"))
+        direction = "SHORT" if str(act.get("direction")) == "SHORT" else "LONG"
+        be_level = act.get("entry_fill_price") or act.get("entry")
+        mfe = act.get("mfe")
+        mfe_text = f"+{float(mfe):.2f}R" if isinstance(mfe, (int, float)) else ">= +1R"
+        if str(act.get("scanner") or "").lower().startswith("crash"):
+            plan = (
+                f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen - "
+                "KEIN Teilverkauf: Crash-Position nur absichern."
+            )
         else:
-            execution_parts = [f"Fill {_format_alert_price(fill)}"]
-            slip_r = tr.get("adverse_slippage_r")
-            slip_pct = tr.get("adverse_slippage_pct")
-            if isinstance(slip_r, (int, float)):
-                slip_text = f"Slippage {float(slip_r):+.2f}R"
-                if isinstance(slip_pct, (int, float)):
-                    slip_text += f" / {float(slip_pct):+.2f}%"
-                execution_parts.append(slip_text)
-            live_rr = tr.get("live_effective_rr")
-            if isinstance(live_rr, (int, float)):
-                execution_parts.append(f"Live R:R {float(live_rr):.2f}")
-            execution_parts.append(f"Fill-Qualitaet {fill_quality}")
-            rejection = str(tr.get("fill_rejection_reason") or "").strip()
-            if rejection:
-                execution_parts.append(rejection)
-            execution = "<br>".join(html.escape(part) for part in execution_parts)
+            tp1_text = (
+                _format_alert_price(act.get("tp1"))
+                if act.get("tp1") is not None
+                else "TP1"
+            )
+            plan = (
+                f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen. "
+                f"An TP1 ({tp1_text}): 50% verkaufen, Rest risikofrei weiterlaufen lassen."
+            )
+        levels = " | ".join(
+            f"{label} {_format_alert_price(act.get(key))}"
+            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
+            if act.get(key) is not None
+        )
         rows += f"""<tr>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{event}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{r_text}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;color:#444;font-size:12px">{execution}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{plan}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mfe_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{levels}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">{plan}</td>
         </tr>"""
 
     body_html = f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
-    <h2 style="color:#0f172a">Signal-Update — Positions-Ereignisse</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | {n} Update(s) zu zuvor gemailten Signalen</p>
+    <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+    <h2 style="color:#0f172a">Stop-Update - Trades auf Einstand sichern</h2>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Position(en) haben +1R erreicht</p>
+    <p>Diese Trades sind mindestens <b>+1R</b> in deine Richtung gelaufen. Der Stop
+    gehoert jetzt auf den <b>Einstand</b>, damit das urspruengliche Kursrisiko entfaellt.</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
             <th style="padding:8px;text-align:left">Ticker</th>
             <th style="padding:8px;text-align:left">Scanner</th>
-            <th style="padding:8px;text-align:left">Ereignis</th>
-            <th style="padding:8px;text-align:left">R</th>
-            <th style="padding:8px;text-align:left">Ausfuehrung</th>
+            <th style="padding:8px;text-align:left">MFE</th>
             <th style="padding:8px;text-align:left">Plan-Level</th>
+            <th style="padding:8px;text-align:left">Anweisung</th>
         </tr>
         {rows}
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Automatisches Update vom Signal-Tracker (15-Minuten-Evaluierung).<br>
-        'TP1 erreicht' = Teilgewinn-Zone erreicht, Restposition risikofrei Richtung TP2 (Stop auf Entry).<br>
-        Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
+        Automatischer Stop-Update-Hinweis vom Signal-Tracker (MFE &gt;= +1R, einmalig je Signal).<br>
+        Kein neues Signal und keine Handelsaufforderung.
     </p>
     </body></html>"""
-
-    sent = _send_email_alert(subject, body_html, secrets, mail_class="info")
-    if sent:
-        # B2-Muster: Dedupe-Mark NUR nach erfolgreichem Versand.
-        for dedupe_key, _, _ in pending:
-            _email_dedupe_mark(dedupe_key, now=now)
-        log.info(f"[SignalTracker] 📧 Update-Mail gesendet: {n} Transition(en) "
-                 f"({', '.join(str(tr.get('ticker') or '?') for _, _, tr in pending)})")
-    else:
-        log.warning(f"[SignalTracker] Update-Mail nicht versendet ({n} Transition(en) offen)")
-    return bool(sent)
+    return subject, body_html
 
 
 def _send_be_alert_mail(activations, secrets):
@@ -1836,76 +2088,15 @@ def _send_be_alert_mail(activations, secrets):
     if not pending:
         return False
 
-    n = len(pending)
-    subject = f"Stop-Update: {n} Trade(s) auf Einstand sichern (+1R gelaufen)"
-
-    rows = ""
-    for _, act in pending:
-        ticker = html.escape(str(act.get("ticker") or "?"))
-        scanner = html.escape(str(act.get("scanner") or "?"))
-        direction = "SHORT" if str(act.get("direction")) == "SHORT" else "LONG"
-        be_level = act.get("entry_fill_price") or act.get("entry")
-        mfe = act.get("mfe")
-        mfe_text = f"+{float(mfe):.2f}R" if isinstance(mfe, (int, float)) else ">= +1R"
-        if str(act.get("scanner") or "").lower().startswith("crash"):
-            plan = (f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen — "
-                    f"KEIN Teilverkauf: Tracker-Daten zeigen, Halten schlug 50/50.")
-        else:
-            tp1_text = (_format_alert_price(act.get("tp1"))
-                        if act.get("tp1") is not None else "TP1")
-            plan = (f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen. "
-                    f"An TP1 ({tp1_text}): 50% verkaufen, Rest risikofrei weiterlaufen lassen.")
-        levels = " | ".join(
-            f"{label} {_format_alert_price(act.get(key))}"
-            for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
-            if act.get(key) is not None
-        )
-        rows += f"""<tr>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mfe_text}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{levels}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">{plan}</td>
-        </tr>"""
-
-    body_html = f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
-    <h2 style="color:#0f172a">Stop-Update — Trades auf Einstand sichern</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | {n} Position(en) haben +1R erreicht</p>
-    <p>Diese Trades sind mindestens <b>+1R</b> in deine Richtung gelaufen. Der Stop
-    gehoert jetzt auf den <b>Einstand</b> — damit ist der Trade risikofrei.
-    Tracker-Daten der letzten 90 Tage: 31% der Signale mit +1R MFE endeten ohne
-    diese Regel im Minus.</p>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <tr style="background:#f5f5f5">
-            <th style="padding:8px;text-align:left">Ticker</th>
-            <th style="padding:8px;text-align:left">Scanner</th>
-            <th style="padding:8px;text-align:left">MFE</th>
-            <th style="padding:8px;text-align:left">Plan-Level</th>
-            <th style="padding:8px;text-align:left">Anweisung</th>
-        </tr>
-        {rows}
-    </table>
-    <p style="color:#999;font-size:12px;margin-top:20px">
-        Automatischer Stop-Update-Hinweis vom Signal-Tracker (MFE &gt;= +1R, einmalig je Signal).<br>
-        Crash-Scanner: ausdruecklich KEIN Teilverkauf — dort schlug Halten das 50/50-Management.<br>
-        Kein neues Signal, keine Handelsaufforderung. Einmalig je Signal (7-Tage-Dedupe).
-    </p>
-    </body></html>"""
-
-    # This tracker state is the retry source. Using the generic outbox here as
-    # well would create two independent retry paths and duplicate emails.
-    sent = _send_email_alert(
-        subject,
-        body_html,
+    sent, complete = _dispatch_followup_digest(
+        pending,
         secrets,
-        mail_class="info",
+        _build_be_update_digest,
+        lambda item: item[1],
+        lambda item: item[0],
         enqueue_on_failure=False,
     )
-    if sent:
-        # B2-Muster: Dedupe-Mark NUR nach erfolgreichem Versand.
-        for dedupe_key, _ in pending:
-            _email_dedupe_mark(dedupe_key, now=now)
+    if complete:
         signal_ids = []
         for _, activation in pending:
             try:
@@ -1918,15 +2109,28 @@ def _send_be_alert_mail(activations, secrets):
             acknowledged = mark_be_alerts_sent(signal_ids)
             if acknowledged < len(signal_ids):
                 log.warning(
-                    "[SignalTracker] Stop-Update gesendet, aber nur %s/%s "
+                    "[SignalTracker] Stop-Update abgeschlossen, aber nur %s/%s "
                     "Zustellungen dauerhaft bestaetigt",
                     acknowledged,
                     len(signal_ids),
                 )
-        log.info(f"[SignalTracker] 📧 BE-Alert gesendet: {n} Stop-Update(s) "
-                 f"({', '.join(str(a.get('ticker') or '?') for _, a in pending)})")
+
+    tickers = ", ".join(str(act.get("ticker") or "?") for _, act in pending)
+    if sent:
+        log.info(
+            f"[SignalTracker] BE-Alert gesendet: {len(pending)} Stop-Update(s) "
+            f"({tickers})"
+        )
+    elif not complete:
+        log.warning(
+            f"[SignalTracker] BE-Alert nicht vollstaendig versendet "
+            f"({len(pending)} Aktivierung(en) offen)"
+        )
     else:
-        log.warning(f"[SignalTracker] BE-Alert nicht versendet ({n} Aktivierung(en) offen)")
+        log.info(
+            f"[SignalTracker] Kein persoenlicher Empfaenger fuer "
+            f"{len(pending)} Stop-Update(s); Ereignisse abgeschlossen"
+        )
     return bool(sent)
 
 

@@ -1,6 +1,6 @@
 # Alpha Station — Projekthandbuch
 
-**Stand:** 5. August 2026 · **Endstand Code:** `5aea225` auf GitHub `main` · **Tests:** 1400 (alle grün)
+**Stand:** 5. August 2026 · **Arbeitsbranch:** `nachaudit-fixes-2026-07-21` · **Tests:** 1405 (alle grün)
 **Repository:** `C:\Users\miros\Desktop\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`
 **Produktionsnachweis:** GitHub enthält `5aea225`; der Server-Rollout dieses Commits wurde
@@ -1012,6 +1012,38 @@ volle Suite **1400/1400 grün**, Python-Compile und `git diff --check` grün.
 Commit `5aea225` ist auf GitHub `main`; der Produktions-Rollout wurde in dieser
 Sitzung nicht per SSH bestätigt.
 
+### 3.31 5. August — Persönliche Positionen für Folge- und Stop-Mails
+
+- Nutzer können ein Scanner-Signal in der Detailansicht als tatsächlich gekauft
+  oder geshortet markieren und später wieder entfernen. Die Markierung speichert
+  Ticker, Richtung, Scanner, Signal-ID, Asset-Typ und Unternehmensname; maximal
+  250 persönliche Positionen pro Konto.
+- In den Alert-Einstellungen gibt es zwei klar getrennte Modi:
+  `Alle Systemsignale` behält das bisherige Verhalten, `Nur meine Trades` filtert
+  allgemeine Signal-Updates und Stop-/Einstand-Mails auf die persönlich markierten
+  Positionen.
+- Erstsignal-Mails, Scanner-Ergebnisse, der globale Signal-Tracker und der
+  Wochenreport bleiben vollständig. Die persönliche Auswahl darf den objektiven
+  Forward-Track-Record nicht verändern oder gute/schlechte Systemsignale aus der
+  Statistik entfernen.
+- Die Zustellung und Deduplizierung erfolgt pro Empfänger. Ein SMTP-Fehler bei
+  einem Nutzer blockiert keine anderen Nutzer; beim Retry wird nur der fehlende
+  Empfänger erneut bedient. Mehrere Konten mit derselben Zieladresse werden sicher
+  zusammengeführt; `all` hat dabei Vorrang vor `mine`.
+- Die Markierung ist ausdrücklich **keine Broker-Order**. Automatisierte
+  IBKR-Ausführung wird erst als eigenes Paper-Trading-Projekt mit expliziter
+  Freigabe, Positionslimits, Kill-Switch, Idempotenz und Order-Audit umgesetzt.
+
+**Mail-Stichprobe vom 3./4. August:** Die beigefügten Folge-Mails zeigen ein
+gemischtes Bild: unter anderem erreichte OWL TP2, KC und LBRX erreichten TP1;
+GIB, ALRS und KSPI liefen in den Stop. Viele neuere Swing-Signale waren zum
+Prüfzeitpunkt noch offen. Daraus wird bewusst keine belastbare Trefferquote
+abgeleitet, weil Beobachtungsfenster und Stichprobe unvollständig sind.
+
+**Verifikation:** fünf neue Regressionstests für Normalisierung, Profil-Merge,
+Signalzuordnung, Empfängerfilter und isolierten Retry; volle Suite
+**1405/1405 grün**, Python-Compile und `git diff --check` grün.
+
 ---
 
 ## 4. Das Mail-System (Stand 05.08.2026)
@@ -1112,7 +1144,7 @@ Symbol geraten werden; Asset-Typ und Ticker bleiben die verbindliche Identität.
 
 ## 6. Testlandschaft
 
-**1400 Tests, alle grün** (05.08.2026). Der Stand umfasst Rechenkern,
+**1405 Tests, alle grün** (05.08.2026). Der Stand umfasst Rechenkern,
 Scanner-/Mail-Verträge, Scheduler-Recovery, Tracker-Kohorten, Regime-Filter,
 ORB-Zielpläne, Aktienidentität und ausfallsichere Stop-Updates. Wichtige Suiten:
 
@@ -1164,7 +1196,9 @@ Summary-Filter, shadow_summary, Eval-/Mail-Vertrag (`mail_class` in transitions/
 Wochenreport-Sektion, Pipeline-Integration, alle grün) →
 1400 (05.08. Regime-/Outbox-Härtung, Scanner-Recovery, korrekte Tracker-Kohorten und
 50/50-Payoffs, ORB-Zielpläne/Sortierung, Unternehmensidentität, atomisches Dedupe
-und persistente Stop-Update-Retries; alle grün).
+und persistente Stop-Update-Retries; alle grün) →
+1405 (05.08. persönliche Positionen, empfängerbezogene Folge-/Stop-Mails,
+per-Empfänger-Dedupe und isolierter Retry; alle grün).
 
 ---
 
@@ -1172,7 +1206,7 @@ und persistente Stop-Update-Retries; alle grün).
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **Produktion auf `5aea225` verifizieren:** Server-HEAD, alle drei Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30 |
+| 1 | **Aktuellen Branch-Stand produktiv verifizieren:** Server-HEAD, alle drei Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30/3.31 |
 | 2 | **Mail-Zustellung beobachten:** Outbox-Zahlen (`pending`, `retry`, `dead_letter`) und offene `be_mail_sent_at`-Aktivierungen prüfen; Testmail plus absichtlich simulierten temporären Fehler nachvollziehen. | 3.26/3.30, Abschnitt 4 |
 | 3 | **Forward-Kalibrierung statt Bauchgefühl:** je Scanner und Regime mindestens 30 vollständig beobachtete Signale sammeln; freigegebene Signale gegen Shadow-Kohorte mit Hit-Rate, Wilson-KI, Level-R und Managed-R vergleichen. Erst dann Schwellen verändern. | Abschnitt 5 |
 | 4 | **PM-/Swing-/Orts-Gates produktiv messen:** Reject-Gründe und Ergebnisdaten nach mehreren Handelstagen auswerten. Lockerung nur, wenn verpasster Erwartungswert statistisch höher als vermiedener Verlust ist. | 3.7, Commits `cdeff7e`/`da6c4be` |
@@ -1180,7 +1214,8 @@ und persistente Stop-Update-Retries; alle grün).
 | 6 | **Regime- und Zinssegmentierung auswerten:** ab ausreichend großen Zellen Marktregime und `rates_json` gegen Forward-Ergebnisse prüfen; zusätzliche Gates nur bei belastbarem Delta. | 3.12/3.26 |
 | 7 | **Auto-Update überwachen:** Cron-/Deploy-Log muss Pull, sicheren Testlauf, Service-Neustart und Health-Nachweis enthalten; bei Fehlern kein stilles Teil-Deployment. | `deploy/auto_update.sh`, `deploy/safe_deploy.sh` |
 | 8 | **Server-Grundpflege:** ausstehende Ubuntu-Updates/Reboot in einem Wartungsfenster über `bash deploy/os_maintenance.sh`; danach vollständige Service- und Health-Verifikation. | Infrastruktur |
-| 9 | **EN/DE-Sprach-Toggle:** UI bleibt derzeit bewusst deutsch; nur als eigenes Produktfeature umsetzen, nicht als Launch-Blocker. | UX |
+| 9 | **IBKR nur kontrolliert automatisieren:** zuerst Paper-Konto, explizite Nutzerfreigabe je Strategie, harte Positions-/Tagesverlustlimits, Kill-Switch, idempotente Order-IDs, Fill-/Reject-Audit und keine Order aus einem reinen Watch-/Retest-Signal. | Broker-Sicherheit, 3.31 |
+| 10 | **EN/DE-Sprach-Toggle:** UI bleibt derzeit bewusst deutsch; nur als eigenes Produktfeature umsetzen, nicht als Launch-Blocker. | UX |
 
 ---
 
