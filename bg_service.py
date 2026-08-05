@@ -133,6 +133,7 @@ try:
     from modules.signal_tracker import (
         record_alert_signals,
         evaluate_open_signals,
+        has_open_equivalent_signal,
         load_performance_summary,
         scanner_verdict,
         shadow_summary,
@@ -140,6 +141,7 @@ try:
 except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
     record_alert_signals = None
     evaluate_open_signals = None
+    has_open_equivalent_signal = None
     load_performance_summary = None
     scanner_verdict = None
     shadow_summary = None
@@ -1305,7 +1307,7 @@ def _apply_mail_class_prefix(subject, mail_class):
 
 # ── Signal-Tracking & Telegram (Team-A-Module, defensiv gekapselt) ──
 _CG_MARKETS_CACHE_FILE = "/tmp/coingecko_markets_cache.json"
-_SIGNAL_EVAL_INTERVAL_SEC = 3600  # stündlicher Evaluierungs-Job (gehört IMMER bg)
+_SIGNAL_EVAL_INTERVAL_SEC = 900  # 15-Minuten-Auswertung: Stops/TP/BE zeitnah erfassen.
 _signal_eval_warned_missing = False
 # Quote-/Perp-Suffixe für Crypto-Symbol-Matching (TSTUSDT -> TST)
 _CRYPTO_QUOTE_SUFFIXES = ("USDT", "USDC", "PERP", "USD", "EUR", "BTC")
@@ -1327,6 +1329,21 @@ def _record_alert_signals_safe(scanner_name, rows, mail_class="trade", channel="
     except Exception as exc:
         log.warning(f"[SignalTracker] record fehlgeschlagen ({scanner_name}): {exc}")
         return 0
+
+
+def _has_open_equivalent_trade_safe(scanner_name, row):
+    """True, wenn derselbe wirtschaftliche Trade bereits offen getrackt wird."""
+    if has_open_equivalent_signal is None or not isinstance(row, dict):
+        return False
+    try:
+        return bool(has_open_equivalent_signal(
+            scanner_name,
+            row,
+            mail_class="trade",
+        ))
+    except Exception as exc:
+        log.warning(f"[SignalTracker] Cross-Scanner-Dedupe fehlgeschlagen ({scanner_name}): {exc}")
+        return False
 
 
 def _format_telegram_text(rows):
@@ -1397,11 +1414,19 @@ def _tracker_stock_fetcher(ticker, since_iso_date):
         return None
 
 
-def _tracker_crypto_fetcher(ticker, instrument_id=None, venue=None, contract_symbol=None):
-    """Aktueller Crypto-Preis best-effort aus dem CoinGecko-Markets-Cache.
+def _tracker_crypto_fetcher(
+    ticker,
+    instrument_id=None,
+    venue=None,
+    contract_symbol=None,
+    since=None,
+    until=None,
+):
+    """Exchange-5m-Intervall seit der letzten Bewertung, sonst Punkt-Fallback.
 
-    Symbol-Match case-insensitive; Perp-/Quote-Suffixe (z.B. USDT) werden
-    gestrippt. Kein Treffer / kein Cache => None (Kontrakt Team A).
+    Der Tracker braucht High/Low zwischen zwei Laeufen, nicht nur einen
+    CoinGecko-Snapshot. Nur explizit unterstuetzte Venues werden abgefragt;
+    unbekannte Venues duerfen nie still auf eine andere Boerse fallen.
     """
     try:
         sym = str(ticker or "").strip().upper()
@@ -1411,6 +1436,94 @@ def _tracker_crypto_fetcher(ticker, instrument_id=None, venue=None, contract_sym
             if sym.endswith(suffix) and len(sym) > len(suffix):
                 sym = sym[: -len(suffix)].rstrip("-_/ ")
                 break
+        def _parse_utc(value):
+            if not value:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                return None
+
+        venue_raw = str(venue or "").strip().lower()
+        venue_aliases = {
+            "binance": "binance",
+            "mexc": "mexc",
+            "bitget": "bitget",
+            "crypto.com": "crypto.com",
+            "cryptocom": "crypto.com",
+        }
+        venue_norm = venue_aliases.get(venue_raw)
+        contract = str(contract_symbol or "").strip().upper()
+        since_dt = _parse_utc(since)
+        until_dt = _parse_utc(until) or datetime.now(timezone.utc)
+
+        if venue_norm and contract and since_dt and until_dt > since_dt:
+            try:
+                from modules.new_listing_scanner import fetch_candles_for
+
+                span_seconds = max(300.0, (until_dt - since_dt).total_seconds())
+                candle_count = min(500, max(12, int(span_seconds / 300.0) + 6))
+                candles = fetch_candles_for(
+                    contract,
+                    venue_norm,
+                    timeframe="5m",
+                    count=candle_count,
+                ) or []
+                since_ts = since_dt.timestamp()
+                until_ts = until_dt.timestamp()
+                interval_start = (int(since_ts) // 300) * 300
+                available = []
+                for candle in candles:
+                    if not isinstance(candle, dict):
+                        continue
+                    try:
+                        candle_ts = float(candle.get("timestamp"))
+                        if candle_ts > 10_000_000_000:
+                            candle_ts /= 1000.0
+                        open_price = float(candle.get("open"))
+                        high = float(candle.get("high"))
+                        low = float(candle.get("low"))
+                        close = float(candle.get("close"))
+                    except (TypeError, ValueError):
+                        continue
+                    if open_price <= 0 or high <= 0 or low <= 0 or close <= 0:
+                        continue
+                    if interval_start <= candle_ts <= until_ts:
+                        available.append((candle_ts, open_price, high, low, close))
+
+                if available:
+                    available.sort(key=lambda item: item[0])
+                    completed = [item for item in available if item[0] + 300 <= until_ts]
+                    range_rows = completed or available[-1:]
+                    current = available[-1][4]
+                    interval_open = range_rows[0][1]
+                    interval_high = max(item[2] for item in range_rows)
+                    interval_low = min(item[3] for item in range_rows)
+                    expected_completed = max(1, int(max(0.0, until_ts - interval_start) // 300))
+                    coverage = len(completed) / expected_completed
+                    interval_complete = bool(
+                        completed
+                        and completed[0][0] <= interval_start + 300
+                        and completed[-1][0] + 300 >= until_ts - 300
+                        and coverage >= 0.80
+                    )
+                    return {
+                        "current": current,
+                        "interval_open": interval_open,
+                        "interval_high": interval_high,
+                        "interval_low": interval_low,
+                        "interval_complete": interval_complete,
+                        "source": f"{venue_norm}:5m",
+                    }
+            except Exception as exc:
+                log.debug(
+                    f"[SignalTracker] Exchange-Intervall {venue_norm}/{contract} "
+                    f"fehlgeschlagen: {exc}"
+                )
+
         if not os.path.exists(_CG_MARKETS_CACHE_FILE):
             return None
         with open(_CG_MARKETS_CACHE_FILE, "r") as f:
@@ -1459,7 +1572,15 @@ def _tracker_crypto_fetcher(ticker, instrument_id=None, venue=None, contract_sym
             coin_id = str(c.get("id", "")).strip().lower()
             if requested_id and coin_id == requested_id:
                 price = c.get("current_price")
-                return float(price) if isinstance(price, (int, float)) and price > 0 else None
+                if isinstance(price, (int, float)) and price > 0:
+                    return {
+                        "current": float(price),
+                        "interval_high": float(price),
+                        "interval_low": float(price),
+                        "interval_complete": False,
+                        "source": "coingecko_point_fallback",
+                    }
+                return None
             if str(c.get("symbol", "")).strip().upper() == sym:
                 candidates.append(c)
         if requested_id:
@@ -1478,7 +1599,13 @@ def _tracker_crypto_fetcher(ticker, instrument_id=None, venue=None, contract_sym
         if candidates:
             price = candidates[0].get("current_price")
             if isinstance(price, (int, float)) and price > 0:
-                return float(price)
+                return {
+                    "current": float(price),
+                    "interval_high": float(price),
+                    "interval_low": float(price),
+                    "interval_complete": False,
+                    "source": "coingecko_point_fallback",
+                }
         return None
     except Exception as exc:
         log.debug(f"[SignalTracker] Crypto-Fetcher {ticker} fehlgeschlagen: {exc}")
@@ -1592,11 +1719,33 @@ def _send_signal_update_mail(transitions, secrets):
             for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
             if tr.get(key) is not None
         )
+        fill = tr.get("entry_fill_price")
+        fill_quality = str(tr.get("fill_quality") or "UNAVAILABLE").upper()
+        if fill is None:
+            execution = "Fill nicht verfuegbar"
+        else:
+            execution_parts = [f"Fill {_format_alert_price(fill)}"]
+            slip_r = tr.get("adverse_slippage_r")
+            slip_pct = tr.get("adverse_slippage_pct")
+            if isinstance(slip_r, (int, float)):
+                slip_text = f"Slippage {float(slip_r):+.2f}R"
+                if isinstance(slip_pct, (int, float)):
+                    slip_text += f" / {float(slip_pct):+.2f}%"
+                execution_parts.append(slip_text)
+            live_rr = tr.get("live_effective_rr")
+            if isinstance(live_rr, (int, float)):
+                execution_parts.append(f"Live R:R {float(live_rr):.2f}")
+            execution_parts.append(f"Fill-Qualitaet {fill_quality}")
+            rejection = str(tr.get("fill_rejection_reason") or "").strip()
+            if rejection:
+                execution_parts.append(rejection)
+            execution = "<br>".join(html.escape(part) for part in execution_parts)
         rows += f"""<tr>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{event}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{r_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#444;font-size:12px">{execution}</td>
             <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{plan}</td>
         </tr>"""
 
@@ -1610,12 +1759,13 @@ def _send_signal_update_mail(transitions, secrets):
             <th style="padding:8px;text-align:left">Scanner</th>
             <th style="padding:8px;text-align:left">Ereignis</th>
             <th style="padding:8px;text-align:left">R</th>
+            <th style="padding:8px;text-align:left">Ausfuehrung</th>
             <th style="padding:8px;text-align:left">Plan-Level</th>
         </tr>
         {rows}
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Automatisches Update vom Signal-Tracker (stuendliche Evaluierung).<br>
+        Automatisches Update vom Signal-Tracker (15-Minuten-Evaluierung).<br>
         'TP1 erreicht' = Teilgewinn-Zone erreicht, Restposition risikofrei Richtung TP2 (Stop auf Entry).<br>
         Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
     </p>
@@ -3081,6 +3231,22 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
         if not alerts:
             return
 
+        # Scanner-spezifische Cooldowns reichen nicht: ORB, Strategie und BI
+        # koennen denselben wirtschaftlichen Trade erkennen. Nur der erste
+        # offene Plan darf als neue Entry-Mail durchgehen.
+        unique_alerts = []
+        equivalent_count = 0
+        for alert in alerts:
+            if _has_open_equivalent_trade_safe(scanner_name, alert.get("source_row")):
+                equivalent_count += 1
+                continue
+            unique_alerts.append(alert)
+        if equivalent_count:
+            log.info(f"[Alert] {scanner_name}: {equivalent_count} Cross-Scanner-Dublette(n) unterdrueckt")
+        alerts = unique_alerts
+        if not alerts:
+            return
+
         claimed_alerts = [
             alert for alert in alerts
             if _email_dedupe_claim(
@@ -3744,32 +3910,36 @@ def _run_bear_scanner(poly_key, secrets):
                         f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{cs['score']}</td></tr>"
                     )
                 _body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
-                <h2 style="color:#dc2626">Short Alert — {len(crash_stocks)} Crash-Kandidaten</h2>
+                <h2 style="color:#dc2626">Crash-Risiko — {len(crash_stocks)} Aktien unter starkem Verkaufsdruck</h2>
                 <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
+                <p style="padding:10px;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;color:#9a3412">
+                Kein Sofort-Short: Der starke Drop ist bereits gelaufen. Erst nach einem gescheiterten Reclaim
+                oder einem schwachen Bounce einen neuen Short pruefen.</p>
                 <table style="border-collapse:collapse;width:100%;font-size:13px">
                 <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
                 <th style="padding:6px 8px;text-align:left">Ticker</th>
                 <th style="padding:6px 8px;text-align:right">Preis</th>
                 <th style="padding:6px 8px;text-align:right">Drop</th>
                 <th style="padding:6px 8px;text-align:right">RVOL</th>
-                <th style="padding:6px 8px;text-align:left">Entry / Stop / TP</th>
+                <th style="padding:6px 8px;text-align:left">Referenzlevel nach Trigger</th>
                 <th style="padding:6px 8px;text-align:right">Score</th></tr>
                 {_crash_rows}</table>
-                <p style="color:#999;font-size:11px;margin-top:12px">Automatischer Short/Crash Alert vom Background Service (stündlich)</p>
+                <p style="color:#999;font-size:11px;margin-top:12px">Automatische Risikowarnung; kein sofortiges Entry-Signal.</p>
                 </body></html>'''
-                sent = _send_email_alert(f"Short Alert: {len(crash_stocks)} Crash-Kandidaten ({crash_stocks[0]['ticker']} {crash_stocks[0]['change_pct']:.0f}%)", _body, secrets, mail_class="trade", mail_channel="bear")
+                sent = _send_email_alert(
+                    f"Crash-Risiko: {len(crash_stocks)} Aktien aktiv beobachten",
+                    _body,
+                    secrets,
+                    mail_class="info",
+                    mail_channel="bear",
+                )
                 if sent:
                     crash_mail_sent = True
                     _EMAIL_COOLDOWN[_crash_ck] = now
                     _email_dedupe_mark(_crash_ck, now=now)
                     for dedupe_key in crash_dedupe_keys:
                         _email_dedupe_mark(dedupe_key, now=now)
-                    for cs in crash_stocks:
-                        _mark_bearish_stock_alert(cs.get("ticker", ""), now=now)
-                    log.info(f"  CRASH ALERT sent: {[c['ticker'] for c in crash_stocks]}")
-                    # Signal-Tracking (Pfad dormant): crash_stocks sind Original-Rows.
-                    _record_alert_signals_safe("bear_scan", crash_stocks,
-                                               mail_class="trade", channel="email")
+                    log.info(f"  CRASH RISK INFO sent: {[c['ticker'] for c in crash_stocks]}")
                 else:
                     _email_dedupe_release(_crash_ck, claimed_at=now)
                     for dedupe_key in crash_dedupe_keys:
@@ -5189,6 +5359,19 @@ def _alert_nls_signals(results, secrets):
         alert_source_rows.append({**sig, "symbol": raw_symbol, "ticker": symbol,
                                   "exchange": entry.get("exchange", ""), "direction": "short"})
 
+    if not alerts:
+        return
+
+    unique_alerts = []
+    for alert in alerts:
+        if _has_open_equivalent_trade_safe("new_listing", alert["source_row"]):
+            log.info(
+                "NLS Alert suppressed %s: open_equivalent_trade",
+                alert["symbol"],
+            )
+            continue
+        unique_alerts.append(alert)
+    alerts = unique_alerts
     if not alerts:
         return
 

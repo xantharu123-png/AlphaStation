@@ -191,6 +191,11 @@ def test_tracker_crypto_fetcher_blockt_stale_cache(monkeypatch, tmp_path):
     cache_file = tmp_path / "cg_markets.json"
     coins = [{"symbol": "BTC", "current_price": 50_000.0}]
 
+    def _assert_fresh_fallback():
+        observation = bg_service._tracker_crypto_fetcher("BTCUSDT")
+        assert observation["current"] == pytest.approx(50_000.0)
+        assert observation["interval_complete"] is False
+
     # Stale (4h alt, > 3h-TTL) -> None
     cache_file.write_text(json.dumps({"ts": time.time() - 4 * 3600, "coins": coins}))
     monkeypatch.setattr(bg_service, "_CG_MARKETS_CACHE_FILE", str(cache_file))
@@ -198,17 +203,17 @@ def test_tracker_crypto_fetcher_blockt_stale_cache(monkeypatch, tmp_path):
 
     # Frisch (60s alt) -> Preis
     cache_file.write_text(json.dumps({"ts": time.time() - 60, "coins": coins}))
-    assert bg_service._tracker_crypto_fetcher("BTCUSDT") == pytest.approx(50_000.0)
+    _assert_fresh_fallback()
 
     # 2h alt (< 3h-TTL, deckt das 2h-Divergenz-Scan-Intervall ab) -> Preis
     cache_file.write_text(json.dumps({"ts": time.time() - 2 * 3600, "coins": coins}))
-    assert bg_service._tracker_crypto_fetcher("BTCUSDT") == pytest.approx(50_000.0)
+    _assert_fresh_fallback()
 
     # Re-audit: der api.py-Writer nutzt "cached_at" (ISO-String) statt "ts".
     # Frischer cached_at -> Preis (nicht faelschlich None).
     fresh_iso = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     cache_file.write_text(json.dumps({"cached_at": fresh_iso, "coins": coins}))
-    assert bg_service._tracker_crypto_fetcher("BTCUSDT") == pytest.approx(50_000.0)
+    _assert_fresh_fallback()
 
     # Alter cached_at (4h) -> None
     old_iso = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
@@ -217,7 +222,7 @@ def test_tracker_crypto_fetcher_blockt_stale_cache(monkeypatch, tmp_path):
 
     # Kein Zeitfeld -> Fallback auf Datei-mtime (frisch geschrieben) -> Preis
     cache_file.write_text(json.dumps({"coins": coins}))
-    assert bg_service._tracker_crypto_fetcher("BTCUSDT") == pytest.approx(50_000.0)
+    _assert_fresh_fallback()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

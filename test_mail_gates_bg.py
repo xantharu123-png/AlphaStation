@@ -44,6 +44,11 @@ def _setup(monkeypatch, tmp_path, rows):
     monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(cache_file))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
+    monkeypatch.setattr(
+        bg_service,
+        "_has_open_equivalent_trade_safe",
+        lambda *args, **kwargs: False,
+    )
     # Startup-Delay umgehen (Prozess "laeuft schon lange")
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)
     # Keine Intraday-Nachladungen via Polygon im Test

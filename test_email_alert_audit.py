@@ -17,6 +17,10 @@ def _mock_common_stock_universe(monkeypatch, tmp_path, request):
         "MOMO", "ORB1", "DUP", "SSWP",
     }
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    # Mail unit tests must never inherit open positions from the developer's
+    # real local tracker DB. Cross-scanner economic dedupe is covered with an
+    # isolated temporary SQLite DB in test_signal_tracker.py.
+    monkeypatch.setattr(api, "_has_open_equivalent_trade_safe", lambda *args, **kwargs: False)
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
     monkeypatch.setattr(
         api,
@@ -80,6 +84,27 @@ def test_stock_trade_email_status_allows_regular_us_market():
 
     assert status["allowed"] is True
     assert status["session"] == "US_REGULAR"
+
+
+@pytest.mark.parametrize(
+    ("filename", "branch_marker"),
+    [
+        ("api.py", "if _crash_stocks and _stock_bear_mail_allowed:"),
+        ("bg_service.py", "if crash_stocks:"),
+    ],
+)
+def test_crash_mail_is_informational_and_not_opened_as_trade(filename, branch_marker):
+    source = (Path(__file__).resolve().parent / filename).read_text(encoding="utf-8")
+    message_index = source.index("Kein Sofort-Short")
+    start = source.rfind(branch_marker, 0, message_index)
+    end = source.index("CRASH RISK INFO sent", message_index)
+    segment = source[start:end]
+
+    assert start >= 0
+    assert "Referenzlevel nach Trigger" in segment
+    assert 'mail_class="info"' in segment
+    assert "record_alert_signals" not in segment
+    assert "send_telegram" not in segment
 
 
 def test_stock_strategy_mail_skips_when_us_market_closed(monkeypatch):

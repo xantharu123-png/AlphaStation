@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # Session-unabhaengig: bg_service neben dieser Datei importierbar machen.
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
@@ -51,6 +53,11 @@ def _setup_bi(monkeypatch, tmp_path, rows):
     monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(cache_file))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
+    monkeypatch.setattr(
+        bg_service,
+        "_has_open_equivalent_trade_safe",
+        lambda *args, **kwargs: False,
+    )
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600)
     monkeypatch.setattr(
         bg_service, "_fetch_long_latest_intraday_state", lambda *a, **k: {}, raising=False
@@ -307,8 +314,16 @@ def test_tracker_crypto_fetcher_matches_cache_and_strips_suffix(monkeypatch, tmp
     ], "ts": time.time(), "pages": 4}))
     monkeypatch.setattr(bg_service, "_CG_MARKETS_CACHE_FILE", str(cache))
     # Perp-Suffix gestrippt + case-insensitive Match
-    assert bg_service._tracker_crypto_fetcher("TSTUSDT") == 1.23
-    assert bg_service._tracker_crypto_fetcher("btc") == 60000.0
+    tst = bg_service._tracker_crypto_fetcher("TSTUSDT")
+    assert tst["current"] == pytest.approx(1.23)
+    assert tst["interval_high"] == pytest.approx(1.23)
+    assert tst["interval_low"] == pytest.approx(1.23)
+    assert tst["interval_complete"] is False
+    assert "interval_open" not in tst
+    assert tst["source"] == "coingecko_point_fallback"
+    btc = bg_service._tracker_crypto_fetcher("btc")
+    assert btc["current"] == pytest.approx(60000.0)
+    assert btc["interval_complete"] is False
     # Kein Treffer => None
     assert bg_service._tracker_crypto_fetcher("NOPEUSDT") is None
     # Cache fehlt => None statt Crash
@@ -358,7 +373,7 @@ def test_signal_eval_registered_after_scan_set_filter_and_wired():
     assert i_filter < i_reg, "signal_eval muss NACH dem BG_SCAN_SET-Filter registriert werden"
     assert 'scanner_name == "signal_eval"' in src
     assert "_run_signal_eval_job()" in src
-    assert bg_service._SIGNAL_EVAL_INTERVAL_SEC == 3600
+    assert bg_service._SIGNAL_EVAL_INTERVAL_SEC == 900
 
 
 # ── 5) Frontend: watch_mail_optin-Schalter ─────────────────────────────────

@@ -84,7 +84,7 @@ def tracker(tmp_path, monkeypatch):
 
 # ── Teil 1: evaluate_open_signals -> result['transitions'] ───────────────────
 def test_tracker_stop_transition_has_complete_contract_fields(tracker):
-    """STOP-Transition erscheint in transitions — alle 13 Kontrakt-Felder."""
+    """STOP-Transition enthaelt Status, Fill-Qualitaet und Live-R:R."""
     tracker.record_alert_signals("breakout", [_base_row()])
     bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])  # Tag 1: Low <= Stop
     result = tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
@@ -96,6 +96,9 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
         "entry", "entry_fill_price", "stop", "tp1", "tp2", "r_realized",
         "tp1_hit_this_run", "asset_class",
         "mail_class",  # AUDIT 2026-07-31 (Shadow-Tracking): bg filtert danach
+        "adverse_slippage_r", "adverse_slippage_pct",
+        "live_rr_tp1", "live_effective_rr",
+        "fill_quality", "fill_rejection_reason",
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"

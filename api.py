@@ -166,12 +166,14 @@ try:
         load_performance_summary,
         load_breaker_recovery_summary,
         get_signal_count,
+        has_open_equivalent_signal,
     )
 except ImportError as _sig_track_err:
     record_alert_signals = None
     load_performance_summary = None
     load_breaker_recovery_summary = None
     get_signal_count = None
+    has_open_equivalent_signal = None
     print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
 
 try:
@@ -6051,6 +6053,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
                 "PerpChartSymbol",
                 row.get("PerpMatchSymbol"),
             ),
+            "direction": "long",
         })
 
     revalidated_candidates = []
@@ -6062,6 +6065,15 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             continue
         revalidated_candidates.append(validation["candidate"])
     candidates = revalidated_candidates
+
+    candidates, equivalent_count = _filter_open_equivalent_trade_rows(
+        "early_movers",
+        candidates,
+    )
+    if equivalent_count:
+        suppressed["open_equivalent_trade"] = (
+            suppressed.get("open_equivalent_trade", 0) + equivalent_count
+        )
 
     if not candidates:
         if suppressed:
@@ -8136,6 +8148,42 @@ def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade
         print(f"[Alert] Signal-Tracking Fehler (ignoriert): {exc}")
 
 
+def _has_open_equivalent_trade_safe(scanner_name: str, row) -> bool:
+    """Return True when another scanner already mailed the same open trade plan."""
+    if has_open_equivalent_signal is None or not isinstance(row, dict):
+        return False
+    try:
+        return bool(
+            has_open_equivalent_signal(
+                scanner_name,
+                row,
+                mail_class="trade",
+            )
+        )
+    except Exception as exc:
+        print(f"[Alert] Cross-Scanner-Dedupe Fehler (ignoriert): {exc}")
+        return False
+
+
+def _filter_open_equivalent_trade_rows(
+    scanner_name: str,
+    rows,
+    source_key: str = "",
+):
+    """Remove rows whose equivalent open trade was already mailed elsewhere."""
+    filtered = []
+    skipped = 0
+    for row in rows or []:
+        source_row = row.get(source_key) if source_key and isinstance(row, dict) else row
+        if not isinstance(source_row, dict):
+            source_row = row if isinstance(row, dict) else {}
+        if _has_open_equivalent_trade_safe(scanner_name, source_row):
+            skipped += 1
+            continue
+        filtered.append(row)
+    return filtered, skipped
+
+
 def _send_email_alert(
     subject,
     body_html,
@@ -8405,6 +8453,21 @@ def _check_and_alert(scanner_name, cache_file):
                     "skipped",
                     f"no_alertable_stock_setups:{_format_alert_suppression_summary(suppressed, grade_counts)}",
                 )
+            return
+        unique_alerts = []
+        equivalent_count = 0
+        for alert in alerts:
+            if _has_open_equivalent_trade_safe(scanner_name, alert.get("source_row")):
+                equivalent_count += 1
+                continue
+            unique_alerts.append(alert)
+        alerts = unique_alerts
+        if equivalent_count:
+            print(
+                f"[Alert] {scanner_name}: {equivalent_count} wirtschaftlich gleiche "
+                "offene Setups scanneruebergreifend unterdrueckt"
+            )
+        if not alerts:
             return
         claimed_alerts = [
             alert for alert in alerts
@@ -8869,6 +8932,41 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     return
                 _email_dedupe_claim(_watch_key, _watch_cap, now=now)
 
+    # A ticker can qualify in multiple scanners at the same time.  Do not mail
+    # the same open economic trade twice merely because its strategy label
+    # differs.  RED-regime watch mails remain useful context and are not trade
+    # deduplicated.
+    if not _regime_shadow_tag:
+        unique_email_alerts = []
+        equivalent_count = 0
+        for alert in email_alerts:
+            source = dict(alert.get("source_row") or {})
+            direction = str(source.get("direction") or "").lower()
+            if direction not in ("long", "short"):
+                direction = (
+                    "short"
+                    if "short" in f"{scanner_key} {alert.get('strategy', strategy_name)}".lower()
+                    else "long"
+                )
+            source.update({
+                "ticker": alert["ticker"],
+                "price": alert["price"],
+                "direction": direction,
+            })
+            if _has_open_equivalent_trade_safe(scanner_key, source):
+                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                equivalent_count += 1
+            else:
+                unique_email_alerts.append(alert)
+        email_alerts = unique_email_alerts
+        if not email_alerts:
+            _record_email_event(
+                f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+                "skipped",
+                f"open_equivalent_trade:{equivalent_count}",
+            )
+            return
+
     rows = ""
     for a in email_alerts:
         timing_label = html.escape(_format_alert_timing_label(a.get("entry_quality"), market_type))
@@ -9275,11 +9373,30 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "btc_divergence": pump.get("btc_divergence", sig.get("btc_divergence")),
             "btc_context": pump.get("btc_short_context", sig.get("btc_short_context", "")),
             "cooldown_key": cooldown_key,
+            "direction": "short",
+            "source_row": {
+                **sig,
+                "symbol": entry.get("symbol") or sig.get("symbol") or "",
+                "ticker": symbol,
+                "exchange": entry.get("exchange", ""),
+                "direction": "short",
+            },
         })
     if not alerts:
         if suppressed:
             _record_email_event("Pump & Dump SHORT Alert", "skipped", f"no_active_short_signals:{suppressed}")
         _send_new_listing_watch_email(payload if isinstance(payload, dict) else {}, suppressed=suppressed, now=now)
+        return
+
+    alerts, equivalent_count = _filter_open_equivalent_trade_rows(
+        "new_listing", alerts, source_key="source_row"
+    )
+    if not alerts:
+        _record_email_event(
+            "Pump & Dump SHORT Alert",
+            "skipped",
+            f"open_equivalent_trade:{equivalent_count}",
+        )
         return
 
     email_alerts = [
@@ -9333,7 +9450,9 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         for alert in email_alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
             _email_dedupe_mark(alert["cooldown_key"], now=now)
-        _safe_record_alert_signals("new_listing", email_alerts)
+        _safe_record_alert_signals(
+            "new_listing", [alert["source_row"] for alert in email_alerts]
+        )
     else:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -15437,15 +15556,18 @@ def _bear_scan_wrapper() -> None:
                             f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{_cs.get('score',0)}</td></tr>"
                         )
                     _crash_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
-                    <h2 style="color:#dc2626">⚠️ Crash Alert — {len(_crash_stocks)} Aktien</h2>
+                    <h2 style="color:#dc2626">⚠️ Crash-Risiko — {len(_crash_stocks)} Aktien unter starkem Verkaufsdruck</h2>
                     <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
+                    <p style="padding:10px;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;color:#9a3412">
+                    Kein Sofort-Short: Der starke Drop ist bereits gelaufen. Erst nach einem gescheiterten Reclaim
+                    oder einem schwachen Bounce einen neuen Short pruefen.</p>
                     <table style="border-collapse:collapse;width:100%;font-size:13px">
                     <tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left">Grd</th>
                     <th style="padding:6px 8px;text-align:left">Ticker / Unternehmen</th>
                     <th style="padding:6px 8px;text-align:right">Preis</th>
                     <th style="padding:6px 8px;text-align:right">Drop</th>
                     <th style="padding:6px 8px;text-align:right">RVOL</th>
-                    <th style="padding:6px 8px;text-align:left">Entry / Stop / TP</th>
+                    <th style="padding:6px 8px;text-align:left">Referenzlevel nach Trigger</th>
                     <th style="padding:6px 8px;text-align:right">Score</th></tr>
                     {_crash_rows}</table>
                     </body></html>'''
@@ -15454,11 +15576,11 @@ def _bear_scan_wrapper() -> None:
                     # letzten Log-Eintrag ueberschreiben). AUDIT H-3: swing.
                     try:
                         _crash_sent = _send_email_alert(
-                            f"CRASH: {len(_crash_stocks)} Aktien ({_crash_stocks[0].get('ticker','?')} {_crash_stocks[0].get('change_pct',0):.0f}%)",
+                            f"Crash-Risiko: {len(_crash_stocks)} Aktien aktiv beobachten",
                             _crash_body,
                             trade_horizon="swing",
-                            mail_class="trade",  # AUDIT H-2: Crash-Shorts sind handelbare Signale
-                            telegram_text=_safe_format_telegram_rows(_crash_stocks),
+                            mail_class="info",
+                            telegram_text="",
                             mail_channel="bear",
                         )
                     except Exception:
@@ -15472,11 +15594,7 @@ def _bear_scan_wrapper() -> None:
                         _email_dedupe_mark(_crash_ck)
                         for _dedupe_key in _crash_dedupe_keys:
                             _email_dedupe_mark(_dedupe_key)
-                        for _cs in _crash_stocks:
-                            _mark_bearish_stock_alert(_cs.get("ticker", ""), now=time.time())
-                        # Signal-Tracking: nur die Rows in der Mail ([:5]).
-                        _safe_record_alert_signals("crash", _crash_stocks)
-                        print(f"[Bear] CRASH SUMMARY sent: {[c.get('ticker') for c in _crash_stocks]}")
+                        print(f"[Bear] CRASH RISK INFO sent: {[c.get('ticker') for c in _crash_stocks]}")
                     else:
                         _email_dedupe_release(_crash_ck, claimed_at=_crash_claim_now)
                         for _dedupe_key in _crash_dedupe_keys:
@@ -15504,6 +15622,8 @@ def _bear_scan_wrapper() -> None:
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:
+                    continue
+                if _has_open_equivalent_trade_safe("bear", bd):
                     continue
                 _gr = bd.get("grade", "?")
                 _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
@@ -26454,8 +26574,12 @@ def _penny_stock_scanner_wrapper() -> None:
         # truth has been published successfully.
         state_changed_after_mail = False
         side_effect_now = time.time()
+        mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
+            "penny_stocks", buy_candidates
+        )
+        diagnostics["cross_scanner_duplicates"] = equivalent_count
         claimed_buy_candidates = [
-            row for row in buy_candidates[:5]
+            row for row in mail_buy_candidates[:5]
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
         ]
         try:
@@ -27180,8 +27304,12 @@ def _penny_position_monitor_wrapper() -> None:
 
         state_changed_after_mail = False
         claim_time = time.time()
+        mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
+            "penny_stocks", buy_candidates
+        )
+        diagnostics["cross_scanner_duplicates"] = equivalent_count
         claimed_buys = [
-            row for row in buy_candidates[:5]
+            row for row in mail_buy_candidates[:5]
             if _email_dedupe_claim(
                 str(row.get("_dedupe_key") or ""),
                 6 * 3600,
@@ -28405,6 +28533,13 @@ def _orb_scanner_wrapper() -> None:
             if row.get("grade") in ("S", "A")
             and str(row.get("trade_decision") or "").upper() == "TRADEABLE"
         ]
+        alert_breakouts, equivalent_count = _filter_open_equivalent_trade_rows(
+            "orb", alert_breakouts
+        )
+        if equivalent_count:
+            print(
+                f"[ORB] {equivalent_count} wirtschaftlich identische offene Trade(s) unterdrueckt"
+            )
         _alert_now = time.time()
         _fresh_alert_breakouts = []
         _orb_alert_cooldown_keys: List[str] = []

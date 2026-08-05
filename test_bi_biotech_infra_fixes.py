@@ -43,6 +43,11 @@ def _bg_setup(monkeypatch, tmp_path, cache_file, payload):
     monkeypatch.setattr(bg_service, "_alert_cache_path", lambda _name: str(isolated_cache))
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
+    monkeypatch.setattr(
+        bg_service,
+        "_has_open_equivalent_trade_safe",
+        lambda *args, **kwargs: False,
+    )
     monkeypatch.setattr(bg_service, "_BG_STARTED_AT", time.time() - 3600, raising=False)
     monkeypatch.setattr(
         bg_service, "_fetch_long_latest_intraday_state", lambda *a, **k: {}, raising=False

@@ -31,6 +31,11 @@ def _isolate_email_state(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(
         api,
+        "_has_open_equivalent_trade_safe",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        api,
         "_revalidate_early_mover_mail_candidate",
         lambda candidate, now_ts=None: {"ok": True, "candidate": candidate},
     )

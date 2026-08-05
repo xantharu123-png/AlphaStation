@@ -49,6 +49,11 @@ def _created_date(ticker):
     return datetime.fromisoformat(_signal(ticker)["created_at"]).date()
 
 
+def _created_market_date(ticker):
+    created_at = datetime.fromisoformat(_signal(ticker)["created_at"])
+    return created_at.astimezone(st.ZoneInfo("America/New_York")).date()
+
+
 def _bars_after(ticker, specs):
     """Daily-Bars an den Folgetagen des Alerts (Tag +1, +2, ...).
 
@@ -175,15 +180,20 @@ def test_record_tolerant_field_aliases(tracker):
 
 def test_record_dedupe_open_signal_per_scanner_ticker(tracker):
     assert tracker.record_alert_signals("breakout", [_base_row()]) == 1
-    # gleicher (scanner, ticker) noch OPEN -> skip
+    # Derselbe wirtschaftliche Trade bleibt auch scanneruebergreifend einmalig.
     assert tracker.record_alert_signals("breakout", [_base_row()]) == 0
-    # anderer Scanner darf denselben Ticker loggen
-    assert tracker.record_alert_signals("bi_scanner", [_base_row()]) == 1
+    assert tracker.record_alert_signals("bi_scanner", [_base_row()]) == 0
+    assert tracker.has_open_equivalent_signal("BI_SCANNER", _base_row()) is True
+
+    # Ein materiell anderer Plan im selben Ticker darf separat getrackt werden.
+    distinct_plan = _base_row(Entry=120.0, Preis=120.0, StopLoss=115.0, TP1=125.0, TP2=130.0)
+    assert tracker.record_alert_signals("bi_scanner", [distinct_plan]) == 1
     # Dedupe greift auch innerhalb EINES Batches
-    assert tracker.record_alert_signals("momo", [_base_row(), _base_row()]) == 1
+    msft = _base_row(Ticker="MSFT")
+    assert tracker.record_alert_signals("momo", [msft, msft]) == 1
     # geschlossenes Signal blockiert nicht mehr
     conn = sqlite3.connect(st.SIGNAL_DB_PATH)
-    conn.execute("UPDATE signals SET status = 'STOP_HIT' WHERE scanner = 'breakout'")
+    conn.execute("UPDATE signals SET status = 'STOP_HIT' WHERE ticker = 'AAPL'")
     conn.commit()
     conn.close()
     assert tracker.record_alert_signals("breakout", [_base_row()]) == 1
@@ -232,6 +242,7 @@ def test_record_never_raises_and_returns_int(tracker, tmp_path, monkeypatch):
 # ── evaluate_open_signals: Aktien (Daily-OHLC) ───────────────────────────────
 def test_evaluate_stock_long_stop_hit(tracker):
     tracker.record_alert_signals("breakout", [_base_row()])
+    expected_since = _created_market_date("AAPL").isoformat()
     bars = _bars_after("AAPL", [(103.0, 99.0, 102.0), (101.0, 94.5, 96.0)])
     fetcher = _stock_fetcher({"AAPL": bars})
     result = tracker.evaluate_open_signals(stock_daily_fetcher=fetcher)
@@ -244,7 +255,7 @@ def test_evaluate_stock_long_stop_hit(tracker):
     assert sig["closed_at"]
     assert sig["last_eval_at"]
     # Fetcher bekam (ticker, Alert-Datum als ISO-String)
-    assert fetcher.calls == [("AAPL", _created_date("AAPL").isoformat())]
+    assert fetcher.calls == [("AAPL", expected_since)]
 
 
 def test_evaluate_stock_long_tp1_then_tp2(tracker):
@@ -297,6 +308,25 @@ def test_evaluate_stock_ambiguous_same_day_conservative_stop(tracker):
     assert sig["outcome_detail"] == "ambiguous_same_day"
     assert sig["r_realized"] == pytest.approx(-1.0)
     assert not sig["tp1_hit_at"]  # TP wird im Zweifel NICHT gutgeschrieben
+
+
+def test_stock_gap_fill_is_rejected_when_slippage_breaks_plan(tracker):
+    row = _base_row(Ticker="FSLR", Preis=100.0, TP1=110.0, TP2=115.0)
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+
+    # Planned risk is 5. A gap-open at 108 would add 1.6R adverse slippage and
+    # leave insufficient reward, so the tracker must not pretend this was a fill.
+    bars = _bars_after("FSLR", [(108.0, 109.0, 107.0, 108.5)])
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"FSLR": bars})
+    )
+
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    signal = _signal("FSLR")
+    assert signal["status"] == "NO_FILL"
+    assert signal["entry_filled_at"] is None
+    assert signal["outcome_detail"].startswith("adverse_fill_slippage|")
+    assert "adverse_slippage_r=1.6000" in signal["outcome_detail"]
 
 
 def test_evaluate_stock_expired_without_any_tp(tracker):
@@ -395,11 +425,11 @@ def test_evaluate_fetcher_exception_counts_as_failure(tracker):
 def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     rows = [
         _base_row(Ticker="DOGE"),             # Spot unter Stop
-        _base_row(Ticker="PEPE", TP1=102.0),  # Spot ueber TP1, dann Expiry
+        _base_row(Ticker="PEPE"),              # Spot ueber TP1, dann Expiry
         _base_row(Ticker="SOL"),              # Spot ueber TP2
     ]
     assert tracker.record_alert_signals("crypto_explosion", rows) == 3
-    prices = {"DOGE": 94.0, "PEPE": 103.0, "SOL": 111.0}
+    prices = {"DOGE": 94.0, "PEPE": 106.0, "SOL": 111.0}
     result = tracker.evaluate_open_signals(crypto_price_fetcher=prices.get)
     assert result == {"evaluated": 3, "closed": 2, "errors": 0}
     doge = _signal("DOGE")
@@ -412,7 +442,7 @@ def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     pepe = _signal("PEPE")
     assert pepe["status"] == "OPEN"
     assert pepe["tp1_hit_at"]
-    assert pepe["max_favorable_r"] == pytest.approx(0.6)
+    assert pepe["max_favorable_r"] == pytest.approx(1.2)
     # 121h spaeter (Expiry-Fenster 120h): EXPIRED mit R des letzten Preises
     later = datetime.fromisoformat(pepe["created_at"]) + timedelta(hours=121)
     result2 = tracker.evaluate_open_signals(crypto_price_fetcher=prices.get, now=later)
@@ -420,7 +450,115 @@ def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     pepe = _signal("PEPE")
     assert pepe["status"] == "EXPIRED"
     assert pepe["outcome_detail"] == "tp1_then_expired"
-    assert pepe["r_realized"] == pytest.approx(0.6)  # (103-100)/5
+    assert pepe["r_realized"] == pytest.approx(1.2)  # (106-100)/5
+
+
+def test_crypto_completed_interval_captures_tp_touch_between_checks(tracker):
+    assert tracker.record_alert_signals(
+        "crypto_explosion", [_base_row(Ticker="BTC", TP1=105.0, TP2=110.0)]
+    ) == 1
+
+    observation = {
+        "current": 102.0,
+        "interval_open": 101.0,
+        "interval_high": 106.0,
+        "interval_low": 99.0,
+        "interval_complete": True,
+        "source": "binance_5m",
+    }
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+    )
+    assert result == {"evaluated": 1, "closed": 0, "errors": 0}
+    signal = _signal("BTC")
+    assert signal["status"] == "OPEN"
+    assert signal["tp1_hit_at"]
+    assert signal["max_favorable_r"] == pytest.approx(1.2)
+    assert signal["max_adverse_r"] == pytest.approx(-0.2)
+
+
+def test_crypto_same_interval_stop_and_target_is_conservatively_stopped(tracker):
+    assert tracker.record_alert_signals("crypto_explosion", [_base_row(Ticker="ETH")]) == 1
+    observation = {
+        "current": 100.0,
+        "interval_open": 100.0,
+        "interval_high": 111.0,
+        "interval_low": 94.0,
+        "interval_complete": True,
+        "source": "binance_5m",
+    }
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    signal = _signal("ETH")
+    assert signal["status"] == "STOP_HIT"
+    assert signal["r_realized"] == pytest.approx(-1.0)
+    assert signal["outcome_detail"] == "ambiguous_same_interval_stop_first"
+
+
+def test_crypto_gap_fill_is_rejected_when_slippage_breaks_plan(tracker):
+    row = _base_row(Ticker="AVAX", Preis=99.0, coin_id="avalanche-2")
+    assert tracker.record_alert_signals("crypto_explosion", [row]) == 1
+    observation = {
+        "current": 104.5,
+        "interval_open": 103.0,
+        "interval_high": 104.5,
+        "interval_low": 102.0,
+        "interval_complete": True,
+        "source": "binance_5m",
+    }
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    signal = _signal("AVAX")
+    assert signal["status"] == "NO_FILL"
+    assert signal["entry_filled_at"] is None
+    assert signal["outcome_detail"].startswith("adverse_fill_slippage|")
+    assert "adverse_slippage_r=0.6000" in signal["outcome_detail"]
+
+
+def test_crypto_coingecko_point_fallback_cannot_create_new_fill(tracker):
+    row = _base_row(Ticker="LINK", Preis=99.0, coin_id="chainlink")
+    assert tracker.record_alert_signals("crypto_explosion", [row]) == 1
+    observation = {
+        "current": 102.0,
+        "interval_high": 102.0,
+        "interval_low": 102.0,
+        "interval_complete": False,
+        "source": "coingecko_point_fallback",
+    }
+
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+    )
+
+    assert result == {"evaluated": 1, "closed": 0, "errors": 0}
+    signal = _signal("LINK")
+    assert signal["status"] == "OPEN"
+    assert signal["entry_filled_at"] is None
+    assert signal["entry_fill_price"] is None
+
+
+def test_crypto_gap_through_stop_records_observed_slippage(tracker):
+    assert tracker.record_alert_signals("crypto_explosion", [_base_row(Ticker="XRP")]) == 1
+    observation = {
+        "current": 92.0,
+        "interval_open": 93.0,
+        "interval_high": 94.0,
+        "interval_low": 91.0,
+        "interval_complete": True,
+        "source": "binance_5m",
+    }
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    signal = _signal("XRP")
+    assert signal["status"] == "STOP_HIT"
+    assert signal["r_realized"] == pytest.approx(-1.4)
+    assert signal["outcome_detail"] == "stop_gap_slippage"
 
 
 def test_crypto_evaluation_passes_exact_instrument_identity(tracker):

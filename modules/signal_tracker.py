@@ -74,6 +74,7 @@ __all__ = [
     "CRYPTO_SCANNERS",
     "extract_signal_fields",
     "record_alert_signals",
+    "has_open_equivalent_signal",
     "evaluate_open_signals",
     "load_performance_summary",
     "load_breaker_recovery_summary",
@@ -122,6 +123,21 @@ STATUS_TP1_OPEN = "TP1_HIT_OPEN"
 STOCK_EXPIRY_BARS = 5       # Handelstage (= Daily-Bars) nach dem Alert
 CRYPTO_EXPIRY_HOURS = 120   # Stunden nach created_at
 MAX_EVAL_FAILS = 5          # danach status = UNTRACKED
+
+# Maximal tolerierte Verschlechterung gegenueber dem geplanten Entry.
+# Intraday-/Event-Signale brauchen eine engere Fill-Disziplin als Swings.
+_MAX_ADVERSE_FILL_R = {
+    "orb": 0.25,
+    "crash": 0.25,
+    "bear": 0.25,
+    "early_movers": 0.35,
+    "crypto_explosion": 0.35,
+    "crypto_trade_signals": 0.35,
+    "new_listing": 0.25,
+    "stock_strategy": 0.50,
+    "strategy_scan": 0.50,
+}
+_DEFAULT_MAX_ADVERSE_FILL_R = 0.50
 
 # Tolerante Feld-Aliase — gleiche Logik wie die Alert-Pipeline der App.
 _TICKER_KEYS = ("ticker", "Ticker", "symbol", "Symbol")
@@ -388,6 +404,169 @@ def _db_connection():
         conn.close()
 
 
+def _fill_quality(
+    scanner: str,
+    planned_entry: float,
+    fill_price: float,
+    stop: float,
+    tp1: float,
+    tp2: float,
+    direction: str,
+) -> Dict[str, Any]:
+    """Bewertet, ob der reale Fill den versendeten Plan noch repraesentiert."""
+    direction_norm = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
+    planned_risk = abs(float(planned_entry) - float(stop))
+    if planned_risk <= 0:
+        return {"valid": False, "reason": "invalid_planned_risk"}
+
+    actual_geometry = trade_geometry(fill_price, stop, tp1, tp2, direction_norm)
+    actual_risk = _to_float(actual_geometry.get("risk"))
+    if not actual_geometry.get("valid") or actual_risk is None or actual_risk <= 0:
+        return {"valid": False, "reason": "fill_invalidated_trade_geometry"}
+
+    if direction_norm == "LONG":
+        adverse_slippage_r = max(0.0, (float(fill_price) - float(planned_entry)) / planned_risk)
+        reward_tp1 = float(tp1) - float(fill_price)
+        reward_tp2 = float(tp2) - float(fill_price)
+    else:
+        adverse_slippage_r = max(0.0, (float(planned_entry) - float(fill_price)) / planned_risk)
+        reward_tp1 = float(fill_price) - float(tp1)
+        reward_tp2 = float(fill_price) - float(tp2)
+
+    rr_tp1 = reward_tp1 / actual_risk
+    rr_tp2 = reward_tp2 / actual_risk
+    effective_rr = 0.5 * (rr_tp1 + rr_tp2)
+    max_slippage_r = _MAX_ADVERSE_FILL_R.get(
+        str(scanner or "").strip().lower(),
+        _DEFAULT_MAX_ADVERSE_FILL_R,
+    )
+    if adverse_slippage_r > max_slippage_r:
+        return {
+            "valid": False,
+            "reason": "adverse_fill_slippage",
+            "adverse_slippage_r": round(adverse_slippage_r, 4),
+            "max_adverse_slippage_r": max_slippage_r,
+            "rr_tp1": round(rr_tp1, 4),
+            "effective_rr": round(effective_rr, 4),
+        }
+    if rr_tp1 < 1.0 or effective_rr < 1.5:
+        return {
+            "valid": False,
+            "reason": "fill_rr_below_minimum",
+            "adverse_slippage_r": round(adverse_slippage_r, 4),
+            "rr_tp1": round(rr_tp1, 4),
+            "effective_rr": round(effective_rr, 4),
+        }
+    return {
+        "valid": True,
+        "adverse_slippage_r": round(adverse_slippage_r, 4),
+        "rr_tp1": round(rr_tp1, 4),
+        "rr_tp2": round(rr_tp2, 4),
+        "effective_rr": round(effective_rr, 4),
+    }
+
+
+def _fill_rejection_detail(fill_check: Dict[str, Any]) -> str:
+    """Kompakte, auswertbare Begruendung fuer einen verworfenen Fill."""
+    reason = str(fill_check.get("reason") or "invalid_fill")
+    details = []
+    for key in ("adverse_slippage_r", "max_adverse_slippage_r", "rr_tp1", "effective_rr"):
+        value = _to_float(fill_check.get(key))
+        if value is not None:
+            details.append(f"{key}={value:.4f}")
+    return reason if not details else reason + "|" + "|".join(details)
+
+
+def _equivalent_open_rows(
+    conn: sqlite3.Connection,
+    scanner: str,
+    fields: Dict[str, Any],
+    asset_class: str,
+    mail_class: str,
+) -> List[sqlite3.Row]:
+    """Liest offene Signale desselben wirtschaftlichen Instruments."""
+    direction = fields.get("direction") or "LONG"
+    params: List[Any] = [asset_class, direction, STATUS_OPEN, mail_class]
+    where = "asset_class = ? AND direction = ? AND status = ? AND mail_class = ?"
+    instrument_id = fields.get("instrument_id")
+    venue = fields.get("venue")
+    contract_symbol = fields.get("contract_symbol")
+    ticker = fields.get("ticker")
+    if asset_class == "crypto" and instrument_id:
+        where += " AND instrument_id = ?"
+        params.append(instrument_id)
+    elif asset_class == "crypto" and venue and contract_symbol:
+        where += " AND venue = ? AND contract_symbol = ?"
+        params.extend([venue, contract_symbol])
+    else:
+        where += " AND ticker = ?"
+        params.append(ticker)
+    return list(
+        conn.execute(
+            "SELECT scanner, entry, stop FROM signals WHERE " + where,
+            tuple(params),
+        ).fetchall()
+    )
+
+
+def _has_equivalent_open_signal(
+    conn: sqlite3.Connection,
+    scanner: str,
+    fields: Dict[str, Any],
+    asset_class: str,
+    mail_class: str,
+) -> bool:
+    """Dedupe fuer denselben Plan, auch wenn ein anderer Scanner ihn meldet."""
+    entry = _to_float(fields.get("entry"))
+    stop = _to_float(fields.get("stop"))
+    if entry is None or stop is None:
+        return False
+    for existing in _equivalent_open_rows(conn, scanner, fields, asset_class, mail_class):
+        if str(existing["scanner"] or "") == scanner:
+            return True
+        # Shadow-Daten bleiben scannerbezogen; nur echte Trade-Mails werden
+        # scanneruebergreifend als ein wirtschaftliches Signal behandelt.
+        if mail_class != "trade":
+            continue
+        existing_entry = _to_float(existing["entry"])
+        existing_stop = _to_float(existing["stop"])
+        if existing_entry is None or existing_stop is None:
+            continue
+        current_risk = abs(entry - stop)
+        existing_risk = abs(existing_entry - existing_stop)
+        equivalent_distance = 0.50 * max(current_risk, existing_risk)
+        if equivalent_distance > 0 and abs(entry - existing_entry) <= equivalent_distance:
+            return True
+    return False
+
+
+def has_open_equivalent_signal(
+    scanner_name: str,
+    row: Dict[str, Any],
+    mail_class: str = "trade",
+) -> bool:
+    """Oeffentliche Vorabpruefung, damit doppelte Mails gar nicht erst rausgehen."""
+    try:
+        scanner = str(scanner_name or "").strip().lower()
+        mail_norm = str(mail_class or "trade").strip().lower()
+        fields = extract_signal_fields(row)
+        asset_class = "crypto" if scanner in CRYPTO_SCANNERS else "stock"
+        if not scanner or not fields.get("ticker") or mail_norm not in ("trade", "shadow"):
+            return False
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                return _has_equivalent_open_signal(
+                    conn,
+                    scanner,
+                    fields,
+                    asset_class,
+                    mail_norm,
+                )
+    except Exception as exc:
+        logger.warning("has_open_equivalent_signal fehlgeschlagen: %s", exc)
+        return False
+
+
 # ── Recording ────────────────────────────────────────────────────────────────
 def record_alert_signals(
     scanner_name: str,
@@ -412,11 +591,11 @@ def record_alert_signals(
         Ungueltige Rows werden nicht in die Erfolgsstatistik aufgenommen.
       - asset_class = 'crypto', wenn scanner_name in CRYPTO_SCANNERS,
         sonst 'stock'.
-      - Dedupe: Existiert bereits ein OPEN-Signal mit gleichem
-        (scanner, ticker, mail_class), wird die Row uebersprungen (gilt auch
-        innerhalb eines Batches). Die mail_class im Dedupe-Key stellt sicher,
-        dass ein Shadow-Signal weder eine spaetere echte Mail desselben
-        Tickers blockiert noch von ihr blockiert wird.
+      - Dedupe: Existiert bereits ein wirtschaftlich gleichwertiges OPEN-Signal
+        fuer Instrument, Richtung und Mail-Klasse, wird die Row uebersprungen.
+        Bei echten Trade-Mails gilt dies scanneruebergreifend, wenn die Entries
+        innerhalb einer halben Risikoeinheit liegen. Shadow-Signale bleiben
+        scannerbezogen und blockieren echte Mails nicht.
       - rates_context: optionaler Zins-Block (modules/treasury_rates) aus dem
         Market-Context; wird kompakt als rates_json annotiert (kein Gate).
 
@@ -430,7 +609,7 @@ def record_alert_signals(
             return 0
         if not rows or not isinstance(rows, (list, tuple)):
             return 0
-        scanner = str(scanner_name or "").strip()
+        scanner = str(scanner_name or "").strip().lower()
         if not scanner:
             logger.warning("record_alert_signals: leerer scanner_name — Rows werden nicht geloggt")
             return 0
@@ -466,28 +645,18 @@ def record_alert_signals(
                         instrument_id = fields.get("instrument_id")
                         venue = fields.get("venue")
                         contract_symbol = fields.get("contract_symbol")
-                        if asset_class == "crypto" and instrument_id:
-                            exists = conn.execute(
-                                "SELECT 1 FROM signals WHERE scanner = ? AND instrument_id = ? "
-                                "AND status = ? AND mail_class = ? LIMIT 1",
-                                (scanner, instrument_id, STATUS_OPEN, mail_norm),
-                            ).fetchone()
-                        elif asset_class == "crypto" and venue and contract_symbol:
-                            exists = conn.execute(
-                                "SELECT 1 FROM signals WHERE scanner = ? AND venue = ? "
-                                "AND contract_symbol = ? AND status = ? AND mail_class = ? LIMIT 1",
-                                (scanner, venue, contract_symbol, STATUS_OPEN, mail_norm),
-                            ).fetchone()
-                        else:
-                            exists = conn.execute(
-                                "SELECT 1 FROM signals WHERE scanner = ? AND ticker = ? "
-                                "AND status = ? AND mail_class = ? LIMIT 1",
-                                (scanner, ticker, STATUS_OPEN, mail_norm),
-                            ).fetchone()
-                        if exists:
+                        if _has_equivalent_open_signal(
+                            conn,
+                            scanner,
+                            fields,
+                            asset_class,
+                            mail_norm,
+                        ):
                             continue
                         fill_at = None
                         fill_price = None
+                        signal_status = STATUS_OPEN
+                        outcome_detail = ""
                         alert_price = fields["price_at_alert"]
                         if asset_class == "crypto" and alert_price is not None:
                             if direction == "LONG" and entry <= alert_price < fields["tp1"]:
@@ -496,6 +665,21 @@ def record_alert_signals(
                             elif direction == "SHORT" and fields["tp1"] < alert_price <= entry:
                                 fill_at = now_iso
                                 fill_price = float(alert_price)
+                        if fill_price is not None:
+                            fill_check = _fill_quality(
+                                scanner,
+                                float(entry),
+                                fill_price,
+                                float(stop),
+                                float(fields["tp1"]),
+                                float(fields["tp2"]),
+                                direction,
+                            )
+                            if not fill_check.get("valid"):
+                                signal_status = STATUS_NO_FILL
+                                outcome_detail = _fill_rejection_detail(fill_check)
+                                fill_at = None
+                                fill_price = None
                         block_reasons_text = ""
                         if mail_norm == "shadow":
                             block_reasons_text = str(row.get("block_reasons") or "")[:500]
@@ -505,15 +689,16 @@ def record_alert_signals(
                                 created_at, scanner, ticker, asset_class, direction,
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
                                 rvol, mail_class, channel, status, outcome_detail,
-                                entry_filled_at, entry_fill_price, instrument_id,
+                                closed_at, entry_filled_at, entry_fill_price, instrument_id,
                                 venue, contract_symbol, rates_json, block_reasons
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
                                 float(entry), float(stop), fields["tp1"], fields["tp2"],
                                 fields["price_at_alert"], fields["grade"], fields["score"],
-                                fields["rvol"], mail_norm, channel_norm, STATUS_OPEN, "",
+                                fields["rvol"], mail_norm, channel_norm, signal_status, outcome_detail,
+                                now_iso if signal_status == STATUS_NO_FILL else None,
                                 fill_at, fill_price, instrument_id, venue, contract_symbol,
                                 rates_json, block_reasons_text,
                             ),
@@ -819,6 +1004,24 @@ def _evaluate_stock_signal(
     bars_after_alert = 0
     holding_bars = 0
 
+    if fill_price is not None:
+        fill_check = _fill_quality(
+            str(sig.get("scanner") or ""),
+            entry,
+            fill_price,
+            stop,
+            float(tp1),
+            float(tp2),
+            direction,
+        )
+        if not fill_check.get("valid"):
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": _fill_rejection_detail(fill_check),
+            })
+            return updates, False
+
     for bar_date, open_price, high, low, close in _normalize_daily_bars(bars_raw, created_date):
         bars_after_alert += 1
         if fill_price is None:
@@ -855,6 +1058,22 @@ def _evaluate_stock_signal(
                     })
                     break
                 continue
+            fill_check = _fill_quality(
+                str(sig.get("scanner") or ""),
+                entry,
+                fill_price,
+                stop,
+                float(tp1),
+                float(tp2),
+                direction,
+            )
+            if not fill_check.get("valid"):
+                updates.update({
+                    "status": STATUS_NO_FILL,
+                    "closed_at": now_iso,
+                    "outcome_detail": _fill_rejection_detail(fill_check),
+                })
+                break
             fill_date = bar_date
             fill_at = bar_date.isoformat()
             updates["entry_filled_at"] = fill_at
@@ -933,13 +1152,19 @@ def _evaluate_stock_signal(
     return updates, False
 
 
-def _fetch_crypto_price(fetcher: Callable[..., Any], sig: Dict[str, Any]) -> Any:
-    """Call legacy and identity-aware crypto fetchers without masking errors."""
+def _fetch_crypto_price(
+    fetcher: Callable[..., Any],
+    sig: Dict[str, Any],
+    now_dt: Optional[datetime] = None,
+) -> Any:
+    """Call legacy and interval-aware crypto fetchers without masking errors."""
     ticker = sig["ticker"]
     identity = {
         "instrument_id": sig.get("instrument_id"),
         "venue": sig.get("venue"),
         "contract_symbol": sig.get("contract_symbol"),
+        "since": sig.get("last_eval_at") or sig.get("created_at"),
+        "until": now_dt.isoformat() if now_dt is not None else None,
     }
     try:
         parameters = inspect.signature(fetcher).parameters
@@ -957,22 +1182,86 @@ def _fetch_crypto_price(fetcher: Callable[..., Any], sig: Dict[str, Any]) -> Any
     return fetcher(ticker)
 
 
+def _normalize_crypto_observation(raw: Any) -> Optional[Dict[str, Any]]:
+    """Normalize a point price or an exchange interval observation."""
+    if isinstance(raw, dict):
+        current = None
+        for key in ("current", "price", "close", "last"):
+            current = _to_float(raw.get(key))
+            if current is not None:
+                break
+        interval_high = None
+        for key in ("interval_high", "high"):
+            interval_high = _to_float(raw.get(key))
+            if interval_high is not None:
+                break
+        interval_low = None
+        for key in ("interval_low", "low"):
+            interval_low = _to_float(raw.get(key))
+            if interval_low is not None:
+                break
+        interval_open = None
+        for key in ("interval_open", "open"):
+            interval_open = _to_float(raw.get(key))
+            if interval_open is not None:
+                break
+        complete_raw = raw.get("interval_complete", raw.get("complete", False))
+        if isinstance(complete_raw, str):
+            interval_complete = complete_raw.strip().lower() in {"1", "true", "yes", "ok"}
+        else:
+            interval_complete = bool(complete_raw)
+        source = str(raw.get("source") or "interval")
+    else:
+        current = _to_float(raw)
+        interval_open = current
+        interval_high = current
+        interval_low = current
+        interval_complete = False
+        source = "point"
+
+    if current is None or current <= 0:
+        return None
+    if interval_high is None:
+        interval_high = current
+    if interval_low is None:
+        interval_low = current
+    if interval_high <= 0 or interval_low <= 0:
+        return None
+    if interval_low > interval_high:
+        interval_low, interval_high = interval_high, interval_low
+    if interval_open is not None and interval_open <= 0:
+        interval_open = None
+    return {
+        "current": current,
+        "interval_open": interval_open,
+        "interval_high": max(interval_high, current),
+        "interval_low": min(interval_low, current),
+        "interval_complete": interval_complete,
+        "source": source,
+    }
+
+
 def _evaluate_crypto_signal(
     sig: Dict[str, Any],
     fetcher: Callable[..., Any],
     now_dt: datetime,
 ) -> Tuple[Dict[str, Any], bool]:
-    """Crypto-Signal per Best-Effort-Spot-Check bewerten.
+    """Crypto signal conservatively evaluated with completed interval ranges.
 
-    LIMITATION: Es wird nur der aktuelle Preis geprueft (kein High/Low-Pfad
-    zwischen zwei Evaluierungslaeufen) — kurze Spikes durch Stop oder TP
-    zwischen zwei Checks werden nicht erkannt. Expiry: CRYPTO_EXPIRY_HOURS
-    (120h) nach created_at, r_realized = R des letzten bekannten Preises.
-    Stop/TP haben Vorrang vor dem Expiry-Check.
+    Exchange-native interval high/low values capture touches between evaluator
+    runs. If one completed interval touches mutually exclusive levels and their
+    order cannot be proven, the evaluator chooses the conservative outcome.
     """
-    price = _to_float(_fetch_crypto_price(fetcher, sig))
-    if price is None or price <= 0:
+    observation = _normalize_crypto_observation(_fetch_crypto_price(fetcher, sig, now_dt))
+    if observation is None:
         return _register_eval_failure(sig, now_dt), True
+
+    price = float(observation["current"])
+    interval_high = float(observation["interval_high"])
+    interval_low = float(observation["interval_low"])
+    interval_open = _to_float(observation.get("interval_open"))
+    interval_complete = bool(observation["interval_complete"])
+    observation_source = str(observation.get("source") or "")
 
     entry = float(sig["entry"])
     stop = float(sig["stop"])
@@ -991,14 +1280,41 @@ def _evaluate_crypto_signal(
     alert_price = _to_float(sig.get("price_at_alert"))
     updates: Dict[str, Any] = {"last_eval_at": now_iso}
 
+    if direction == "LONG":
+        entry_touched = interval_high >= entry
+        stop_touched = interval_low <= stop
+        tp1_touched = tp1 is not None and interval_high >= tp1
+        tp2_touched = tp2 is not None and interval_high >= tp2
+    else:
+        entry_touched = interval_low <= entry
+        stop_touched = interval_high >= stop
+        tp1_touched = tp1 is not None and interval_low <= tp1
+        tp2_touched = tp2 is not None and interval_low <= tp2
+
     if fill_price is None:
-        invalidated_before_fill = (
-            direction == "LONG"
-            and ((alert_price is not None and alert_price <= stop) or price <= stop)
-        ) or (
-            direction == "SHORT"
-            and ((alert_price is not None and alert_price >= stop) or price >= stop)
+        if interval_complete and entry_touched and stop_touched:
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": "ambiguous_entry_and_stop_same_interval",
+            })
+            return updates, False
+        if interval_complete and entry_touched and tp1_touched:
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": "entry_observed_after_tp1",
+            })
+            return updates, False
+
+        alert_invalidated = (
+            alert_price is not None
+            and (
+                (direction == "LONG" and alert_price <= stop)
+                or (direction == "SHORT" and alert_price >= stop)
+            )
         )
+        invalidated_before_fill = alert_invalidated or (stop_touched and not entry_touched)
         if invalidated_before_fill:
             updates.update({
                 "status": STATUS_NO_FILL,
@@ -1006,28 +1322,46 @@ def _evaluate_crypto_signal(
                 "outcome_detail": "entry_invalidated_before_fill",
             })
             return updates, False
+        if observation_source == "coingecko_point_fallback":
+            # A point quote has no path information. It can prove that an
+            # unfilled setup is currently invalid, but not when or where the
+            # entry was crossed. Only exchange-native intervals may create a
+            # new tracked fill; point quotes remain a monitoring fallback.
+            if expired:
+                updates.update({
+                    "status": STATUS_NO_FILL,
+                    "closed_at": now_iso,
+                    "outcome_detail": "entry_not_reached_unverified_point_data",
+                })
+            return updates, False
         crossed_from_valid_side = (
             alert_price is not None
             and ((direction == "LONG" and alert_price < entry) or (direction == "SHORT" and alert_price > entry))
         )
-        if direction == "LONG" and price >= entry:
-            if price >= tp1 and not crossed_from_valid_side:
+        if entry_touched:
+            if tp1_touched and not crossed_from_valid_side:
                 updates.update({
                     "status": STATUS_NO_FILL,
                     "closed_at": now_iso,
                     "outcome_detail": "entry_observed_after_tp1",
                 })
                 return updates, False
-            fill_price = entry if crossed_from_valid_side else price
-        elif direction == "SHORT" and price <= entry:
-            if price <= tp1 and not crossed_from_valid_side:
-                updates.update({
-                    "status": STATUS_NO_FILL,
-                    "closed_at": now_iso,
-                    "outcome_detail": "entry_observed_after_tp1",
-                })
-                return updates, False
-            fill_price = entry if crossed_from_valid_side else price
+            if crossed_from_valid_side:
+                gap_above_long_entry = (
+                    direction == "LONG"
+                    and interval_open is not None
+                    and interval_open > entry
+                    and interval_low > entry
+                )
+                gap_below_short_entry = (
+                    direction == "SHORT"
+                    and interval_open is not None
+                    and interval_open < entry
+                    and interval_high < entry
+                )
+                fill_price = interval_open if (gap_above_long_entry or gap_below_short_entry) else entry
+            else:
+                fill_price = price
         elif expired:
             updates.update({
                 "status": STATUS_NO_FILL,
@@ -1036,6 +1370,23 @@ def _evaluate_crypto_signal(
             })
             return updates, False
         else:
+            return updates, False
+
+        fill_check = _fill_quality(
+            str(sig.get("scanner") or ""),
+            entry,
+            fill_price,
+            stop,
+            float(tp1),
+            float(tp2),
+            direction,
+        )
+        if not fill_check.get("valid"):
+            updates.update({
+                "status": STATUS_NO_FILL,
+                "closed_at": now_iso,
+                "outcome_detail": _fill_rejection_detail(fill_check),
+            })
             return updates, False
         fill_at = now_iso
         updates["entry_filled_at"] = fill_at
@@ -1052,32 +1403,43 @@ def _evaluate_crypto_signal(
         return updates, False
 
     r_now = _signed_r(price, fill_price, risk, direction)
-    max_fav = max(float(sig.get("max_favorable_r") or 0.0), r_now)
-    max_adv = min(float(sig.get("max_adverse_r") or 0.0), r_now)
+    favorable_price = interval_high if direction == "LONG" else interval_low
+    adverse_price = interval_low if direction == "LONG" else interval_high
+    interval_favorable_r = _signed_r(favorable_price, fill_price, risk, direction)
+    interval_adverse_r = _signed_r(adverse_price, fill_price, risk, direction)
+    max_fav = max(float(sig.get("max_favorable_r") or 0.0), interval_favorable_r)
+    max_adv = min(float(sig.get("max_adverse_r") or 0.0), interval_adverse_r)
     tp1_hit_at = sig.get("tp1_hit_at") or None
     updates.update({
         "max_favorable_r": round(max_fav, 4),
         "max_adverse_r": round(max_adv, 4),
     })
 
-    if direction == "LONG":
-        stop_hit = price <= stop
-        tp2_hit = tp2 is not None and price >= tp2
-        tp1_touch = tp1 is not None and price >= tp1
-    else:
-        stop_hit = price >= stop
-        tp2_hit = tp2 is not None and price <= tp2
-        tp1_touch = tp1 is not None and price <= tp1
-
-    if stop_hit:
+    ambiguous_stop_and_target = interval_complete and stop_touched and (tp1_touched or tp2_touched)
+    if stop_touched:
+        stop_fill_price = stop
+        if observation_source == "point":
+            stop_fill_price = price
+        elif interval_open is not None:
+            if direction == "LONG" and interval_open < stop:
+                stop_fill_price = interval_open
+            elif direction == "SHORT" and interval_open > stop:
+                stop_fill_price = interval_open
+        stop_slipped = abs(stop_fill_price - stop) > max(abs(stop) * 1e-9, 1e-12)
+        if ambiguous_stop_and_target:
+            outcome_detail = "ambiguous_same_interval_stop_first"
+        elif stop_slipped:
+            outcome_detail = "stop_gap_slippage"
+        else:
+            outcome_detail = ""
         updates.update({
             "status": STATUS_STOP,
             "stop_hit_at": now_iso,
             "closed_at": now_iso,
-            "r_realized": round(r_now, 4),
-            "outcome_detail": "",
+            "r_realized": round(_signed_r(stop_fill_price, fill_price, risk, direction), 4),
+            "outcome_detail": outcome_detail,
         })
-    elif tp2_hit:
+    elif tp2_touched:
         if tp1 is not None and not tp1_hit_at:
             tp1_hit_at = now_iso  # TP2 impliziert TP1
         updates.update({
@@ -1088,7 +1450,7 @@ def _evaluate_crypto_signal(
             "outcome_detail": "",
         })
     else:
-        if tp1_touch and not tp1_hit_at:
+        if tp1_touched and not tp1_hit_at:
             tp1_hit_at = now_iso
         if expired:
             updates.update({
@@ -1172,19 +1534,51 @@ def _transition_record(
     """Transitions-Dict fuer result['transitions'] bauen (Kontrakt s. Docstring
     von evaluate_open_signals). Plan-Level stammen aus der DB-Row, r_realized
     aus den Updates dieses Laufs (None bei TP1_HIT_OPEN/UNTRACKED)."""
+    planned_entry = _to_float(sig.get("entry"))
+    fill_price = _to_float(updates.get("entry_fill_price", sig.get("entry_fill_price")))
+    stop = _to_float(sig.get("stop"))
+    tp1 = _to_float(sig.get("tp1"))
+    tp2 = _to_float(sig.get("tp2"))
+    direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
+    fill_check: Dict[str, Any] = {}
+    if None not in (planned_entry, fill_price, stop, tp1, tp2):
+        fill_check = _fill_quality(
+            str(sig.get("scanner") or ""),
+            float(planned_entry),
+            float(fill_price),
+            float(stop),
+            float(tp1),
+            float(tp2),
+            direction,
+        )
+    slippage_pct = None
+    if planned_entry not in (None, 0) and fill_price is not None:
+        if direction == "LONG":
+            slippage_pct = ((fill_price - planned_entry) / planned_entry) * 100.0
+        else:
+            slippage_pct = ((planned_entry - fill_price) / planned_entry) * 100.0
+
     return {
         "id": int(sig["id"]),
         "ticker": sig.get("ticker"),
         "scanner": sig.get("scanner"),
         "mail_class": str(sig.get("mail_class") or "trade"),
-        "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
+        "direction": direction,
         "old_status": str(sig.get("status") or STATUS_OPEN),
         "new_status": new_status,
-        "entry": _to_float(sig.get("entry")),
-        "entry_fill_price": _to_float(updates.get("entry_fill_price", sig.get("entry_fill_price"))),
-        "stop": _to_float(sig.get("stop")),
-        "tp1": _to_float(sig.get("tp1")),
-        "tp2": _to_float(sig.get("tp2")),
+        "entry": planned_entry,
+        "entry_fill_price": fill_price,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "fill_quality": "OK" if fill_check.get("valid") else (
+            "REJECTED" if fill_check else "UNAVAILABLE"
+        ),
+        "fill_rejection_reason": fill_check.get("reason"),
+        "adverse_slippage_r": _to_float(fill_check.get("adverse_slippage_r")),
+        "adverse_slippage_pct": round(slippage_pct, 4) if slippage_pct is not None else None,
+        "live_rr_tp1": _to_float(fill_check.get("rr_tp1")),
+        "live_effective_rr": _to_float(fill_check.get("effective_rr")),
         "r_realized": _to_float(updates.get("r_realized")),
         "tp1_hit_this_run": bool(tp1_hit_this_run),
         "asset_class": str(sig.get("asset_class") or "stock"),
@@ -1205,8 +1599,9 @@ def evaluate_open_signals(
             ist das Alert-Datum (YYYY-MM-DD). Rueckgabe None/[] zaehlt als
             Fehlversuch: eval_fail_count + 1, nach 5 Fehlversuchen wird das
             Signal auf status='UNTRACKED' gestellt.
-        crypto_price_fetcher: Callable (ticker) -> aktueller Preis (float)
-            oder None. Gleiche Fehlversuch-Logik.
+        crypto_price_fetcher: Callable (ticker, identity/since/until) ->
+            Exchange-Intervall mit current/high/low oder Legacy-Punktpreis.
+            Gleiche Fehlversuch-Logik.
         now: Optionale UTC-Zeit (datetime) fuer deterministische Tests;
             Default ist die aktuelle UTC-Zeit.
 
@@ -1222,8 +1617,11 @@ def evaluate_open_signals(
                       erfolgreich persistierte Updates), Konsument sind die
                       Exit-Update-Mails in bg_service:
                       {'id', 'ticker', 'scanner', 'direction', 'old_status',
-                       'new_status', 'entry', 'stop', 'tp1', 'tp2',
-                       'r_realized', 'tp1_hit_this_run', 'asset_class'}
+                       'new_status', 'entry', 'entry_fill_price', 'stop',
+                       'tp1', 'tp2', 'fill_quality', 'adverse_slippage_r',
+                       'adverse_slippage_pct', 'live_rr_tp1',
+                       'live_effective_rr', 'r_realized',
+                       'tp1_hit_this_run', 'asset_class'}
                       new_status: STOP_HIT/TP2_HIT/EXPIRED/UNTRACKED oder
                       der virtuelle Status 'TP1_HIT_OPEN' (TP1 in diesem Lauf
                       erreicht, Signal bleibt OPEN). r_realized ist None bei
@@ -1242,11 +1640,11 @@ def evaluate_open_signals(
                       Terminale Exits schreiben zusaetzlich r_realized_be
                       (breakeven_adjusted_r) fuer den Ist-vs-BE-Vergleich.
 
-    Aktien werden praezise ueber Daily-OHLC der Folgetage bewertet (Daily-Bars
-    implizieren US-Handelstage), Crypto nur als Best-Effort-Spot-Check des
-    aktuellen Preises — siehe Modul-Docstring (Limitation: kein High/Low-Pfad
-    zwischen zwei Laeufen). Crypto-Expiry: 120h nach created_at; Aktien-Expiry:
-    5 Daily-Bars nach Alert.
+    Aktien werden ueber Daily-OHLC der Folgetage bewertet (Daily-Bars
+    implizieren US-Handelstage). Crypto nutzt bei einem interval-faehigen
+    Fetcher Exchange-5m-High/Low seit dem letzten Lauf; ein Legacy-Punktpreis
+    bleibt ausdruecklich unvollstaendig. Crypto-Expiry: 120h nach created_at;
+    Aktien-Expiry: 5 Daily-Bars nach Alert.
     """
     result = _EvalResult({"evaluated": 0, "closed": 0, "errors": 0,
                           "transitions": [], "be_activations": []})
