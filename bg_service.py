@@ -134,6 +134,8 @@ try:
         record_alert_signals,
         evaluate_open_signals,
         has_open_equivalent_signal,
+        load_pending_be_activations,
+        mark_be_alerts_sent,
         load_performance_summary,
         scanner_verdict,
         shadow_summary,
@@ -142,6 +144,8 @@ except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Paral
     record_alert_signals = None
     evaluate_open_signals = None
     has_open_equivalent_signal = None
+    load_pending_be_activations = None
+    mark_be_alerts_sent = None
     load_performance_summary = None
     scanner_verdict = None
     shadow_summary = None
@@ -1807,16 +1811,26 @@ def _send_be_alert_mail(activations, secrets):
     for act in activations:
         if not isinstance(act, dict):
             continue
-        # Shadow-Tracking (AUDIT 2026-07-31): keine BE-Mail fuer Signale,
-        # die nie gemailt wurden.
+        tracker_persisted = bool(act.get("tracker_persisted"))
+        # Direct events still need the original-mail guard. Persisted pending
+        # events already come from canonical mail_class='trade' tracker rows.
         if str(act.get("mail_class") or "trade") != "trade":
             continue
-        if not _signal_origin_was_mailed(act.get("scanner"), act.get("ticker"), now=now):
+        if (
+            not tracker_persisted
+            and not _signal_origin_was_mailed(
+                act.get("scanner"), act.get("ticker"), now=now
+            )
+        ):
             log.debug(f"[SignalTracker] BE-Alert unterdrueckt (kein Erst-Mail-Mark): "
                       f"{act.get('scanner')}/{act.get('ticker')}")
             continue
         dedupe_key = f"signal_be_{act.get('id')}"
         if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+            # Reconcile old successful file-dedupe state with the new durable
+            # tracker acknowledgement after a rolling deployment.
+            if tracker_persisted and mark_be_alerts_sent is not None:
+                mark_be_alerts_sent([act.get("id")])
             continue
         pending.append((dedupe_key, act))
     if not pending:
@@ -1879,11 +1893,36 @@ def _send_be_alert_mail(activations, secrets):
     </p>
     </body></html>"""
 
-    sent = _send_email_alert(subject, body_html, secrets, mail_class="info")
+    # This tracker state is the retry source. Using the generic outbox here as
+    # well would create two independent retry paths and duplicate emails.
+    sent = _send_email_alert(
+        subject,
+        body_html,
+        secrets,
+        mail_class="info",
+        enqueue_on_failure=False,
+    )
     if sent:
         # B2-Muster: Dedupe-Mark NUR nach erfolgreichem Versand.
         for dedupe_key, _ in pending:
             _email_dedupe_mark(dedupe_key, now=now)
+        signal_ids = []
+        for _, activation in pending:
+            try:
+                signal_id = int(activation.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if signal_id > 0 and signal_id not in signal_ids:
+                signal_ids.append(signal_id)
+        if signal_ids and mark_be_alerts_sent is not None:
+            acknowledged = mark_be_alerts_sent(signal_ids)
+            if acknowledged < len(signal_ids):
+                log.warning(
+                    "[SignalTracker] Stop-Update gesendet, aber nur %s/%s "
+                    "Zustellungen dauerhaft bestaetigt",
+                    acknowledged,
+                    len(signal_ids),
+                )
         log.info(f"[SignalTracker] 📧 BE-Alert gesendet: {n} Stop-Update(s) "
                  f"({', '.join(str(a.get('ticker') or '?') for _, a in pending)})")
     else:
@@ -1928,10 +1967,24 @@ def _run_signal_eval_job(secrets=None):
         # Stop-Update-Mails (Breakeven, MFE >= +1R dieses Laufs): gleiche
         # Fehlertoleranz — ein Mail-Fehler darf den Eval-Job nie beschaedigen.
         try:
-            be_activations = stats.get("be_activations") or []
-            if be_activations:
+            pending_by_id = {}
+            for activation in stats.get("be_activations") or []:
+                if not isinstance(activation, dict) or activation.get("id") is None:
+                    continue
+                pending_by_id[str(activation.get("id"))] = dict(activation)
+            if load_pending_be_activations is not None:
+                for activation in load_pending_be_activations():
+                    if not isinstance(activation, dict) or activation.get("id") is None:
+                        continue
+                    key = str(activation.get("id"))
+                    pending_by_id[key] = {
+                        **pending_by_id.get(key, {}),
+                        **activation,
+                    }
+            if pending_by_id:
                 _send_be_alert_mail(
-                    be_activations, secrets if secrets is not None else _load_secrets()
+                    list(pending_by_id.values()),
+                    secrets if secrets is not None else _load_secrets(),
                 )
         except Exception as exc:
             log.warning(f"[SignalTracker] BE-Alert-Mail fehlgeschlagen (Eval-Ergebnis "

@@ -76,6 +76,8 @@ __all__ = [
     "record_alert_signals",
     "has_open_equivalent_signal",
     "evaluate_open_signals",
+    "load_pending_be_activations",
+    "mark_be_alerts_sent",
     "load_performance_summary",
     "load_breaker_recovery_summary",
     "get_signal_count",
@@ -330,6 +332,7 @@ _SCHEMA_MIGRATIONS = {
     "venue": "TEXT",
     "contract_symbol": "TEXT",
     "be_activated_at": "TEXT",
+    "be_mail_sent_at": "TEXT",
     "r_realized_be": "REAL",
     "rates_json": "TEXT",
     # Shadow-Tracking (AUDIT 2026-07-31): bei mail_class='shadow' die Gruende,
@@ -1755,6 +1758,101 @@ def evaluate_open_signals(
 
 
 # ── Performance-Summary ──────────────────────────────────────────────────────
+def load_pending_be_activations(
+    max_age_hours: int = 168,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Load undelivered +1R stop updates from the tracker database.
+
+    ``be_activated_at`` records the trading event. ``be_mail_sent_at`` is
+    written only after the dedicated stop-update email was delivered. This
+    keeps delivery retryable across SMTP failures and process restarts.
+    Closed or stale signals are intentionally not sent as late instructions.
+    """
+    try:
+        now_dt = _coerce_now(now)
+        cutoff = now_dt - timedelta(hours=max(1, int(max_age_hours)))
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT id, ticker, scanner, mail_class, direction,
+                               entry, entry_fill_price, stop, tp1, tp2,
+                               max_favorable_r, asset_class, be_activated_at
+                        FROM signals
+                        WHERE status = ?
+                          AND mail_class = 'trade'
+                          AND be_activated_at IS NOT NULL
+                          AND be_mail_sent_at IS NULL
+                        ORDER BY be_activated_at, id
+                        """,
+                        (STATUS_OPEN,),
+                    ).fetchall()
+                ]
+
+        pending: List[Dict[str, Any]] = []
+        for sig in rows:
+            activated_at = _parse_utc_datetime(sig.get("be_activated_at"))
+            if activated_at is None or activated_at < cutoff:
+                continue
+            pending.append({
+                "id": int(sig["id"]),
+                "ticker": sig.get("ticker"),
+                "scanner": sig.get("scanner"),
+                "mail_class": str(sig.get("mail_class") or "trade"),
+                "direction": (
+                    "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
+                ),
+                "entry": _to_float(sig.get("entry")),
+                "entry_fill_price": _to_float(sig.get("entry_fill_price")),
+                "stop": _to_float(sig.get("stop")),
+                "tp1": _to_float(sig.get("tp1")),
+                "tp2": _to_float(sig.get("tp2")),
+                "mfe": _to_float(sig.get("max_favorable_r")),
+                "asset_class": str(sig.get("asset_class") or "stock"),
+                "activated_at": sig.get("be_activated_at"),
+                "tracker_persisted": True,
+            })
+        return pending
+    except Exception as exc:
+        logger.warning("Ausstehende Stop-Updates konnten nicht geladen werden: %s", exc)
+        return []
+
+
+def mark_be_alerts_sent(
+    signal_ids: Iterable[Any],
+    sent_at: Optional[datetime] = None,
+) -> int:
+    """Idempotently acknowledge delivered stop updates for signal IDs."""
+    ids: List[int] = []
+    for raw_id in signal_ids or []:
+        try:
+            signal_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if signal_id > 0 and signal_id not in ids:
+            ids.append(signal_id)
+    if not ids:
+        return 0
+
+    stamp = _coerce_now(sent_at).isoformat() if sent_at is not None else _utc_iso()
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                cursor = conn.execute(
+                    f"UPDATE signals SET be_mail_sent_at = ? "
+                    f"WHERE id IN ({placeholders}) AND be_mail_sent_at IS NULL",
+                    [stamp, *ids],
+                )
+                return int(cursor.rowcount or 0)
+    except Exception as exc:
+        logger.warning("Stop-Update-Zustellung konnte nicht gespeichert werden: %s", exc)
+        return 0
+
+
 _METRIC_KEYS = (
     "signals", "open", "tp1_hit", "tp2_hit", "stop_hit", "expired", "no_fill", "untracked"
 )

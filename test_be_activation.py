@@ -189,6 +189,24 @@ def test_tracker_return_stays_backward_compatible_with_be(tracker):
     assert "be_activations" in result and "be_activations" in dict(result)
 
 
+def test_tracker_be_mail_stays_pending_until_acknowledged(tracker):
+    tracker.record_alert_signals("breakout", [_base_row()])
+    bars = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"AAPL": bars})
+    )
+    signal_id = result["be_activations"][0]["id"]
+
+    pending = tracker.load_pending_be_activations()
+    assert len(pending) == 1
+    assert pending[0]["id"] == signal_id
+    assert pending[0]["tracker_persisted"] is True
+
+    assert tracker.mark_be_alerts_sent([signal_id]) == 1
+    assert tracker.load_pending_be_activations() == []
+    assert tracker.mark_be_alerts_sent([signal_id]) == 0
+
+
 # ── Helpers bg (Muster test_exit_update_mails.py) ────────────────────────────
 def _activation(**overrides):
     act = {
@@ -210,13 +228,19 @@ def _setup_bg(monkeypatch, tmp_path, activations, origin_keys=()):
     payload = {"evaluated": len(activations), "closed": 0, "errors": 0,
                "transitions": [], "be_activations": list(activations)}
     monkeypatch.setattr(bg_service, "evaluate_open_signals", lambda **kw: payload)
+    monkeypatch.setattr(bg_service, "load_pending_be_activations", lambda: [])
+    monkeypatch.setattr(
+        bg_service,
+        "mark_be_alerts_sent",
+        lambda signal_ids: len(list(signal_ids)),
+    )
     if origin_keys:
         Path(bg_service._EMAIL_DEDUPE_FILE).write_text(
             json.dumps({key: time.time() for key in origin_keys})
         )
     sent = []
 
-    def _recorder(subject, body_html, secrets, mail_class="trade"):
+    def _recorder(subject, body_html, secrets, mail_class="trade", **kwargs):
         sent.append({"subject": subject, "body": body_html, "mail_class": mail_class})
         return True
 
@@ -282,6 +306,43 @@ def test_bg_failing_be_mail_still_returns_eval_stats(monkeypatch, tmp_path):
     stats = bg_service._run_signal_eval_job(secrets={})
     assert stats is payload  # Eval-Ergebnis kommt trotz Mail-Crash zurueck
     assert sent == []
+
+
+def test_bg_retries_persisted_be_mail_after_send_failure(monkeypatch, tmp_path):
+    _setup_bg(monkeypatch, tmp_path, [])
+    activation = _activation(tracker_persisted=True, mail_class="trade")
+    acknowledged = []
+    attempts = []
+
+    monkeypatch.setattr(
+        bg_service,
+        "load_pending_be_activations",
+        lambda: [] if acknowledged else [dict(activation)],
+    )
+
+    def _ack(signal_ids):
+        ids = list(signal_ids)
+        acknowledged.extend(ids)
+        return len(ids)
+
+    def _flaky_mail(subject, body_html, secrets, mail_class="trade", **kwargs):
+        attempts.append(kwargs)
+        return len(attempts) > 1
+
+    monkeypatch.setattr(bg_service, "mark_be_alerts_sent", _ack)
+    monkeypatch.setattr(bg_service, "_send_email_alert", _flaky_mail)
+
+    bg_service._run_signal_eval_job(secrets={})
+    assert len(attempts) == 1
+    assert attempts[0]["enqueue_on_failure"] is False
+    assert acknowledged == []
+
+    bg_service._run_signal_eval_job(secrets={})
+    assert len(attempts) == 2
+    assert acknowledged == [21]
+
+    bg_service._run_signal_eval_job(secrets={})
+    assert len(attempts) == 2
 
 
 if __name__ == "__main__":
