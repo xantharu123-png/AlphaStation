@@ -3545,13 +3545,78 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const personalPositionSignalId = Number.isInteger(personalPositionSignalIdRaw) && personalPositionSignalIdRaw > 0
         ? personalPositionSignalIdRaw
         : null;
+    const personalPositionSetupKey = String(
+        activeTradeSetup?.setup_key ?? cd.setup_key ?? d.setup_key ?? ''
+    ).trim();
+    const personalPositionScanner = String(
+        cd.scanner ?? cd.source_scanner ?? activeTradeSetup?.scanner ?? d.scanner ?? d.source_scanner ?? ''
+    ).trim().toLowerCase();
+    const personalPositionStrategy = String(
+        activeTradeSetup?.strategy ?? cd.strategy ?? d.strategy ?? ''
+    ).trim();
+    const personalPositionTradeHorizon = String(
+        activeTradeSetup?.trade_horizon ?? cd.trade_horizon ?? d.trade_horizon ?? ''
+    ).trim().toLowerCase();
+    const personalPositionEntry = firstFiniteNumber(
+        activeTradeSetup?.entry, activeTradeSetup?.main_entry,
+        cd.entry, cd.Entry, cd.entry_price, d.entry, d.Entry, d.entry_price
+    );
+    const personalPositionStop = firstFiniteNumber(
+        activeTradeSetup?.stop, activeTradeSetup?.stop_loss,
+        cd.stop, cd.StopLoss, cd.stop_loss, d.stop, d.StopLoss, d.stop_loss
+    );
+    const personalPositionTp1 = firstFiniteNumber(activeTradeSetup?.tp1, cd.tp1, cd.TP1, d.tp1, d.TP1);
+    const personalPositionTp2 = firstFiniteNumber(activeTradeSetup?.tp2, cd.tp2, cd.TP2, d.tp2, d.TP2);
+    const personalPositionInstrumentId = String(
+        activeTradeSetup?.instrument_id ?? cd.instrument_id ?? d.instrument_id ?? cd.coin_id ?? d.coin_id ?? ''
+    ).trim();
+    const personalPositionVenue = String(
+        activeTradeSetup?.venue ?? cd.venue ?? d.venue ?? cd.exchange ?? d.exchange ?? ''
+    ).trim().toLowerCase();
+    const personalPositionContractSymbol = String(
+        activeTradeSetup?.contract_symbol ?? cd.contract_symbol ?? d.contract_symbol ?? ''
+    ).trim().toUpperCase();
     const currentPersonalPosition = personalPositions.find(position => {
         const positionTicker = String(position?.ticker || '').trim().toUpperCase().replace(/USDT$/, '');
         const positionDirection = String(position?.direction || '').trim().toUpperCase();
         if (positionTicker !== personalPositionTicker || positionDirection !== personalPositionDirection) return false;
         const savedSignalId = Number(position?.signal_id || 0);
-        if (personalPositionSignalId && savedSignalId > 0) return savedSignalId === personalPositionSignalId;
-        return true;
+        if (personalPositionSignalId && savedSignalId > 0) {
+            return savedSignalId === personalPositionSignalId;
+        }
+        const identityPairs = [
+            [position?.scanner, personalPositionScanner],
+            [position?.strategy, personalPositionStrategy],
+            [position?.trade_horizon, personalPositionTradeHorizon],
+            [position?.asset_type, isCrypto ? 'crypto' : 'stock'],
+            [position?.instrument_id, personalPositionInstrumentId],
+            [position?.venue, personalPositionVenue],
+            [position?.contract_symbol, personalPositionContractSymbol],
+        ];
+        if (identityPairs.some(([saved, current]) => saved && current && String(saved).toLowerCase() !== String(current).toLowerCase())) {
+            return false;
+        }
+        const savedSetupKey = String(position?.setup_key || '').trim().toLowerCase();
+        const currentSetupKey = personalPositionSetupKey.toLowerCase();
+        if (savedSetupKey && currentSetupKey && savedSetupKey === currentSetupKey) return true;
+        const savedEntry = firstFiniteNumber(position?.entry);
+        const savedStop = firstFiniteNumber(position?.stop);
+        if (savedEntry && savedStop && personalPositionEntry && personalPositionStop) {
+            const savedRisk = Math.abs(savedEntry - savedStop);
+            const currentRisk = Math.abs(personalPositionEntry - personalPositionStop);
+            const scale = Math.max(savedRisk, currentRisk, savedEntry * 0.002, personalPositionEntry * 0.002, 1e-9);
+            if (Math.abs(savedEntry - personalPositionEntry) > 0.15 * scale) return false;
+            if (Math.abs(savedStop - personalPositionStop) > 0.15 * scale) return false;
+            for (const [savedTarget, currentTarget] of [
+                [firstFiniteNumber(position?.tp1), personalPositionTp1],
+                [firstFiniteNumber(position?.tp2), personalPositionTp2],
+            ]) {
+                if (savedTarget && currentTarget && Math.abs(savedTarget - currentTarget) > 0.25 * scale) return false;
+            }
+            return true;
+        }
+        if (savedSetupKey || currentSetupKey) return false;
+        return !position?.scanner || !personalPositionScanner || String(position.scanner).toLowerCase() === personalPositionScanner;
     }) || null;
     const formatSidebarPrice = (value) => {
         const n = Number(value);
@@ -3883,8 +3948,18 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     ticker: personalPositionTicker,
                     direction: personalPositionDirection,
                     signal_id: personalPositionSignalId,
-                    scanner: '',
+                    setup_key: personalPositionSetupKey,
+                    scanner: personalPositionScanner,
+                    strategy: personalPositionStrategy,
+                    trade_horizon: personalPositionTradeHorizon,
                     asset_type: isCrypto ? 'crypto' : 'stock',
+                    entry: personalPositionEntry,
+                    stop: personalPositionStop,
+                    tp1: personalPositionTp1,
+                    tp2: personalPositionTp2,
+                    instrument_id: personalPositionInstrumentId,
+                    venue: personalPositionVenue,
+                    contract_symbol: personalPositionContractSymbol,
                     company_name: sidebarCompanyName || '',
                 }),
             });

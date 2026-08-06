@@ -7,22 +7,26 @@ import bg_service
 from modules import auth
 
 
-def _position(ticker, direction="LONG", scanner="stock_strategy", signal_id=None):
-    return {
+def _position(ticker, direction="LONG", scanner="stock_strategy", signal_id=None, **extra):
+    position = {
         "ticker": ticker,
         "direction": direction,
         "scanner": scanner,
         "signal_id": signal_id,
     }
+    position.update(extra)
+    return position
 
 
-def _event(ticker, direction="LONG", scanner="stock_strategy", signal_id=None):
-    return {
+def _event(ticker, direction="LONG", scanner="stock_strategy", signal_id=None, **extra):
+    event = {
         "ticker": ticker,
         "direction": direction,
         "scanner": scanner,
         "id": signal_id,
     }
+    event.update(extra)
+    return event
 
 
 def test_personal_position_normalization_is_safe_and_stable():
@@ -32,6 +36,16 @@ def test_personal_position_normalization_is_safe_and_stable():
             "direction": "long",
             "scanner": "Stock Strategy!",
             "company_name": "Example\x00 Corp",
+            "setup_key": "stock:ABC:swing:2026-08-06",
+            "strategy": "Momentum Breakout Long",
+            "trade_horizon": "SWING",
+            "entry": "100.25",
+            "stop": 95.0,
+            "tp1": 105.0,
+            "tp2": 110.0,
+            "instrument_id": "us-stock:ABC",
+            "venue": "NYSE",
+            "contract_symbol": "abc",
         }
     )
 
@@ -39,7 +53,17 @@ def test_personal_position_normalization_is_safe_and_stable():
     assert normalized["direction"] == "LONG"
     assert normalized["scanner"] == "stockstrategy"
     assert normalized["company_name"] == "Example Corp"
-    assert normalized["id"].startswith("position-")
+    assert normalized["setup_key"] == "stock:ABC:swing:2026-08-06"
+    assert normalized["strategy"] == "Momentum Breakout Long"
+    assert normalized["trade_horizon"] == "swing"
+    assert normalized["entry"] == 100.25
+    assert normalized["stop"] == 95.0
+    assert normalized["tp1"] == 105.0
+    assert normalized["tp2"] == 110.0
+    assert normalized["instrument_id"] == "us-stock:ABC"
+    assert normalized["venue"] == "nyse"
+    assert normalized["contract_symbol"] == "ABC"
+    assert normalized["id"].startswith("setup-")
     assert auth._normalize_personal_position({"ticker": "ABC", "direction": "SIDEWAYS"}) is None
 
 
@@ -92,6 +116,57 @@ def test_followup_event_matching_prefers_signal_id_then_falls_back_to_identity()
     assert not bg_service._followup_event_matches_position(
         _event("ABC", "LONG", "stock_strategy"),
         _position("ABC", "SHORT", "stock_strategy"),
+    )
+
+
+def test_followup_event_matching_uses_setup_identity_before_geometry_fallback():
+    position = _position(
+        "ABC",
+        setup_key="stock:ABC:swing:one",
+        strategy="Momentum Breakout Long",
+        trade_horizon="swing",
+        entry=100.0,
+        stop=95.0,
+        tp1=105.0,
+        tp2=110.0,
+    )
+    assert bg_service._followup_event_matches_position(
+        _event(
+            "ABC",
+            setup_key="stock:ABC:swing:one",
+            strategy="Momentum Breakout Long",
+            trade_horizon="swing",
+            entry=100.04,
+            stop=95.04,
+            tp1=105.05,
+            tp2=110.05,
+        ),
+        position,
+    )
+    assert not bg_service._followup_event_matches_position(
+        _event(
+            "ABC",
+            setup_key="stock:ABC:swing:two",
+            strategy="Momentum Breakout Long",
+            trade_horizon="swing",
+            entry=120.0,
+            stop=115.0,
+            tp1=125.0,
+            tp2=130.0,
+        ),
+        position,
+    )
+
+
+def test_followup_event_matching_accepts_legacy_geometry_only_when_equivalent():
+    position = _position("ABC", entry=100.0, stop=95.0, tp1=105.0, tp2=110.0)
+    assert bg_service._followup_event_matches_position(
+        _event("ABC", entry=100.04, stop=95.04, tp1=105.05, tp2=110.05),
+        position,
+    )
+    assert not bg_service._followup_event_matches_position(
+        _event("ABC", entry=103.0, stop=98.0, tp1=108.0, tp2=113.0),
+        position,
     )
 
 

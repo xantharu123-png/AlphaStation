@@ -336,8 +336,14 @@ def test_tracker_crypto_fetcher_matches_cache_and_strips_suffix(monkeypatch, tmp
 def test_eval_job_calls_evaluate_with_both_fetchers(monkeypatch):
     seen = {}
 
-    def _fake_eval(stock_daily_fetcher=None, crypto_price_fetcher=None, now=None):
+    def _fake_eval(
+        stock_daily_fetcher=None,
+        stock_intraday_fetcher=None,
+        crypto_price_fetcher=None,
+        now=None,
+    ):
         seen["stock"] = stock_daily_fetcher
+        seen["stock_intraday"] = stock_intraday_fetcher
         seen["crypto"] = crypto_price_fetcher
         return {"evaluated": 3, "closed": 1, "errors": 0}
 
@@ -345,6 +351,7 @@ def test_eval_job_calls_evaluate_with_both_fetchers(monkeypatch):
     stats = bg_service._run_signal_eval_job()
     assert stats == {"evaluated": 3, "closed": 1, "errors": 0}
     assert seen["stock"] is bg_service._tracker_stock_fetcher
+    assert seen["stock_intraday"] is bg_service._tracker_stock_intraday_fetcher
     assert seen["crypto"] is bg_service._tracker_crypto_fetcher
 
 

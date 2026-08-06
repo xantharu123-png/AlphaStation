@@ -99,6 +99,7 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
         "adverse_slippage_r", "adverse_slippage_pct",
         "live_rr_tp1", "live_effective_rr",
         "fill_quality", "fill_rejection_reason",
+        "strategy", "trade_horizon", "setup_key",
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"

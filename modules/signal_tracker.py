@@ -52,6 +52,7 @@ praezise ueber Daily-OHLC-Bars der Folgetage ausgewertet.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -161,6 +162,15 @@ _CONTRACT_KEYS = (
     "PerpChartSymbol",
     "PerpMatchSymbol",
 )
+_STRATEGY_KEYS = (
+    "strategy", "Strategy", "setup_type", "SetupType", "pattern", "Pattern",
+    "scanner_strategy",
+)
+_HORIZON_KEYS = (
+    "trade_horizon", "TradeHorizon", "horizon", "Horizon",
+    "holding_period", "HoldingPeriod", "_alert_horizon", "alert_horizon",
+)
+_SETUP_KEY_KEYS = ("setup_key", "SetupKey", "signal_key", "SignalKey")
 
 
 # ── Zeit- und Parsing-Helfer ─────────────────────────────────────────────────
@@ -248,6 +258,9 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
         "instrument_id": None,
         "venue": None,
         "contract_symbol": None,
+        "strategy": None,
+        "trade_horizon": None,
+        "setup_key": None,
     }
     if not isinstance(row, dict):
         return out
@@ -272,6 +285,9 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
             ("instrument_id", _INSTRUMENT_ID_KEYS),
             ("venue", _VENUE_KEYS),
             ("contract_symbol", _CONTRACT_KEYS),
+            ("strategy", _STRATEGY_KEYS),
+            ("trade_horizon", _HORIZON_KEYS),
+            ("setup_key", _SETUP_KEY_KEYS),
         ):
             raw_value = _first_raw(row, aliases)
             if raw_value is not None:
@@ -322,6 +338,9 @@ CREATE TABLE IF NOT EXISTS signals (
     ,instrument_id TEXT
     ,venue TEXT
     ,contract_symbol TEXT
+    ,strategy TEXT
+    ,trade_horizon TEXT
+    ,setup_key TEXT
 )
 """
 
@@ -331,6 +350,9 @@ _SCHEMA_MIGRATIONS = {
     "instrument_id": "TEXT",
     "venue": "TEXT",
     "contract_symbol": "TEXT",
+    "strategy": "TEXT",
+    "trade_horizon": "TEXT",
+    "setup_key": "TEXT",
     "be_activated_at": "TEXT",
     "be_mail_sent_at": "TEXT",
     "r_realized_be": "REAL",
@@ -369,6 +391,7 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)",
     "CREATE INDEX IF NOT EXISTS idx_signals_scanner_ticker ON signals(scanner, ticker)",
     "CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_setup_open ON signals(setup_key, status, mail_class)",
 )
 
 
@@ -480,6 +503,87 @@ def _fill_rejection_detail(fill_check: Dict[str, Any]) -> str:
     return reason if not details else reason + "|" + "|".join(details)
 
 
+def _identity_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())[:160]
+
+
+def _identity_level(value: Any) -> str:
+    number = _to_float(value)
+    return "" if number is None else format(number, ".10g")
+
+
+def _asset_identity(fields: Dict[str, Any], asset_class: str) -> str:
+    if asset_class == "crypto":
+        instrument_id = _identity_text(fields.get("instrument_id"))
+        if instrument_id:
+            return "coin:" + instrument_id
+        venue = _identity_text(fields.get("venue"))
+        contract = _identity_text(fields.get("contract_symbol"))
+        if venue and contract:
+            return f"contract:{venue}:{contract}"
+    return "ticker:" + _identity_text(fields.get("ticker"))
+
+
+def _generated_setup_key(
+    scanner: str,
+    fields: Dict[str, Any],
+    asset_class: str,
+) -> str:
+    payload = {
+        "asset": _asset_identity(fields, asset_class),
+        "direction": _identity_text(fields.get("direction") or "LONG"),
+        "scanner": _identity_text(scanner),
+        "strategy": _identity_text(fields.get("strategy") or scanner),
+        "horizon": _identity_text(fields.get("trade_horizon") or "unspecified"),
+        "entry": _identity_level(fields.get("entry")),
+        "stop": _identity_level(fields.get("stop")),
+        "tp1": _identity_level(fields.get("tp1")),
+        "tp2": _identity_level(fields.get("tp2")),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sig_" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _prepare_identity_fields(
+    fields: Dict[str, Any],
+    scanner: str,
+    asset_class: str,
+) -> Dict[str, Any]:
+    prepared = dict(fields)
+    strategy = str(prepared.get("strategy") or scanner).strip()[:160]
+    horizon = str(prepared.get("trade_horizon") or "unspecified").strip()[:80]
+    supplied_key = str(prepared.get("setup_key") or "").strip()[:160]
+    prepared["strategy"] = strategy
+    prepared["trade_horizon"] = horizon
+    prepared["setup_key"] = supplied_key or _generated_setup_key(
+        scanner, prepared, asset_class
+    )
+    return prepared
+
+
+def _geometry_equivalent(existing: sqlite3.Row, fields: Dict[str, Any]) -> bool:
+    levels = {
+        "entry": (_to_float(existing["entry"]), _to_float(fields.get("entry"))),
+        "stop": (_to_float(existing["stop"]), _to_float(fields.get("stop"))),
+        "tp1": (_to_float(existing["tp1"]), _to_float(fields.get("tp1"))),
+        "tp2": (_to_float(existing["tp2"]), _to_float(fields.get("tp2"))),
+    }
+    if any(old is None or new is None for old, new in levels.values()):
+        return False
+    old_entry = float(levels["entry"][0])
+    new_entry = float(levels["entry"][1])
+    old_risk = abs(old_entry - float(levels["stop"][0]))
+    new_risk = abs(new_entry - float(levels["stop"][1]))
+    # Very tight stops must not make harmless quote rounding look like a new setup.
+    scale = max(old_risk, new_risk, abs(old_entry) * 0.002, abs(new_entry) * 0.002, 1e-9)
+    return (
+        abs(float(levels["entry"][0]) - float(levels["entry"][1])) <= 0.15 * scale
+        and abs(float(levels["stop"][0]) - float(levels["stop"][1])) <= 0.15 * scale
+        and abs(float(levels["tp1"][0]) - float(levels["tp1"][1])) <= 0.25 * scale
+        and abs(float(levels["tp2"][0]) - float(levels["tp2"][1])) <= 0.25 * scale
+    )
+
+
 def _equivalent_open_rows(
     conn: sqlite3.Connection,
     scanner: str,
@@ -506,7 +610,8 @@ def _equivalent_open_rows(
         params.append(ticker)
     return list(
         conn.execute(
-            "SELECT scanner, entry, stop FROM signals WHERE " + where,
+            "SELECT scanner, strategy, trade_horizon, setup_key, entry, stop, tp1, tp2 "
+            "FROM signals WHERE " + where,
             tuple(params),
         ).fetchall()
     )
@@ -519,26 +624,24 @@ def _has_equivalent_open_signal(
     asset_class: str,
     mail_class: str,
 ) -> bool:
-    """Dedupe fuer denselben Plan, auch wenn ein anderer Scanner ihn meldet."""
-    entry = _to_float(fields.get("entry"))
-    stop = _to_float(fields.get("stop"))
-    if entry is None or stop is None:
-        return False
+    """Dedupe nur fuer denselben wirtschaftlichen Tradeplan."""
+    setup_key = str(fields.get("setup_key") or "")
+    strategy = _identity_text(fields.get("strategy") or scanner)
+    horizon = _identity_text(fields.get("trade_horizon") or "unspecified")
     for existing in _equivalent_open_rows(conn, scanner, fields, asset_class, mail_class):
-        if str(existing["scanner"] or "") == scanner:
+        existing_key = str(existing["setup_key"] or "")
+        if setup_key and existing_key and setup_key == existing_key:
             return True
-        # Shadow-Daten bleiben scannerbezogen; nur echte Trade-Mails werden
-        # scanneruebergreifend als ein wirtschaftliches Signal behandelt.
-        if mail_class != "trade":
+        same_scanner = str(existing["scanner"] or "") == scanner
+        if mail_class != "trade" and not same_scanner:
             continue
-        existing_entry = _to_float(existing["entry"])
-        existing_stop = _to_float(existing["stop"])
-        if existing_entry is None or existing_stop is None:
+        if not _geometry_equivalent(existing, fields):
             continue
-        current_risk = abs(entry - stop)
-        existing_risk = abs(existing_entry - existing_stop)
-        equivalent_distance = 0.50 * max(current_risk, existing_risk)
-        if equivalent_distance > 0 and abs(entry - existing_entry) <= equivalent_distance:
+        same_context = (
+            _identity_text(existing["strategy"] or existing["scanner"]) == strategy
+            and _identity_text(existing["trade_horizon"] or "unspecified") == horizon
+        )
+        if (same_scanner and same_context) or mail_class == "trade":
             return True
     return False
 
@@ -556,6 +659,7 @@ def has_open_equivalent_signal(
         asset_class = "crypto" if scanner in CRYPTO_SCANNERS else "stock"
         if not scanner or not fields.get("ticker") or mail_norm not in ("trade", "shadow"):
             return False
+        fields = _prepare_identity_fields(fields, scanner, asset_class)
         with _DB_LOCK:
             with _db_connection() as conn:
                 return _has_equivalent_open_signal(
@@ -594,11 +698,11 @@ def record_alert_signals(
         Ungueltige Rows werden nicht in die Erfolgsstatistik aufgenommen.
       - asset_class = 'crypto', wenn scanner_name in CRYPTO_SCANNERS,
         sonst 'stock'.
-      - Dedupe: Existiert bereits ein wirtschaftlich gleichwertiges OPEN-Signal
-        fuer Instrument, Richtung und Mail-Klasse, wird die Row uebersprungen.
-        Bei echten Trade-Mails gilt dies scanneruebergreifend, wenn die Entries
-        innerhalb einer halben Risikoeinheit liegen. Shadow-Signale bleiben
-        scannerbezogen und blockieren echte Mails nicht.
+      - Dedupe: Existiert bereits derselbe OPEN-Tradeplan (Setup-ID oder eng
+        uebereinstimmende Entry/Stop/TP-Geometrie), wird die Row uebersprungen.
+        Ein veraenderter Plan desselben Scanners darf dagegen neu geloggt
+        werden. Shadow-Signale bleiben scannerbezogen und blockieren echte
+        Mails nicht.
       - rates_context: optionaler Zins-Block (modules/treasury_rates) aus dem
         Market-Context; wird kompakt als rates_json annotiert (kein Gate).
 
@@ -624,7 +728,9 @@ def record_alert_signals(
             with _db_connection() as conn:
                 for row in rows:
                     try:
-                        fields = extract_signal_fields(row)
+                        fields = _prepare_identity_fields(
+                            extract_signal_fields(row), scanner, asset_class
+                        )
                         ticker = fields["ticker"]
                         entry = fields["entry"]
                         stop = fields["stop"]
@@ -661,7 +767,7 @@ def record_alert_signals(
                         signal_status = STATUS_OPEN
                         outcome_detail = ""
                         alert_price = fields["price_at_alert"]
-                        if asset_class == "crypto" and alert_price is not None:
+                        if mail_norm == "trade" and alert_price is not None:
                             if direction == "LONG" and entry <= alert_price < fields["tp1"]:
                                 fill_at = now_iso
                                 fill_price = float(alert_price)
@@ -693,8 +799,9 @@ def record_alert_signals(
                                 entry, stop, tp1, tp2, price_at_alert, grade, score,
                                 rvol, mail_class, channel, status, outcome_detail,
                                 closed_at, entry_filled_at, entry_fill_price, instrument_id,
-                                venue, contract_symbol, rates_json, block_reasons
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                venue, contract_symbol, strategy, trade_horizon, setup_key,
+                                rates_json, block_reasons
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
@@ -703,7 +810,8 @@ def record_alert_signals(
                                 fields["rvol"], mail_norm, channel_norm, signal_status, outcome_detail,
                                 now_iso if signal_status == STATUS_NO_FILL else None,
                                 fill_at, fill_price, instrument_id, venue, contract_symbol,
-                                rates_json, block_reasons_text,
+                                fields.get("strategy"), fields.get("trade_horizon"),
+                                fields.get("setup_key"), rates_json, block_reasons_text,
                             ),
                         )
                         inserted += 1
@@ -1248,8 +1356,11 @@ def _evaluate_crypto_signal(
     sig: Dict[str, Any],
     fetcher: Callable[..., Any],
     now_dt: datetime,
+    *,
+    expiry_hours: Optional[int] = CRYPTO_EXPIRY_HOURS,
+    register_failures: bool = True,
 ) -> Tuple[Dict[str, Any], bool]:
-    """Crypto signal conservatively evaluated with completed interval ranges.
+    """Signal conservatively evaluated with completed interval ranges.
 
     Exchange-native interval high/low values capture touches between evaluator
     runs. If one completed interval touches mutually exclusive levels and their
@@ -1257,7 +1368,10 @@ def _evaluate_crypto_signal(
     """
     observation = _normalize_crypto_observation(_fetch_crypto_price(fetcher, sig, now_dt))
     if observation is None:
-        return _register_eval_failure(sig, now_dt), True
+        if register_failures:
+            return _register_eval_failure(sig, now_dt), True
+        # Do not advance the cursor until a completed post-alert interval exists.
+        return {}, False
 
     price = float(observation["current"])
     interval_high = float(observation["interval_high"])
@@ -1273,11 +1387,17 @@ def _evaluate_crypto_signal(
     direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
     geometry = trade_geometry(entry, stop, tp1, tp2, direction)
     if not geometry.get("valid"):
-        return _register_eval_failure(sig, now_dt), True
+        if register_failures:
+            return _register_eval_failure(sig, now_dt), True
+        return {}, False
 
     now_iso = now_dt.isoformat()
     created_dt = _parse_utc_datetime(sig.get("created_at"))
-    expired = created_dt is not None and now_dt >= created_dt + timedelta(hours=CRYPTO_EXPIRY_HOURS)
+    expired = (
+        expiry_hours is not None
+        and created_dt is not None
+        and now_dt >= created_dt + timedelta(hours=expiry_hours)
+    )
     fill_at = sig.get("entry_filled_at") or None
     fill_price = _to_float(sig.get("entry_fill_price"))
     alert_price = _to_float(sig.get("price_at_alert"))
@@ -1565,6 +1685,9 @@ def _transition_record(
         "id": int(sig["id"]),
         "ticker": sig.get("ticker"),
         "scanner": sig.get("scanner"),
+        "strategy": sig.get("strategy"),
+        "trade_horizon": sig.get("trade_horizon"),
+        "setup_key": sig.get("setup_key"),
         "mail_class": str(sig.get("mail_class") or "trade"),
         "direction": direction,
         "old_status": str(sig.get("status") or STATUS_OPEN),
@@ -1592,6 +1715,8 @@ def evaluate_open_signals(
     stock_daily_fetcher: Optional[Callable[[str, str], Any]] = None,
     crypto_price_fetcher: Optional[Callable[..., Any]] = None,
     now: Optional[datetime] = None,
+    *,
+    stock_intraday_fetcher: Optional[Callable[..., Any]] = None,
 ) -> dict:
     """Bewertet alle OPEN-Signale gegen Stop/TP1/TP2. Wirft nie.
 
@@ -1605,6 +1730,9 @@ def evaluate_open_signals(
         crypto_price_fetcher: Callable (ticker, identity/since/until) ->
             Exchange-Intervall mit current/high/low oder Legacy-Punktpreis.
             Gleiche Fehlversuch-Logik.
+        stock_intraday_fetcher: Optionaler Intervall-Fetcher fuer Aktien am
+            Versandtag. Vollstaendige 5m-High/Low-Spannen verhindern, dass
+            Same-Day-Entry, Stop oder Ziele erst am Folgetag sichtbar werden.
         now: Optionale UTC-Zeit (datetime) fuer deterministische Tests;
             Default ist die aktuelle UTC-Zeit.
 
@@ -1643,8 +1771,8 @@ def evaluate_open_signals(
                       Terminale Exits schreiben zusaetzlich r_realized_be
                       (breakeven_adjusted_r) fuer den Ist-vs-BE-Vergleich.
 
-    Aktien werden ueber Daily-OHLC der Folgetage bewertet (Daily-Bars
-    implizieren US-Handelstage). Crypto nutzt bei einem interval-faehigen
+    Aktien werden am Versandtag ueber vollstaendige Intraday-Intervalle und
+    danach ueber Daily-OHLC der Folgetage bewertet. Crypto nutzt bei einem interval-faehigen
     Fetcher Exchange-5m-High/Low seit dem letzten Lauf; ein Legacy-Punktpreis
     bleibt ausdruecklich unvollstaendig. Crypto-Expiry: 120h nach created_at;
     Aktien-Expiry: 5 Daily-Bars nach Alert.
@@ -1664,13 +1792,35 @@ def evaluate_open_signals(
                 ]
         for sig in open_signals:
             is_crypto = str(sig.get("asset_class") or "") == "crypto"
-            fetcher = crypto_price_fetcher if is_crypto else stock_daily_fetcher
+            created_dt = _parse_utc_datetime(sig.get("created_at"))
+            same_market_day = bool(
+                created_dt
+                and created_dt.astimezone(ZoneInfo("America/New_York")).date()
+                == now_dt.astimezone(ZoneInfo("America/New_York")).date()
+            )
+            use_stock_intraday = bool(
+                not is_crypto and same_market_day and stock_intraday_fetcher is not None
+            )
+            if is_crypto:
+                fetcher = crypto_price_fetcher
+            elif use_stock_intraday:
+                fetcher = stock_intraday_fetcher
+            else:
+                fetcher = stock_daily_fetcher
             if fetcher is None:
                 continue
             result["evaluated"] += 1
             try:
                 if is_crypto:
                     updates, fetch_failed = _evaluate_crypto_signal(sig, fetcher, now_dt)
+                elif use_stock_intraday:
+                    updates, fetch_failed = _evaluate_crypto_signal(
+                        sig,
+                        fetcher,
+                        now_dt,
+                        expiry_hours=None,
+                        register_failures=False,
+                    )
                 else:
                     updates, fetch_failed = _evaluate_stock_signal(sig, fetcher, now_dt)
             except Exception as exc:
@@ -1735,6 +1885,9 @@ def evaluate_open_signals(
                             "id": int(sig["id"]),
                             "ticker": sig.get("ticker"),
                             "scanner": sig.get("scanner"),
+                            "strategy": sig.get("strategy"),
+                            "trade_horizon": sig.get("trade_horizon"),
+                            "setup_key": sig.get("setup_key"),
                             "mail_class": str(sig.get("mail_class") or "trade"),
                             "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
                             "entry": _to_float(sig.get("entry")),
@@ -1778,7 +1931,8 @@ def load_pending_be_activations(
                     dict(row)
                     for row in conn.execute(
                         """
-                        SELECT id, ticker, scanner, mail_class, direction,
+                        SELECT id, ticker, scanner, strategy, trade_horizon,
+                               setup_key, mail_class, direction,
                                entry, entry_fill_price, stop, tp1, tp2,
                                max_favorable_r, asset_class, be_activated_at
                         FROM signals
@@ -1801,6 +1955,9 @@ def load_pending_be_activations(
                 "id": int(sig["id"]),
                 "ticker": sig.get("ticker"),
                 "scanner": sig.get("scanner"),
+                "strategy": sig.get("strategy"),
+                "trade_horizon": sig.get("trade_horizon"),
+                "setup_key": sig.get("setup_key"),
                 "mail_class": str(sig.get("mail_class") or "trade"),
                 "direction": (
                     "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"

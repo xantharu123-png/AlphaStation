@@ -16917,8 +16917,18 @@ class PersonalPositionRequest(BaseModel):
     ticker: str
     direction: str = "LONG"
     signal_id: Optional[int] = None
+    setup_key: str = ""
     scanner: str = ""
+    strategy: str = ""
+    trade_horizon: str = ""
     asset_type: str = ""
+    entry: Optional[float] = None
+    stop: Optional[float] = None
+    tp1: Optional[float] = None
+    tp2: Optional[float] = None
+    instrument_id: str = ""
+    venue: str = ""
+    contract_symbol: str = ""
     company_name: str = ""
 
 

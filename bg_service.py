@@ -1425,6 +1425,104 @@ def _tracker_stock_fetcher(ticker, since_iso_date):
         return None
 
 
+def _tracker_stock_intraday_fetcher(
+    ticker,
+    instrument_id=None,
+    venue=None,
+    contract_symbol=None,
+    since=None,
+    until=None,
+):
+    """Completed Polygon 5m ranges for same-session stock tracking."""
+    del instrument_id, venue, contract_symbol
+
+    def _parse_utc(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        import requests as req
+
+        poly_key = _load_secrets().get("POLYGON_KEY", "")
+        since_dt = _parse_utc(since)
+        until_dt = _parse_utc(until) or datetime.now(timezone.utc)
+        symbol = str(ticker or "").strip().upper()
+        if not poly_key or not symbol or since_dt is None or until_dt <= since_dt:
+            return None
+
+        from_date = since_dt.strftime("%Y-%m-%d")
+        to_date = until_dt.strftime("%Y-%m-%d")
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{symbol}"
+            f"/range/5/minute/{from_date}/{to_date}"
+        )
+        resp = req.get(
+            url,
+            params={
+                "apiKey": poly_key,
+                "adjusted": "true",
+                "sort": "asc",
+                "limit": 5000,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            log.debug(
+                f"[SignalTracker] Polygon 5m HTTP {resp.status_code} fuer {symbol}"
+            )
+            return None
+
+        since_ts = since_dt.timestamp()
+        until_ts = until_dt.timestamp()
+        # Only bars that started after the previous evaluation may affect the
+        # result. Including a bar already open at alert time creates look-back
+        # leakage from highs/lows that happened before the signal was sent.
+        interval_start = math.ceil(since_ts / 300.0) * 300
+        completed = []
+        for bar in resp.json().get("results") or []:
+            try:
+                bar_ts = float(bar["t"]) / 1000.0
+                values = (
+                    bar_ts,
+                    float(bar["o"]),
+                    float(bar["h"]),
+                    float(bar["l"]),
+                    float(bar["c"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if min(values[1:]) <= 0:
+                continue
+            if interval_start <= bar_ts and bar_ts + 300 <= until_ts:
+                completed.append(values)
+
+        if not completed:
+            return None
+        completed.sort(key=lambda item: item[0])
+        interval_complete = bool(
+            completed[0][0] <= interval_start + 600
+            and completed[-1][0] + 300 >= until_ts - 600
+        )
+        return {
+            "current": completed[-1][4],
+            "interval_open": completed[0][1],
+            "interval_high": max(item[2] for item in completed),
+            "interval_low": min(item[3] for item in completed),
+            "interval_complete": interval_complete,
+            "source": "polygon:stock:5m",
+        }
+    except Exception as exc:
+        log.debug(f"[SignalTracker] Stock-5m-Fetcher {ticker} fehlgeschlagen: {exc}")
+        return None
+
+
 def _tracker_crypto_fetcher(
     ticker,
     instrument_id=None,
@@ -1726,7 +1824,7 @@ def _followup_event_matches_position(event, position):
         position_signal_id = int(position.get("signal_id") or 0)
     except (TypeError, ValueError):
         position_signal_id = 0
-    if event_signal_id > 0 and position_signal_id > 0:
+    if position_signal_id > 0:
         return event_signal_id == position_signal_id
 
     if str(event.get("ticker") or "").strip().upper() != str(position.get("ticker") or "").strip().upper():
@@ -1734,6 +1832,58 @@ def _followup_event_matches_position(event, position):
     event_direction = "SHORT" if str(event.get("direction") or "").upper() == "SHORT" else "LONG"
     position_direction = "SHORT" if str(position.get("direction") or "").upper() == "SHORT" else "LONG"
     if event_direction != position_direction:
+        return False
+    event_setup_key = str(event.get("setup_key") or "").strip().lower()
+    position_setup_key = str(position.get("setup_key") or "").strip().lower()
+    identity_pairs = (
+        ("scanner", "scanner"),
+        ("strategy", "strategy"),
+        ("trade_horizon", "trade_horizon"),
+        ("asset_class", "asset_type"),
+        ("instrument_id", "instrument_id"),
+        ("venue", "venue"),
+        ("contract_symbol", "contract_symbol"),
+    )
+    for event_key, position_key in identity_pairs:
+        event_value = str(event.get(event_key) or "").strip().lower()
+        position_value = str(position.get(position_key) or "").strip().lower()
+        if event_value and position_value and event_value != position_value:
+            return False
+    if event_setup_key and position_setup_key and event_setup_key == position_setup_key:
+        return True
+
+    def _positive(value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+    position_entry = _positive(position.get("entry"))
+    position_stop = _positive(position.get("stop"))
+    event_entry = _positive(event.get("entry"))
+    event_stop = _positive(event.get("stop"))
+    if position_entry is not None or position_stop is not None:
+        if None in (position_entry, position_stop, event_entry, event_stop):
+            return False
+        position_risk = abs(position_entry - position_stop)
+        event_risk = abs(event_entry - event_stop)
+        tolerance_risk = max(position_risk, event_risk, position_entry * 0.002, 1e-9)
+        if abs(position_entry - event_entry) > 0.15 * tolerance_risk:
+            return False
+        if abs(position_stop - event_stop) > 0.15 * tolerance_risk:
+            return False
+        for target_key in ("tp1", "tp2"):
+            position_target = _positive(position.get(target_key))
+            event_target = _positive(event.get(target_key))
+            if position_target is not None and (
+                event_target is None
+                or abs(position_target - event_target) > 0.25 * tolerance_risk
+            ):
+                return False
+        return True
+
+    if position_setup_key:
         return False
     position_scanner = str(position.get("scanner") or "").strip().lower()
     event_scanner = str(event.get("scanner") or "").strip().lower()
@@ -2151,6 +2301,7 @@ def _run_signal_eval_job(secrets=None):
     try:
         stats = evaluate_open_signals(
             stock_daily_fetcher=_tracker_stock_fetcher,
+            stock_intraday_fetcher=_tracker_stock_intraday_fetcher,
             crypto_price_fetcher=_tracker_crypto_fetcher,
         ) or {}
         log.info(f"[SignalTracker] Eval-Lauf: evaluated={stats.get('evaluated', 0)} "

@@ -1044,9 +1044,33 @@ abgeleitet, weil Beobachtungsfenster und Stichprobe unvollständig sind.
 Signalzuordnung, Empfängerfilter und isolierten Retry; volle Suite
 **1405/1405 grün**, Python-Compile und `git diff --check` grün.
 
+### 3.32 6. August — Stabile Setup-Identität und Same-Day-Auswertung
+
+- Der Signal-Tracker identifiziert ein Setup nicht mehr nur über gerundete
+  Entry-/Stop-/TP-Werte. `setup_key`, Strategie und Zeithorizont werden
+  persistiert; für ältere Signale bleibt ein toleranter Geometrievergleich als
+  kontrollierter Fallback erhalten. Kleine Rundungs- oder Kursformatänderungen
+  erzeugen dadurch kein zweites scheinbar neues Signal.
+- Aktien-Signale vom laufenden Handelstag werden mit abgeschlossenen 5-Minuten-
+  Intervallen ausgewertet, statt bis zur nächsten Daily-Kerze offen zu bleiben.
+  Eine fehlende Intraday-Antwort wird weder als Kursfortschritt noch als
+  Datenfehler persistiert; der nächste Lauf darf sauber erneut prüfen.
+- Persönliche Positionen speichern dieselbe Setup-Identität und die relevanten
+  Plan-Level. Folge- und Stop-Mails im Modus `Nur meine Trades` werden zuerst per
+  Signal-ID beziehungsweise `setup_key` und erst danach über kompatible
+  Geometrie zugeordnet. Gleiches Symbol und gleiche Richtung allein reichen bei
+  mehreren Setups nicht mehr aus.
+- Erstsignal-Mails, Scanner-Ergebnisse und der globale Forward-Track-Record
+  bleiben weiterhin vollständig. Die persönliche Zuordnung verändert nur die
+  empfängerbezogenen Folge- und Stop-Mails.
+
+**Verifikation:** gezielte Tracker-/Positionssuite **43/43 grün**, vollständige
+Suite **1410/1410 grün**, Python-Compile, `git diff --check` und der verifizierte
+Frontend-Bundle-Hash **0c8663e92b1c** sind grün.
+
 ---
 
-## 4. Das Mail-System (Stand 05.08.2026)
+## 4. Das Mail-System (Stand 06.08.2026)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
 `info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT (nur Intraday-`trade`) /

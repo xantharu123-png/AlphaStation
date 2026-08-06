@@ -199,6 +199,33 @@ def test_record_dedupe_open_signal_per_scanner_ticker(tracker):
     assert tracker.record_alert_signals("breakout", [_base_row()]) == 1
 
 
+def test_explicit_setup_key_dedupes_rounded_versions_and_is_persisted(tracker):
+    first = _base_row(
+        setup_key="stock:AAPL:swing:2026-08-06",
+        strategy="Momentum Breakout Long",
+        trade_horizon="swing",
+    )
+    assert tracker.record_alert_signals("stock_strategy", [first]) == 1
+
+    stored = _signal("AAPL")
+    assert stored["setup_key"] == "stock:AAPL:swing:2026-08-06"
+    assert stored["strategy"] == "Momentum Breakout Long"
+    assert stored["trade_horizon"] == "swing"
+
+    rounded = _base_row(
+        Entry=100.04,
+        Preis=100.04,
+        StopLoss=95.04,
+        TP1=105.08,
+        TP2=110.08,
+        setup_key="stock:AAPL:swing:2026-08-06",
+        strategy="Momentum Breakout Long",
+        trade_horizon="swing",
+    )
+    assert tracker.record_alert_signals("bi_scanner", [rounded]) == 0
+    assert tracker.get_signal_count() == 1
+
+
 def test_crypto_dedupe_uses_instrument_identity_not_ambiguous_symbol(tracker):
     rows = [
         _base_row(
@@ -310,8 +337,64 @@ def test_evaluate_stock_ambiguous_same_day_conservative_stop(tracker):
     assert not sig["tp1_hit_at"]  # TP wird im Zweifel NICHT gutgeschrieben
 
 
+def test_same_day_stock_uses_intraday_interval_instead_of_daily_bars(tracker):
+    assert tracker.record_alert_signals("stock_strategy", [_base_row()]) == 1
+    created_at = datetime.fromisoformat(_signal("AAPL")["created_at"])
+    daily_calls = []
+    intraday_calls = []
+
+    def daily_fetcher(ticker, since_iso_date):
+        daily_calls.append((ticker, since_iso_date))
+        return []
+
+    def intraday_fetcher(ticker, **kwargs):
+        intraday_calls.append((ticker, kwargs))
+        return {
+            "current": 96.0,
+            "interval_open": 100.0,
+            "interval_high": 102.0,
+            "interval_low": 94.0,
+            "interval_complete": True,
+            "source": "polygon_5m",
+        }
+
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=daily_fetcher,
+        stock_intraday_fetcher=intraday_fetcher,
+        now=created_at + timedelta(minutes=10),
+    )
+
+    assert result["evaluated"] == 1
+    assert result["closed"] == 1
+    assert result["errors"] == 0
+    assert daily_calls == []
+    assert intraday_calls and intraday_calls[0][0] == "AAPL"
+    assert _signal("AAPL")["status"] == "STOP_HIT"
+
+
+def test_missing_same_day_stock_interval_does_not_advance_failure_state(tracker):
+    row = _base_row(Ticker="MSFT", Preis=99.0)
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    before = _signal("MSFT")
+    created_at = datetime.fromisoformat(before["created_at"])
+
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=lambda *_args: pytest.fail("daily fetcher must not run same-day"),
+        stock_intraday_fetcher=lambda _ticker, **_kwargs: None,
+        now=created_at + timedelta(minutes=10),
+    )
+
+    after = _signal("MSFT")
+    assert result["evaluated"] == 1
+    assert result["closed"] == 0
+    assert result["errors"] == 0
+    assert after["status"] == "OPEN"
+    assert after["last_eval_at"] == before["last_eval_at"]
+    assert after["eval_fail_count"] == before["eval_fail_count"] == 0
+
+
 def test_stock_gap_fill_is_rejected_when_slippage_breaks_plan(tracker):
-    row = _base_row(Ticker="FSLR", Preis=100.0, TP1=110.0, TP2=115.0)
+    row = _base_row(Ticker="FSLR", Preis=99.0, TP1=110.0, TP2=115.0)
     assert tracker.record_alert_signals("stock_strategy", [row]) == 1
 
     # Planned risk is 5. A gap-open at 108 would add 1.6R adverse slippage and

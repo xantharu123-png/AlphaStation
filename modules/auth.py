@@ -17,6 +17,7 @@ import secrets
 import sqlite3
 import threading
 import re
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable
 from pathlib import Path
@@ -1810,6 +1811,36 @@ def _normalize_personal_position(position: Dict[str, Any]) -> Optional[Dict[str,
     scanner = re.sub(r"[^a-z0-9_.-]", "", str(position.get("scanner") or "").strip().lower())[:48]
     asset_type = re.sub(r"[^a-z0-9_.-]", "", str(position.get("asset_type") or "").strip().lower())[:24]
     company_name = re.sub(r"[\x00-\x1f\x7f]", "", str(position.get("company_name") or "").strip())[:160]
+    setup_key = re.sub(
+        r"[^A-Za-z0-9._:-]", "", str(position.get("setup_key") or "").strip()
+    )[:160]
+    strategy = re.sub(
+        r"[\x00-\x1f\x7f]", "", str(position.get("strategy") or "").strip()
+    )[:160]
+    trade_horizon = re.sub(
+        r"[^a-z0-9_.-]", "", str(position.get("trade_horizon") or "").strip().lower()
+    )[:32]
+    instrument_id = re.sub(
+        r"[\x00-\x1f\x7f]", "", str(position.get("instrument_id") or "").strip()
+    )[:120]
+    venue = re.sub(r"[^a-z0-9_.-]", "", str(position.get("venue") or "").strip().lower())[:32]
+    contract_symbol = re.sub(
+        r"[^A-Z0-9._:/-]", "", str(position.get("contract_symbol") or "").strip().upper()
+    )[:64]
+
+    def _positive_price(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed) or parsed <= 0:
+            return None
+        return round(parsed, 10)
+
+    entry = _positive_price(position.get("entry"))
+    stop = _positive_price(position.get("stop"))
+    tp1 = _positive_price(position.get("tp1"))
+    tp2 = _positive_price(position.get("tp2"))
     try:
         signal_id = int(position.get("signal_id"))
     except (TypeError, ValueError):
@@ -1821,8 +1852,13 @@ def _normalize_personal_position(position: Dict[str, Any]) -> Optional[Dict[str,
         position_id = supplied_id
     elif signal_id:
         position_id = f"signal-{signal_id}"
+    elif setup_key:
+        position_id = "setup-" + hashlib.sha256(setup_key.encode("utf-8")).hexdigest()[:20]
     else:
-        fingerprint = f"{ticker}|{direction}|{scanner}".encode("utf-8")
+        fingerprint = (
+            f"{ticker}|{direction}|{scanner}|{strategy}|{trade_horizon}|"
+            f"{entry}|{stop}|{tp1}|{tp2}|{instrument_id}|{venue}|{contract_symbol}"
+        ).encode("utf-8")
         position_id = "position-" + hashlib.sha256(fingerprint).hexdigest()[:20]
     marked_at = str(position.get("marked_at") or "").strip()[:40] or _utc_iso()
     return {
@@ -1830,8 +1866,18 @@ def _normalize_personal_position(position: Dict[str, Any]) -> Optional[Dict[str,
         "ticker": ticker,
         "direction": direction,
         "signal_id": signal_id or None,
+        "setup_key": setup_key,
         "scanner": scanner,
+        "strategy": strategy,
+        "trade_horizon": trade_horizon,
         "asset_type": asset_type,
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "instrument_id": instrument_id,
+        "venue": venue,
+        "contract_symbol": contract_symbol,
         "company_name": company_name,
         "marked_at": marked_at,
     }
