@@ -78,16 +78,11 @@ from modules.scanners import (
     _biotech_cache_load,
     _bi_progress_read,
     _biotech_progress_read,
-    _autotrader_config_load,
-    _autotrader_config_save,
-    _autotrader_state_read,
-    _autotrader_state_write,
-    _autotrader_log,
-    _autotrader_request_stop,
     _autotrader_is_market_hours,
     autotrader_scan_once,
     autotrader_background_loop,
 )
+from modules import paper_autotrader as _paper_autotrader
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import (
     rate_limited_get,
@@ -31765,27 +31760,30 @@ _autotrader_thread = None
 class AutotraderConfigUpdate(BaseModel):
     config: dict
 
+
+class AutotraderArmRequest(BaseModel):
+    armed: bool
+    confirmation: str = ""
+
+
+class AutotraderStopUpdate(BaseModel):
+    ticker: str
+    stop: float
+
 @app.get("/api/autotrader/status")
 def autotrader_status(authorization: Optional[str] = Header(None)):
-    """Get Auto-Trader status, config, and recent log."""
+    """Return reconciled IBKR-paper truth and the guarded execution state."""
     _require_admin(authorization)
-    state = _autotrader_state_read()
-    config = _autotrader_config_load()
+    state = _paper_autotrader.reconcile_broker()
+    config = _paper_autotrader.config_load()
     market_hours = _autotrader_is_market_hours()
-    # Read log
-    log_entries = []
-    try:
-        import json as _json
-        with open("/tmp/alpha_autotrader_log.json", "r") as f:
-            log_entries = _json.load(f)
-    except Exception:
-        pass
     return {
         "state": state,
         "config": config,
+        "gate": _paper_autotrader.account_gate(state, config),
         "market_hours": market_hours,
         "thread_alive": _autotrader_thread is not None and _autotrader_thread.is_alive() if _autotrader_thread else False,
-        "log": log_entries[-50:],  # Last 50 entries
+        "log": _paper_autotrader.audit_read(50),
     }
 
 @app.post("/api/autotrader/config")
@@ -31793,13 +31791,66 @@ def autotrader_update_config(
     body: AutotraderConfigUpdate,
     authorization: Optional[str] = Header(None),
 ):
-    """Update Auto-Trader configuration."""
+    """Update bounded risk settings; execution state is changed only via /arm."""
     _require_admin(authorization)
-    config = _autotrader_config_load()
-    config.update(body.config)
-    _autotrader_config_save(config)
-    _autotrader_log(f"Config aktualisiert: {list(body.config.keys())}", "INFO")
-    return {"ok": True, "config": config}
+    guarded = sorted(
+        set(body.config).intersection({"mode", "paper_only", "execution_enabled", "kill_switch"})
+    )
+    config = _paper_autotrader.config_save(body.config)
+    _paper_autotrader.audit_log(
+        "Risk configuration updated",
+        "INFO",
+        fields=sorted(set(body.config) - set(guarded)),
+        ignored_execution_fields=guarded,
+    )
+    return {"ok": True, "config": config, "ignored_execution_fields": guarded}
+
+
+@app.post("/api/autotrader/reconcile")
+def autotrader_reconcile(authorization: Optional[str] = Header(None)):
+    _require_admin(authorization)
+    state = _paper_autotrader.reconcile_broker()
+    config = _paper_autotrader.config_load()
+    return {"ok": True, "state": state, "gate": _paper_autotrader.account_gate(state, config)}
+
+
+@app.post("/api/autotrader/arm")
+def autotrader_arm(
+    body: AutotraderArmRequest,
+    authorization: Optional[str] = Header(None),
+):
+    _require_admin(authorization)
+    if body.armed and body.confirmation.strip() != "PAPER AUTO AKTIVIEREN":
+        raise HTTPException(status_code=400, detail="Bestaetigung 'PAPER AUTO AKTIVIEREN' fehlt")
+    result = _paper_autotrader.set_execution_armed(body.armed)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "Paper-Ausfuehrung nicht bereit")
+    return result
+
+
+@app.post("/api/autotrader/kill-switch")
+def autotrader_kill_switch(authorization: Optional[str] = Header(None)):
+    _require_admin(authorization)
+    return _paper_autotrader.engage_kill_switch()
+
+
+@app.post("/api/autotrader/tighten-stop")
+def autotrader_tighten_stop(
+    body: AutotraderStopUpdate,
+    authorization: Optional[str] = Header(None),
+):
+    _require_admin(authorization)
+    result = _paper_autotrader.tighten_stop(body.ticker, body.stop)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "Stop konnte nicht geaendert werden")
+    return result
+
+
+@app.post("/api/autotrader/prune-intents")
+def autotrader_prune_intents(authorization: Optional[str] = Header(None)):
+    _require_admin(authorization)
+    _paper_autotrader.reconcile_broker()
+    return _paper_autotrader.prune_terminal_intents()
 
 @app.post("/api/autotrader/start")
 def autotrader_start(authorization: Optional[str] = Header(None)):
@@ -31815,18 +31866,19 @@ def autotrader_start(authorization: Optional[str] = Header(None)):
     _autotrader_clear_stop()
     _autotrader_thread = threading.Thread(target=autotrader_background_loop, args=(poly_key,), daemon=True)
     _autotrader_thread.start()
-    _autotrader_log("Auto-Trader gestartet via API", "INFO")
+    _paper_autotrader.audit_log("Auto-Trader scan loop started via API", "INFO")
     return {"ok": True, "message": "Auto-Trader gestartet"}
 
 @app.post("/api/autotrader/stop")
 def autotrader_stop(authorization: Optional[str] = Header(None)):
     """Stop the Auto-Trader background loop."""
     _require_admin(authorization)
-    _autotrader_request_stop()
-    state = _autotrader_state_read()
+    _paper_autotrader.request_stop()
+    _paper_autotrader.set_execution_armed(False)
+    state = _paper_autotrader.state_read()
     state["status"] = "stopped"
-    _autotrader_state_write(state)
-    _autotrader_log("Auto-Trader gestoppt via API", "INFO")
+    _paper_autotrader.state_write(state)
+    _paper_autotrader.audit_log("Auto-Trader scan loop stopped via API", "INFO")
     return {"ok": True, "message": "Auto-Trader wird gestoppt"}
 
 @app.post("/api/autotrader/scan-once")
@@ -31841,15 +31893,12 @@ def autotrader_run_single_scan(authorization: Optional[str] = Header(None)):
 
 @app.post("/api/autotrader/clear-positions")
 def autotrader_clear_positions(authorization: Optional[str] = Header(None)):
-    """Clear all tracked positions (does NOT close actual broker positions)."""
+    """Deprecated: broker positions must never be changed by editing local JSON."""
     _require_admin(authorization)
-    state = _autotrader_state_read()
-    state["positions"] = []
-    state["trades_today"] = 0
-    state["daily_pnl"] = 0
-    _autotrader_state_write(state)
-    _autotrader_log("Positionen zurückgesetzt via API", "INFO")
-    return {"ok": True}
+    raise HTTPException(
+        status_code=410,
+        detail="Lokales Loeschen ist gesperrt. Positionen und P&L kommen ausschliesslich von IBKR.",
+    )
 
 
 # ── Admin System ──

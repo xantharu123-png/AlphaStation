@@ -1030,9 +1030,9 @@ Sitzung nicht per SSH bestätigt.
   einem Nutzer blockiert keine anderen Nutzer; beim Retry wird nur der fehlende
   Empfänger erneut bedient. Mehrere Konten mit derselben Zieladresse werden sicher
   zusammengeführt; `all` hat dabei Vorrang vor `mine`.
-- Die Markierung ist ausdrücklich **keine Broker-Order**. Automatisierte
-  IBKR-Ausführung wird erst als eigenes Paper-Trading-Projekt mit expliziter
-  Freigabe, Positionslimits, Kill-Switch, Idempotenz und Order-Audit umgesetzt.
+- Die Markierung ist ausdrücklich **keine Broker-Order**. Diese Trennung bleibt
+  auch nach Einführung des Paper-AutoTraders bestehen: persönliche Positionen
+  und echte Broker-Positionen sind getrennte Datenquellen.
 
 **Mail-Stichprobe vom 3./4. August:** Die beigefügten Folge-Mails zeigen ein
 gemischtes Bild: unter anderem erreichte OWL TP2, KC und LBRX erreichten TP1;
@@ -1067,6 +1067,47 @@ Signalzuordnung, Empfängerfilter und isolierten Retry; volle Suite
 **Verifikation:** gezielte Tracker-/Positionssuite **43/43 grün**, vollständige
 Suite **1410/1410 grün**, Python-Compile, `git diff --check` und der verifizierte
 Frontend-Bundle-Hash **0c8663e92b1c** sind grün.
+
+### 3.33 8. August — Kontrollierter IBKR-Paper-AutoTrader
+
+- Die Ausführung ist technisch **Paper-only**. Standardzustand ist
+  `paper_review`, Ausführung aus und Kill-Switch aktiv. Nur ein von IBKR
+  gemeldetes `DU...`-Paperkonto darf das Konto-Gate passieren; Livekonten werden
+  unabhängig von UI oder Konfiguration abgewiesen.
+- Normale Risiko-Konfiguration kann den Ausführungszustand nicht verändern.
+  Arming erfordert einen Admin, die exakte Bestätigung
+  `PAPER AUTO AKTIVIEREN`, eine aktive Paper-Verbindung und sämtliche Konto- und
+  Risiko-Gates. Disarm und Kill-Switch bleiben jederzeit möglich.
+- IBKR ist die Quelle für Positionen, offene Orders, Fills, Kontowerte und
+  Tages-PnL. Nach Neustart oder Verbindungsunterbruch rekonstruiert die
+  Reconciliation den Brokerzustand; lokale Scheinpositionen, erfundener PnL und
+  ein manueller Positions-Reset sind ausgeschlossen.
+- Jeder Setup-Intent und jede Order erhält eine stabile, eindeutige Referenz.
+  Cooldown und Trade-Zähler beginnen erst nach echtem Fill. Auch ein vollständig
+  gefüllter und wieder geschlossener Trade zwischen zwei Abfragen bleibt über
+  die IBKR-Fills nachvollziehbar.
+- Pro Teilposition wird ein Parent mit Stop und Take-Profit als OCA-Gruppe
+  übermittelt. Reine Watch-/Retest-Signale werden nicht ausgeführt. Entry, Stop,
+  TP1 und TP2 müssen aus einem validierten Scanner-Plan stammen; der AutoTrader
+  erfindet keine Ersatz-Level.
+- Defensive Standardlimits: maximal 3 Positionen, 0,25 % Kontorisiko pro Trade,
+  1 % Tagesverlust, 2.000 USD Order-Notional, 20 % Bruttoexposure sowie Reserve-,
+  Stückzahl-, Mindest-R:R- und Daily-PnL-Prüfung.
+- Der Kill-Switch sperrt neue Ausführung und storniert ausschließlich noch nicht
+  gefüllte Alpha-Station-Parent-Entries. Er liquidiert keine bestehende Position
+  blind. Der Stop-Manager darf vorhandene Stops nur enger, niemals weiter vom
+  Risiko weg setzen.
+- Status, Reconciliation, Arming, Kill-Switch, Stop-Anpassung und Intent-Pruning
+  liegen hinter der Admin-Authentifizierung. Das Admin-Panel zeigt ausschließlich
+  den abgeglichenen Brokerzustand und ein persistentes Audit-Protokoll.
+- Technische Abnahme am 8. August 2026: **1417/1417 Repository-Tests** und
+  **123/123 fokussierte Paper-/Auth-/Frontend-Tests** bestanden; `api.py`,
+  `modules/scanners.py` und `modules/paper_autotrader.py` kompilieren fehlerfrei.
+  Das ausgelieferte Frontend-Bundle wurde aus der eingebetteten Quelle neu
+  erzeugt und mit Hash **c0b3b13a6c86** verifiziert.
+- Bewusste Grenze: Unit-/Integrationsprüfungen mit einem Fake-Broker ersetzen
+  keinen mehrtägigen TWS-/IB-Gateway-Paper-Soak. **Live-Trading ist nicht
+  freigegeben und bleibt blockiert.**
 
 ---
 
@@ -1238,7 +1279,7 @@ per-Empfänger-Dedupe und isolierter Retry; alle grün).
 | 6 | **Regime- und Zinssegmentierung auswerten:** ab ausreichend großen Zellen Marktregime und `rates_json` gegen Forward-Ergebnisse prüfen; zusätzliche Gates nur bei belastbarem Delta. | 3.12/3.26 |
 | 7 | **Auto-Update überwachen:** Cron-/Deploy-Log muss Pull, sicheren Testlauf, Service-Neustart und Health-Nachweis enthalten; bei Fehlern kein stilles Teil-Deployment. | `deploy/auto_update.sh`, `deploy/safe_deploy.sh` |
 | 8 | **Server-Grundpflege:** ausstehende Ubuntu-Updates/Reboot in einem Wartungsfenster über `bash deploy/os_maintenance.sh`; danach vollständige Service- und Health-Verifikation. | Infrastruktur |
-| 9 | **IBKR nur kontrolliert automatisieren:** zuerst Paper-Konto, explizite Nutzerfreigabe je Strategie, harte Positions-/Tagesverlustlimits, Kill-Switch, idempotente Order-IDs, Fill-/Reject-Audit und keine Order aus einem reinen Watch-/Retest-Signal. | Broker-Sicherheit, 3.31 |
+| 9 | **IBKR-Paper-Soak nachweisen:** TWS/IB Gateway mit DU-Konto über mehrere Sessions testen (Disconnect/Reconnect, Partial Fill, Reject, Gap, Stop/TP-OCA, Restart-Reconciliation, Kill-Switch). Erst nach dokumentierter Paper-Freigabe über Live-Automation neu entscheiden; aktuell bleibt Live blockiert. | Broker-Sicherheit, 3.31/3.33 |
 | 10 | **EN/DE-Sprach-Toggle:** UI bleibt derzeit bewusst deutsch; nur als eigenes Produktfeature umsetzen, nicht als Launch-Blocker. | UX |
 
 ---

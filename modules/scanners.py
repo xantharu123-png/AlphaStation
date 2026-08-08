@@ -36,24 +36,7 @@ from modules.vrvp_levels import (
     calculate_wilder_atr,
 )
 from modules.volume_metrics import historical_volume_baseline
-
-# AutoTrader: IBKR imports (optional — nur wenn ib_insync installiert)
-try:
-    from modules.brokers import (
-        Order,
-        _get_ib_state,
-        ib_calc_shares,
-        ib_get_contract,
-        ib_is_connected,
-        split_take_profit_shares,
-    )
-except ImportError:
-    def ib_is_connected(): return False
-    def ib_calc_shares(*a, **kw): return 0
-    def _get_ib_state(): return {}
-    def ib_get_contract(*a, **kw): return None
-    def split_take_profit_shares(*a, **kw): return []
-    Order = None
+from modules import paper_autotrader as _paper_autotrader
 
 # SPAC SIC Codes (für Biotech Scanner SPAC-Filter)
 SPAC_SIC_CODES = {"6770", "6726"}
@@ -259,28 +242,7 @@ _BIOTECH_FORWARD_RESULT_RE = re.compile(
 )
 
 # ── Constants (extracted from scanner.py V70.2) ──
-_AUTOTRADER_CONFIG_FILE = "/tmp/alpha_autotrader_config.json"
-_AUTOTRADER_STATE_FILE = "/tmp/alpha_autotrader_state.json"
-_AUTOTRADER_STOP_FILE = "/tmp/alpha_autotrader_stop"
-_AUTOTRADER_LOG_FILE = "/tmp/alpha_autotrader_log.json"
-
-_AUTOTRADER_DEFAULT_CONFIG = {
-    "mode": "semi",
-    "max_positions": 5,
-    "position_size_type": "dollar",
-    "position_size": 2000,
-    "excluded_grades": ["A"],
-    "min_bi_pct": 55,
-    "min_smart_money": 2,
-    "scan_interval_min": 15,
-    "max_daily_loss_pct": 3.0,
-    "cooldown_days": 5,
-    "trading_hours_only": True,
-    "min_rr": 2.0,
-    "max_tickers_scan": 300,
-    "min_price": 5.0,
-    "min_volume": 200000,
-}
+_AUTOTRADER_DEFAULT_CONFIG = dict(_paper_autotrader.DEFAULT_CONFIG)
 
 _BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
 _BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
@@ -313,24 +275,17 @@ _BIOTECH_DEFAULT_CONFIG = {
 
 def _autotrader_should_stop():
     """Prüft ob Stop-Signal gesetzt ist."""
-    return os.path.exists(_AUTOTRADER_STOP_FILE)
+    return _paper_autotrader.stop_requested()
 
 
 def _autotrader_request_stop():
     """Schreibt Stop-Signal für den AutoTrader Background-Thread."""
-    try:
-        with open(_AUTOTRADER_STOP_FILE, "w") as f:
-            f.write("stop")
-    except Exception:
-        pass
+    _paper_autotrader.request_stop()
 
 
 def _autotrader_clear_stop():
     """Löscht Stop-Signal."""
-    try:
-        os.remove(_AUTOTRADER_STOP_FILE)
-    except Exception:
-        pass
+    _paper_autotrader.clear_stop()
 
 
 def _autotrader_check_cooldown(ticker, cooldown_dict, cooldown_days):
@@ -433,64 +388,27 @@ def _biotech_universe_cache_file():
 
 def _autotrader_config_load():
     """Lädt Auto-Trader Konfiguration."""
-    try:
-        with open(_AUTOTRADER_CONFIG_FILE, "r") as f:
-            saved = json.load(f)
-        config = dict(_AUTOTRADER_DEFAULT_CONFIG)
-        config.update(saved)
-        return config
-    except Exception:
-        return dict(_AUTOTRADER_DEFAULT_CONFIG)
+    return _paper_autotrader.config_load()
 
 
 def _autotrader_config_save(config):
     """Speichert Auto-Trader Konfiguration persistent."""
-    try:
-        with open(_AUTOTRADER_CONFIG_FILE, "w") as f:
-            json.dump(config, f)
-    except Exception:
-        pass
+    return _paper_autotrader.config_save(config)
 
 
 def _autotrader_state_read():
     """Liest aktuellen Auto-Trader Status."""
-    try:
-        with open(_AUTOTRADER_STATE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"status": "stopped", "positions": [], "daily_pnl": 0, "trades_today": 0,
-                "last_scan": None, "cooldown_tickers": {}, "log": []}
+    return _paper_autotrader.state_read()
 
 
 def _autotrader_state_write(state):
     """Schreibt Auto-Trader Status."""
-    try:
-        with open(_AUTOTRADER_STATE_FILE, "w") as f:
-            json.dump(state, f, default=str)
-    except Exception:
-        pass
+    return _paper_autotrader.state_write(state)
 
 
 def _autotrader_log(message, level="INFO"):
     """Schreibt Log-Eintrag."""
-    try:
-        log_data = []
-        try:
-            with open(_AUTOTRADER_LOG_FILE, "r") as f:
-                log_data = json.load(f)
-        except Exception:
-            pass
-        log_data.append({
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "level": level,
-            "msg": message
-        })
-        # Behalte nur letzte 200 Einträge
-        log_data = log_data[-200:]
-        with open(_AUTOTRADER_LOG_FILE, "w") as f:
-            json.dump(log_data, f, default=str)
-    except Exception:
-        pass
+    _paper_autotrader.audit_log(message, level)
 
 
 def _autotrader_is_market_hours():
@@ -507,7 +425,7 @@ def _autotrader_is_market_hours():
         market_close = now_et.replace(hour=16, minute=0, second=0)
         return market_open <= now_et <= market_close
     except Exception:
-        return True  # Fallback: immer erlauben
+        return False
 
 
 def _autotrader_long_geometry(entry, stop, tp1, tp2):
@@ -527,38 +445,24 @@ def autotrader_scan_once(poly_key, config=None):
 
     Returns: dict mit signals_found, orders_placed, errors
     """
-    if config is None:
-        config = _autotrader_config_load()
-
-    state = _autotrader_state_read()
-    result = {"signals_found": 0, "orders_placed": 0, "errors": [], "signals": []}
+    config = _paper_autotrader.normalize_config(config or _autotrader_config_load())
+    state = _paper_autotrader.reconcile_broker()
+    result = {
+        "signals_found": 0,
+        "orders_placed": 0,
+        "errors": [],
+        "signals": [],
+        "mode": config.get("mode"),
+        "broker_connected": bool(state.get("broker_connected")),
+    }
 
     # Market Hours Check
     if config.get("trading_hours_only", True) and not _autotrader_is_market_hours():
         _autotrader_log(" Außerhalb Handelszeiten — Scan übersprungen", "INFO")
         result["errors"].append("Außerhalb Handelszeiten")
-        return result
-
-    # IBKR Connection Check
-    if not ib_is_connected():
-        _autotrader_log(" IBKR nicht verbunden — Scan übersprungen", "WARN")
-        result["errors"].append("IBKR nicht verbunden")
-        return result
-
-    # Max Positions Check
-    current_positions = len(state.get("positions", []))
-    max_pos = config.get("max_positions", 5)
-    if current_positions >= max_pos:
-        _autotrader_log(f" Max Positionen erreicht ({current_positions}/{max_pos})", "INFO")
-        result["errors"].append(f"Max Positionen: {current_positions}/{max_pos}")
-        return result
-
-    # Daily Loss Check
-    daily_pnl = state.get("daily_pnl", 0)
-    max_loss = config.get("max_daily_loss_pct", 3.0)
-    if daily_pnl < -max_loss:
-        _autotrader_log(f" Tages-Verlustlimit erreicht: {daily_pnl:.1f}% (Max: -{max_loss}%)", "WARN")
-        result["errors"].append(f"Tages-Verlustlimit: {daily_pnl:.1f}%")
+        state["last_scan"] = datetime.now(dt.timezone.utc).isoformat()
+        state["last_result"] = result
+        _autotrader_state_write(state)
         return result
 
     excluded_grades = set(config.get("excluded_grades", ["A"]))
@@ -825,132 +729,47 @@ def autotrader_scan_once(poly_key, config=None):
     # Sortiere nach Score (beste zuerst)
     qualified_signals.sort(key=lambda x: x["score_pct"], reverse=True)
 
-    # Begrenze auf verfügbare Slots
-    slots_available = max_pos - current_positions
-    signals_to_trade = qualified_signals[:slots_available]
+    # Review the strongest proposals independently of broker availability.
+    # Only paper_autotrader may turn a proposal into an IBKR order; it owns the
+    # paper-account, risk, exposure, sizing and duplicate-order gates.
+    result["signals_found"] = len(qualified_signals)
+    signals_to_review = qualified_signals[:20]
+    _autotrader_log(
+        f" {len(qualified_signals)} qualifizierte Signale, "
+        f"{len(signals_to_review)} werden zentral geprueft",
+        "INFO",
+    )
 
-    _autotrader_log(f" {len(qualified_signals)} qualifizierte Signale, {len(signals_to_trade)} werden getradet", "INFO")
-
-    # Orders an IBKR senden
-    for signal in signals_to_trade:
+    for signal in signals_to_review:
+        signal = {**signal, "direction": "LONG"}
         try:
-            # Position Size berechnen
-            shares = ib_calc_shares(
-                signal["entry"],
-                config.get("position_size", 2000),
-                "Dollar" if config.get("position_size_type") == "dollar" else "Shares"
-            )
-
-            if shares <= 0:
-                continue
-
-            # Bracket Order senden
-            # Mode: "full" → transmit=True (auto-execute), "semi" → transmit=False (confirm in TWS)
-            is_full_auto = config.get("mode") == "full"
-
-            ib_state = _get_ib_state()
-            ib = ib_state.get("ib")
-            if not ib or not ib.isConnected():
-                _autotrader_log(f" IBKR Verbindung verloren bei {signal['ticker']}", "ERROR")
-                result["errors"].append(f"IBKR offline bei {signal['ticker']}")
-                break
-
-            # Contract erstellen
-            contract = ib_get_contract(signal["ticker"], "Aktien", "US")
-            if not contract:
-                _autotrader_log(f" Contract nicht gefunden: {signal['ticker']}", "WARN")
-                continue
-
-            try:
-                qualified = ib.qualifyContracts(contract)
-                if not qualified:
-                    continue
-            except Exception:
-                continue
-
-            # Bracket Order bauen
-            main_action = "BUY"
-            exit_action = "SELL"
-
-            # Parent: Stop-limit breakout order. A buy-limit above market can
-            # execute immediately and silently turn a trigger into a chase.
-            parent = Order(
-                action=main_action,
-                orderType="STP LMT",
-                auxPrice=round(signal["entry"], 2),
-                lmtPrice=round(signal["stop_limit"], 2),
-                totalQuantity=shares,
-                transmit=False
-            )
-            parent_trade = ib.placeOrder(contract, parent)
-            parent_id = parent_trade.order.orderId
-
-            # Stop Loss
-            stop_order = Order(
-                action=exit_action,
-                orderType="STP",
-                auxPrice=round(signal["stop"], 2),
-                totalQuantity=shares,
-                parentId=parent_id,
-                transmit=False
-            )
-            ib.placeOrder(contract, stop_order)
-
-            # Split exits without ever creating a zero-quantity child. A
-            # one-share position therefore receives TP1 only.
-            allocations = split_take_profit_shares(shares, target_count=2)
-            targets = (signal["tp1"], signal["tp2"])
-            for index, (target_price, quantity) in enumerate(zip(targets, allocations)):
-                tp_order = Order(
-                    action=exit_action,
-                    orderType="LMT",
-                    lmtPrice=round(target_price, 2),
-                    totalQuantity=quantity,
-                    parentId=parent_id,
-                    transmit=is_full_auto and index == len(allocations) - 1,
-                )
-                ib.placeOrder(contract, tp_order)
-
-            ib.sleep(0.3)
-
-            # Position tracken
-            position_entry = {
-                "ticker": signal["ticker"],
-                "grade": signal["grade"],
-                "entry": signal["entry"],
-                "stop": signal["stop"],
-                "tp1": signal["tp1"],
-                "tp2": signal["tp2"],
-                "shares": shares,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "parent_id": parent_id,
-                "mode": "AUTO" if is_full_auto else "SEMI",
-                "score_pct": signal["score_pct"],
-                "rr": signal["rr"],
+            execution = _paper_autotrader.submit_signal(signal)
+        except Exception as exc:
+            execution = {
+                "success": False,
+                "submitted": False,
+                "error": str(exc)[:200],
             }
-            state["positions"].append(position_entry)
-            state["cooldown_tickers"][signal["ticker"]] = datetime.now().strftime("%Y-%m-%d")
-            state["trades_today"] = state.get("trades_today", 0) + 1
-
-            result["orders_placed"] += 1
-            result["signals"].append(signal)
-
-            mode_label = " AUTO" if is_full_auto else " SEMI"
             _autotrader_log(
-                f"{mode_label} ORDER: {signal['ticker']} Grade {signal['grade']} | "
-                f"Entry ${signal['entry']} | SL ${signal['stop']} | TP1 ${signal['tp1']} | "
-                f"TP2 ${signal['tp2']} | {shares} Shares | R:R {signal['rr']}",
-                "TRADE"
+                f" Zentrale Ausfuehrungspruefung fehlgeschlagen {signal['ticker']}: "
+                f"{str(exc)[:100]}",
+                "ERROR",
+            )
+        result["signals"].append({**signal, "execution": execution})
+        if execution.get("submitted"):
+            result["orders_placed"] += 1
+            _autotrader_log(
+                f" PAPER ORDER: {signal['ticker']} Grade {signal['grade']} | "
+                f"Entry ${signal['entry']} | SL ${signal['stop']} | "
+                f"TP1 ${signal['tp1']} | TP2 ${signal['tp2']} | R:R {signal['rr']}",
+                "TRADE",
             )
 
-        except Exception as e:
-            _autotrader_log(f" Order-Fehler {signal['ticker']}: {str(e)[:80]}", "ERROR")
-            result["errors"].append(f"{signal['ticker']}: {str(e)[:50]}")
-
-    # State speichern
-    state["last_scan"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    state["status"] = "running"
+    # Persist scan metadata, but replace all market/account truth with a fresh
+    # broker reconciliation after possible submissions.
+    state = _paper_autotrader.reconcile_broker()
+    state["last_scan"] = datetime.now(dt.timezone.utc).isoformat()
+    state["last_result"] = result
     _autotrader_state_write(state)
 
     del ticker_history  # Memory freigeben
@@ -972,10 +791,8 @@ def autotrader_background_loop(poly_key):
     config = _autotrader_config_load()
     interval_sec = config.get("scan_interval_min", 15) * 60
 
-    state = _autotrader_state_read()
+    state = _paper_autotrader.reconcile_broker()
     state["status"] = "running"
-    state["trades_today"] = 0
-    state["daily_pnl"] = 0
     _autotrader_state_write(state)
 
     _autotrader_log(" Auto-Trader gestartet", "INFO")
@@ -1003,7 +820,7 @@ def autotrader_background_loop(poly_key):
             time.sleep(60)  # 1 Min warten bei Fehler
 
     # Aufräumen
-    state = _autotrader_state_read()
+    state = _paper_autotrader.reconcile_broker()
     state["status"] = "stopped"
     _autotrader_state_write(state)
     _autotrader_clear_stop()

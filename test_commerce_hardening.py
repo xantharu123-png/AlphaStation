@@ -91,6 +91,13 @@ def test_operational_diagnostics_and_global_autotrader_require_admin():
         lambda: api.get_catalyst_data_status(None),
         lambda: api.autotrader_status(None),
         lambda: api.autotrader_update_config(api.AutotraderConfigUpdate(config={}), None),
+        lambda: api.autotrader_reconcile(None),
+        lambda: api.autotrader_arm(api.AutotraderArmRequest(armed=False), None),
+        lambda: api.autotrader_kill_switch(None),
+        lambda: api.autotrader_tighten_stop(
+            api.AutotraderStopUpdate(ticker="AAPL", stop=100), None
+        ),
+        lambda: api.autotrader_prune_intents(None),
         lambda: api.autotrader_start(None),
         lambda: api.autotrader_stop(None),
         lambda: api.autotrader_run_single_scan(None),
@@ -101,6 +108,44 @@ def test_operational_diagnostics_and_global_autotrader_require_admin():
         with pytest.raises(api.HTTPException) as denied:
             protected_call()
         assert denied.value.status_code == 403
+
+
+def test_autotrader_arm_requires_exact_confirmation(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_require_admin",
+        lambda _authorization: ({"email": "admin@example.com"}, "admin@example.com"),
+    )
+    calls = []
+    monkeypatch.setattr(
+        api._paper_autotrader,
+        "set_execution_armed",
+        lambda armed: calls.append(armed) or {"ok": True, "armed": armed},
+    )
+
+    with pytest.raises(api.HTTPException) as denied:
+        api.autotrader_arm(
+            api.AutotraderArmRequest(armed=True, confirmation="aktivieren"),
+            "Bearer admin",
+        )
+    assert denied.value.status_code == 400
+    assert calls == []
+
+    result = api.autotrader_arm(
+        api.AutotraderArmRequest(
+            armed=True,
+            confirmation="PAPER AUTO AKTIVIEREN",
+        ),
+        "Bearer admin",
+    )
+    assert result["ok"] is True
+    assert calls == [True]
+
+    api.autotrader_arm(
+        api.AutotraderArmRequest(armed=False),
+        "Bearer admin",
+    )
+    assert calls == [True, False]
 
 
 def test_non_admin_frontend_does_not_offer_global_autotrader():
