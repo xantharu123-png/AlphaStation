@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 BRANCH="${BRANCH:-main}"
+EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 COMMERCIAL_DEPLOY="${COMMERCIAL_DEPLOY:-auto}"
 # Zielarchitektur: tradingbot-api (FastAPI :8000) + tradingbot-bg
 # (bg_service.py); das statische Frontend wird von nginx ausgeliefert.
@@ -139,6 +140,72 @@ run_source_checks() {
   )
 }
 
+frontend_bundle_revision() {
+  local bundle_path="${1:-$APP_DIR/frontend/app.bundle.js}"
+  "$PYTHON" - "$bundle_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    head = path.read_text(encoding="utf-8")[:512]
+except OSError as exc:
+    raise SystemExit(f"cannot read frontend bundle metadata: {exc}")
+match = re.search(r"app-source-sha256:\s*([0-9a-f]{64})", head)
+if not match:
+    raise SystemExit("frontend bundle source hash is missing")
+print(match.group(1)[:12])
+PY
+}
+
+verify_runtime_revision() {
+  local health_file="$1"
+  local expected_revision="$2"
+  local expected_bundle="$3"
+  "$PYTHON" - "$health_file" "$expected_revision" "$expected_bundle" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+health_file = Path(sys.argv[1])
+expected_revision = sys.argv[2].strip().lower()
+expected_bundle = sys.argv[3].strip().lower()
+try:
+    payload = json.loads(health_file.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"cannot parse API build health: {exc}")
+
+actual_revision = str(payload.get("revision") or "").strip().lower()
+actual_bundle = str(payload.get("frontend_bundle") or "").strip().lower()
+errors = []
+if actual_revision != expected_revision:
+    errors.append(f"API revision {actual_revision or 'missing'} != {expected_revision}")
+if actual_bundle != expected_bundle:
+    errors.append(f"API frontend bundle {actual_bundle or 'missing'} != {expected_bundle}")
+if errors:
+    raise SystemExit("; ".join(errors))
+print(f"[deploy] Runtime build matches target: {actual_revision}, frontend {actual_bundle}")
+PY
+}
+
+read_env_value() {
+  local key="$1"
+  if [ ! -f "$APP_DIR/.env" ]; then
+    return 0
+  fi
+  awk -F= -v key="$key" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      value = substr($0, index($0, "=") + 1)
+    }
+    END {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^\"|\"$/, "", value)
+      print value
+    }
+  ' "$APP_DIR/.env" 2>/dev/null
+}
+
 verify_commercial_edge() {
   if [ "$COMMERCIAL_DEPLOY" != "1" ]; then
     return 0
@@ -148,22 +215,62 @@ verify_commercial_edge() {
 }
 
 verify_frontend_delivery() {
-  if [ "$LEGACY_FRONTEND_ACTIVE" != "1" ]; then
-    return 0
-  fi
-  served_frontend="$(mktemp /tmp/alphastation-served-frontend.XXXXXX)"
-  if ! curl -fsS "http://127.0.0.1:3000/" -o "$served_frontend"; then
-    rm -f -- "$served_frontend"
-    echo "[deploy] Legacy frontend on :3000 is not reachable after restart."
+  local served_dir served_index served_bundle served_boot public_app_url public_host public_port
+  served_dir="$(mktemp -d /tmp/alphastation-served-frontend.XXXXXX)"
+  served_index="$served_dir/index.html"
+  served_bundle="$served_dir/app.bundle.js"
+  served_boot="$served_dir/boot.js"
+
+  if [ "$LEGACY_FRONTEND_ACTIVE" = "1" ]; then
+    if ! curl -fsS --connect-timeout 5 --max-time 20 "http://127.0.0.1:3000/" -o "$served_index" \
+      || ! curl -fsS --connect-timeout 5 --max-time 20 "http://127.0.0.1:3000/app.bundle.js" -o "$served_bundle" \
+      || ! curl -fsS --connect-timeout 5 --max-time 20 "http://127.0.0.1:3000/boot.js" -o "$served_boot"; then
+      rm -rf -- "$served_dir"
+      echo "[deploy] Legacy frontend on :3000 is not fully reachable after restart."
+      return 1
+    fi
+  elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+    public_app_url="$(read_env_value PUBLIC_APP_URL)"
+    public_app_url="${public_app_url%/}"
+    if [[ "$public_app_url" =~ ^https://([^/:]+)(/)?$ ]]; then
+      public_host="${BASH_REMATCH[1]}"
+      if ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:443:127.0.0.1" "$public_app_url/" -o "$served_index" \
+        || ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:443:127.0.0.1" "$public_app_url/app.bundle.js" -o "$served_bundle" \
+        || ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:443:127.0.0.1" "$public_app_url/boot.js" -o "$served_boot"; then
+        rm -rf -- "$served_dir"
+        echo "[deploy] nginx frontend is not fully reachable at $public_app_url."
+        return 1
+      fi
+    elif [[ "$public_app_url" =~ ^http://([^/:]+)(:([0-9]+))?(/)?$ ]]; then
+      public_host="${BASH_REMATCH[1]}"
+      public_port="${BASH_REMATCH[3]:-80}"
+      if ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:$public_port:127.0.0.1" "$public_app_url/" -o "$served_index" \
+        || ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:$public_port:127.0.0.1" "$public_app_url/app.bundle.js" -o "$served_bundle" \
+        || ! curl -fsS --connect-timeout 5 --max-time 20 --resolve "$public_host:$public_port:127.0.0.1" "$public_app_url/boot.js" -o "$served_boot"; then
+        rm -rf -- "$served_dir"
+        echo "[deploy] nginx frontend is not fully reachable at $public_app_url."
+        return 1
+      fi
+    else
+      rm -rf -- "$served_dir"
+      echo "[deploy] Cannot verify nginx frontend: PUBLIC_APP_URL is missing or invalid."
+      return 1
+    fi
+  else
+    rm -rf -- "$served_dir"
+    echo "[deploy] No active frontend delivery service found."
     return 1
   fi
-  if ! cmp -s "$APP_DIR/frontend/index.html" "$served_frontend"; then
-    rm -f -- "$served_frontend"
-    echo "[deploy] Legacy frontend serves a different index.html than the deployed revision."
+
+  if ! cmp -s "$APP_DIR/frontend/index.html" "$served_index" \
+    || ! cmp -s "$APP_DIR/frontend/app.bundle.js" "$served_bundle" \
+    || ! cmp -s "$APP_DIR/frontend/boot.js" "$served_boot"; then
+    rm -rf -- "$served_dir"
+    echo "[deploy] Served frontend files do not match the deployed revision."
     return 1
   fi
-  rm -f -- "$served_frontend"
-  echo "[deploy] Frontend delivery on :3000 matches the deployed revision."
+  rm -rf -- "$served_dir"
+  echo "[deploy] Served index, app bundle and boot script match the deployed revision."
 }
 
 configure_api_bind_mode() {
@@ -232,7 +339,7 @@ prepare_runtime_state() {
 # hardened units can replace a legacy /root/venv service definition.
 ensure_runtime_dependencies
 
-old_rev="$(git rev-parse --short HEAD)"
+old_rev="$(git rev-parse --short=12 HEAD)"
 old_rev_full="$(git rev-parse HEAD)"
 echo "[deploy] Current revision: $old_rev"
 
@@ -274,8 +381,17 @@ rollback_deployment() {
   fi
 
   if [ "$rollback_status" -eq 0 ]; then
+    rollback_rev="$(git rev-parse --short=12 HEAD)"
+    rollback_bundle="$(frontend_bundle_revision "$APP_DIR/frontend/app.bundle.js")"
+    rollback_status=$?
+  fi
+
+  if [ "$rollback_status" -eq 0 ]; then
     for _ in $(seq 1 20); do
-      if curl -fsS "http://127.0.0.1:8000/api/health" >/tmp/tradingbot-rollback-health.json; then
+      if curl -fsS "http://127.0.0.1:8000/api/health" >/tmp/tradingbot-rollback-health.json \
+        && verify_runtime_revision /tmp/tradingbot-rollback-health.json "$rollback_rev" "$rollback_bundle" \
+        && verify_frontend_delivery \
+        && verify_commercial_edge; then
         echo "[deploy] Rollback health OK; previous revision restored."
         cat /tmp/tradingbot-rollback-health.json
         set -e
@@ -304,8 +420,22 @@ handle_deploy_error() {
 }
 
 git fetch origin "$BRANCH"
-new_rev="$(git rev-parse --short "origin/$BRANCH")"
+new_rev_full="$(git rev-parse "origin/$BRANCH")"
+new_rev="$(git rev-parse --short=12 "origin/$BRANCH")"
 echo "[deploy] Target revision:  $new_rev"
+
+if [ -n "$EXPECTED_REVISION" ]; then
+  expected_revision="$(printf '%s' "$EXPECTED_REVISION" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "$expected_revision" =~ ^[0-9a-f]{12,40}$ ]]; then
+    echo "[deploy] EXPECTED_REVISION is not a valid Git revision: $EXPECTED_REVISION"
+    exit 1
+  fi
+  if [ "${new_rev_full:0:${#expected_revision}}" != "$expected_revision" ]; then
+    echo "[deploy] Fetched target $new_rev does not match expected revision ${expected_revision:0:12}."
+    exit 1
+  fi
+  echo "[deploy] Auto-update target binding verified: ${expected_revision:0:12}"
+fi
 
 if [ "$old_rev" = "$new_rev" ]; then
   echo "[deploy] Already up to date."
@@ -343,6 +473,15 @@ else
   fi
 fi
 
+active_rev_full="$(git rev-parse HEAD)"
+active_rev="$(git rev-parse --short=12 HEAD)"
+if [ "$active_rev_full" != "$new_rev_full" ]; then
+  echo "[deploy] Checked-out revision $active_rev does not match fetched target $new_rev."
+  false
+fi
+active_bundle="$(frontend_bundle_revision "$APP_DIR/frontend/app.bundle.js")"
+echo "[deploy] Deploy identity: revision $active_rev, frontend $active_bundle"
+
 ensure_runtime_dependencies
 
 run_source_checks "$APP_DIR" "Deployed revision"
@@ -376,8 +515,20 @@ for _ in $(seq 1 20); do
       cat /tmp/tradingbot-health.json
       false
     fi
+    if ! curl -fsS "http://127.0.0.1:8000/api/health" >/tmp/tradingbot-build-health.json; then
+      sleep 2
+      continue
+    fi
+    if ! verify_runtime_revision /tmp/tradingbot-build-health.json "$active_rev" "$active_bundle"; then
+      echo "[deploy] API is reachable but still serves a different build; waiting..."
+      sleep 2
+      continue
+    fi
     echo "[deploy] Health OK"
     cat /tmp/tradingbot-health.json
+    if [ "$HEALTH_URL" != "http://127.0.0.1:8000/api/health" ]; then
+      cat /tmp/tradingbot-build-health.json
+    fi
     verify_frontend_delivery
     verify_commercial_edge
     trap - ERR

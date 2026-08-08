@@ -32,6 +32,7 @@ import uuid
 import tempfile  # AUDIT H-10: atomare Cache-Writes
 import traceback
 import ipaddress
+import subprocess
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
@@ -647,6 +648,43 @@ ORB_SCAN_END_MINUTE = 16 * 60
 
 # ── Configuration & Constants ──
 API_VERSION = "1.0.0"
+
+
+def _detect_build_revision() -> str:
+    """Return the immutable Git revision served by this API process."""
+    configured = str(os.environ.get("APP_REVISION") or os.environ.get("GIT_COMMIT") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{12,40}", configured):
+        return configured[:12]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        revision = result.stdout.strip().lower()
+        if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{12}", revision):
+            return revision
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def _detect_frontend_bundle_revision() -> str:
+    """Return the source hash embedded in the generated frontend bundle."""
+    bundle_path = Path(__file__).resolve().parent / "frontend" / "app.bundle.js"
+    try:
+        bundle_head = bundle_path.read_text(encoding="utf-8")[:512]
+    except OSError:
+        return "unknown"
+    match = re.search(r"app-source-sha256:\s*([0-9a-f]{64})", bundle_head)
+    return match.group(1)[:12] if match else "unknown"
+
+
+BUILD_REVISION = _detect_build_revision()
+FRONTEND_BUNDLE_REVISION = _detect_frontend_bundle_revision()
 POLYGON_KEY = os.getenv("POLYGON_KEY", "")
 BPIQ_API_KEY = os.getenv("BPIQ_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -9493,6 +9531,8 @@ class TradeReminderRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+    revision: str
+    frontend_bundle: str
     timestamp: str
     api_keys_configured: Dict[str, bool]
 
@@ -17814,6 +17854,8 @@ def get_health():
     return HealthResponse(
         status="healthy",
         version=API_VERSION,
+        revision=BUILD_REVISION,
+        frontend_bundle=FRONTEND_BUNDLE_REVISION,
         timestamp=datetime.now().isoformat(),
         api_keys_configured={} if COMMERCIAL_STRICT_MODE else {
             "market_data": bool(POLYGON_KEY),
@@ -17956,6 +17998,8 @@ def _build_system_health() -> Dict[str, Any]:
     return {
         "status": overall,
         "version": API_VERSION,
+        "revision": BUILD_REVISION,
+        "frontend_bundle": FRONTEND_BUNDLE_REVISION,
         "timestamp": datetime.now().isoformat(),
         "api_keys_configured": api_keys,
         "email_alerts": email_alerts,

@@ -1109,6 +1109,30 @@ Frontend-Bundle-Hash **0c8663e92b1c** sind grün.
   keinen mehrtägigen TWS-/IB-Gateway-Paper-Soak. **Live-Trading ist nicht
   freigegeben und bleibt blockiert.**
 
+### 3.34 8. August - Revisionsgebundener Auto-Deploy und Frontend-Nachweis
+
+- Der Auto-Updater fuehrt bei einem neuen `origin/main` nicht mehr das moeglicherweise
+  veraltete lokale Deploy-Skript aus. Er extrahiert `deploy/safe_deploy.sh` direkt
+  aus dem gefetchten Ziel-Commit und uebergibt dessen vollstaendige Revision als
+  `EXPECTED_REVISION`.
+- `safe_deploy.sh` prueft vor und nach dem Pull, dass erwarteter Ziel-Commit,
+  ausgechecktes `HEAD` und der spaeter laufende API-Prozess exakt zusammenpassen.
+  `/api/health` und `/api/system-health` liefern dafuer `revision` und
+  `frontend_bundle`.
+- Ein HTTP-200 allein gilt nicht mehr als erfolgreicher Rollout. Die API muss die
+  erwartete Git-Revision und den erwarteten Bundle-Hash melden; zusaetzlich muessen
+  ausgeliefertes `index.html`, `app.bundle.js` und `boot.js` bytegleich mit dem
+  ausgecheckten Ziel-Commit sein.
+- Derselbe Identitaetsvertrag gilt beim automatischen Rollback. Erst wenn alter
+  Commit, API-Revision, Bundle-Hash und ausgelieferte Frontend-Dateien wieder
+  uebereinstimmen, wird der Rollback als gesund gemeldet.
+- Dadurch bedeutet `Health OK` nun: exakt der gefetchte Build ist aktiv. Ein
+  GitHub-Push oder ein beliebiger erreichbarer Health-Endpunkt allein bleibt kein
+  Produktionsnachweis.
+- Lokale Abnahme: 93 Fokus-Tests und 1420 Tests der vollen Suite sowie Bash-Syntax,
+  Python-Compile und Frontend-Bundle-Pruefung waren gruen. Der separate
+  Produktionsnachweis bleibt bis zur Serverpruefung offen.
+
 ---
 
 ## 4. Das Mail-System (Stand 06.08.2026)

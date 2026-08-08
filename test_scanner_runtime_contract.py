@@ -20,6 +20,12 @@ def test_bi_scanner_uses_one_progress_display():
 def test_auto_update_runs_transactional_safe_deploy():
     source = (ROOT / "deploy" / "auto_update.sh").read_text(encoding="utf-8")
 
-    assert 'bash "$APP_DIR/deploy/safe_deploy.sh"' in source
+    assert "set -Eeuo pipefail" in source
+    assert 'EXPECTED_REVISION="$REMOTE"' in source
+    assert 'git show "${REMOTE}:deploy/safe_deploy.sh" > "$TARGET_DEPLOY"' in source
+    assert 'bash "$TARGET_DEPLOY"' in source
+    assert "trap cleanup_target_deploy EXIT" in source
+    assert 'git fetch fehlgeschlagen (Netz?) — Deployment nicht gestartet' in source
+    assert source.count("exit 1") >= 3
     assert "systemctl restart tradingbot-api tradingbot-bg" not in source
     assert "git pull --ff-only origin main" not in source

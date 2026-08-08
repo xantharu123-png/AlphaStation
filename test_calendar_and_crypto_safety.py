@@ -88,7 +88,9 @@ def test_scanner_quality_and_safe_deploy_are_present():
     assert "systemctl restart" in deploy_script
     assert "verify_frontend_delivery" in deploy_script
     assert "tradingbot-frontend.service" in deploy_script
-    assert 'cmp -s "$APP_DIR/frontend/index.html" "$served_frontend"' in deploy_script
+    assert 'cmp -s "$APP_DIR/frontend/index.html" "$served_index"' in deploy_script
+    assert 'cmp -s "$APP_DIR/frontend/app.bundle.js" "$served_bundle"' in deploy_script
+    assert 'cmp -s "$APP_DIR/frontend/boot.js" "$served_boot"' in deploy_script
     assert "configure_api_bind_mode" in deploy_script
     assert "legacy-direct-frontend.conf" in deploy_script
     assert 'Environment="API_BIND_HOST=0.0.0.0"' in deploy_script

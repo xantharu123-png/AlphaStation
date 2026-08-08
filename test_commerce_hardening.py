@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1497,6 +1498,70 @@ def test_deploy_rolls_back_code_dependencies_and_units_after_live_failure():
     assert 'trap handle_deploy_error ERR' in deploy
     assert "Rollback health OK; previous revision restored." in deploy
     assert "Tracked worktree changes detected" in deploy
+
+
+def test_deploy_binds_api_and_frontend_to_the_exact_target_revision():
+    root = Path(__file__).parent
+    deploy = (root / "deploy" / "safe_deploy.sh").read_text(encoding="utf-8")
+    api_source = (root / "api.py").read_text(encoding="utf-8")
+
+    assert "BUILD_REVISION = _detect_build_revision()" in api_source
+    assert "FRONTEND_BUNDLE_REVISION = _detect_frontend_bundle_revision()" in api_source
+    assert "revision=BUILD_REVISION" in api_source
+    assert "frontend_bundle=FRONTEND_BUNDLE_REVISION" in api_source
+    assert 'EXPECTED_REVISION="${EXPECTED_REVISION:-}"' in deploy
+    assert 'new_rev_full="$(git rev-parse "origin/$BRANCH")"' in deploy
+    assert "does not match expected revision" in deploy
+    assert "verify_runtime_revision" in deploy
+    assert "API revision" in deploy
+    assert "API frontend bundle" in deploy
+    assert 'curl -fsS "http://127.0.0.1:8000/api/health"' in deploy
+
+    runtime_check_pos = deploy.index(
+        "verify_runtime_revision /tmp/tradingbot-build-health.json"
+    )
+    health_ok_pos = deploy.index('echo "[deploy] Health OK"')
+    assert runtime_check_pos < health_ok_pos
+
+    assert '"http://127.0.0.1:3000/app.bundle.js"' in deploy
+    assert '"http://127.0.0.1:3000/boot.js"' in deploy
+    assert "--resolve" in deploy
+    assert 'cmp -s "$APP_DIR/frontend/index.html"' in deploy
+    assert 'cmp -s "$APP_DIR/frontend/app.bundle.js"' in deploy
+    assert 'cmp -s "$APP_DIR/frontend/boot.js"' in deploy
+    assert "Served frontend files do not match the deployed revision" in deploy
+
+    rollback_pos = deploy.index("rollback_deployment()")
+    rollback_health_pos = deploy.index(
+        "verify_runtime_revision /tmp/tradingbot-rollback-health.json",
+        rollback_pos,
+    )
+    rollback_success_pos = deploy.index(
+        "Rollback health OK; previous revision restored.",
+        rollback_pos,
+    )
+    assert rollback_health_pos < rollback_success_pos
+
+
+def test_health_reports_a_verifiable_runtime_and_frontend_identity():
+    health = api.get_health().model_dump()
+
+    assert re.fullmatch(r"(?:[0-9a-f]{12}|unknown)", health["revision"])
+    assert re.fullmatch(r"(?:[0-9a-f]{12}|unknown)", health["frontend_bundle"])
+    assert health["revision"] == api.BUILD_REVISION
+    assert health["frontend_bundle"] == api.FRONTEND_BUNDLE_REVISION
+
+
+def test_build_revision_rejects_ambiguous_short_environment_hash(monkeypatch):
+    monkeypatch.setenv("APP_REVISION", "abc1234")
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+
+    assert api._detect_build_revision() == "unknown"
 
 
 def test_deploy_synchronizes_hardened_service_units_before_restart():

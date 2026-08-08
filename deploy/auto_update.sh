@@ -13,7 +13,7 @@
 # Pruefen:  crontab -l   und   tail -5 /var/log/alpha_autoupdate.log
 # Abklemmen: crontab -l | grep -v auto_update.sh | crontab -
 
-set -u
+set -Eeuo pipefail
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
 LOG_TAG="alpha-auto-update"
 
@@ -23,7 +23,10 @@ flock -n 9 || exit 0
 
 cd "$APP_DIR" || { logger -t "$LOG_TAG" -p user.err "APP_DIR $APP_DIR fehlt"; exit 1; }
 
-git fetch origin main --quiet 2>/dev/null || { logger -t "$LOG_TAG" "git fetch fehlgeschlagen (Netz?) — naechster Takt"; exit 0; }
+if ! git fetch origin main --quiet 2>/dev/null; then
+    logger -t "$LOG_TAG" -p user.err "git fetch fehlgeschlagen (Netz?) — Deployment nicht gestartet"
+    exit 1
+fi
 
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
@@ -31,8 +34,24 @@ REMOTE="$(git rev-parse origin/main)"
 
 logger -t "$LOG_TAG" "Neue Version: $LOCAL -> $REMOTE — starte sicheren Deploy"
 
-if APP_DIR="$APP_DIR" BRANCH="main" bash "$APP_DIR/deploy/safe_deploy.sh"; then
+TARGET_DEPLOY="$(mktemp /tmp/alpha-safe-deploy.XXXXXX)"
+cleanup_target_deploy() {
+    rm -f -- "$TARGET_DEPLOY"
+}
+trap cleanup_target_deploy EXIT
+
+# Run the deploy contract from the fetched target itself. Otherwise the first
+# rollout of a deploy-script fix would still be governed by the stale script.
+if ! git show "${REMOTE}:deploy/safe_deploy.sh" > "$TARGET_DEPLOY"; then
+    logger -t "$LOG_TAG" -p user.err "Ziel-Deployskript konnte nicht aus $REMOTE geladen werden"
+    exit 1
+fi
+chmod 0700 "$TARGET_DEPLOY"
+
+if APP_DIR="$APP_DIR" BRANCH="main" EXPECTED_REVISION="$REMOTE" bash "$TARGET_DEPLOY"; then
     logger -t "$LOG_TAG" "Deploy OK: $(git rev-parse --short HEAD) getestet und aktiv"
+    exit 0
 else
     logger -t "$LOG_TAG" -p user.err "Sicherer Deploy fehlgeschlagen/rollback — manuell pruefen: cd $APP_DIR && git status"
+    exit 1
 fi
