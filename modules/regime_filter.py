@@ -92,17 +92,27 @@ def breaker_metrics(summary: dict | None, scanner_key: str) -> dict:
     row = per.get(scanner_key) or {}
     decided = row.get("managed_be_decided_signals")
     win_pct = row.get("managed_be_win_rate_pct")
+    win_pct_upper = row.get("managed_be_win_rate_pct_upper")
     avg_r = row.get("avg_r_managed_50_50_be")
+    avg_r_upper = row.get("avg_r_managed_50_50_be_upper")
     if not isinstance(decided, int):
         decided = int(row.get("decided_signals") or 0)
     if not isinstance(win_pct, (int, float)):
         win_pct = float(row.get("win_rate_pct") or 0.0)
     if not isinstance(avg_r, (int, float)):
         avg_r = float(row.get("avg_r") or 0.0)
+    if not isinstance(win_pct_upper, (int, float)):
+        fallback = row.get("win_rate_pct_upper")
+        win_pct_upper = float(fallback) if isinstance(fallback, (int, float)) else win_pct
+    if not isinstance(avg_r_upper, (int, float)):
+        fallback = row.get("avg_r_upper")
+        avg_r_upper = float(fallback) if isinstance(fallback, (int, float)) else avg_r
     return {
         "decided": int(decided),
         "win_pct": float(win_pct),
+        "win_pct_upper": float(win_pct_upper),
         "avg_r": float(avg_r),
+        "avg_r_upper": float(avg_r_upper),
         "r_model": "managed_50_50_plus_breakeven",
     }
 
@@ -154,7 +164,9 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
     m = metrics or {}
     decided = int(m.get("decided") or 0)
     win_pct = float(m.get("win_pct") or 0.0)
+    win_pct_upper = float(m.get("win_pct_upper", win_pct) or 0.0)
     avg_r = float(m.get("avg_r") or 0.0)
+    avg_r_upper = float(m.get("avg_r_upper", avg_r) or 0.0)
     tripped_at = _parse_dt((state_entry or {}).get("tripped_at"))
     recovery = recovery_metrics or {}
     recovery_available = recovery.get("available") is True
@@ -177,7 +189,13 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
         "error": recovery.get("error"),
     }
     base = {
-        "metrics": {"decided": decided, "win_pct": win_pct, "avg_r": avg_r},
+        "metrics": {
+            "decided": decided,
+            "win_pct": win_pct,
+            "win_pct_upper": win_pct_upper,
+            "avg_r": avg_r,
+            "avg_r_upper": avg_r_upper,
+        },
         "recovery_metrics": recovery_view,
         "review_due": False,
     }
@@ -234,11 +252,20 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
             ),
         }
 
-    if decided >= min_decided and avg_r <= trip_avg_r and win_pct <= trip_win_pct:
+    # A daily OHLC candle cannot reveal whether stop or target traded first.
+    # Trip only when both conservative and favorable orderings are bad.
+    if (
+        decided >= min_decided
+        and avg_r <= trip_avg_r
+        and avg_r_upper <= trip_avg_r
+        and win_pct <= trip_win_pct
+        and win_pct_upper <= trip_win_pct
+    ):
         return {**base, "state": RED, "tripped_at": now.isoformat(),
                 "reason": (f"breaker_trip (30d reif: n={decided} >= {min_decided}, "
                            f"ØR {avg_r:+.2f} <= {trip_avg_r:+.2f}, "
-                           f"Win {win_pct:.0f}% <= {trip_win_pct:.0f}%)")}
+                           f"Win-Band {win_pct:.0f}..{win_pct_upper:.0f}% <= "
+                           f"{trip_win_pct:.0f}%, R-Upper {avg_r_upper:+.2f})")}
     return {**base, "state": GREEN, "tripped_at": None, "reason": ""}
 
 

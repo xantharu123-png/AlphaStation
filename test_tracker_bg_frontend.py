@@ -256,8 +256,8 @@ def test_tracker_stock_fetcher_maps_polygon_daily_bars(monkeypatch):
         def json(self):
             # 1700000000000 ms => 2023-11-14 UTC
             return {"results": [
-                {"t": 1700000000000, "h": 11.0, "l": 9.0, "c": 10.5},
-                {"t": 1700086400000, "h": 12.0, "l": 10.0, "c": 11.5},
+                {"t": 1700000000000, "o": 9.5, "h": 11.0, "l": 9.0, "c": 10.5},
+                {"t": 1700086400000, "o": 10.75, "h": 12.0, "l": 10.0, "c": 11.5},
                 {"bad": "row"},  # tolerant ueberspringen
             ]}
 
@@ -272,12 +272,13 @@ def test_tracker_stock_fetcher_maps_polygon_daily_bars(monkeypatch):
     monkeypatch.setattr(requests, "get", _fake_get)
     bars = bg_service._tracker_stock_fetcher("aapl", "2026-06-01")
     assert bars == [
-        {"date": "2023-11-14", "high": 11.0, "low": 9.0, "close": 10.5},
-        {"date": "2023-11-15", "high": 12.0, "low": 10.0, "close": 11.5},
+        {"date": "2023-11-14", "open": 9.5, "high": 11.0, "low": 9.0, "close": 10.5},
+        {"date": "2023-11-15", "open": 10.75, "high": 12.0, "low": 10.0, "close": 11.5},
     ]
     assert "/AAPL/range/1/day/2026-06-01/" in seen["url"]
     assert seen["timeout"] == 15
     assert seen["params"].get("apiKey") == "k"
+    assert seen["params"].get("adjusted") == "true"
 
 
 def test_tracker_stock_fetcher_http_error_returns_none(monkeypatch):

@@ -112,8 +112,27 @@ def test_record_basic_fields_and_status(tracker):
     assert sig["channel"] == "email"
     assert sig["eval_fail_count"] == 0
     assert sig["outcome_detail"] == ""
+    assert sig["evaluation_horizon_bars"] == 5
     assert sig["created_at"]
     assert tracker.get_signal_count() == 1
+
+
+@pytest.mark.parametrize(
+    ("scanner", "strategy", "trade_horizon", "explicit", "expected"),
+    [
+        ("orb", "Opening Range Breakout", "intraday", None, 1),
+        ("stock_strategy", "Momentum Breakout Long", "swing", None, 8),
+        ("bi_long", "BI Long", "swing", None, 10),
+        ("turtle", "Turtle Breakout", "swing", None, 20),
+        ("stock_strategy", "Momentum Breakout Long", "swing", 12, 12),
+    ],
+)
+def test_stock_horizon_is_strategy_specific(
+    scanner, strategy, trade_horizon, explicit, expected
+):
+    assert st._infer_stock_horizon_bars(
+        scanner, strategy, trade_horizon, explicit
+    ) == expected
 
 
 def test_record_only_trade_mail_class(tracker):
@@ -334,7 +353,213 @@ def test_evaluate_stock_ambiguous_same_day_conservative_stop(tracker):
     assert sig["status"] == "STOP_HIT"
     assert sig["outcome_detail"] == "ambiguous_same_day"
     assert sig["r_realized"] == pytest.approx(-1.0)
+    assert sig["r_realized_upper"] == pytest.approx(1.0)
     assert not sig["tp1_hit_at"]  # TP wird im Zweifel NICHT gutgeschrieben
+
+
+@pytest.mark.parametrize(
+    ("row", "bar"),
+    [
+        (
+            _base_row(Ticker="LONGAMB", Preis=97.0),
+            (97.0, 102.0, 94.0, 99.0),
+        ),
+        (
+            _base_row(
+                Ticker="SHORTAMB",
+                Direction="SHORT",
+                Preis=103.0,
+                StopLoss=105.0,
+                TP1=95.0,
+                TP2=90.0,
+            ),
+            (103.0, 106.0, 98.0, 101.0),
+        ),
+    ],
+)
+def test_stock_entry_and_stop_in_same_bar_is_marked_ambiguous(tracker, row, bar):
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    bars = _bars_after(ticker, [bar])
+    tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({ticker: bars})
+    )
+    sig = _signal(ticker)
+    assert sig["status"] == "STOP_HIT"
+    assert sig["outcome_detail"] == "ambiguous_same_day_entry_and_stop"
+    assert sig["r_realized"] == pytest.approx(-1.0)
+    assert sig["r_realized_upper"] == pytest.approx(-0.2)
+
+
+@pytest.mark.parametrize(
+    ("row", "first_bar", "gap_bar", "expected_r"),
+    [
+        (
+            _base_row(Ticker="LONGGAPTARGET"),
+            (99.0, 101.0, 98.0, 100.0),
+            (92.0, 111.0, 90.0, 109.0),
+            -1.6,
+        ),
+        (
+            _base_row(
+                Ticker="SHORTGAPTARGET",
+                Direction="SHORT",
+                StopLoss=105.0,
+                TP1=95.0,
+                TP2=90.0,
+            ),
+            (101.0, 102.0, 99.0, 100.0),
+            (108.0, 110.0, 89.0, 91.0),
+            -1.6,
+        ),
+    ],
+)
+def test_stock_gap_through_stop_is_not_ambiguous_even_if_target_touches_later(
+    tracker, row, first_bar, gap_bar, expected_r
+):
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher(
+            {ticker: _bars_after(ticker, [first_bar, gap_bar])}
+        )
+    )
+
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    sig = _signal(ticker)
+    assert sig["status"] == "STOP_HIT"
+    assert sig["outcome_detail"] == "stop_gap_slippage"
+    assert sig["r_realized"] == pytest.approx(expected_r)
+    assert sig["r_realized_upper"] == pytest.approx(expected_r)
+
+
+@pytest.mark.parametrize(
+    ("row", "first_bar", "gap_bar"),
+    [
+        (
+            _base_row(Ticker="LONGGAP"),
+            (99.0, 101.0, 98.0, 100.0),
+            (92.0, 94.0, 90.0, 91.0),
+        ),
+        (
+            _base_row(
+                Ticker="SHORTGAP",
+                Direction="SHORT",
+                StopLoss=105.0,
+                TP1=95.0,
+                TP2=90.0,
+            ),
+            (101.0, 102.0, 99.0, 100.0),
+            (108.0, 110.0, 106.0, 109.0),
+        ),
+    ],
+)
+def test_stock_gap_through_stop_uses_open_and_marks_slippage(
+    tracker, row, first_bar, gap_bar
+):
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher(
+            {ticker: _bars_after(ticker, [first_bar, gap_bar])}
+        )
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    sig = _signal(ticker)
+    assert sig["status"] == "STOP_HIT"
+    assert sig["r_realized"] == pytest.approx(-1.6)
+    assert sig["r_realized_upper"] == pytest.approx(-1.6)
+    assert sig["outcome_detail"] == "stop_gap_slippage"
+
+
+@pytest.mark.parametrize(
+    ("row", "bar"),
+    [
+        (
+            _base_row(Ticker="LONGNOFILL", Preis=99.0),
+            (106.0, 108.0, 104.0, 107.0),
+        ),
+        (
+            _base_row(
+                Ticker="SHORTNOFILL",
+                Direction="SHORT",
+                StopLoss=105.0,
+                TP1=95.0,
+                TP2=90.0,
+                Preis=101.0,
+            ),
+            (94.0, 96.0, 92.0, 93.0),
+        ),
+    ],
+)
+def test_stock_gap_beyond_tp1_is_no_fill(tracker, row, bar):
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({ticker: _bars_after(ticker, [bar])})
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    sig = _signal(ticker)
+    assert sig["status"] == "NO_FILL"
+    assert sig["entry_filled_at"] is None
+    assert sig["entry_fill_price"] is None
+    assert sig["r_realized"] is None
+    assert sig["outcome_detail"] == "entry_gapped_beyond_tp1"
+    assert sig["be_activated_at"] is None
+
+
+def test_breakeven_activation_requires_confirmed_fill(tracker):
+    row = _base_row(Ticker="NOFILLBE", Preis=99.0)
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET max_favorable_r=1.5 WHERE ticker='NOFILLBE'"
+        )
+
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher(
+            {"NOFILLBE": _bars_after("NOFILLBE", [(99.0, 99.5, 98.0, 99.0)])}
+        )
+    )
+
+    assert result["evaluated"] == 1
+    assert result["be_activations"] == []
+    sig = _signal("NOFILLBE")
+    assert sig["status"] == "OPEN"
+    assert sig["entry_filled_at"] is None
+    assert sig["be_activated_at"] is None
+
+
+def test_stock_strategy_does_not_expire_after_legacy_five_bars(tracker):
+    row = _base_row(
+        Strategy="Momentum Breakout Long",
+        TradeHorizon="swing",
+    )
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+    five_bars = _bars_after("AAPL", [(102.0, 98.0, 101.0)] * 5)
+    first = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"AAPL": five_bars})
+    )
+    assert first == {"evaluated": 1, "closed": 0, "errors": 0}
+    assert _signal("AAPL")["status"] == "OPEN"
+
+    eight_bars = _bars_after("AAPL", [(102.0, 98.0, 101.0)] * 8)
+    second = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"AAPL": eight_bars})
+    )
+    assert second == {"evaluated": 1, "closed": 1, "errors": 0}
+    assert _signal("AAPL")["status"] == "EXPIRED"
+
+
+def test_orb_expires_after_one_completed_daily_bar(tracker):
+    assert tracker.record_alert_signals("orb", [_base_row()]) == 1
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher(
+            {"AAPL": _bars_after("AAPL", [(102.0, 98.0, 101.0)])}
+        )
+    )
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    assert _signal("AAPL")["status"] == "EXPIRED"
 
 
 def test_same_day_stock_uses_intraday_interval_instead_of_daily_bars(tracker):
@@ -577,6 +802,7 @@ def test_crypto_same_interval_stop_and_target_is_conservatively_stopped(tracker)
     signal = _signal("ETH")
     assert signal["status"] == "STOP_HIT"
     assert signal["r_realized"] == pytest.approx(-1.0)
+    assert signal["r_realized_upper"] == pytest.approx(2.0)
     assert signal["outcome_detail"] == "ambiguous_same_interval_stop_first"
 
 
@@ -767,7 +993,7 @@ def test_mature_summary_excludes_right_censored_recent_signals(tracker):
         conn.execute(
             "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, created_at=? "
             "WHERE ticker='MATURE'",
-            ((as_of - timedelta(days=15)).isoformat(),),
+            ((as_of - timedelta(days=30)).isoformat(),),
         )
         conn.execute(
             "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, created_at=? "

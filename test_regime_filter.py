@@ -30,9 +30,21 @@ FRI = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)  # Freitag derselben Woche
 NXT_MON = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)  # naechster Montag
 
 
-def _summary(decided=0, win=0.0, avg_r=0.0, scanner="stock_strategy"):
+def _summary(
+    decided=0,
+    win=0.0,
+    avg_r=0.0,
+    scanner="stock_strategy",
+    win_upper=None,
+    avg_r_upper=None,
+):
     return {"per_scanner": {scanner: {
-        "decided_signals": decided, "win_rate_pct": win, "avg_r": avg_r}}}
+        "decided_signals": decided,
+        "win_rate_pct": win,
+        "win_rate_pct_upper": win if win_upper is None else win_upper,
+        "avg_r": avg_r,
+        "avg_r_upper": avg_r if avg_r_upper is None else avg_r_upper,
+    }}}
 
 
 # ── Layer 1: Markt-Mapping ───────────────────────────────────────────────────
@@ -56,13 +68,17 @@ def test_breaker_metrics_extraction():
     assert m == {
         "decided": 12,
         "win_pct": 33.3,
+        "win_pct_upper": 33.3,
         "avg_r": -0.51,
+        "avg_r_upper": -0.51,
         "r_model": "managed_50_50_plus_breakeven",
     }
     assert rf.breaker_metrics({}, "stock_strategy") == {
         "decided": 0,
         "win_pct": 0.0,
+        "win_pct_upper": 0.0,
         "avg_r": 0.0,
+        "avg_r_upper": 0.0,
         "r_model": "managed_50_50_plus_breakeven",
     }
     assert rf.breaker_metrics(None, "x")["decided"] == 0
@@ -75,13 +91,17 @@ def test_breaker_metrics_prefers_recommended_management_model():
         "avg_r": -0.8,
         "managed_be_decided_signals": 12,
         "managed_be_win_rate_pct": 41.7,
+        "managed_be_win_rate_pct_upper": 50.0,
         "avg_r_managed_50_50_be": 0.18,
+        "avg_r_managed_50_50_be_upper": 0.42,
     }}}
 
     assert rf.breaker_metrics(summary, "stock_strategy") == {
         "decided": 12,
         "win_pct": 41.7,
+        "win_pct_upper": 50.0,
         "avg_r": 0.18,
+        "avg_r_upper": 0.42,
         "r_model": "managed_50_50_plus_breakeven",
     }
 
@@ -95,6 +115,28 @@ def test_breaker_trip_exact_boundaries():
     assert rf.evaluate_breaker({"decided": 9, "win_pct": 0.0, "avg_r": -2.0}, None, MON)["state"] == rf.GREEN
     assert rf.evaluate_breaker({"decided": 10, "win_pct": 25.1, "avg_r": -0.5}, None, MON)["state"] == rf.GREEN
     assert rf.evaluate_breaker({"decided": 10, "win_pct": 20.0, "avg_r": -0.29}, None, MON)["state"] == rf.GREEN
+
+
+def test_breaker_does_not_trip_on_ambiguous_ohlc_ordering_alone():
+    uncertain = {
+        "decided": 12,
+        "win_pct": 8.3,
+        "win_pct_upper": 41.7,
+        "avg_r": -0.8,
+        "avg_r_upper": 0.2,
+    }
+    assert rf.evaluate_breaker(uncertain, None, MON)["state"] == rf.GREEN
+
+    unequivocally_bad = {
+        "decided": 12,
+        "win_pct": 8.3,
+        "win_pct_upper": 16.7,
+        "avg_r": -0.8,
+        "avg_r_upper": -0.4,
+    }
+    result = rf.evaluate_breaker(unequivocally_bad, None, MON)
+    assert result["state"] == rf.RED
+    assert result["metrics"]["avg_r_upper"] == -0.4
 
 
 def test_breaker_cooldown_persists_and_recovers():

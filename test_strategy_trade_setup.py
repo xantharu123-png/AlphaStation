@@ -243,12 +243,15 @@ def test_backtest_does_not_exit_at_untraded_average_target():
 
     assert trade is not None
     assert trade["target_model"] == "50_50_tp1_tp2"
-    assert trade["exit_reason"] == "TP1+EOD"
+    assert trade["exit_reason"] == "TP1_STOP"
     assert trade["tp1_hit"] is True
-    assert trade["r_multiple"] == 1.45
+    assert trade["r_multiple"] == 0.45
+    assert trade["exit_reason_upper"] == "TP1+EOD"
+    assert trade["r_multiple_upper"] == 1.45
+    assert trade["intrabar_ambiguous"] is True
 
 
-def test_backtest_blends_actual_tp1_and_tp2_fills_only_after_tp2_trades():
+def test_backtest_reports_tp1_stop_to_tp2_band_when_daily_order_is_unknown():
     bars = [
         {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
         {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
@@ -258,8 +261,11 @@ def test_backtest_blends_actual_tp1_and_tp2_fills_only_after_tp2_trades():
     trade = simulate_trade(bars, 0, _two_target_strategy())
 
     assert trade is not None
-    assert trade["exit_reason"] == "BLENDED_TP"
-    assert trade["r_multiple"] == 1.96
+    assert trade["exit_reason"] == "TP1_STOP"
+    assert trade["r_multiple"] == 0.45
+    assert trade["exit_reason_upper"] == "BLENDED_TP"
+    assert trade["r_multiple_upper"] == 1.95
+    assert "same_bar_tp1_and_trailed_stop" in trade["ambiguity_reason"]
 
 
 def test_backtest_tp1_then_breakeven_stop_keeps_only_partial_profit():
@@ -273,7 +279,7 @@ def test_backtest_tp1_then_breakeven_stop_keeps_only_partial_profit():
 
     assert trade is not None
     assert trade["exit_reason"] == "TP1_STOP"
-    assert trade["r_multiple"] == 0.46
+    assert trade["r_multiple"] == 0.45
 
 
 def test_backtest_short_partial_exit_is_directionally_symmetric():
@@ -286,5 +292,22 @@ def test_backtest_short_partial_exit_is_directionally_symmetric():
     trade = simulate_trade(bars, 0, _two_target_strategy(direction="short"))
 
     assert trade is not None
+    assert trade["exit_reason"] == "TP1_STOP"
+    assert trade["r_multiple"] == 0.45
+    assert trade["exit_reason_upper"] == "BLENDED_TP"
+    assert trade["r_multiple_upper"] == 1.95
+
+
+def test_backtest_clean_same_bar_tp2_is_not_delayed_to_next_day():
+    bars = [
+        {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
+        {"date": "2026-01-02", "open": 101, "high": 116, "low": 101, "close": 115},
+    ]
+
+    trade = simulate_trade(bars, 0, _two_target_strategy())
+
+    assert trade is not None
     assert trade["exit_reason"] == "BLENDED_TP"
-    assert trade["r_multiple"] == 1.96
+    assert trade["exit_reason_upper"] == "BLENDED_TP"
+    assert trade["r_multiple"] == 1.95
+    assert trade["intrabar_ambiguous"] is False

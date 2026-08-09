@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from modules.trade_levels import trade_geometry
+import pytest
+
+from modules.trade_levels import minimum_stop_distance, trade_geometry
 from modules.indicators import calculate_atr_14
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
@@ -250,3 +252,37 @@ def test_root_scanner_copies_are_isolated_from_production_modules():
     assert "raise ImportError(" in volume_stub
     assert "modules.vrvp_levels" in volume_stub
     assert len(volume_stub.splitlines()) < 20
+
+
+@pytest.mark.parametrize(
+    ("trade_horizon", "scanner_name", "asset_class", "expected"),
+    [
+        ("swing", "stock_strategy", "stock", 1.5),
+        ("intraday", "orb", "stock", 0.4),
+        ("swing", "early_movers", "crypto", 1.2),
+        ("position", "turtle", "stock", 2.0),
+    ],
+)
+def test_minimum_stop_distance_uses_horizon_and_asset_noise_floor(
+    trade_horizon, scanner_name, asset_class, expected
+):
+    result = minimum_stop_distance(
+        100.0,
+        trade_horizon=trade_horizon,
+        scanner_name=scanner_name,
+        asset_class=asset_class,
+    )
+    assert result["distance"] == pytest.approx(expected)
+
+
+def test_minimum_stop_distance_uses_largest_atr_or_spread_floor():
+    result = minimum_stop_distance(
+        100.0,
+        atr=10.0,
+        spread_pct=2.0,
+        trade_horizon="swing",
+        scanner_name="stock_strategy",
+        asset_class="stock",
+    )
+    assert result["distance"] == pytest.approx(4.5)
+    assert result["components"]["atr_floor"] == pytest.approx(4.5)

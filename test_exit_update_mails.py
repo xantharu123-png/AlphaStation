@@ -94,8 +94,9 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert set(tr) == {
         "id", "ticker", "scanner", "direction", "old_status", "new_status",
         "entry", "entry_fill_price", "stop", "tp1", "tp2", "r_realized",
+        "r_realized_upper", "outcome_detail", "evaluation_horizon_bars",
         "tp1_hit_this_run", "asset_class",
-        "mail_class",  # AUDIT 2026-07-31 (Shadow-Tracking): bg filtert danach
+        "mail_class", "channel",
         "adverse_slippage_r", "adverse_slippage_pct",
         "live_rr_tp1", "live_effective_rr",
         "fill_quality", "fill_rejection_reason",
@@ -105,6 +106,7 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert tr["ticker"] == "AAPL"
     assert tr["scanner"] == "breakout"
     assert tr["mail_class"] == "trade"
+    assert tr["channel"] == "email"
     assert tr["direction"] == "LONG"
     assert tr["old_status"] == "OPEN"
     assert tr["new_status"] == "STOP_HIT"
@@ -179,6 +181,7 @@ def _transition(**overrides):
         "old_status": "OPEN", "new_status": "STOP_HIT", "entry": 10.0,
         "stop": 9.5, "tp1": 11.0, "tp2": 11.8, "r_realized": -1.0,
         "tp1_hit_this_run": False, "asset_class": "stock",
+        "mail_class": "trade", "channel": "email",
     }
     tr.update(overrides)
     return tr
@@ -272,14 +275,39 @@ def test_bg_failing_mail_builder_still_returns_eval_stats(monkeypatch, tmp_path)
 
 
 def test_bg_without_origin_mark_no_update_mail(monkeypatch, tmp_path):
-    """Zweitsicherung: Signal ohne Erst-Mail-Mark (nie gemailt) => still,
-    und es wird auch KEIN Transitions-Dedupe-Mark verbrannt."""
-    sent, _ = _setup_bg(monkeypatch, tmp_path, [_transition()])
+    """Nicht per E-Mail versendetes Ursprungssignal bleibt fail-closed."""
+    sent, _ = _setup_bg(
+        monkeypatch,
+        tmp_path,
+        [_transition(channel="telegram")],
+    )
     bg_service._run_signal_eval_job(secrets={})
     assert sent == []
     dedupe_file = Path(bg_service._EMAIL_DEDUPE_FILE)
     marks = json.loads(dedupe_file.read_text()) if dedupe_file.exists() else {}
     assert not any(str(k).startswith("signal_update_") for k in marks)
+
+
+def test_tracker_email_origin_does_not_expire_with_legacy_dedupe(monkeypatch, tmp_path):
+    """Lange Swing-/BI-Trades behalten ihren dauerhaften Mail-Nachweis."""
+    monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
+    Path(bg_service._EMAIL_DEDUPE_FILE).write_text(
+        json.dumps({"bi_long_UNF": time.time() - 8 * 86400})
+    )
+    assert bg_service._signal_origin_was_mailed(_transition()) is True
+    assert bg_service._signal_origin_was_mailed("bi_long", "UNF") is False
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        {"id": 7, "mail_class": "shadow", "channel": "email"},
+        {"id": 7, "mail_class": "trade", "channel": "telegram"},
+        {"id": 0, "mail_class": "trade", "channel": "email"},
+    ],
+)
+def test_tracker_origin_provenance_fails_closed(origin):
+    assert bg_service._signal_origin_was_mailed(origin) is False
 
 
 def test_bg_new_listing_origin_matches_raw_symbol_mark(monkeypatch, tmp_path):

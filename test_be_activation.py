@@ -91,12 +91,13 @@ def test_tracker_mfe_1r_marks_be_exactly_once(tracker):
     assert set(act) == {
         "id", "ticker", "scanner", "direction", "entry", "entry_fill_price",
         "stop", "tp1", "tp2", "mfe", "asset_class", "activated_at",
-        "mail_class",  # AUDIT 2026-07-31 (Shadow-Tracking): bg filtert danach
+        "mail_class", "channel",
         "strategy", "trade_horizon", "setup_key",
     }
     assert act["ticker"] == "AAPL"
     assert act["scanner"] == "breakout"
     assert act["mail_class"] == "trade"
+    assert act["channel"] == "email"
     assert act["direction"] == "LONG"
     assert act["entry"] == pytest.approx(100.0)
     assert act["stop"] == pytest.approx(95.0)
@@ -201,6 +202,7 @@ def test_tracker_be_mail_stays_pending_until_acknowledged(tracker):
     pending = tracker.load_pending_be_activations()
     assert len(pending) == 1
     assert pending[0]["id"] == signal_id
+    assert pending[0]["channel"] == "email"
     assert pending[0]["tracker_persisted"] is True
 
     assert tracker.mark_be_alerts_sent([signal_id]) == 1
@@ -215,6 +217,7 @@ def _activation(**overrides):
         "entry": 100.0, "entry_fill_price": 100.0, "stop": 95.0, "tp1": 105.0,
         "tp2": 110.0, "mfe": 1.2, "asset_class": "stock",
         "activated_at": "2026-07-30T10:00:00",
+        "mail_class": "trade", "channel": "email",
     }
     act.update(overrides)
     return act
@@ -284,9 +287,12 @@ def test_bg_be_mail_second_run_deduped(monkeypatch, tmp_path):
 
 
 def test_bg_be_without_origin_mark_silent(monkeypatch, tmp_path):
-    """Zweitsicherung: Signal ohne Erst-Mail-Mark => still, und es wird auch
-    KEIN BE-Dedupe-Mark verbrannt."""
-    sent, _ = _setup_bg(monkeypatch, tmp_path, [_activation()])
+    """Nicht per E-Mail versendetes Ursprungssignal bleibt fail-closed."""
+    sent, _ = _setup_bg(
+        monkeypatch,
+        tmp_path,
+        [_activation(channel="telegram")],
+    )
     stats = bg_service._run_signal_eval_job(secrets={})
     assert sent == []
     assert stats["evaluated"] == 1

@@ -97,9 +97,10 @@ from modules.data_fetchers import (
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
-from modules.trade_levels import normalize_alert_trade_levels, trade_geometry, trade_plan_quality
+from modules.trade_levels import minimum_stop_distance, normalize_alert_trade_levels, trade_geometry, trade_plan_quality
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline, project_partial_rvol
+from modules.business_quality import fetch_business_quality
 from modules.stock_execution import (
     aggregate_regular_session_4h_bars,
     stock_swing_4h_execution_state,
@@ -187,7 +188,15 @@ except ImportError as _notify_tg_err:
     print(f"[Warning] notify_telegram module not loaded: {_notify_tg_err}")
 
 try:
-    from modules.backtests import run_bi_v2_backtest, run_biotech_backtest
+    from modules.backtests import (
+        backtest_uncertainty_metrics,
+        conservative_trade_exit_index,
+        evaluate_rule_signal as evaluate_backtest_rule_signal,
+        run_bi_v2_backtest,
+        run_biotech_backtest,
+        simulate_50_50_daily_exit,
+        simulate_trade as simulate_rule_trade,
+    )
     HAS_ADVANCED_BACKTESTS = True
 except ImportError as _backtest_err:
     HAS_ADVANCED_BACKTESTS = False
@@ -339,35 +348,6 @@ BACKTEST_STRATEGY_ALIASES = {
     "Gap Momentum Long": "Gap Up Momentum",
     "Gap Momentum Short": "Gap Down Short",
 }
-
-# AUDIT H-5: Backtest-Regel-Korrektur (api-seitig, da modules/strategies.py
-# nicht angefasst werden darf). Der Alias "Momentum Breakout Long" ->
-# "Breakout Long" zeigte auf die ALTEN Backtest-Regeln (Change >= 3%, KEIN
-# RVOL-Filter). Live gilt seit S-1: Change >= 2%, RVOL >= 1.5, ClosePos >=
-# 0.5 — der Backtest muss dieselben Signal-Bedingungen pruefen, sonst testet
-# er eine andere Strategie. Der Alias bleibt bestehen (Frontend/Tests nutzen
-# ihn); korrigiert wird die Ziel-Regel "Breakout Long" selbst, plus ein
-# identischer nativer Eintrag unter dem Live-Namen.
-_H5_LIVE_SYNCED_BREAKOUT_RULE = {
-    "direction": "long",
-    "description": "Daily live-signal proxy: 20D breakout proximity, Change >=2%, RVOL >=1.5, close hold and controlled wick",
-    "signal": {
-        "change_pct_min": 2.0, "change_pct_max": 50.0,
-        "close_pos_min": 0.65,
-        "rvol_min": 1.5,
-        "breakout_lookback_days": 20,
-        "breakout_proximity_min": -0.01,
-        "upper_wick_pct_max": 38.0,
-    },
-    "entry": "next_open",
-    "stop_pct": 0.05,
-    "tp1_rr": 1.5,
-    "tp2_rr": 2.5,
-    "max_hold_days": 3,
-    "min_price": 5.0,
-}
-BACKTEST_RULES["Breakout Long"] = dict(_H5_LIVE_SYNCED_BREAKOUT_RULE)
-BACKTEST_RULES["Momentum Breakout Long"] = dict(_H5_LIVE_SYNCED_BREAKOUT_RULE)
 
 STOCK_STRATEGY_HIDDEN = {
     "Penny Rockets",
@@ -3106,6 +3086,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'{source_text}'
         f'{synthetic_text}'
         f'{binary_warning_text}'
+        f'{_business_quality_alert_html(row)}'
     )
 
 
@@ -6639,6 +6620,128 @@ _STOCK_MOMENTUM_MAIL_MIN_MEDIAN_DOLLAR_VOLUME_20D = 2_000_000.0
 _STOCK_STRATEGY_MAIL_MIN_ATR_PCT = 2.0
 
 
+def _stock_business_quality_context(row: Dict[str, Any]) -> bool:
+    """Return whether live business quality is relevant for this setup.
+
+    Filing data is a slow-moving holding-quality overlay. It must never alter
+    crypto, shorts, intraday/ORB, penny-stock, crash or biotech decisions.
+    """
+    strategy_name = str(row.get("Strategy") or row.get("strategy") or "").lower()
+    direction = str(
+        row.get("Signal_Direction", row.get("direction", row.get("Signal", ""))) or ""
+    ).lower()
+    if "short" in strategy_name or direction == "short":
+        return False
+    excluded = ("orb", "penny", "biotech", "crash", "crypto", "intraday")
+    return bool(strategy_name) and not any(marker in strategy_name for marker in excluded)
+
+
+def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach current filing quality without changing the technical score."""
+    if not isinstance(row, dict) or not _stock_business_quality_context(row):
+        return row
+    if row.get("Business_Data_Status"):
+        return row
+
+    ticker = _extract_alert_ticker(row)
+    if not ticker:
+        return row
+    price = _alert_float(_extract_alert_price(row), None)
+    market_cap = _alert_float(_alert_get_any(
+        row, "MarketCap", "Market_Cap", "market_cap", "MCap", "marketCap"
+    ), None)
+    shares_outstanding = _alert_float(_alert_get_any(
+        row, "SharesOutstanding", "shares_outstanding", "Shares_Outstanding"
+    ), None)
+    industry = str(_alert_get_any(
+        row, "Industry", "industry", "SIC_Description", "sic_description", default=""
+    ) or "")
+    try:
+        quality = fetch_business_quality(
+            ticker,
+            price=price,
+            market_cap=market_cap,
+            shares_outstanding=shares_outstanding,
+            industry=industry,
+        )
+    except Exception as exc:  # Fundamentals must never break a technical scan.
+        quality = {
+            "status": "error",
+            "score": None,
+            "label": "DATEN FEHLEN",
+            "valuation_score": None,
+            "valuation_label": "NICHT BEWERTBAR",
+            "coverage_pct": 0,
+            "severe_risk": False,
+            "severe_reasons": [],
+            "error": str(exc)[:180],
+        }
+
+    row["Business_Quality"] = quality
+    row["Business_Data_Status"] = str(quality.get("status") or "missing")
+    row["Business_Quality_Score"] = quality.get("score")
+    row["Business_Quality_Label"] = quality.get("label") or "DATEN FEHLEN"
+    row["Valuation_Score"] = quality.get("valuation_score")
+    row["Valuation_Label"] = quality.get("valuation_label") or "NICHT BEWERTBAR"
+    row["Business_Coverage_Pct"] = quality.get("coverage_pct") or 0
+    row["Business_Severe_Risk"] = bool(quality.get("severe_risk"))
+    row["Business_Severe_Reasons"] = list(quality.get("severe_reasons") or [])
+    row["Business_As_Of"] = quality.get("as_of")
+    if not row.get("company_name") and quality.get("company_name"):
+        row["company_name"] = quality["company_name"]
+
+    technical_score = _alert_float(row.get("score", row.get("Score")), None)
+    business_score = _alert_float(quality.get("score"), None)
+    if technical_score is not None:
+        if quality.get("status") in {"ok", "partial"} and business_score is not None:
+            row["Investment_Score"] = round(
+                0.72 * technical_score + 0.28 * business_score,
+                1,
+            )
+        else:
+            row["Investment_Score"] = round(technical_score, 1)
+    return row
+
+
+def _enrich_stock_business_quality_rows(
+    rows: List[Dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """Enrich only the strongest swing-long rows to keep scans responsive."""
+    enriched = 0
+    for row in rows:
+        if enriched >= max(0, int(limit)):
+            break
+        score = _alert_float(row.get("score", row.get("Score")), 0) or 0
+        if score < _ALERT_MIN_SCORE or not _stock_business_quality_context(row):
+            continue
+        _ensure_stock_business_quality(row)
+        enriched += 1
+    return rows
+
+
+def _business_quality_alert_html(row: Dict[str, Any]) -> str:
+    score = _alert_float(row.get("Business_Quality_Score"), None)
+    if score is None:
+        return ""
+    label = html.escape(str(row.get("Business_Quality_Label") or "NEUTRAL"))
+    valuation = html.escape(str(row.get("Valuation_Label") or "NICHT BEWERTBAR"))
+    investment = _alert_float(row.get("Investment_Score"), None)
+    investment_text = f" | Gesamt {investment:.0f}/100" if investment is not None else ""
+    severe = bool(row.get("Business_Severe_Risk"))
+    color = "#dc2626" if severe else "#475569"
+    detail = ""
+    if severe:
+        reasons = html.escape(", ".join(row.get("Business_Severe_Reasons") or [])[:220])
+        detail = f" | Schweres Risiko: {reasons}" if reasons else " | Schweres Risiko"
+    return (
+        f'<br><span style="color:{color};font-size:11px">'
+        f'Unternehmen {score:.0f}/100 {label} | Bewertung {valuation}'
+        f'{investment_text}{detail}</span>'
+    )
+
+
 def _stock_strategy_mail_quality_state(
     row: Dict[str, Any],
     *,
@@ -6673,6 +6776,11 @@ def _stock_strategy_mail_quality_state(
         atr_pct = (atr_value / price_value) * 100.0
         if atr_pct < _STOCK_STRATEGY_MAIL_MIN_ATR_PCT:
             return False, "stock_swing_mail_blocked_low_volatility_budget"
+
+    # Missing filing data is neutral. Only a confirmed severe business risk
+    # blocks an automatic multi-day long mail; manual scanner rows remain visible.
+    if is_long_context and bool(row.get("Business_Severe_Risk")):
+        return False, "stock_swing_mail_blocked_severe_business_risk"
 
     if "momentum breakout long" not in strategy_name:
         return True, ""
@@ -8790,6 +8898,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     suppressed: Dict[str, int] = {}
     grade_counts: Dict[str, int] = {}
     seen_cooldown_keys = set()
+    business_quality_fetches = 0
     for row in results[:50]:
         if not isinstance(row, dict):
             continue
@@ -8804,6 +8913,15 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if scanner_key in _STOCK_ALERT_SCANNERS and not premarket_mail_mode:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
         if scanner_key == "stock_strategy" and not premarket_mail_mode:
+            score_for_business = _alert_float(row.get("score", row.get("Score")), 0) or 0
+            if (
+                not row.get("Business_Data_Status")
+                and business_quality_fetches < 8
+                and score_for_business >= _ALERT_MIN_SCORE
+                and _stock_business_quality_context(row)
+            ):
+                row = _ensure_stock_business_quality(row)
+                business_quality_fetches += 1
             row_strategy = str(row.get("Strategy") or row.get("strategy") or strategy_name or "").lower()
             if "momentum breakout long" in row_strategy:
                 row = _stock_breakout_freshness_state(
@@ -11741,7 +11859,14 @@ def _build_structured_trade_setup(
     if atr_value <= 0:
         atr_value = entry * 0.03
 
-    min_risk = max(entry * 0.015, atr_value * 0.45)
+    stop_floor = minimum_stop_distance(
+        entry,
+        atr=atr_value,
+        trade_horizon="swing",
+        scanner_name="stock_strategy",
+        asset_class="stock",
+    )
+    min_risk = float(stop_floor.get("distance") or max(entry * 0.015, atr_value * 0.45))
     buffer = max(entry * 0.003, atr_value * 0.10)
     warnings: List[str] = []
     notes: List[str] = []
@@ -14512,6 +14637,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
         scan_diag["max_results"] = max_results
         results = results[:max_results]
+        _enrich_stock_business_quality_rows(results)
         scan_diag["final_results"] = len(results)
         scan_diag.setdefault("stage_counts", {})["raw_matches_before_special_filter"] = scan_diag["raw_matches_before_special_filter"]
         scan_diag.setdefault("stage_counts", {})["final_results"] = scan_diag["final_results"]
@@ -30532,11 +30658,20 @@ def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, cry
             "exit_price": _bt_round_price(exit_price, crypto),
             "pnl_pct": round(_bt_float(trade.get("pnl_pct")), 2),
             "r_multiple": round(_bt_float(trade.get("r_multiple")), 2),
+            "exit_date_upper": trade.get("exit_date_upper") or trade.get("exit_date") or "",
+            "exit_price_upper": _bt_round_price(trade.get("exit_price_upper", exit_price), crypto),
+            "pnl_pct_upper": round(_bt_float(trade.get("pnl_pct_upper", trade.get("pnl_pct"))), 2),
+            "r_multiple_upper": round(_bt_float(trade.get("r_multiple_upper", trade.get("r_multiple"))), 2),
             "type": str(trade.get("direction") or direction or "LONG").upper(),
             "grade": str(trade.get("grade") or "").upper(),
             "outcome": trade.get("outcome") or trade.get("exit_reason") or "",
+            "outcome_upper": trade.get("outcome_upper") or trade.get("exit_reason_upper") or trade.get("outcome") or trade.get("exit_reason") or "",
             "signal_date": trade.get("signal_date") or "",
             "tp1_hit": bool(trade.get("tp1_hit")),
+            "tp1_hit_upper": bool(trade.get("tp1_hit_upper", trade.get("tp1_hit"))),
+            "intrabar_ambiguous": bool(trade.get("intrabar_ambiguous")),
+            "ambiguity_reason": trade.get("ambiguity_reason"),
+            "ohlc_path_policy": trade.get("ohlc_path_policy"),
         })
     return rows
 
@@ -30553,24 +30688,44 @@ def _build_backtest_result(
     stats_by_grade: Optional[Dict[str, Dict[str, Any]]] = None,
     note: str = "",
     crypto: bool = False,
+    unresolved: Optional[int] = None,
+    source_methodology: str = "",
+    methodology_warnings: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    filled = [t for t in trades if str(t.get("outcome") or "").upper() != "NO_FILL"]
-    filled = sorted(filled, key=_bt_trade_sort_key)
-    pcts = [_bt_float(t.get("pnl_pct")) for t in filled]
+    all_trades = list(trades or [])
+    no_fill_observed = sum(
+        1 for trade in all_trades
+        if str(trade.get("outcome") or "").upper() == "NO_FILL"
+    )
+    unresolved_observed = sum(
+        1 for trade in all_trades
+        if str(trade.get("outcome") or "").upper() == "UNRESOLVED"
+    )
+    physically_filled = [
+        trade for trade in all_trades
+        if str(trade.get("outcome") or "").upper() != "NO_FILL"
+    ]
+    decided = [
+        trade for trade in all_trades
+        if str(trade.get("outcome") or "").upper()
+        not in {"", "NO_FILL", "UNRESOLVED"}
+    ]
+    decided = sorted(decided, key=_bt_trade_sort_key)
+    pcts = [_bt_float(t.get("pnl_pct")) for t in decided]
     wins = [p for p in pcts if p > 0]
     losses = [p for p in pcts if p <= 0]
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
-    total_trades = len(filled)
-    normalized_trades = _normalize_backtest_trades(filled, direction, crypto)
+    total_trades = len(decided)
+    normalized_trades = _normalize_backtest_trades(decided, direction, crypto)
     win_rate = round(len(wins) / total_trades * 100, 1) if total_trades else 0
     avg_pnl = round(sum(pcts) / total_trades, 2) if total_trades else 0
     sum_pnl = round(sum(pcts), 2) if total_trades else 0
-    total_return = _bt_compounded_return(filled)
-    max_drawdown = _bt_max_drawdown(filled)
+    total_return = _bt_compounded_return(decided)
+    max_drawdown = _bt_max_drawdown(decided)
     profit_factor = profit_factor_metrics(gross_profit, gross_loss)
-    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in filled) / total_trades, 2) if total_trades else 0
-    out_of_sample = _bt_out_of_sample_summary(filled)
+    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in decided) / total_trades, 2) if total_trades else 0
+    out_of_sample = _bt_out_of_sample_summary(decided)
     verdict = _bt_apply_oos_verdict(
         _bt_backtest_verdict(
             total_trades,
@@ -30583,16 +30738,19 @@ def _build_backtest_result(
         ),
         out_of_sample,
     )
-    return {
+    result = {
         "ticker": "Crypto Universe" if crypto else "Scanner Universe",
         "strategy": strategy,
         "strategy_label": label,
         "backtest_type": "crypto" if crypto else "scanner",
         "months": months,
         "n_tickers": n_tickers,
-        "total_signals": int(total_signals if total_signals is not None else len(trades)),
+        "total_signals": int(total_signals if total_signals is not None else len(all_trades)),
+        "total_filled": len(physically_filled),
         "total_trades": total_trades,
-        "no_fill": int(no_fill),
+        "total_decided": total_trades,
+        "no_fill": max(int(no_fill or 0), no_fill_observed),
+        "unresolved": max(int(unresolved or 0), unresolved_observed),
         "win_rate": win_rate,
         "avg_pnl": avg_pnl,
         "sum_pnl": sum_pnl,
@@ -30609,30 +30767,45 @@ def _build_backtest_result(
         "avg_r": avg_r,
         "verdict": verdict,
         "out_of_sample": out_of_sample,
-        "stats_by_grade": stats_by_grade or _bt_stats_by_grade(filled),
+        "stats_by_grade": stats_by_grade or _bt_stats_by_grade(decided),
         "trades": normalized_trades,
         "note": note,
-        "methodology": "Universe-Kennzahlen sind chronologisch sortierte Trade-Statistiken, keine garantierte Portfolio-Rendite.",
+        "methodology": source_methodology or "Universe-Kennzahlen sind chronologisch sortierte Trade-Statistiken, keine garantierte Portfolio-Rendite.",
+        "methodology_warnings": list(methodology_warnings or []),
+        "statistics_scope": "decided_filled_trades_only",
         "timestamp": datetime.now().isoformat(),
     }
+    if HAS_ADVANCED_BACKTESTS:
+        result.update(backtest_uncertainty_metrics(decided))
+    return result
 
 
 def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[str, Any], months: int) -> Dict[str, Any]:
     summary = raw.get("summary") or {}
     all_trades = raw.get("trades") or []
-    filled = [t for t in all_trades if str(t.get("outcome") or "").upper() != "NO_FILL"]
+    observed_no_fill = sum(
+        1 for trade in all_trades
+        if str(trade.get("outcome") or "").upper() == "NO_FILL"
+    )
+    observed_unresolved = sum(
+        1 for trade in all_trades
+        if str(trade.get("outcome") or "").upper() == "UNRESOLVED"
+    )
     return _build_backtest_result(
         strategy=strategy,
         label=meta.get("name", strategy),
         direction=meta.get("direction", "long"),
         months=months,
-        trades=filled,
+        trades=all_trades,
         total_signals=summary.get("total_signals", len(all_trades)),
-        no_fill=summary.get("no_fill", len(all_trades) - len(filled)),
+        no_fill=summary.get("no_fill", observed_no_fill),
         n_tickers=summary.get("n_tickers", 0),
         stats_by_grade=raw.get("stats_by_grade") or None,
         note=meta.get("note", ""),
         crypto=False,
+        unresolved=summary.get("unresolved", observed_unresolved),
+        source_methodology=str(summary.get("methodology") or ""),
+        methodology_warnings=summary.get("methodology_warnings") or [],
     )
 
 
@@ -30797,78 +30970,63 @@ def _simulate_crypto_trade(
     if not geometry["valid"]:
         return None
     risk = float(geometry["risk"])
-
-    current_stop = stop
-    tp1_hit = False
-    exit_price = None
-    exit_reason = None
-    exit_date = None
-    end_idx = min(len(bars) - 1, entry_idx + max_hold - 1)
-
-    for idx in range(entry_idx, end_idx + 1):
-        bar = bars[idx]
-        if side == "long":
-            if bar["low"] <= current_stop:
-                runner_exit = bar["open"] if bar["open"] < current_stop else current_stop
-                exit_price = (tp1 + runner_exit) / 2.0 if tp1_hit else runner_exit
-                exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
-                exit_date = bar["date"]
-                break
-            if bar["high"] >= tp2:
-                exit_price = (tp1 + tp2) / 2
-                exit_reason = "TP2"
-                tp1_hit = True
-                exit_date = bar["date"]
-                break
-            if not tp1_hit and bar["high"] >= tp1:
-                tp1_hit = True
-                current_stop = max(current_stop, entry + risk * 0.25)
-        else:
-            if bar["high"] >= current_stop:
-                runner_exit = bar["open"] if bar["open"] > current_stop else current_stop
-                exit_price = (tp1 + runner_exit) / 2.0 if tp1_hit else runner_exit
-                exit_reason = "TRAIL_STOP" if tp1_hit else "STOP"
-                exit_date = bar["date"]
-                break
-            if bar["low"] <= tp2:
-                exit_price = (tp1 + tp2) / 2
-                exit_reason = "TP2"
-                tp1_hit = True
-                exit_date = bar["date"]
-                break
-            if not tp1_hit and bar["low"] <= tp1:
-                tp1_hit = True
-                current_stop = min(current_stop, entry - risk * 0.25)
-
-    if exit_price is None:
-        close_price = bars[end_idx]["close"]
-        if tp1_hit:
-            if side == "long":
-                exit_price = (tp1 + max(close_price, entry)) / 2
-            else:
-                exit_price = (tp1 + min(close_price, entry)) / 2
-            exit_reason = "TP1_PARTIAL"
-        else:
-            exit_price = close_price
-            exit_reason = "MAX_HOLD"
-        exit_date = bars[end_idx]["date"]
-
-    if side == "long":
-        pnl_pct = ((exit_price - entry) / entry) * 100 - fee_pct
-    else:
-        pnl_pct = ((entry - exit_price) / entry) * 100 - fee_pct
-    return {
+    simulated = simulate_50_50_daily_exit(
+        bars,
+        entry_idx,
+        max_hold,
+        side.upper(),
+        entry,
+        stop,
+        tp1,
+        tp2,
+        trail_fraction=0.0,
+        fee_pct=max(float(fee_pct or 0), 0.0),
+        first_bar_order_unknown=False,
+        post_tp1_stop_offset=risk * 0.25,
+    )
+    if not simulated:
+        return None
+    public_outcome = {
+        "BLENDED_TP": "TP2",
+        "TP1_STOP": "TRAIL_STOP",
+        "TP1+EOD": "TP1_PARTIAL",
+        "EOD": "MAX_HOLD",
+    }.get(simulated["exit_reason"], simulated["exit_reason"])
+    result = dict(simulated)
+    result.update({
         "entry_date": bars[entry_idx]["date"],
         "actual_entry": entry,
-        "exit_date": exit_date,
-        "exit_price": exit_price,
-        "outcome": exit_reason,
-        "tp1_hit": tp1_hit,
+        "outcome": public_outcome,
         "target_model": "50_50_tp1_tp2",
-        "pnl_pct": round(pnl_pct, 2),
-        "r_multiple": round(pnl_pct / (risk / entry * 100), 2) if risk > 0 else 0,
-        "is_winner": pnl_pct > 0,
-    }
+    })
+    return result
+
+
+def _validated_backtest_max_hold_days(rule: Dict[str, Any], strategy: str) -> int:
+    """Require every strategy to declare its own evaluation horizon."""
+    if "max_hold_days" not in rule:
+        raise ValueError(
+            f"Backtest rule {strategy!r} requires explicit max_hold_days; "
+            "a shared fallback would mix strategy horizons"
+        )
+    try:
+        max_hold_raw = float(rule["max_hold_days"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Backtest rule {strategy!r} has invalid "
+            f"max_hold_days={rule.get('max_hold_days')!r}; "
+            "max_hold_days must be a positive integer"
+        ) from exc
+    if (
+        not math.isfinite(max_hold_raw)
+        or max_hold_raw <= 0
+        or not max_hold_raw.is_integer()
+    ):
+        raise ValueError(
+            f"Backtest rule {strategy!r} has invalid max_hold_days={max_hold_raw!r}; "
+            "max_hold_days must be a positive integer"
+        )
+    return int(max_hold_raw)
 
 
 def _crypto_backtest_universe(max_tickers: int) -> List[Dict[str, Any]]:
@@ -30940,6 +31098,10 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
         bars, bar_exchange = _validated_exchange_daily_crypto_bars(coin, days=days)
         if len(bars) < 45:
             continue
+        date_to_index = {
+            str(bar.get("date") or ""): index
+            for index, bar in enumerate(bars)
+        }
         cooldown_until = -999
 
         # A confirmation close may only be traded at the following open. Two
@@ -31041,7 +31203,11 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
             if not sim:
                 continue
             total_signals += 1
-            cooldown_until = idx + 7
+            cooldown_until = conservative_trade_exit_index(
+                sim,
+                date_to_index,
+                entry_idx,
+            )
             sim.update({
                 "ticker": symbol,
                 "symbol": symbol,
@@ -31102,12 +31268,146 @@ def _calc_ema_series(data, period):
     return emas
 
 
+def _calc_aligned_ema_series(data, period):
+    """Return an EMA aligned to the source bar indices."""
+    values = [float(value) for value in (data or [])]
+    result = [None] * len(values)
+    if period <= 0 or len(values) < period:
+        return result
+
+    ema = sum(values[:period]) / period
+    result[period - 1] = ema
+    multiplier = 2.0 / (period + 1.0)
+    for index in range(period, len(values)):
+        ema = values[index] * multiplier + ema * (1.0 - multiplier)
+        result[index] = ema
+    return result
+
+
+def _calc_wilder_rsi_series(data, period=14):
+    """Return Wilder RSI values aligned to the source bar indices."""
+    values = [float(value) for value in (data or [])]
+    result = [None] * len(values)
+    if period <= 0 or len(values) <= period:
+        return result
+
+    gains = []
+    losses = []
+    for index in range(1, period + 1):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    def _rsi(gain, loss):
+        if loss <= 0 and gain <= 0:
+            return 50.0
+        if loss <= 0:
+            return 100.0
+        if gain <= 0:
+            return 0.0
+        return 100.0 - (100.0 / (1.0 + gain / loss))
+
+    result[period] = _rsi(avg_gain, avg_loss)
+    for index in range(period + 1, len(values)):
+        change = values[index] - values[index - 1]
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
+        avg_gain = ((period - 1) * avg_gain + gain) / period
+        avg_loss = ((period - 1) * avg_loss + loss) / period
+        result[index] = _rsi(avg_gain, avg_loss)
+    return result
+
+
+def _indicator_entry_on_next_open(signal_index, dates, opens, direction="long"):
+    """Fill a close-confirmed signal at the next tradable session open."""
+    fill_index = int(signal_index) + 1
+    if fill_index >= len(opens) or fill_index >= len(dates):
+        return None
+    fill_price = float(opens[fill_index])
+    if not math.isfinite(fill_price) or fill_price <= 0:
+        return None
+    return {
+        "signal_date": dates[signal_index],
+        "entry_date": dates[fill_index],
+        "entry_price": fill_price,
+        "dir": str(direction or "long").lower(),
+        "bar_idx": fill_index,
+        "fill_model": "next_session_open_after_close_signal",
+    }
+
+
+def _indicator_exit_on_next_open(position, signal_index, dates, opens):
+    """Exit an open indicator trade on the session after its close signal."""
+    fill_index = int(signal_index) + 1
+    if fill_index >= len(opens) or fill_index >= len(dates):
+        return None
+    exit_price = float(opens[fill_index])
+    if not math.isfinite(exit_price) or exit_price <= 0:
+        return None
+    direction = str(position.get("dir") or "long").lower()
+    trade = _make_trade(
+        position["entry_date"],
+        position["entry_price"],
+        dates[fill_index],
+        exit_price,
+        direction,
+    )
+    trade.update(
+        {
+            "entry_signal_date": position.get("signal_date"),
+            "exit_signal_date": dates[signal_index],
+            "fill_model": "next_session_open_after_close_signal",
+        }
+    )
+    return trade
+
+
+def _indicator_unresolved_trade(position, dates):
+    """Represent an actually filled but still-open trade without inventing an exit."""
+    direction = str(position.get("dir") or "long").upper()
+    return {
+        "entry_date": position.get("entry_date"),
+        "entry_price": round(float(position.get("entry_price") or 0.0), 6),
+        "entry_signal_date": position.get("signal_date"),
+        "exit_date": None,
+        "exit_price": None,
+        "pnl_pct": 0.0,
+        "type": f"{direction} (OPEN)",
+        "outcome": "UNRESOLVED",
+        "exit_reason": "END_OF_DATA",
+        "last_data_date": dates[-1] if dates else None,
+        "fill_model": position.get("fill_model") or "next_session_open_after_close_signal",
+    }
+
+
 def _backtest_stats(trades, ticker, strategy, months):
     """Calculate backtest statistics from a list of trades."""
-    trades = sorted(trades or [], key=chronological_trade_key)
+    input_trades = sorted(trades or [], key=chronological_trade_key)
+    no_fill = sum(
+        1 for trade in input_trades
+        if str((trade or {}).get("outcome") or "").upper() == "NO_FILL"
+    )
+    unresolved = sum(
+        1 for trade in input_trades
+        if str((trade or {}).get("outcome") or "").upper() == "UNRESOLVED"
+    )
+    unresolved_rows = [
+        trade for trade in input_trades
+        if str((trade or {}).get("outcome") or "").upper() == "UNRESOLVED"
+    ]
+    # Legacy indicator backtests omit outcome because those rows are already
+    # decided. Explicitly non-decided rows must not enter performance metrics.
+    trades = [
+        trade for trade in input_trades
+        if str((trade or {}).get("outcome") or "").upper()
+        not in {"NO_FILL", "UNRESOLVED"}
+    ]
     total_trades = len(trades)
     if total_trades == 0:
-        return {
+        result = {
             "ticker": ticker, "strategy": strategy, "months": months,
             "total_trades": 0, "win_rate": 0, "avg_pnl": 0, "total_return": 0,
             "max_drawdown": 0, "avg_win": 0, "avg_loss": 0, "best_trade": 0,
@@ -31116,7 +31416,16 @@ def _backtest_stats(trades, ticker, strategy, months):
             "verdict": _bt_backtest_verdict(0, 0, 0, 0, 0, 0, 0),
             "out_of_sample": _bt_out_of_sample_summary([]),
             "worst_trade": 0, "trades": [], "timestamp": datetime.now().isoformat(),
+            "total_input_trades": len(input_trades),
+            "total_filled": len(input_trades) - no_fill,
+            "total_decided": 0,
+            "no_fill": no_fill,
+            "unresolved": unresolved,
+            "statistics_scope": "decided_filled_trades_only",
+            "open_trades": unresolved_rows[-50:],
         }
+        result.update(backtest_uncertainty_metrics([]))
+        return result
     wins = [t for t in trades if t["pnl_pct"] > 0]
     losses_list = [t for t in trades if t["pnl_pct"] <= 0]
     win_rate = round(len(wins) / total_trades * 100, 1)
@@ -31155,7 +31464,7 @@ def _backtest_stats(trades, ticker, strategy, months):
         ),
         out_of_sample,
     )
-    return {
+    result = {
         "ticker": ticker, "strategy": strategy, "months": months,
         "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
         "total_return": total_return, "max_drawdown": rounded_max_dd,
@@ -31168,8 +31477,17 @@ def _backtest_stats(trades, ticker, strategy, months):
         "verdict": verdict,
         "out_of_sample": out_of_sample,
         "trades": trades[-50:],
+        "total_input_trades": len(input_trades),
+        "total_filled": len(input_trades) - no_fill,
+        "total_decided": total_trades,
+        "no_fill": no_fill,
+        "unresolved": unresolved,
+        "statistics_scope": "decided_filled_trades_only",
+        "open_trades": unresolved_rows[-50:],
         "timestamp": datetime.now().isoformat(),
     }
+    result.update(backtest_uncertainty_metrics(trades))
+    return result
 
 
 def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"):
@@ -31219,85 +31537,86 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         # ══════════════════════════════════════════════════════════
 
         if strategy == "sma_crossover":
-            for i in range(51, len(closes)):
-                sma20 = sum(closes[i-20:i]) / 20
-                sma50 = sum(closes[i-50:i]) / 50
-                prev_sma20 = sum(closes[i-21:i-1]) / 20
-                prev_sma50 = sum(closes[i-51:i-1]) / 50
+            for i in range(50, len(closes)):
+                sma20 = sum(closes[i - 19:i + 1]) / 20
+                sma50 = sum(closes[i - 49:i + 1]) / 50
+                prev_sma20 = sum(closes[i - 20:i]) / 20
+                prev_sma50 = sum(closes[i - 50:i]) / 50
                 if position is None:
                     if prev_sma20 <= prev_sma50 and sma20 > sma50:
-                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                        position = _indicator_entry_on_next_open(i, dates, opens)
                 else:
                     if prev_sma20 >= prev_sma50 and sma20 < sma50:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trades.append(trade)
+                            position = None
 
         elif strategy == "rsi_mean_reversion":
-            for i in range(15, len(closes)):
-                gains, losses = [], []
-                for j in range(14):
-                    diff = closes[i-j] - closes[i-j-1]
-                    (gains if diff > 0 else losses).append(abs(diff))
-                avg_gain = sum(gains) / 14 if gains else 0.001
-                avg_loss = sum(losses) / 14 if losses else 0.001
-                rsi = 100 - (100 / (1 + avg_gain / avg_loss))
+            rsi_values = _calc_wilder_rsi_series(closes, 14)
+            for i in range(14, len(closes)):
+                rsi = rsi_values[i]
+                if rsi is None:
+                    continue
                 if position is None:
                     if rsi < 30:
-                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                        position = _indicator_entry_on_next_open(i, dates, opens)
                 else:
                     if rsi > 70:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trades.append(trade)
+                            position = None
 
         elif strategy == "ema_crossover":
             if len(closes) > 21:
-                ema9_full = _calc_ema_series(closes, 9)
-                ema21_full = _calc_ema_series(closes, 21)
-                # Align both to same index: ema9 starts at idx 8, ema21 at idx 20
-                offset = 21 - 9  # = 12
-                for i in range(1, len(ema21_full)):
-                    e9_idx = i + offset
-                    if e9_idx >= len(ema9_full) or e9_idx < 1:
+                ema9 = _calc_aligned_ema_series(closes, 9)
+                ema21 = _calc_aligned_ema_series(closes, 21)
+                for bar_idx in range(21, len(closes)):
+                    if any(value is None for value in (
+                        ema9[bar_idx], ema21[bar_idx],
+                        ema9[bar_idx - 1], ema21[bar_idx - 1],
+                    )):
                         continue
-                    bar_idx = 20 + i
-                    if bar_idx >= len(dates):
-                        break
                     if position is None:
-                        if ema9_full[e9_idx] > ema21_full[i] and ema9_full[e9_idx - 1] <= ema21_full[i - 1]:
-                            position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
+                        if ema9[bar_idx] > ema21[bar_idx] and ema9[bar_idx - 1] <= ema21[bar_idx - 1]:
+                            position = _indicator_entry_on_next_open(bar_idx, dates, opens)
                     else:
-                        if ema9_full[e9_idx] < ema21_full[i] and ema9_full[e9_idx - 1] >= ema21_full[i - 1]:
-                            trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[bar_idx], closes[bar_idx]))
-                            position = None
+                        if ema9[bar_idx] < ema21[bar_idx] and ema9[bar_idx - 1] >= ema21[bar_idx - 1]:
+                            trade = _indicator_exit_on_next_open(position, bar_idx, dates, opens)
+                            if trade is not None:
+                                trades.append(trade)
+                                position = None
 
         elif strategy == "macd":
             if len(closes) > 35:
-                ema12 = _calc_ema_series(closes, 12)
-                ema26 = _calc_ema_series(closes, 26)
-                # MACD = EMA12 - EMA26, aligned to ema26 start (idx 25)
-                offset = 26 - 12  # = 14
-                macd_line = []
-                for i in range(len(ema26)):
-                    e12_idx = i + offset
-                    if e12_idx < len(ema12):
-                        macd_line.append(ema12[e12_idx] - ema26[i])
-                if len(macd_line) > 9:
-                    signal_line = _calc_ema_series(macd_line, 9)
-                    sig_offset = 9
-                    for i in range(1, len(signal_line)):
-                        m_idx = i + sig_offset - 1
-                        if m_idx >= len(macd_line) or m_idx < 1:
-                            continue
-                        bar_idx = 25 + m_idx + 1
-                        if bar_idx >= len(dates):
+                ema12 = _calc_aligned_ema_series(closes, 12)
+                ema26 = _calc_aligned_ema_series(closes, 26)
+                macd_line = [None] * len(closes)
+                for bar_idx in range(25, len(closes)):
+                    if ema12[bar_idx] is not None and ema26[bar_idx] is not None:
+                        macd_line[bar_idx] = ema12[bar_idx] - ema26[bar_idx]
+                compact_macd = [value for value in macd_line if value is not None]
+                compact_signal = _calc_aligned_ema_series(compact_macd, 9)
+                signal_line = [None] * len(closes)
+                for offset, value in enumerate(compact_signal):
+                    signal_line[25 + offset] = value
+                if len(compact_macd) > 9:
+                    for bar_idx in range(34, len(closes)):
+                        if any(value is None for value in (
+                            macd_line[bar_idx], signal_line[bar_idx],
+                            macd_line[bar_idx - 1], signal_line[bar_idx - 1],
+                        )):
                             continue
                         if position is None:
-                            if macd_line[m_idx] > signal_line[i] and macd_line[m_idx - 1] <= signal_line[i - 1]:
-                                position = {"entry_date": dates[bar_idx], "entry_price": closes[bar_idx]}
+                            if macd_line[bar_idx] > signal_line[bar_idx] and macd_line[bar_idx - 1] <= signal_line[bar_idx - 1]:
+                                position = _indicator_entry_on_next_open(bar_idx, dates, opens)
                         else:
-                            if macd_line[m_idx] < signal_line[i] and macd_line[m_idx - 1] >= signal_line[i - 1]:
-                                trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[bar_idx], closes[bar_idx]))
-                                position = None
+                            if macd_line[bar_idx] < signal_line[bar_idx] and macd_line[bar_idx - 1] >= signal_line[bar_idx - 1]:
+                                trade = _indicator_exit_on_next_open(position, bar_idx, dates, opens)
+                                if trade is not None:
+                                    trades.append(trade)
+                                    position = None
 
         elif strategy == "bollinger_bands":
             period = 20
@@ -31312,22 +31631,29 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 if position is None:
                     # Long: Preis unter Lower Band
                     if closes[i] <= lower:
-                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "long", "bar_idx": i}
+                        position = _indicator_entry_on_next_open(i, dates, opens, "long")
                     # Short: Preis über Upper Band
                     elif closes[i] >= upper:
-                        position = {"entry_date": dates[i], "entry_price": closes[i], "dir": "short", "bar_idx": i}
+                        position = _indicator_entry_on_next_open(i, dates, opens, "short")
                 else:
                     bars_held = i - position.get("bar_idx", i)
                     if position["dir"] == "long" and closes[i] >= sma:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "long"))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trades.append(trade)
+                            position = None
                     elif position["dir"] == "short" and closes[i] <= sma:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], "short"))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trades.append(trade)
+                            position = None
                     elif bars_held >= 20:
                         # Max-Hold Timeout: verhindert infinite holding in Trends
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i], position["dir"]))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trade["exit_reason"] = "MAX_HOLD"
+                            trades.append(trade)
+                            position = None
 
         elif strategy == "mean_reversion_sma":
             # Buy when price drops >5% below SMA50, sell when back above SMA50
@@ -31336,11 +31662,13 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 pct_from_sma = ((closes[i] - sma50) / sma50) * 100
                 if position is None:
                     if pct_from_sma < -5:
-                        position = {"entry_date": dates[i], "entry_price": closes[i]}
+                        position = _indicator_entry_on_next_open(i, dates, opens)
                 else:
                     if closes[i] > sma50:
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
-                        position = None
+                        trade = _indicator_exit_on_next_open(position, i, dates, opens)
+                        if trade is not None:
+                            trades.append(trade)
+                            position = None
 
         # ══════════════════════════════════════════════════════════
         # TURTLE TRADING (Richard Dennis, 1983)
@@ -31388,43 +31716,71 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 # Donchian Channel Low (10-Tage) für Exit
                 dc_low_exit = min(lows[max(0, i - donchian_exit):i])
 
-                atr = atr_arr[i]
+                # Entry sizing may only use information known before this bar.
+                atr = atr_arr[i - 1]
 
                 if position is None:
                     # ENTRY: Close durchbricht 20-Tage-Hoch
-                    if closes[i] > dc_high and atr > 0:
+                    if highs[i] >= dc_high and atr > 0:
                         # System 1 Filter: Skip wenn letzter Breakout profitabel war
                         if last_breakout_profitable:
                             last_breakout_profitable = False  # Reset — nächster gilt wieder
                             continue
 
                         # Entry-Preis = Donchian-Breakout-Level (dc_high), nicht Close
-                        entry_price = dc_high
+                        entry_price = max(float(opens[i]), float(dc_high))
                         stop_price = entry_price - atr_stop_mult * atr
                         position = {
                             "entry_date": dates[i],
                             "entry_price": entry_price,
                             "stop": stop_price,
                             "entry_atr": atr,  # ATR zum Zeitpunkt des Einstiegs
+                            "dir": "long",
+                            "bar_idx": i,
+                            "fill_model": "donchian_stop_or_open_gap",
                         }
+                        # With daily OHLC the order of high and low is unknown.
+                        # Count an entry-day stop conservatively and expose it.
+                        if lows[i] <= stop_price:
+                            trade = _make_trade(
+                                position["entry_date"],
+                                position["entry_price"],
+                                dates[i],
+                                stop_price,
+                            )
+                            trade.update({
+                                "exit_reason": "STOP",
+                                "same_bar_path_ambiguous": True,
+                                "fill_model": "donchian_stop_or_open_gap",
+                            })
+                            trades.append(trade)
+                            position = None
                 else:
                     # EXIT-Bedingungen prüfen (Stop oder Donchian-Exit)
                     stop_price = position["stop"]
                     entry_atr = position["entry_atr"]
 
                     # Stop-Loss getroffen (Intraday Low)
-                    if lows[i] <= stop_price:
-                        exit_price = stop_price  # Ausführung am Stop
+                    # The tighter of the protective stop and Donchian exit is
+                    # a stop order. A gap through that level fills at the open.
+                    protective_exit = max(float(stop_price), float(dc_low_exit))
+                    if lows[i] <= protective_exit:
+                        exit_price = min(float(opens[i]), protective_exit)
                         pnl = exit_price - position["entry_price"]
                         last_breakout_profitable = (pnl > 0)
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], exit_price))
+                        trade = _make_trade(
+                            position["entry_date"],
+                            position["entry_price"],
+                            dates[i],
+                            exit_price,
+                        )
+                        trade.update({
+                            "exit_reason": "STOP" if stop_price >= dc_low_exit else "DONCHIAN_EXIT",
+                            "fill_model": "protective_stop_or_open_gap",
+                        })
+                        trades.append(trade)
                         position = None
                     # Donchian Exit: Close unter 10-Tage-Tief
-                    elif closes[i] < dc_low_exit:
-                        pnl = closes[i] - position["entry_price"]
-                        last_breakout_profitable = (pnl > 0)
-                        trades.append(_make_trade(position["entry_date"], position["entry_price"], dates[i], closes[i]))
-                        position = None
                     else:
                         # Trailing Stop mit Entry-ATR (nicht aktuellem ATR)
                         new_stop = closes[i] - atr_stop_mult * entry_atr
@@ -31437,8 +31793,6 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
         elif strategy in BACKTEST_RULES:
             rule = BACKTEST_RULES[strategy]
-            sig = rule["signal"]
-            direction = rule.get("direction", "long")
             stop_pct = float(rule.get("stop_pct", 0.05))
             if not math.isfinite(stop_pct) or stop_pct <= 0:
                 raise ValueError(
@@ -31458,215 +31812,76 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                     f"tp1_rr={tp1_rr!r}, tp2_rr={tp2_rr!r}; "
                     "targets must be finite and satisfy 0 < TP1 < TP2"
                 )
-            max_hold = rule.get("max_hold_days", 5)
-            entry_type = rule.get("entry", "next_open")
-            min_price = rule.get("min_price", 1.0)
-
-            # Pre-calc RVOL (20d avg volume).
-            # AUDIT M-Backtest-RVOL: Init war 1.0 -> in den ersten 20 Bars wurde
-            # rvol = Rohvolumen (riesig) und rvol_min war trivial erfuellt.
-            # None = keine valide Volumenbasis; rvol-gated Strategien duerfen
-            # dort kein Signal generieren.
-            avg_vols = [None] * len(bars)
-            for i in range(20, len(bars)):
-                avg_vols[i] = historical_volume_baseline(
-                    volumes[i-20:i],
-                    lookback=20,
-                    minimum_periods=10,
+            _validated_backtest_max_hold_days(rule, strategy)
+            min_price = float(rule.get("min_price", 1.0))
+            if not math.isfinite(min_price) or min_price <= 0:
+                raise ValueError(
+                    f"Backtest rule {strategy!r} has invalid min_price={min_price!r}; "
+                    "min_price must be finite and positive"
                 )
 
-            for i in range(2, len(bars) - 1):
-                if position is not None:
-                    # ── MANAGE OPEN POSITION: Stop/TP/MaxHold ──
-                    days_held = position.get("days_held", 0) + 1
-                    position["days_held"] = days_held
-                    entry_p = position["entry_price"]
-                    risk = entry_p * stop_pct
+            canonical_bars = [
+                {
+                    "date": dates[i],
+                    "open": float(opens[i]),
+                    "high": float(highs[i]),
+                    "low": float(lows[i]),
+                    "close": float(closes[i]),
+                    "volume": float(volumes[i]),
+                }
+                for i in range(len(bars))
+            ]
+            date_to_index = {
+                str(bar.get("date") or ""): index
+                for index, bar in enumerate(canonical_bars)
+            }
+            last_exit_index = -1
 
-                    tp1_hit = bool(position.get("tp1_hit"))
-                    entry_bar_ambiguous = (
-                        position.get("entry_type") == "prev_high"
-                        and position.get("entry_index") == i
-                    )
-
-                    if direction == "short":
-                        initial_stop = entry_p * (1 + stop_pct)
-                        active_stop = entry_p if tp1_hit else initial_stop
-                        tp1_price = entry_p - risk * tp1_rr
-                        tp2_price = entry_p - risk * tp2_rr
-
-                        # Daily OHLC has no intrabar ordering. Stop-first is the
-                        # conservative assumption whenever stop and target coexist.
-                        if highs[i] >= active_stop:
-                            runner_exit = max(opens[i], active_stop) if opens[i] >= active_stop else active_stop
-                            exit_price = (tp1_price + runner_exit) / 2.0 if tp1_hit else runner_exit
-                            reason = "TP1_STOP" if tp1_hit else "STOP"
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "short")
-                            trade["exit_reason"] = reason
-                            trades.append(trade)
-                            position = None
-                            continue
-                        if tp1_hit and lows[i] <= tp2_price:
-                            exit_price = (tp1_price + tp2_price) / 2.0
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "short")
-                            trade.update({
-                                "exit_reason": "BLENDED_TP",
-                                "target_model": "50_50_tp1_tp2",
-                                "tp1_rr": tp1_rr,
-                                "tp2_rr": tp2_rr,
-                            })
-                            trades.append(trade)
-                            position = None
-                            continue
-                        if not tp1_hit and not entry_bar_ambiguous and lows[i] <= tp1_price:
-                            position["tp1_hit"] = True
-                    else:
-                        initial_stop = entry_p * (1 - stop_pct)
-                        active_stop = entry_p if tp1_hit else initial_stop
-                        tp1_price = entry_p + risk * tp1_rr
-                        tp2_price = entry_p + risk * tp2_rr
-
-                        if lows[i] <= active_stop:
-                            runner_exit = min(opens[i], active_stop) if opens[i] <= active_stop else active_stop
-                            exit_price = (tp1_price + runner_exit) / 2.0 if tp1_hit else runner_exit
-                            reason = "TP1_STOP" if tp1_hit else "STOP"
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "long")
-                            trade["exit_reason"] = reason
-                            trades.append(trade)
-                            position = None
-                            continue
-                        if tp1_hit and highs[i] >= tp2_price:
-                            exit_price = (tp1_price + tp2_price) / 2.0
-                            trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, "long")
-                            trade.update({
-                                "exit_reason": "BLENDED_TP",
-                                "target_model": "50_50_tp1_tp2",
-                                "tp1_rr": tp1_rr,
-                                "tp2_rr": tp2_rr,
-                            })
-                            trades.append(trade)
-                            position = None
-                            continue
-                        if not tp1_hit and not entry_bar_ambiguous and highs[i] >= tp1_price:
-                            position["tp1_hit"] = True
-
-                    # Max hold days → exit at close
-                    if days_held >= max_hold:
-                        if position.get("tp1_hit"):
-                            exit_price = (tp1_price + closes[i]) / 2.0
-                            exit_reason = "TP1+EOD"
-                        else:
-                            exit_price = closes[i]
-                            exit_reason = "EOD"
-                        trade = _make_trade(position["entry_date"], entry_p, dates[i], exit_price, direction)
-                        trade["exit_reason"] = exit_reason
-                        trades.append(trade)
-                        position = None
+            for signal_index in range(1, len(canonical_bars)):
+                if signal_index <= last_exit_index:
+                    continue
+                if canonical_bars[signal_index]["close"] < min_price:
                     continue
 
-                # ── CHECK SIGNAL CONDITIONS ──
-                if closes[i] < min_price:
+                signal_metrics = evaluate_backtest_rule_signal(
+                    canonical_bars,
+                    signal_index,
+                    strategy,
+                )
+                if signal_metrics is None:
                     continue
 
-                c = closes[i]
-                o = opens[i]
-                h = highs[i]
-                lo = lows[i]
-                prev_c = closes[i - 1]
-                change_pct = ((c - prev_c) / prev_c) * 100 if prev_c else 0
-                close_pos = (c - lo) / (h - lo) if (h - lo) > 0 else 0.5
-                candle_range = max(h - lo, 1e-9)
-                upper_wick_pct = max(0.0, h - max(o, c)) / candle_range * 100.0
-
-                # Gap %
-                gap_pct = ((o - prev_c) / prev_c) * 100 if prev_c else 0
-
-                # Prev day change %
-                prev_change_pct = ((prev_c - closes[i - 2]) / closes[i - 2]) * 100 if i >= 2 and closes[i - 2] else 0
-
-                # RVOL — None solange keine 20-Bar-Volumenbasis existiert
-                # (AUDIT M-Backtest-RVOL: vorher fake 1.0-Basis vor Bar 20)
-                rvol = (volumes[i] / avg_vols[i]) if avg_vols[i] else None
-
-                # Check all signal conditions
-                match = True
-                if "change_pct_min" in sig and change_pct < sig["change_pct_min"]:
-                    match = False
-                if "change_pct_max" in sig and change_pct > sig["change_pct_max"]:
-                    match = False
-                if "close_pos_min" in sig and close_pos < sig["close_pos_min"]:
-                    match = False
-                if "close_pos_max" in sig and close_pos > sig["close_pos_max"]:
-                    match = False
-                if "gap_pct_min" in sig and gap_pct < sig["gap_pct_min"]:
-                    match = False
-                if "gap_pct_max" in sig and gap_pct > sig["gap_pct_max"]:
-                    match = False
-                if "prev_change_pct_min" in sig and prev_change_pct < sig["prev_change_pct_min"]:
-                    match = False
-                if "prev_change_pct_max" in sig and prev_change_pct > sig["prev_change_pct_max"]:
-                    match = False
-                # AUDIT M-Backtest-RVOL: rvol=None (erste 20 Bars) erfuellt
-                # KEINE rvol-Bedingung -> kein Signal fuer rvol-gated Regeln.
-                if "rvol_min" in sig and (rvol is None or rvol < sig["rvol_min"]):
-                    match = False
-                if "rvol_max" in sig and (rvol is None or rvol > sig["rvol_max"]):
-                    match = False
-                if "upper_wick_pct_max" in sig and upper_wick_pct > sig["upper_wick_pct_max"]:
-                    match = False
-                breakout_lookback = int(sig.get("breakout_lookback_days", 0) or 0)
-                if breakout_lookback:
-                    if i < breakout_lookback:
-                        match = False
-                    else:
-                        prior_high = max(highs[i - breakout_lookback:i])
-                        proximity = ((c - prior_high) / prior_high) if prior_high > 0 else -1.0
-                        if proximity < float(sig.get("breakout_proximity_min", 0.0) or 0.0):
-                            match = False
-
-                if not match:
+                trade = simulate_rule_trade(
+                    canonical_bars,
+                    signal_index,
+                    strategy,
+                )
+                if trade is None:
                     continue
 
-                # ── ENTRY ──
-                if entry_type == "next_open" and i + 1 < len(bars):
-                    position = {
-                        "entry_date": dates[i + 1], "entry_price": opens[i + 1],
-                        "entry_index": i + 1, "entry_type": "next_open",
-                        "days_held": 0, "tp1_hit": False,
+                trade.update(
+                    {
+                        "ticker": ticker,
+                        "strategy": strategy,
+                        "type": str(rule.get("direction", "long")).upper(),
+                        "signal_metrics": signal_metrics,
                     }
-                elif entry_type == "at_close":
-                    position = {
-                        "entry_date": dates[i], "entry_price": closes[i],
-                        "entry_index": i, "entry_type": "at_close",
-                        "days_held": 0, "tp1_hit": False,
-                    }
-                elif entry_type == "prev_high":
-                    # Entry only if next day breaks prev high
-                    if i + 1 < len(bars) and highs[i + 1] > highs[i]:
-                        position = {
-                            "entry_date": dates[i + 1], "entry_price": highs[i],
-                            "entry_index": i + 1, "entry_type": "prev_high",
-                            "days_held": 0, "tp1_hit": False,
-                        }
+                )
+                trades.append(trade)
+
+                last_exit_index = conservative_trade_exit_index(
+                    trade,
+                    date_to_index,
+                    signal_index,
+                )
 
         else:
             return {"error": f"Unbekannte Strategie: {strategy}"}
 
-        # Close any open position at last bar
+        # A filled trade still open at the end of the sample is censored, not
+        # a fictional last-close exit. It is disclosed but excluded from PnL.
         if position is not None:
-            direction = BACKTEST_RULES.get(strategy, {}).get("direction", "long")
-            entry_p = position["entry_price"]
-            exit_price = closes[-1]
-            if position.get("tp1_hit"):
-                rule = BACKTEST_RULES.get(strategy, {})
-                risk = entry_p * float(rule.get("stop_pct", 0.05))
-                tp1_rr = float(rule.get("tp1_rr", 1.5))
-                tp1_price = entry_p - risk * tp1_rr if direction == "short" else entry_p + risk * tp1_rr
-                exit_price = (tp1_price + exit_price) / 2.0
-            t = _make_trade(position["entry_date"], entry_p, dates[-1], exit_price, direction)
-            t["type"] += " (offen)"
-            t["exit_reason"] = "TP1+EOD" if position.get("tp1_hit") else "EOD"
-            trades.append(t)
+            trades.append(_indicator_unresolved_trade(position, dates))
 
         stats = _backtest_stats(trades, ticker, strategy, months)
         if requested_strategy != strategy:

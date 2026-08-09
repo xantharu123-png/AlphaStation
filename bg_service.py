@@ -371,10 +371,9 @@ _STOCK_SWING_EXECUTION_CACHE_LOCK = threading.Lock()
 _BIOTECH_ALERT_DEDUPE_SEC = 72 * 3600
 # B5: Einmalige Invalidierungs-Update-Mail je Symbol (72h-Fenster).
 _NLS_INVALIDATION_DEDUPE_SEC = 72 * 3600
-# Exit-Update-Mails (Signal-Tracker): einmalig je Transition. 7-Tage-Fenster =
-# grosszuegig — deckt das komplette Signal-Leben ab (Aktien max. 5 Daily-Bars,
-# Crypto 120h) und entspricht der max. Haltedauer der Dedupe-Datei selbst
-# (_load_email_dedupe prunt Eintraege > 7 Tage).
+# Exit-Update-Mails (Signal-Tracker): einmalig je Transition. Das 7-Tage-Fenster
+# verhindert nur Retry-/Restart-Duplikate; die strategieabhaengige Haltedauer
+# wird separat im Tracker gespeichert und kann laenger sein.
 _SIGNAL_UPDATE_DEDUPE_SEC = 7 * 86400
 # Startup-Delay wie api (_EMAIL_STARTUP_DELAY): nach Prozess-Restart 5 Min keine
 # Mails — alte Cache-Daten erzeugen sonst Phantom-Alerts/Restart-Spam.
@@ -1393,7 +1392,7 @@ def _send_telegram_companion(final_subject, mail_class, telegram_text=""):
 def _tracker_stock_fetcher(ticker, since_iso_date):
     """Daily-Bars für den Signal-Tracker via Polygon Aggregates.
 
-    Kontrakt Team A: list[{date, high, low, close}] oder None bei Fehler.
+    Kontrakt: list[{date, open, high, low, close}] oder None bei Fehler.
     """
     try:
         import requests as req
@@ -1413,6 +1412,7 @@ def _tracker_stock_fetcher(ticker, since_iso_date):
             try:
                 bars.append({
                     "date": datetime.fromtimestamp(b["t"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    "open": float(b["o"]),
                     "high": float(b["h"]),
                     "low": float(b["l"]),
                     "close": float(b["c"]),
@@ -1732,23 +1732,34 @@ _SIGNAL_UPDATE_EVENTS = {
 }
 
 
-def _signal_origin_was_mailed(scanner, ticker, now=None):
-    """Zweitsicherung: hat das Ursprungssignal wirklich eine Mail ausgeloest?
+def _signal_origin_was_mailed(origin, ticker=None, now=None):
+    """Nachweis: hat das Ursprungssignal wirklich eine Mail ausgeloest?
 
-    Der Tracker loggt ohnehin NUR tatsaechlich versendete Signale
-    (record_alert_signals laeuft erst NACH sent=True, s. B2-Muster) — diese
-    Pruefung ist eine bewusste Doppelsicherung gegen Alt-/Fremdbestaende in
-    der Tracker-DB (z.B. manuell eingespielte oder Telegram-only Signale).
+    Tracker-Ereignisse tragen die dauerhafte Herkunft aus der Signal-DB:
+    ID, mail_class und channel. Dadurch bleiben Folge-Mails auch bei langen
+    Swing-/BI-Laufzeiten korrekt; die zeitlich begrenzte Dedupe-Datei darf
+    nicht als Herkunftsnachweis dienen. Shadow-, manuell eingespielte oder
+    Telegram-only Signale bleiben fail-closed.
 
-    Geprueft wird das geteilte persistente Dedupe (api+bg, gleiche Datei) mit
-    dem Key-Format f"{scanner}_{ticker}". Sonderfall new_listing: api/bg
-    markieren auf dem ROH-Symbol (new_listing_TSTUSDT), der Tracker fuehrt
-    das Display-Symbol (TST) — daher dort Suffix-tolerante Suche ueber
-    _display_crypto_contract_symbol. 7-Tage-Fenster = grosszuegig (Signal
-    lebt max. ~5 Handelstage / 120h).
+    Der alte scanner+ticker-Aufruf bleibt nur fuer Legacy-Pfade ohne
+    Tracker-Datensatz erhalten. Dort wird das geteilte Dedupe geprueft;
+    new_listing braucht zusaetzlich die Suffix-tolerante Symbolzuordnung.
     """
     now = now or time.time()
-    scanner = str(scanner or "").strip()
+    if isinstance(origin, dict):
+        mail_class = str(origin.get("mail_class") or "").strip().lower()
+        channel = str(origin.get("channel") or "").strip().lower()
+        try:
+            signal_id = int(origin.get("id") or 0)
+        except (TypeError, ValueError):
+            signal_id = 0
+        return bool(
+            signal_id > 0
+            and mail_class == "trade"
+            and "email" in channel
+        )
+
+    scanner = str(origin or "").strip()
     ticker = str(ticker or "").strip().upper()
     if not scanner or not ticker:
         return False
@@ -2049,7 +2060,7 @@ def _build_signal_update_digest(pending):
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
         Automatisches Update vom Signal-Tracker (15-Minuten-Evaluierung).<br>
-        'TP1 erreicht' = Teilgewinn-Zone erreicht, Restposition risikofrei Richtung TP2 (Stop auf Entry).<br>
+        'TP1 erreicht' = Teilgewinn-Zone erreicht, Stop der Restposition auf Entry ziehen; Gap- und Slippage-Risiko bleiben bestehen.<br>
         Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
     </p>
     </body></html>"""
@@ -2064,7 +2075,8 @@ def _send_signal_update_mail(transitions, secrets):
       - EINE Sammelmail pro Eval-Lauf (alle Transitionen gebuendelt),
         kein Versand ohne mailbare Transitionen.
       - Nur Ereignisse aus _SIGNAL_UPDATE_EVENTS (UNTRACKED wird verworfen).
-      - Zweitsicherung _signal_origin_was_mailed (s. dort).
+      - Dauerhafter Tracker-Herkunftsnachweis via
+        _signal_origin_was_mailed (s. dort).
       - Persistentes Dedupe je Transition: signal_update_{id}_{new_status}
         (TTL 7d) — kein Spam bei Re-Evals; Mark erst NACH erfolgreichem
         Versand (B2-Muster: SMTP-Fehler => naechster Lauf darf erneut).
@@ -2088,7 +2100,7 @@ def _send_signal_update_mail(transitions, secrets):
         event = _SIGNAL_UPDATE_EVENTS.get(new_status)
         if event is None:
             continue
-        if not _signal_origin_was_mailed(tr.get("scanner"), tr.get("ticker"), now=now):
+        if not _signal_origin_was_mailed(tr, now=now):
             log.debug(f"[SignalTracker] Update unterdrueckt (kein Erst-Mail-Mark): "
                       f"{tr.get('scanner')}/{tr.get('ticker')} -> {new_status}")
             continue
@@ -2150,7 +2162,8 @@ def _build_be_update_digest(pending):
             )
             plan = (
                 f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen. "
-                f"An TP1 ({tp1_text}): 50% verkaufen, Rest risikofrei weiterlaufen lassen."
+                f"An TP1 ({tp1_text}): 50% verkaufen und den Stop der Restposition auf Einstand ziehen. "
+                "Gap- und Slippage-Risiko bleiben bestehen."
             )
         levels = " | ".join(
             f"{label} {_format_alert_price(act.get(key))}"
@@ -2201,7 +2214,7 @@ def _send_be_alert_mail(activations, secrets):
         +0.40R schlug das 50/50-Management +0.27R).
       - alle anderen: Stop auf Einstand + an TP1 50% verkaufen (Regel B).
     Versandregeln wie _send_signal_update_mail: EINE Sammelmail pro Lauf,
-    Zweitsicherung _signal_origin_was_mailed, persistentes Dedupe
+    dauerhafter Tracker-Herkunftsnachweis, persistentes Dedupe
     signal_be_{id} (7d), Dedupe-Mark erst NACH erfolgreichem Versand (B2).
 
     Returns True nur bei tatsaechlich versendeter Mail.
@@ -2220,9 +2233,7 @@ def _send_be_alert_mail(activations, secrets):
             continue
         if (
             not tracker_persisted
-            and not _signal_origin_was_mailed(
-                act.get("scanner"), act.get("ticker"), now=now
-            )
+            and not _signal_origin_was_mailed(act, now=now)
         ):
             log.debug(f"[SignalTracker] BE-Alert unterdrueckt (kein Erst-Mail-Mark): "
                       f"{act.get('scanner')}/{act.get('ticker')}")
@@ -2531,6 +2542,14 @@ def _build_mature_weekly_report_mail(
     def _pct_text(value, decimals=1):
         return f"{float(value):.{decimals}f}%" if isinstance(value, (int, float)) else "-"
 
+    def _metric_band(lower, upper, formatter):
+        lower_text = formatter(lower)
+        if not isinstance(upper, (int, float)) or not isinstance(lower, (int, float)):
+            return lower_text
+        if abs(float(upper) - float(lower)) <= 1e-9:
+            return lower_text
+        return f"{lower_text} bis {formatter(upper)}*"
+
     activity_signals = _int(activity_total, "signals")
     activity_open = _int(activity_total, "open")
     activity_decided = _int(activity_total, "decided_signals")
@@ -2540,9 +2559,13 @@ def _build_mature_weekly_report_mail(
     mature_losses = _int(perf_total, "managed_be_losses")
     mature_flat = _int(perf_total, "managed_be_breakevens")
     mature_hit = _number(perf_total, "managed_be_win_rate_pct")
+    mature_hit_upper = _number(perf_total, "managed_be_win_rate_pct_upper")
     mature_hit_ex_be = _number(perf_total, "managed_be_win_rate_ex_breakeven_pct")
     mature_sum = _number(perf_total, "sum_r_managed_50_50_be") or 0.0
     mature_avg = _number(perf_total, "avg_r_managed_50_50_be")
+    mature_sum_upper = _number(perf_total, "sum_r_managed_50_50_be_upper")
+    mature_avg_upper = _number(perf_total, "avg_r_managed_50_50_be_upper")
+    mature_ambiguous = _int(perf_total, "ambiguous_outcomes")
     mature_pf = _number(perf_total, "profit_factor_managed_be")
     mature_be = _number(perf_total, "breakeven_win_rate_managed_be_pct")
     excluded = int((performance_summary or {}).get("excluded_not_mature") or 0)
@@ -2552,10 +2575,33 @@ def _build_mature_weekly_report_mail(
     ci_high = ci.get("upper_pct")
     ci_text = ""
     if isinstance(ci_low, (int, float)) and isinstance(ci_high, (int, float)):
-        ci_text = f" (95%-KI {_pct_text(ci_low, 0)} bis {_pct_text(ci_high, 0)})"
+        ci_text = (
+            f" (95%-KI konservativer Pfad: {_pct_text(ci_low, 0)} bis "
+            f"{_pct_text(ci_high, 0)})"
+        )
 
+    uncertainty_note = ""
+    if (
+        mature_ambiguous > 0
+        and mature_sum_upper is not None
+        and mature_sum_upper > mature_sum + 1e-9
+    ):
+        uncertainty_note = (
+            '<div style="background:#fff7ed;border:1px solid #fdba74;padding:10px;'
+            'border-radius:6px;margin:0 0 14px;font-size:12px;color:#7c2d12">'
+            f'<b>Datenband:</b> {mature_ambiguous} Ergebnis(se) hatten Stop und Ziel '
+            'in derselben OHLC-Periode. Der Report verwendet konservativ Stop zuerst. '
+            f'Die Trefferquote liegt deshalb zwischen {_pct_text(mature_hit)} und '
+            f'{_pct_text(mature_hit_upper)}; der noch moegliche Bestpfad laege bei '
+            f'{_r_text(mature_sum_upper, 1)} '
+            f'bzw. {_r_text(mature_avg_upper)} im Mittel. Diese Obergrenze ist kein '
+            'Erwartungswert und keine behauptete Performance. Das 95%-KI oben bezieht '
+            'sich bewusst auf den konservativen Pfad.</div>'
+        )
+
+    subject_r = _metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))
     subject = (
-        f"Wochenreport Signal-Tracker: {mature_sum:+.1f}R | "
+        f"Wochenreport Signal-Tracker: {subject_r} | "
         f"{mature_decided} reife Signale | 50/50+BE"
     )
 
@@ -2594,11 +2640,12 @@ def _build_mature_weekly_report_mail(
 
     if mature_decided:
         performance_html = f"""
-    <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Ausgereifte 30-Tage-Kohorte</h3>
+    <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Ausgereifte Signale im 30-Tage-Berichtsfenster</h3>
     <p style="font-size:12px;color:#64748b;margin-top:0">
         Nur Versandkohorten nach Ablauf des vorgesehenen Beobachtungsfensters;
         {excluded} noch unreife Signale wurden ausgeschlossen.
     </p>
+    {uncertainty_note}
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
         <tr style="background:#eef2ff">
             <th style="padding:8px;text-align:left">Reife Signale</th>
@@ -2615,11 +2662,11 @@ def _build_mature_weekly_report_mail(
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_decided}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{mature_wins} / {mature_losses} / {mature_flat}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">
-                {_pct_text(mature_hit)}{ci_text}
+                {_metric_band(mature_hit, mature_hit_upper, _pct_text)}{ci_text}
                 <br><span style="color:#64748b;font-size:10px">ohne 0R: {_pct_text(mature_hit_ex_be)}</span>
             </td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{_r_text(mature_sum, 1)}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{_r_text(mature_avg)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{_metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{_metric_band(mature_avg, mature_avg_upper, _r_text)}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{f'{mature_pf:.2f}' if mature_pf is not None else '-'}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">{_pct_text(mature_be)}</td>
         </tr>
@@ -2627,7 +2674,7 @@ def _build_mature_weekly_report_mail(
     else:
         performance_html = f"""
     <div style="background:#f8fafc;border:1px solid #cbd5e1;padding:12px;border-radius:6px;margin-bottom:18px;font-size:13px;color:#0f172a">
-        <b>Noch keine ausgereifte 30-Tage-Kohorte.</b><br>
+        <b>Noch keine vollstaendig beobachteten Signale im 30-Tage-Berichtsfenster.</b><br>
         {excluded} Signal(e) haben ihr Beobachtungsfenster noch nicht beendet. Sie werden erst
         nach Ablauf ihres kompletten Stock- bzw. Krypto-Zeitfensters gewertet.
     </div>"""
@@ -2647,15 +2694,26 @@ def _build_mature_weekly_report_mail(
             continue
         row_sum = _number(bucket, "sum_r_managed_50_50_be") or 0.0
         row_avg = _number(bucket, "avg_r_managed_50_50_be")
+        row_sum_upper = _number(bucket, "sum_r_managed_50_50_be_upper")
+        row_ambiguous = _int(bucket, "ambiguous_outcomes")
         row_hit = _number(bucket, "managed_be_win_rate_pct")
+        row_hit_upper = _number(bucket, "managed_be_win_rate_pct_upper")
+        row_avg_upper = _number(bucket, "avg_r_managed_50_50_be_upper")
         row_pf = _number(bucket, "profit_factor_managed_be")
         tint = "#ecfdf5" if row_sum >= 0 else "#fff1f2"
+        row_range = _r_text(row_sum, 1)
+        if (
+            row_ambiguous > 0
+            and row_sum_upper is not None
+            and row_sum_upper > row_sum + 1e-9
+        ):
+            row_range = f"{_r_text(row_sum, 1)} bis {_r_text(row_sum_upper, 1)}*"
         scanner_rows += f"""<tr style="background:{tint}">
             <td style="padding:7px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
             <td style="padding:7px;border-bottom:1px solid #eee">{row_decided}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{_pct_text(row_hit)}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{_r_text(row_avg)}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee"><b>{_r_text(row_sum, 1)}</b></td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_hit, row_hit_upper, _pct_text)}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_avg, row_avg_upper, _r_text)}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee"><b>{row_range}</b></td>
             <td style="padding:7px;border-bottom:1px solid #eee">{f'{row_pf:.2f}' if row_pf is not None else '-'}</td>
         </tr>"""
     scanner_html = ""
@@ -2724,13 +2782,19 @@ def _build_mature_weekly_report_mail(
     <p style="color:#64748b;font-size:12px;margin-top:20px;line-height:1.5">
         Hauptmodell: 1R Anfangsrisiko, 50% Teilverkauf am TP1, Rest bis
         TP2/Stop/Expiry und Stop auf Einstand ab +1R. Aktien werden mit
-        nachfolgenden Tages-OHLC ausgewertet; wenn Stop und Ziel am selben Tag
-        beruehrt werden, gilt konservativ Stop zuerst. Krypto wird aus
+        nachfolgenden Tages-OHLC bis zum strategieabhaengigen, beim Versand
+        gespeicherten Bar-Horizont ausgewertet; wenn Stop und Ziel am selben Tag
+        beruehrt werden, gilt konservativ Stop zuerst und eine separat markierte
+        Obergrenze zeigt nur den anderen noch moeglichen Pfad. Krypto wird aus
         periodischen Kurs-Snapshots bewertet, nicht aus einer lueckenlosen
         Tick-Reihenfolge; Beruehrungen zwischen zwei Auswertungen koennen daher
         fehlen. Trefferquote zaehlt 0R-Einstandsausgaenge im Nenner; die
         Break-even-Schwelle beruecksichtigt dieselbe 0R-Quote. Dies ist ein
-        Forward-Track-Record, kein Backtest.{small_sample}
+        Forward-Track-Record, kein Backtest. Die R-Werte beschreiben den
+        Kursverlauf vor allgemeinen Brokergebuehren, Kommissionen, Borrow,
+        Funding und ueber erkannte Gap-Fills hinausgehender individueller
+        Slippage; sie sind keine Netto-Kontoperformance. * Obergrenzen sind
+        keine Erwartungswerte.{small_sample}
     </p>
     </body></html>"""
     return subject, body_html

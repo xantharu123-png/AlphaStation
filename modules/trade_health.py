@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from modules.trade_levels import trade_geometry
+from modules.trade_levels import minimum_stop_distance, trade_geometry
 
 
 PREFERRED_MIN_RR = 1.5
@@ -380,13 +380,24 @@ def calculate_trade_health(
 
     min_stop_distance: Optional[float] = None
     if entry is not None and entry > 0 and risk is not None and risk > 0:
-        spread_distance = entry * max(0.0, spread_pct or 0.0) / 100.0
-        atr_distance = max(0.0, atr_value or 0.0) * 0.25
-        min_stop_distance = max(entry * 0.001, spread_distance, atr_distance)
+        stop_floor = minimum_stop_distance(
+            entry,
+            atr=atr_value,
+            spread_pct=spread_pct,
+            trade_horizon=_first(row, ["trade_horizon", "TradeHorizon", "horizon"]),
+            scanner_name=_first(
+                row,
+                ["scanner", "scanner_name", "source_scanner"],
+                default=scanner_name,
+            ) or scanner_name,
+            asset_class=_first(row, ["asset_class", "market_type", "market"]),
+        )
+        min_stop_distance = _to_float(stop_floor.get("distance"))
         if risk < min_stop_distance:
             exclusion_reasons.append("stop_distance_below_noise_floor")
             warnings.append(
-                f"Stop-Abstand {risk:.6g} liegt unter Markt-/ATR-Rauschen {min_stop_distance:.6g}"
+                f"Stop-Abstand {risk:.6g} liegt unter {stop_floor.get('profile')} Markt-/ATR-Rauschen "
+                f"{min_stop_distance:.6g}"
             )
 
     # ── S-2 Audit-Fix: Stop-Breach-Erkennung ──

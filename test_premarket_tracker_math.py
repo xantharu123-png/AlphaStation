@@ -16,8 +16,8 @@ def test_pm_tracker_realizes_tp1_before_runner_stops():
     assert result["exit_reason"] == "TP1_STOP"
     assert result["tp1_hit"] is True
     assert result["stop_hit"] is True
-    assert result["exit_price"] == pytest.approx(10.25)
-    assert result["r_multiple"] == pytest.approx(0.25)
+    assert result["exit_price"] == pytest.approx(10.75)
+    assert result["r_multiple"] == pytest.approx(0.75)
 
 
 def test_pm_tracker_uses_half_tp1_half_tp2_and_net_fees():
@@ -48,5 +48,24 @@ def test_pm_tracker_short_geometry_and_partial_exit_are_directional():
     ]
     result = _simulate_pm_setup(bars, setup, "SHORT", fee_pct=0.0)
     assert result["exit_reason"] == "TP1_STOP"
-    assert result["exit_price"] == pytest.approx(9.75)
-    assert result["r_multiple"] == pytest.approx(0.25)
+    assert result["exit_price"] == pytest.approx(9.25)
+    assert result["r_multiple"] == pytest.approx(0.75)
+
+
+def test_pm_tracker_exposes_same_bar_path_uncertainty():
+    bars = [{"o": 9.8, "h": 12.0, "l": 8.5, "c": 10.5}]
+    result = _simulate_pm_setup(bars, SETUP_LONG, "LONG", fee_pct=0.0)
+    assert result["intrabar_ambiguous"] is True
+    assert "entry_bar_pre_post_fill_order_unknown" in result["ambiguity_reason"]
+    assert result["r_multiple_upper"] > result["r_multiple"]
+
+
+def test_pm_tracker_does_not_cap_gap_through_stop_loss():
+    bars = [
+        {"o": 9.8, "h": 10.2, "l": 9.5, "c": 10.1},
+        {"o": 6.5, "h": 7.0, "l": 6.0, "c": 6.4},
+    ]
+    result = _simulate_pm_setup(bars, SETUP_LONG, "LONG", fee_pct=0.0)
+    assert result["exit_reason"] == "STOP"
+    assert result["exit_price"] == pytest.approx(6.5)
+    assert result["r_multiple"] == pytest.approx(-3.5)

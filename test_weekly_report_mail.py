@@ -96,6 +96,7 @@ def _mature_summary(**total_overrides):
         "managed_be_losses": 5,
         "managed_be_breakevens": 1,
         "managed_be_win_rate_pct": 40.0,
+        "managed_be_win_rate_pct_upper": 40.0,
         "managed_be_win_rate_ex_breakeven_pct": 44.4,
         "managed_be_breakeven_outcome_rate_pct": 10.0,
         "managed_be_win_rate_wilson_95": {
@@ -103,7 +104,10 @@ def _mature_summary(**total_overrides):
             "upper_pct": 68.7,
         },
         "sum_r_managed_50_50_be": -1.5,
+        "sum_r_managed_50_50_be_upper": -1.5,
         "avg_r_managed_50_50_be": -0.15,
+        "avg_r_managed_50_50_be_upper": -0.15,
+        "ambiguous_outcomes": 0,
         "profit_factor_managed_be": 0.8,
         "breakeven_win_rate_managed_be_pct": 43.0,
     }
@@ -118,15 +122,23 @@ def _mature_summary(**total_overrides):
             "stock_strategy": {
                 "managed_be_decided_signals": 6,
                 "managed_be_win_rate_pct": 33.3,
+                "managed_be_win_rate_pct_upper": 33.3,
                 "sum_r_managed_50_50_be": -1.8,
+                "sum_r_managed_50_50_be_upper": -1.8,
                 "avg_r_managed_50_50_be": -0.3,
+                "avg_r_managed_50_50_be_upper": -0.3,
+                "ambiguous_outcomes": 0,
                 "profit_factor_managed_be": 0.6,
             },
             "early_movers": {
                 "managed_be_decided_signals": 4,
                 "managed_be_win_rate_pct": 50.0,
+                "managed_be_win_rate_pct_upper": 50.0,
                 "sum_r_managed_50_50_be": 0.3,
+                "sum_r_managed_50_50_be_upper": 0.3,
                 "avg_r_managed_50_50_be": 0.075,
+                "avg_r_managed_50_50_be_upper": 0.075,
+                "ambiguous_outcomes": 0,
                 "profit_factor_managed_be": 1.1,
             },
         },
@@ -617,14 +629,37 @@ def test_mature_report_separates_activity_from_performance():
     assert "50/50+BE" in subject
     assert "10 reife Signale" in subject
     assert "Aktivitaet der letzten 7 Tage" in body
-    assert "Ausgereifte 30-Tage-Kohorte" in body
+    assert "Ausgereifte Signale im 30-Tage-Berichtsfenster" in body
     assert "Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote" in body
     assert "56" in body
     assert "35" in body
     assert "W / L / 0R" in body
     assert "4 / 5 / 1" in body
     assert "8 noch unreife Signale wurden ausgeschlossen" in body
+    assert "Brokergebuehren" in body
+    assert "keine Netto-Kontoperformance" in body
     assert "periodischen Kurs-Snapshots" in body
+
+
+def test_mature_report_discloses_ohlc_ordering_as_metric_bands():
+    mature = _mature_summary(
+        managed_be_win_rate_pct=20.0,
+        managed_be_win_rate_pct_upper=50.0,
+        sum_r_managed_50_50_be=-4.0,
+        sum_r_managed_50_50_be_upper=1.5,
+        avg_r_managed_50_50_be=-0.4,
+        avg_r_managed_50_50_be_upper=0.15,
+        ambiguous_outcomes=3,
+    )
+    subject, body = bg_service._build_mature_weekly_report_mail(
+        _summary(), mature, now_et=FRIDAY_1620, watchdog_events=[]
+    )
+
+    assert "-4.0R bis +1.5R*" in subject
+    assert "20.0% bis 50.0%*" in body
+    assert "-0.40R bis +0.15R*" in body
+    assert "95%-KI konservativer Pfad" in body
+    assert "kein Erwartungswert" in body
 
 
 def test_weekly_job_loads_activity_and_mature_cohorts(monkeypatch, tmp_path):
@@ -642,4 +677,4 @@ def test_weekly_job_loads_activity_and_mature_cohorts(monkeypatch, tmp_path):
     assert calls == [(7, False), (30, True)]
     assert len(sent) == 1
     assert "50/50+BE" in sent[0]["subject"]
-    assert "Ausgereifte 30-Tage-Kohorte" in sent[0]["body"]
+    assert "Ausgereifte Signale im 30-Tage-Berichtsfenster" in sent[0]["body"]

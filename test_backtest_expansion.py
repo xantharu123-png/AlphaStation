@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import api
+import pytest
 
 
 def test_backtest_strategy_list_contains_scanner_and_crypto_profiles():
@@ -29,9 +30,12 @@ def test_public_stock_strategy_backtest_aliases_match_internal_rules():
 def test_scanner_backtest_normalization_keeps_key_metrics():
     raw = {
         "summary": {
-            "total_signals": 2,
+            "total_signals": 3,
             "no_fill": 1,
+            "unresolved": 1,
             "n_tickers": 25,
+            "methodology": "technical_proxy",
+            "methodology_warnings": ["not_a_historical_catalyst_test"],
         },
         "stats_by_grade": {
             "A": {"total": 1, "win_rate": 100.0, "avg_pnl": 4.2, "avg_r": 1.4, "profit_factor": 99.0}
@@ -51,20 +55,32 @@ def test_scanner_backtest_normalization_keeps_key_metrics():
                 "outcome": "TP1_PARTIAL",
                 "tp1_hit": True,
             },
+            {
+                "ticker": "OPEN",
+                "grade": "A",
+                "outcome": "UNRESOLVED",
+                "pnl_pct": 0,
+                "r_multiple": 0,
+            },
             {"ticker": "MISS", "grade": "B", "outcome": "NO_FILL", "pnl_pct": 0},
         ],
     }
 
     result = api._normalize_scanner_backtest(raw, "scanner_bi_long", api.ADVANCED_SCANNER_BACKTESTS["scanner_bi_long"], 6)
 
-    assert result["total_signals"] == 2
+    assert result["total_signals"] == 3
+    assert result["total_filled"] == 2
     assert result["total_trades"] == 1
+    assert result["total_decided"] == 1
     assert result["no_fill"] == 1
+    assert result["unresolved"] == 1
     assert result["n_tickers"] == 25
     assert result["win_rate"] == 100.0
     assert result["trades"][0]["ticker"] == "TEST"
     assert result["trades"][0]["r_multiple"] == 1.4
     assert "A" in result["stats_by_grade"]
+    assert result["methodology"] == "technical_proxy"
+    assert result["methodology_warnings"] == ["not_a_historical_catalyst_test"]
 
 
 def test_crypto_trade_simulation_long_hits_tp2():
@@ -136,7 +152,7 @@ def test_crypto_trade_simulation_keeps_tp1_partial_when_runner_trails_out():
     assert trade["outcome"] == "TRAIL_STOP"
     assert trade["tp1_hit"] is True
     assert trade["exit_price"] == 10.875
-    assert trade["r_multiple"] == 0.88
+    assert trade["r_multiple"] == pytest.approx(0.875)
 
 
 def test_crypto_backtest_enters_after_confirmation_close_not_before(monkeypatch):

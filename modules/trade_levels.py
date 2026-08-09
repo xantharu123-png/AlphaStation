@@ -27,6 +27,81 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     return val
 
 
+def minimum_stop_distance(
+    entry: Any,
+    *,
+    atr: Any = None,
+    spread_pct: Any = None,
+    trade_horizon: Any = None,
+    scanner_name: Any = None,
+    asset_class: Any = None,
+) -> Dict[str, Any]:
+    """Return one shared market-noise floor for stop validation.
+
+    The floor is not a target generator. It only prevents a technically valid
+    structure stop from being placed inside ordinary price/ATR/spread noise.
+    Scanner construction and later trade-health checks must use this same
+    function so that a plan cannot pass under two different definitions.
+    """
+    price = safe_float(entry, None)
+    if price is None or price <= 0:
+        return {
+            "distance": None,
+            "profile": "invalid",
+            "price_floor": None,
+            "atr_floor": None,
+            "spread_floor": None,
+            "components": {
+                "price_floor": None,
+                "atr_floor": None,
+                "spread_floor": None,
+            },
+        }
+
+    context = " ".join(
+        str(value or "").strip().lower()
+        for value in (trade_horizon, scanner_name, asset_class)
+    )
+    is_crypto = "crypto" in context or any(
+        token in context
+        for token in ("early_mover", "new_listing", "btc_diverg", "explosion")
+    )
+    if any(token in context for token in ("intraday", "daytrade", "scalp", "orb")):
+        profile = "intraday"
+        price_pct = 0.006 if is_crypto else 0.004
+        atr_multiple = 0.35
+    elif any(token in context for token in ("position", "weekly", "turtle", "long_term")):
+        profile = "position"
+        price_pct = 0.018 if is_crypto else 0.020
+        atr_multiple = 0.60
+    else:
+        profile = "swing"
+        price_pct = 0.012 if is_crypto else 0.015
+        atr_multiple = 0.45
+
+    atr_value = max(0.0, safe_float(atr, 0.0) or 0.0)
+    spread_value = max(0.0, safe_float(spread_pct, 0.0) or 0.0)
+    price_floor = price * price_pct
+    atr_floor = atr_value * atr_multiple
+    # A round trip through a quoted spread needs room beyond one spread.
+    spread_floor = price * spread_value / 100.0 * 1.5
+    distance = max(price_floor, atr_floor, spread_floor)
+    return {
+        "distance": distance,
+        "profile": profile,
+        "price_floor": price_floor,
+        "atr_floor": atr_floor,
+        "spread_floor": spread_floor,
+        "components": {
+            "price_floor": price_floor,
+            "atr_floor": atr_floor,
+            "spread_floor": spread_floor,
+        },
+        "price_pct": price_pct * 100.0,
+        "atr_multiple": atr_multiple,
+    }
+
+
 def _nested_sources(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     sources = [row]
     for nested_key in ("trade_setup", "setup", "signal"):

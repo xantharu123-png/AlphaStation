@@ -133,8 +133,9 @@ def test_h5_momentum_breakout_backtest_rule_matches_live():
     assert sig["breakout_proximity_min"] == pytest.approx(-0.01)
     assert sig["upper_wick_pct_max"] == pytest.approx(38.0)
     assert rule["direction"] == "long"
-    # Auch der native Live-Name traegt die korrigierte Regel.
-    assert api.BACKTEST_RULES["Momentum Breakout Long"]["signal"]["rvol_min"] == pytest.approx(1.5)
+    # Der oeffentliche Name muss bewusst auf genau eine kanonische Regel zeigen.
+    assert effective_key == "Breakout Long"
+    assert "Momentum Breakout Long" not in api.BACKTEST_RULES
 
 
 # ══════════════════════════════════════════════════════════════

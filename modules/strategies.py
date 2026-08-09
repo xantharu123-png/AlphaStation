@@ -788,10 +788,14 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, v
 BACKTEST_STRATEGY_RULES = {
     "Breakout Long": {
         "direction": "long",
-        "description": "Momentum-Ausbruch: Change >3%, Close nahe High",
+        "description": "Daily live-signal proxy: 20D breakout proximity, Change >=2%, RVOL >=1.5, close hold and controlled wick",
         "signal": {
-            "change_pct_min": 3.0, "change_pct_max": 50.0,
-            "close_pos_min": 0.60
+            "change_pct_min": 2.0, "change_pct_max": 50.0,
+            "close_pos_min": 0.65,
+            "rvol_min": 1.5,
+            "breakout_lookback_days": 20,
+            "breakout_proximity_min": -0.01,
+            "upper_wick_pct_max": 38.0,
         },
         "entry": "next_open",
         "stop_pct": 0.05,

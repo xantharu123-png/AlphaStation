@@ -1,3 +1,5 @@
+import pytest
+
 from modules.trade_health import calculate_trade_health
 
 
@@ -494,3 +496,51 @@ def test_pullback_between_stop_and_entry_is_not_breach():
     assert health["decision"] != "NO_TRADE"
     assert health["health_score"] >= 65
     assert any("Richtung Stop" in w for w in health["warnings"])
+
+
+def test_swing_stop_inside_normal_noise_is_hard_blocked():
+    row = {
+        "ticker": "TIGHT",
+        "direction": "LONG",
+        "current_price": 100.0,
+        "entry": 100.0,
+        "stop": 99.0,
+        "target1": 103.0,
+        "target2": 105.0,
+        "trade_horizon": "swing",
+        "asset_class": "stock",
+        "rvol": 2.0,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.8,
+        "dollar_volume": 10_000_000,
+    }
+
+    health = calculate_trade_health(row, "stock_strategy")
+
+    assert health["decision"] == "NO_TRADE"
+    assert "stop_distance_below_noise_floor" in health["exclusion_reasons"]
+    assert health["metrics"]["min_stop_distance"] == pytest.approx(1.5)
+
+
+def test_swing_stop_outside_noise_floor_is_not_blocked_by_distance():
+    row = {
+        "ticker": "WIDE",
+        "direction": "LONG",
+        "current_price": 100.0,
+        "entry": 100.0,
+        "stop": 98.0,
+        "target1": 104.0,
+        "target2": 106.0,
+        "trade_horizon": "swing",
+        "asset_class": "stock",
+        "rvol": 2.0,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.8,
+        "dollar_volume": 10_000_000,
+    }
+
+    health = calculate_trade_health(row, "stock_strategy")
+
+    assert "stop_distance_below_noise_floor" not in health["exclusion_reasons"]

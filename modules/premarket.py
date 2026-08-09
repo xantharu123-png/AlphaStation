@@ -11,6 +11,7 @@ try:
 except ImportError:
     pytz = None
 from modules.data_fetchers import rate_limited_get
+from modules.backtests import simulate_50_50_daily_exit
 from modules.scorers import calculate_pm_quality_score
 from modules.strategies import classify_pm_setup
 
@@ -19,7 +20,7 @@ PM_TRACKER_FILE = "/tmp/alpha_station_pm_tracker.json"
 
 
 def _simulate_pm_setup(session_bars, setup, direction, fee_pct=0.25):
-    """Conservative 5m execution model for the pre-market tracker."""
+    """Conservative 5m execution model with explicit OHLC path bounds."""
     direction = str(direction or "LONG").upper()
     entry = float(setup.get("entry", 0) or 0)
     stop = float(setup.get("stop", 0) or 0)
@@ -49,62 +50,78 @@ def _simulate_pm_setup(session_bars, setup, direction, fee_pct=0.25):
         result["exit_reason"] = "INVALID GEOMETRY"
         return result
 
-    realized_exit = None
-    runner_exit = None
+    entry_bar_idx = -1
+    fill_price = 0.0
+    first_bar_order_unknown = False
     for bi, bar in enumerate(session_bars or []):
         bar_open = float(bar.get("o", 0) or 0)
         bar_high = float(bar.get("h", 0) or 0)
         bar_low = float(bar.get("l", 0) or 0)
+        triggered = bar_high >= entry if direction == "LONG" else bar_low <= entry
+        if not triggered:
+            continue
+        fill_price = max(entry, bar_open) if direction == "LONG" else min(entry, bar_open)
+        target_missed = fill_price >= tp1 if direction == "LONG" else fill_price <= tp1
+        if target_missed:
+            result["exit_reason"] = "GAP PAST TP1 - NO ENTRY"
+            return result
+        actual_geometry_valid = (
+            stop < fill_price < tp1 < tp2
+            if direction == "LONG"
+            else tp2 < tp1 < fill_price < stop
+        )
+        if not actual_geometry_valid:
+            result["exit_reason"] = "GAP INVALIDATED GEOMETRY - NO ENTRY"
+            return result
+        entry_bar_idx = bi
+        first_bar_order_unknown = bar_open < entry if direction == "LONG" else bar_open > entry
+        break
 
-        if not result["entry_hit"]:
-            triggered = bar_high >= entry if direction == "LONG" else bar_low <= entry
-            if not triggered:
-                continue
-            fill_price = max(entry, bar_open) if direction == "LONG" else min(entry, bar_open)
-            target_missed = fill_price >= tp1 if direction == "LONG" else fill_price <= tp1
-            if target_missed:
-                result["exit_reason"] = "GAP PAST TP1 - NO ENTRY"
-                break
-            result["entry_hit"] = True
-            result["entry_bar_idx"] = bi
-            result["fill_price"] = fill_price
+    if entry_bar_idx < 0:
+        return result
 
-        # Intrabar order is unknown; stop-first avoids optimistic fills.
-        stop_touched = bar_low <= stop if direction == "LONG" else bar_high >= stop
-        tp1_touched = bar_high >= tp1 if direction == "LONG" else bar_low <= tp1
-        tp2_touched = bar_high >= tp2 if direction == "LONG" else bar_low <= tp2
-        if stop_touched:
-            result["stop_hit"] = True
-            runner_exit = stop
-            result["exit_reason"] = "TP1_STOP" if result["tp1_hit"] else "STOP"
-            break
-        if tp2_touched:
-            result["tp1_hit"] = True
-            result["tp2_hit"] = True
-            realized_exit = tp1
-            runner_exit = tp2
-            result["exit_reason"] = "TP2"
-            break
-        if tp1_touched and not result["tp1_hit"]:
-            result["tp1_hit"] = True
-            realized_exit = tp1
+    canonical_bars = []
+    for bi, bar in enumerate(session_bars or []):
+        canonical_bars.append({
+            "date": bar.get("date") or bar.get("t") or bi,
+            "open": float(bar.get("o", 0) or 0),
+            "high": float(bar.get("h", 0) or 0),
+            "low": float(bar.get("l", 0) or 0),
+            "close": float(bar.get("c", 0) or 0),
+        })
 
-    if result["entry_hit"]:
-        day_close = float((session_bars or [{}])[-1].get("c", result["fill_price"]) or result["fill_price"])
-        if runner_exit is None:
-            runner_exit = day_close
-            result["exit_reason"] = "EOD_TP1" if result["tp1_hit"] else "EOD"
-        weighted_exit = 0.5 * realized_exit + 0.5 * runner_exit if realized_exit is not None else runner_exit
-        fill_price = result["fill_price"]
-        gross_pnl = weighted_exit - fill_price if direction == "LONG" else fill_price - weighted_exit
-        pnl_dollar = gross_pnl - fill_price * max(float(fee_pct or 0), 0.0) / 100.0
-        pnl_pct = pnl_dollar / fill_price * 100 if fill_price > 0 else 0.0
-        actual_risk = fill_price - stop if direction == "LONG" else stop - fill_price
-        risk_pct = actual_risk / fill_price * 100 if fill_price > 0 and actual_risk > 0 else 0.0
-        result["exit_price"] = weighted_exit
-        result["pnl_dollar"] = pnl_dollar
-        result["pnl_pct"] = pnl_pct
-        result["r_multiple"] = max(-2.0, pnl_pct / risk_pct) if risk_pct > 0 else 0.0
+    simulated = simulate_50_50_daily_exit(
+        canonical_bars,
+        entry_bar_idx,
+        max(1, len(canonical_bars) - entry_bar_idx),
+        direction,
+        fill_price,
+        stop,
+        tp1,
+        tp2,
+        fee_pct=max(float(fee_pct or 0), 0.0),
+        first_bar_order_unknown=first_bar_order_unknown,
+        post_tp1_stop_offset=0.0,
+    )
+    if not simulated:
+        result["exit_reason"] = "INVALID EXECUTION GEOMETRY"
+        return result
+
+    public_reason = {
+        "BLENDED_TP": "TP2",
+        "TP1+EOD": "EOD_TP1",
+    }.get(simulated["exit_reason"], simulated["exit_reason"])
+    result.update(simulated)
+    result.update({
+        "entry_hit": True,
+        "entry_bar_idx": entry_bar_idx,
+        "fill_price": fill_price,
+        "stop_hit": simulated["exit_reason"] in {"STOP", "TP1_STOP"},
+        "tp1_hit": bool(simulated.get("tp1_hit")),
+        "tp2_hit": simulated["exit_reason"] == "BLENDED_TP",
+        "exit_reason": public_reason,
+        "pnl_dollar": round(fill_price * float(simulated["pnl_pct"]) / 100.0, 6),
+    })
     return result
 
 def _debug_log(msg, error=None):

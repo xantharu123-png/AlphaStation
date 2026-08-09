@@ -5614,6 +5614,12 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     <div className="text-right">
                                         <div className="text-lg font-bold">{item.score?.toFixed(1) || '–'}</div>
                                         <div className="text-xs text-gray-500">Score</div>
+                                        {item.Business_Quality_Score != null && (
+                                            <div className="text-xs text-gray-500 mt-1">
+                                                Unternehmen {Number(item.Business_Quality_Score).toFixed(0)}/100
+                                                {item.Investment_Score != null ? ` · Gesamt ${Number(item.Investment_Score).toFixed(0)}` : ''}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                                 <div className="scanner-mobile-grid">
@@ -5692,7 +5698,15 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                         </div>
                                     ) : '–'}
                                 </td>
-                                <td className="py-3 px-2 text-right font-semibold">{item.score?.toFixed(1)}</td>
+                                <td className="py-3 px-2 text-right font-semibold">
+                                    <div>{item.score?.toFixed(1)}</div>
+                                    {item.Business_Quality_Score != null && (
+                                        <div className="text-xs text-gray-500 font-normal" title="Aktuelle Unternehmensqualitaet; nicht Teil des technischen Scanner-Scores">
+                                            Unternehmen {Number(item.Business_Quality_Score).toFixed(0)}
+                                            {item.Investment_Score != null ? ` · Gesamt ${Number(item.Investment_Score).toFixed(0)}` : ''}
+                                        </div>
+                                    )}
+                                </td>
                                 <td className="py-3 px-2 text-center"><span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span></td>
                             </tr>
                         ))}

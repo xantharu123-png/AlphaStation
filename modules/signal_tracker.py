@@ -36,18 +36,19 @@ Status-Modell eines Signals:
                'ambiguous_same_day', wenn Stop und ein TP am selben Tag lagen
                (konservativ: Stop zuerst gewertet, kein TP gutgeschrieben).
   TP2_HIT    — TP2 erreicht, r_realized = Geometrie-R von TP2 (TP1 impliziert).
-  EXPIRED    — Laufzeit abgelaufen (Aktien: 5 Daily-Bars nach Alert; Crypto:
-               120h nach created_at). r_realized = R des letzten bekannten
+  EXPIRED    — Laufzeit abgelaufen (Aktien: beim Versand eingefrorener,
+               strategieabhaengiger Bar-Horizont; Crypto: 120h nach
+               created_at). r_realized = R des letzten bekannten
                Preises; outcome_detail 'tp1_then_expired', wenn TP1 vorher
                erreicht wurde.
   UNTRACKED  — 5 fehlgeschlagene Bewertungsversuche (keine Kursdaten);
                r_realized bleibt NULL und zaehlt nicht in Win-Rate/avg_r.
 
-Limitation Crypto: Die Bewertung ist ein Best-Effort-Spot-Check auf Basis des
-aktuellen Preises zum Zeitpunkt des Evaluierungslaufs (z.B. stuendlich).
-Es gibt KEINEN High/Low-Pfad zwischen zwei Checks — kurze Spikes durch Stop
-oder TP zwischen zwei Laeufen werden nicht erkannt. Aktien werden dagegen
-praezise ueber Daily-OHLC-Bars der Folgetage ausgewertet.
+Bewertungsgrenze: Vollstaendige OHLC-Intervalle koennen zeigen, welche Levels
+beruehrt wurden, aber nicht deren Reihenfolge innerhalb derselben Kerze. Solche
+Faelle werden konservativ als Stop gewertet und zusaetzlich mit einer rein
+moeglichen Obergrenze gekennzeichnet. Fehlende Intervalldaten duerfen den
+Signalzustand nicht fortschreiben.
 """
 
 from __future__ import annotations
@@ -123,9 +124,36 @@ STATUS_NO_FILL = "NO_FILL"
 #: evaluate_open_signals — Konsument: Exit-Update-Mails in bg_service.
 STATUS_TP1_OPEN = "TP1_HIT_OPEN"
 
-STOCK_EXPIRY_BARS = 5       # Handelstage (= Daily-Bars) nach dem Alert
+STOCK_EXPIRY_BARS = 5       # Nur Legacy-Fallback fuer unbekannte Alt-Signale
 CRYPTO_EXPIRY_HOURS = 120   # Stunden nach created_at
 MAX_EVAL_FAILS = 5          # danach status = UNTRACKED
+
+# Der Bewertungszeitraum ist Teil des Tradeplans und wird bei Versand
+# eingefroren. STOCK_EXPIRY_BARS bleibt nur der Legacy-Fallback fuer alte
+# Datensaetze und unbekannte Scanner.
+_STOCK_HORIZON_BY_SCANNER = {
+    "orb": 1,
+    "orb_scanner": 1,
+    "crash": 3,
+    "crash_monitor": 3,
+    "bear": 3,
+    "bear_scan": 3,
+    "volume_spikes": 3,
+    "penny": 3,
+    "penny_stock": 3,
+    "penny_stocks": 3,
+    "stock_strategy": 8,
+    "strategy_scan": 8,
+    "strategies": 8,
+    "bi": 10,
+    "bi_scanner": 10,
+    "bi_long": 10,
+    "bi_short": 10,
+    "biotech": 10,
+    "biotech_scanner": 10,
+    "turtle": 20,
+    "turtle_scanner": 20,
+}
 
 # Maximal tolerierte Verschlechterung gegenueber dem geplanten Entry.
 # Intraday-/Event-Signale brauchen eine engere Fill-Disziplin als Swings.
@@ -169,6 +197,10 @@ _STRATEGY_KEYS = (
 _HORIZON_KEYS = (
     "trade_horizon", "TradeHorizon", "horizon", "Horizon",
     "holding_period", "HoldingPeriod", "_alert_horizon", "alert_horizon",
+)
+_EVALUATION_HORIZON_KEYS = (
+    "evaluation_horizon_bars", "EvaluationHorizonBars", "horizon_bars",
+    "HorizonBars", "max_hold_bars", "MaxHoldBars",
 )
 _SETUP_KEY_KEYS = ("setup_key", "SetupKey", "signal_key", "SignalKey")
 
@@ -260,6 +292,7 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
         "contract_symbol": None,
         "strategy": None,
         "trade_horizon": None,
+        "evaluation_horizon_bars": None,
         "setup_key": None,
     }
     if not isinstance(row, dict):
@@ -281,6 +314,11 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
         out["grade"] = str(raw_grade).strip() if raw_grade is not None else None
         out["score"] = _to_float(_first_raw(row, _SCORE_KEYS))
         out["rvol"] = _to_float(_first_raw(row, _RVOL_KEYS))
+        raw_evaluation_horizon = _to_float(
+            _first_raw(row, _EVALUATION_HORIZON_KEYS)
+        )
+        if raw_evaluation_horizon is not None:
+            out["evaluation_horizon_bars"] = int(round(raw_evaluation_horizon))
         for output_key, aliases in (
             ("instrument_id", _INSTRUMENT_ID_KEYS),
             ("venue", _VENUE_KEYS),
@@ -340,7 +378,9 @@ CREATE TABLE IF NOT EXISTS signals (
     ,contract_symbol TEXT
     ,strategy TEXT
     ,trade_horizon TEXT
+    ,evaluation_horizon_bars INTEGER
     ,setup_key TEXT
+    ,r_realized_upper REAL
 )
 """
 
@@ -352,7 +392,9 @@ _SCHEMA_MIGRATIONS = {
     "contract_symbol": "TEXT",
     "strategy": "TEXT",
     "trade_horizon": "TEXT",
+    "evaluation_horizon_bars": "INTEGER",
     "setup_key": "TEXT",
+    "r_realized_upper": "REAL",
     "be_activated_at": "TEXT",
     "be_mail_sent_at": "TEXT",
     "r_realized_be": "REAL",
@@ -544,6 +586,65 @@ def _generated_setup_key(
     return "sig_" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
+def _bounded_horizon_bars(value: Any) -> Optional[int]:
+    parsed = _to_float(value)
+    if parsed is None:
+        return None
+    rounded = int(round(parsed))
+    return max(1, min(60, rounded))
+
+
+def _infer_stock_horizon_bars(
+    scanner: str,
+    strategy: Any,
+    trade_horizon: Any,
+    explicit: Any = None,
+) -> int:
+    """Freeze a stock signal's intended holding period in daily bars."""
+    explicit_bars = _bounded_horizon_bars(explicit)
+    if explicit_bars is not None:
+        return explicit_bars
+
+    horizon_text = str(trade_horizon or "").strip().lower()
+    if any(token in horizon_text for token in ("intraday", "daytrade", "day_trade", "scalp")):
+        return 1
+    if any(token in horizon_text for token in ("position", "positionstrade", "long_term")):
+        return 20
+
+    strategy_text = str(strategy or "").strip().lower()
+    if "opening range" in strategy_text or strategy_text == "orb":
+        return 1
+    if any(token in strategy_text for token in ("crash", "gap momentum short")):
+        return 3
+    if "turtle" in strategy_text:
+        return 20
+    if any(
+        token in strategy_text
+        for token in (
+            "cup", "handle", "wyckoff", "moving average", "ma bounce",
+            "bull flag", "bear flag", "compression", "biotech",
+        )
+    ):
+        return 10
+
+    scanner_key = str(scanner or "").strip().lower()
+    scanner_horizon = _STOCK_HORIZON_BY_SCANNER.get(scanner_key)
+    if scanner_horizon is not None:
+        return scanner_horizon
+    if any(token in horizon_text for token in ("swing", "mehrtaeg", "multi_day")):
+        return 8
+    return STOCK_EXPIRY_BARS
+
+
+def _stock_horizon_bars(row: Dict[str, Any]) -> int:
+    return _infer_stock_horizon_bars(
+        str(row.get("scanner") or ""),
+        row.get("strategy"),
+        row.get("trade_horizon"),
+        row.get("evaluation_horizon_bars"),
+    )
+
+
 def _prepare_identity_fields(
     fields: Dict[str, Any],
     scanner: str,
@@ -555,6 +656,16 @@ def _prepare_identity_fields(
     supplied_key = str(prepared.get("setup_key") or "").strip()[:160]
     prepared["strategy"] = strategy
     prepared["trade_horizon"] = horizon
+    prepared["evaluation_horizon_bars"] = (
+        None
+        if asset_class == "crypto"
+        else _infer_stock_horizon_bars(
+            scanner,
+            strategy,
+            horizon,
+            prepared.get("evaluation_horizon_bars"),
+        )
+    )
     prepared["setup_key"] = supplied_key or _generated_setup_key(
         scanner, prepared, asset_class
     )
@@ -800,8 +911,8 @@ def record_alert_signals(
                                 rvol, mail_class, channel, status, outcome_detail,
                                 closed_at, entry_filled_at, entry_fill_price, instrument_id,
                                 venue, contract_symbol, strategy, trade_horizon, setup_key,
-                                rates_json, block_reasons
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                evaluation_horizon_bars, rates_json, block_reasons
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
@@ -811,7 +922,8 @@ def record_alert_signals(
                                 now_iso if signal_status == STATUS_NO_FILL else None,
                                 fill_at, fill_price, instrument_id, venue, contract_symbol,
                                 fields.get("strategy"), fields.get("trade_horizon"),
-                                fields.get("setup_key"), rates_json, block_reasons_text,
+                                fields.get("setup_key"), fields.get("evaluation_horizon_bars"),
+                                rates_json, block_reasons_text,
                             ),
                         )
                         inserted += 1
@@ -838,6 +950,49 @@ def _signed_r(price: float, entry: float, risk: float, direction: str) -> float:
     if direction == "SHORT":
         return (entry - price) / risk
     return (price - entry) / risk
+
+
+def _is_ambiguous_outcome(value: Any) -> bool:
+    """Return whether one OHLC interval permits mutually exclusive paths."""
+    detail = value.get("outcome_detail") if isinstance(value, dict) else value
+    return str(detail or "").startswith("ambiguous_same_")
+
+
+def _realized_upper(row: Dict[str, Any]) -> Optional[float]:
+    """Upper feasible R bound for path-ambiguous bars, never below lower R."""
+    lower = _to_float(row.get("r_realized"))
+    if lower is None:
+        return None
+    upper = _to_float(row.get("r_realized_upper"))
+    return max(lower, upper) if upper is not None else lower
+
+
+def _managed_upper_r(row: Dict[str, Any]) -> Optional[float]:
+    """Feasible upper bound under the recommended 50/50 plus BE policy."""
+    if not _is_ambiguous_outcome(row):
+        return simulate_managed_5050_breakeven(row)
+    upper = _realized_upper(row)
+    lower = _to_float(row.get("r_realized"))
+    fill = _to_float(row.get("entry_fill_price"))
+    if fill is None:
+        fill = _to_float(row.get("entry"))
+    stop = _to_float(row.get("stop"))
+    tp1 = _to_float(row.get("tp1"))
+    tp2 = _to_float(row.get("tp2"))
+    if None in (upper, lower, fill, stop, tp1, tp2) or upper <= lower:
+        return simulate_managed_5050_breakeven(row)
+    direction = "SHORT" if str(row.get("direction")) == "SHORT" else "LONG"
+    geometry = trade_geometry(fill, stop, tp1, tp2, direction)
+    risk = geometry.get("risk")
+    if not geometry.get("valid") or not risk:
+        return upper
+    r_tp1 = _signed_r(tp1, fill, risk, direction)
+    r_tp2 = _signed_r(tp2, fill, risk, direction)
+    if upper >= r_tp2 - 1e-6:
+        return round(0.5 * r_tp1 + 0.5 * r_tp2, 4)
+    if upper >= r_tp1 - 1e-6:
+        return round(0.5 * r_tp1, 4)
+    return upper
 
 
 def _managed_r_50_50(row: Dict[str, Any]) -> Optional[float]:
@@ -901,7 +1056,7 @@ def simulate_breakeven_after_mfe(row: Dict[str, Any], mfe_trigger: float = 1.0) 
         return realized
     if realized >= 0:
         return realized
-    if str(row.get("outcome_detail") or "") == "ambiguous_same_day":
+    if _is_ambiguous_outcome(row):
         return realized
     return 0.0
 
@@ -990,21 +1145,29 @@ def _recommended_payoff_statistics(values: List[float]) -> Dict[str, Any]:
 def _signal_has_full_observation_window(row: Dict[str, Any], as_of: datetime) -> bool:
     """Rechtszensierte Signale aus belastbaren Performance-Kohorten fernhalten.
 
-    Krypto wird 120 Stunden beobachtet. Aktien brauchen fuenf abgeschlossene
-    Handelstage; zehn Kalendertage sind dafuer ein konservativer Proxy, der
-    Wochenenden und einzelne Feiertage einschliesst. Ein frueher Stop wird bewusst nicht
-    vorzeitig als reifes Ergebnis gewertet, solange potenzielle Gewinner aus
-    derselben Versandkohorte noch offen sein koennen.
+    Krypto wird 120 Stunden beobachtet. Bei Aktien kann der Fill erst am Ende
+    des Entry-Fensters erfolgen und danach noch den gesamten Haltedauer-
+    Horizont benoetigen. Deshalb umfasst die Reifepruefung im Worst Case
+    ``2 * bars - 1`` Daily-Bars. Die Umrechnung in Kalendertage enthaelt einen
+    Wochenend-/Feiertagspuffer. Ein frueher Stop wird bewusst nicht vorzeitig
+    als reifes Ergebnis gewertet, solange potenzielle Gewinner aus derselben
+    Versandkohorte noch offen sein koennen.
     """
     created_at = _parse_utc_datetime(row.get("created_at"))
     if created_at is None:
         return False
     asset_class = str(row.get("asset_class") or "stock").strip().lower()
-    horizon = (
-        timedelta(hours=CRYPTO_EXPIRY_HOURS)
-        if asset_class == "crypto"
-        else timedelta(days=max(10, STOCK_EXPIRY_BARS + 5))
-    )
+    if asset_class == "crypto":
+        horizon = timedelta(hours=CRYPTO_EXPIRY_HOURS)
+    else:
+        bars = _stock_horizon_bars(row)
+        max_observation_bars = 1 if bars <= 1 else (2 * bars) - 1
+        calendar_days = (
+            3
+            if max_observation_bars <= 1
+            else int(math.ceil(max_observation_bars * 7.0 / 5.0)) + 3
+        )
+        horizon = timedelta(days=calendar_days)
     return created_at + horizon <= as_of
 
 
@@ -1084,7 +1247,8 @@ def _evaluate_stock_signal(
       SHORT: spiegelverkehrt.
     max_favorable_r / max_adverse_r werden pro Bar mitgefuehrt
     (r = signiertes R-Multiple; max_adverse_r ist das Minimum, also <= 0).
-    Expiry: nach STOCK_EXPIRY_BARS Bars ohne Stop/TP2 -> EXPIRED mit
+    Expiry: nach dem beim Versand eingefrorenen Strategie-Horizont ohne
+    Stop/TP2 -> EXPIRED mit
     r_realized = R des letzten Close (outcome_detail 'tp1_then_expired',
     falls TP1 vorher erreicht war).
     """
@@ -1099,6 +1263,7 @@ def _evaluate_stock_signal(
     tp1 = float(sig["tp1"]) if sig.get("tp1") is not None else None
     tp2 = float(sig["tp2"]) if sig.get("tp2") is not None else None
     direction = "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
+    horizon_bars = _stock_horizon_bars(sig)
     geometry = trade_geometry(entry, stop, tp1, tp2, direction)
     planned_risk = geometry.get("risk")
     if not geometry.get("valid") or planned_risk is None:
@@ -1135,6 +1300,8 @@ def _evaluate_stock_signal(
 
     for bar_date, open_price, high, low, close in _normalize_daily_bars(bars_raw, created_date):
         bars_after_alert += 1
+        filled_before_bar = fill_price is not None
+        filled_intrabar_this_bar = False
         if fill_price is None:
             if direction == "LONG":
                 if open_price >= tp1:
@@ -1148,6 +1315,7 @@ def _evaluate_stock_signal(
                     fill_price = open_price
                 elif low <= entry <= high:
                     fill_price = entry
+                    filled_intrabar_this_bar = True
             else:
                 if open_price <= tp1:
                     updates.update({
@@ -1160,8 +1328,9 @@ def _evaluate_stock_signal(
                     fill_price = open_price
                 elif low <= entry <= high:
                     fill_price = entry
+                    filled_intrabar_this_bar = True
             if fill_price is None:
-                if bars_after_alert >= STOCK_EXPIRY_BARS:
+                if bars_after_alert >= horizon_bars:
                     updates.update({
                         "status": STATUS_NO_FILL,
                         "closed_at": now_iso,
@@ -1221,17 +1390,50 @@ def _evaluate_stock_signal(
         if stop_hit:
             # Stop und ein NEUES TP-Level am selben Tag -> Reihenfolge unklar:
             # konservativ den Stop zuerst werten, TP nicht gutschreiben.
-            ambiguous = tp2_hit or (tp1_touch and not tp1_hit_at)
+            ambiguous_entry_stop = filled_intrabar_this_bar
             if direction == "LONG":
-                stop_exit = open_price if open_price < stop else stop
+                gap_through_stop = filled_before_bar and open_price < stop
             else:
-                stop_exit = open_price if open_price > stop else stop
+                gap_through_stop = filled_before_bar and open_price > stop
+            stop_exit = open_price if gap_through_stop else stop
+            stop_gap_slippage = bool(gap_through_stop)
+            # Bei einem echten Gap liegt der Stop bereits zur Eroeffnung hinter
+            # dem Markt. Ein spaeteres Tagesziel kann daher nicht vor dem Stop
+            # erreicht worden sein und ist keine Pfad-Obergrenze.
+            ambiguous_target = (not stop_gap_slippage) and (
+                tp2_hit or (tp1_touch and not tp1_hit_at)
+            )
+            lower_r = round(_signed_r(stop_exit, fill_price, risk, direction), 4)
+            upper_r = lower_r
+            if ambiguous_target:
+                upper_target = tp2 if tp2_hit else tp1
+                if upper_target is not None:
+                    upper_r = round(_signed_r(upper_target, fill_price, risk, direction), 4)
+            elif ambiguous_entry_stop:
+                # Ohne Intraday-Reihenfolge ist auch moeglich, dass der Stop-
+                # Extrempunkt vor dem Entry lag. Dann blieb die Position bis
+                # zum Close offen. Das ist nur eine Obergrenze, kein Gewinn.
+                upper_r = max(
+                    lower_r,
+                    round(_signed_r(close, fill_price, risk, direction), 4),
+                )
+            if ambiguous_entry_stop and ambiguous_target:
+                outcome_detail = "ambiguous_same_day_entry_stop_and_target"
+            elif ambiguous_entry_stop:
+                outcome_detail = "ambiguous_same_day_entry_and_stop"
+            elif ambiguous_target:
+                outcome_detail = "ambiguous_same_day"
+            elif stop_gap_slippage:
+                outcome_detail = "stop_gap_slippage"
+            else:
+                outcome_detail = ""
             updates.update({
                 "status": STATUS_STOP,
                 "stop_hit_at": day_iso,
                 "closed_at": now_iso,
-                "r_realized": round(_signed_r(stop_exit, fill_price, risk, direction), 4),
-                "outcome_detail": "ambiguous_same_day" if ambiguous else "",
+                "r_realized": lower_r,
+                "r_realized_upper": max(lower_r, upper_r),
+                "outcome_detail": outcome_detail,
             })
             break
         if tp2_hit:
@@ -1242,16 +1444,19 @@ def _evaluate_stock_signal(
                 "tp2_hit_at": day_iso,
                 "closed_at": now_iso,
                 "r_realized": round(_signed_r(tp2, fill_price, risk, direction), 4),
+                "r_realized_upper": round(_signed_r(tp2, fill_price, risk, direction), 4),
                 "outcome_detail": "",
             })
             break
         if tp1_touch and not tp1_hit_at:
             tp1_hit_at = day_iso
-        if holding_bars >= STOCK_EXPIRY_BARS:
+        if holding_bars >= horizon_bars:
+            expiry_r = round(_signed_r(close, fill_price, risk, direction), 4)
             updates.update({
                 "status": STATUS_EXPIRED,
                 "closed_at": now_iso,
-                "r_realized": round(_signed_r(close, fill_price, risk, direction), 4),
+                "r_realized": expiry_r,
+                "r_realized_upper": expiry_r,
                 "outcome_detail": "tp1_then_expired" if tp1_hit_at else "",
             })
             break
@@ -1555,31 +1760,42 @@ def _evaluate_crypto_signal(
             outcome_detail = "stop_gap_slippage"
         else:
             outcome_detail = ""
+        lower_r = round(_signed_r(stop_fill_price, fill_price, risk, direction), 4)
+        upper_r = lower_r
+        if ambiguous_stop_and_target:
+            upper_target = tp2 if tp2_touched else tp1
+            if upper_target is not None:
+                upper_r = round(_signed_r(upper_target, fill_price, risk, direction), 4)
         updates.update({
             "status": STATUS_STOP,
             "stop_hit_at": now_iso,
             "closed_at": now_iso,
-            "r_realized": round(_signed_r(stop_fill_price, fill_price, risk, direction), 4),
+            "r_realized": lower_r,
+            "r_realized_upper": max(lower_r, upper_r),
             "outcome_detail": outcome_detail,
         })
     elif tp2_touched:
         if tp1 is not None and not tp1_hit_at:
             tp1_hit_at = now_iso  # TP2 impliziert TP1
+        tp2_r = round(_signed_r(tp2, fill_price, risk, direction), 4)
         updates.update({
             "status": STATUS_TP2,
             "tp2_hit_at": now_iso,
             "closed_at": now_iso,
-            "r_realized": round(_signed_r(tp2, fill_price, risk, direction), 4),
+            "r_realized": tp2_r,
+            "r_realized_upper": tp2_r,
             "outcome_detail": "",
         })
     else:
         if tp1_touched and not tp1_hit_at:
             tp1_hit_at = now_iso
         if expired:
+            expiry_r = round(r_now, 4)
             updates.update({
                 "status": STATUS_EXPIRED,
                 "closed_at": now_iso,
-                "r_realized": round(r_now, 4),
+                "r_realized": expiry_r,
+                "r_realized_upper": expiry_r,
                 "outcome_detail": "tp1_then_expired" if tp1_hit_at else "",
             })
 
@@ -1643,7 +1859,7 @@ def breakeven_adjusted_r(row: Dict[str, Any]) -> Optional[float]:
         return realized
     if realized >= 0:
         return realized
-    if str(row.get("outcome_detail") or "") == "ambiguous_same_day":
+    if _is_ambiguous_outcome(row):
         return realized
     return 0.0
 
@@ -1687,8 +1903,10 @@ def _transition_record(
         "scanner": sig.get("scanner"),
         "strategy": sig.get("strategy"),
         "trade_horizon": sig.get("trade_horizon"),
+        "evaluation_horizon_bars": sig.get("evaluation_horizon_bars"),
         "setup_key": sig.get("setup_key"),
         "mail_class": str(sig.get("mail_class") or "trade"),
+        "channel": str(sig.get("channel") or "email"),
         "direction": direction,
         "old_status": str(sig.get("status") or STATUS_OPEN),
         "new_status": new_status,
@@ -1706,6 +1924,8 @@ def _transition_record(
         "live_rr_tp1": _to_float(fill_check.get("rr_tp1")),
         "live_effective_rr": _to_float(fill_check.get("effective_rr")),
         "r_realized": _to_float(updates.get("r_realized")),
+        "r_realized_upper": _to_float(updates.get("r_realized_upper")),
+        "outcome_detail": str(updates.get("outcome_detail") or ""),
         "tp1_hit_this_run": bool(tp1_hit_this_run),
         "asset_class": str(sig.get("asset_class") or "stock"),
     }
@@ -1722,7 +1942,7 @@ def evaluate_open_signals(
 
     Args:
         stock_daily_fetcher: Callable (ticker, since_iso_date) -> Liste von
-            Daily-Bars [{'date', 'high', 'low', 'close'}, ...] oder None.
+            Daily-Bars [{'date', 'open', 'high', 'low', 'close'}, ...] oder None.
             Wird vom Aufrufer injiziert (z.B. Polygon-Fetcher); since_iso_date
             ist das Alert-Datum (YYYY-MM-DD). Rueckgabe None/[] zaehlt als
             Fehlversuch: eval_fail_count + 1, nach 5 Fehlversuchen wird das
@@ -1775,7 +1995,7 @@ def evaluate_open_signals(
     danach ueber Daily-OHLC der Folgetage bewertet. Crypto nutzt bei einem interval-faehigen
     Fetcher Exchange-5m-High/Low seit dem letzten Lauf; ein Legacy-Punktpreis
     bleibt ausdruecklich unvollstaendig. Crypto-Expiry: 120h nach created_at;
-    Aktien-Expiry: 5 Daily-Bars nach Alert.
+    Aktien-Expiry: bei Versand eingefrorener, strategieabhaengiger Horizont.
     """
     result = _EvalResult({"evaluated": 0, "closed": 0, "errors": 0,
                           "transitions": [], "be_activations": []})
@@ -1836,8 +2056,14 @@ def evaluate_open_signals(
             # Stop-auf-Einstand-Anweisung. Bei terminalem Exit zusaetzlich
             # r_realized_be (Ist-vs-BE-Vergleich) mitschreiben.
             mfe_now = _to_float(updates.get("max_favorable_r"))
+            effective_fill_at = updates.get("entry_filled_at") or sig.get("entry_filled_at")
+            effective_fill_price = _to_float(
+                updates.get("entry_fill_price", sig.get("entry_fill_price"))
+            )
             be_new = (
                 not sig.get("be_activated_at")
+                and bool(effective_fill_at)
+                and effective_fill_price is not None
                 and mfe_now is not None
                 and mfe_now >= 1.0
             )
@@ -1889,11 +2115,10 @@ def evaluate_open_signals(
                             "trade_horizon": sig.get("trade_horizon"),
                             "setup_key": sig.get("setup_key"),
                             "mail_class": str(sig.get("mail_class") or "trade"),
+                            "channel": str(sig.get("channel") or "email"),
                             "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
                             "entry": _to_float(sig.get("entry")),
-                            "entry_fill_price": _to_float(
-                                updates.get("entry_fill_price", sig.get("entry_fill_price"))
-                            ),
+                            "entry_fill_price": effective_fill_price,
                             "stop": _to_float(sig.get("stop")),
                             "tp1": _to_float(sig.get("tp1")),
                             "tp2": _to_float(sig.get("tp2")),
@@ -1932,7 +2157,7 @@ def load_pending_be_activations(
                     for row in conn.execute(
                         """
                         SELECT id, ticker, scanner, strategy, trade_horizon,
-                               setup_key, mail_class, direction,
+                               setup_key, mail_class, channel, direction,
                                entry, entry_fill_price, stop, tp1, tp2,
                                max_favorable_r, asset_class, be_activated_at
                         FROM signals
@@ -1959,6 +2184,7 @@ def load_pending_be_activations(
                 "trade_horizon": sig.get("trade_horizon"),
                 "setup_key": sig.get("setup_key"),
                 "mail_class": str(sig.get("mail_class") or "trade"),
+                "channel": str(sig.get("channel") or "email"),
                 "direction": (
                     "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
                 ),
@@ -2020,18 +2246,26 @@ def _empty_bucket() -> Dict[str, Any]:
     bucket.update(
         {
             "win_rate_pct": None,
+            "win_rate_pct_upper": None,
             "avg_r": None,
             "sum_r": 0.0,
+            "avg_r_upper": None,
+            "sum_r_upper": 0.0,
+            "ambiguous_outcomes": 0,
+            "ambiguity_rate_pct": None,
             "alerts_per_day": 0.0,
             "managed_be_decided_signals": 0,
             "managed_be_wins": 0,
             "managed_be_losses": 0,
             "managed_be_breakevens": 0,
             "managed_be_win_rate_pct": None,
+            "managed_be_win_rate_pct_upper": None,
             "managed_be_win_rate_ex_breakeven_pct": None,
             "managed_be_breakeven_outcome_rate_pct": None,
             "avg_r_managed_50_50_be": None,
             "sum_r_managed_50_50_be": 0.0,
+            "avg_r_managed_50_50_be_upper": None,
+            "sum_r_managed_50_50_be_upper": 0.0,
             "breakeven_win_rate_managed_be_pct": None,
             "breakeven_win_rate_ex_breakeven_managed_be_pct": None,
         }
@@ -2089,6 +2323,9 @@ def _finalize_bucket(
     be_activations: int = 0,
     be_saved: int = 0,
     managed_be_values: Optional[List[float]] = None,
+    r_upper_values: Optional[List[float]] = None,
+    managed_be_upper_values: Optional[List[float]] = None,
+    ambiguous_outcomes: int = 0,
 ) -> None:
     wins = sum(1 for value in r_values if value > 0)
     decided = len(r_values)
@@ -2100,6 +2337,19 @@ def _finalize_bucket(
     bucket["sample_reliable"] = bool(decided >= 30)
     bucket["avg_r"] = round(sum(r_values) / len(r_values), 3) if r_values else None
     bucket["sum_r"] = round(sum(r_values), 3) if r_values else 0.0
+    upper = [value for value in (r_upper_values or []) if value is not None]
+    upper_wins = sum(1 for value in upper if value > 0)
+    bucket["win_rate_pct_upper"] = (
+        round(100.0 * upper_wins / len(upper), 1)
+        if upper
+        else bucket["win_rate_pct"]
+    )
+    bucket["avg_r_upper"] = round(sum(upper) / len(upper), 3) if upper else bucket["avg_r"]
+    bucket["sum_r_upper"] = round(sum(upper), 3) if upper else bucket["sum_r"]
+    bucket["ambiguous_outcomes"] = int(ambiguous_outcomes)
+    bucket["ambiguity_rate_pct"] = (
+        round(100.0 * ambiguous_outcomes / decided, 1) if decided else None
+    )
     managed = [value for value in (managed_values or []) if value is not None]
     bucket["avg_r_managed_50_50"] = (
         round(sum(managed) / len(managed), 3) if managed else None
@@ -2126,6 +2376,22 @@ def _finalize_bucket(
     bucket["managed_be_sample_reliable"] = bool(recommended["decided"] >= 30)
     bucket["avg_r_managed_50_50_be"] = recommended["avg_r"]
     bucket["sum_r_managed_50_50_be"] = recommended["sum_r"]
+    recommended_upper = _recommended_payoff_statistics(managed_be_upper_values or [])
+    bucket["managed_be_win_rate_pct_upper"] = (
+        recommended_upper["win_rate_pct"]
+        if recommended_upper["decided"]
+        else recommended["win_rate_pct"]
+    )
+    bucket["avg_r_managed_50_50_be_upper"] = (
+        recommended_upper["avg_r"]
+        if recommended_upper["decided"]
+        else recommended["avg_r"]
+    )
+    bucket["sum_r_managed_50_50_be_upper"] = (
+        recommended_upper["sum_r"]
+        if recommended_upper["decided"]
+        else recommended["sum_r"]
+    )
     bucket["avg_win_r_managed_be"] = recommended["avg_win_r"]
     bucket["avg_loss_r_managed_be"] = recommended["avg_loss_r"]
     bucket["profit_factor_managed_be"] = recommended["profit_factor"]
@@ -2226,8 +2492,8 @@ def load_performance_summary(
                   erreicht war — konservative Zaehlung)
       expired   — EXPIRED ohne jedes TP
       untracked — keine Kursdaten beschaffbar (zaehlt nirgends als Ergebnis)
-      win_rate_pct — wins = tp1_hit + tp2_hit vs. decided = wins + stop_hit;
-                     None ohne entschiedene Signale
+      win_rate_pct — Anteil aller geschlossenen R-Ergebnisse > 0;
+                     0R bleibt im Nenner, None ohne R-Ergebnisse
       avg_r / sum_r — ueber geschlossene Signale mit r_realized
       avg_r_managed_50_50 — R des empfohlenen 50/50-Managements (T1)
       avg_r_be — live gemessenes R unter der Einstand-Regel (Stop auf
@@ -2280,11 +2546,17 @@ def load_performance_summary(
             summary["excluded_not_mature"] = len(rows) - len(mature_rows)
             rows = mature_rows
         total_r: List[float] = []
+        total_r_upper: List[float] = []
         total_managed: List[float] = []
         total_managed_be: List[float] = []
+        total_managed_be_upper: List[float] = []
         scanner_r: Dict[str, List[float]] = {}
+        scanner_r_upper: Dict[str, List[float]] = {}
         scanner_managed: Dict[str, List[float]] = {}
         scanner_managed_be: Dict[str, List[float]] = {}
+        scanner_managed_be_upper: Dict[str, List[float]] = {}
+        ambiguous_total = 0
+        ambiguous_scanner: Dict[str, int] = {}
         # BE-Trigger (AUDIT 2026-07-30): live-Wirkung der Einstand-Regel
         total_be: List[float] = []
         scanner_be: Dict[str, List[float]] = {}
@@ -2303,6 +2575,13 @@ def load_performance_summary(
             if r_value is not None:
                 total_r.append(float(r_value))
                 scanner_r.setdefault(scanner, []).append(float(r_value))
+                upper_value = _realized_upper(row)
+                if upper_value is not None:
+                    total_r_upper.append(upper_value)
+                    scanner_r_upper.setdefault(scanner, []).append(upper_value)
+                if _is_ambiguous_outcome(row):
+                    ambiguous_total += 1
+                    ambiguous_scanner[scanner] = ambiguous_scanner.get(scanner, 0) + 1
                 managed_value = _managed_r_50_50(row)
                 if managed_value is not None:
                     total_managed.append(managed_value)
@@ -2311,6 +2590,10 @@ def load_performance_summary(
                 if managed_be_value is not None:
                     total_managed_be.append(managed_be_value)
                     scanner_managed_be.setdefault(scanner, []).append(managed_be_value)
+                managed_be_upper = _managed_upper_r(row)
+                if managed_be_upper is not None:
+                    total_managed_be_upper.append(managed_be_upper)
+                    scanner_managed_be_upper.setdefault(scanner, []).append(managed_be_upper)
                 if row.get("be_activated_at"):
                     be_act_total += 1
                     be_act_scanner[scanner] = be_act_scanner.get(scanner, 0) + 1
@@ -2332,6 +2615,9 @@ def load_performance_summary(
             be_act_total,
             be_saved_total,
             total_managed_be,
+            total_r_upper,
+            total_managed_be_upper,
+            ambiguous_total,
         )
         for scanner, bucket in summary["per_scanner"].items():
             _finalize_bucket(
@@ -2339,6 +2625,9 @@ def load_performance_summary(
                 scanner_be.get(scanner, []), be_act_scanner.get(scanner, 0),
                 be_saved_scanner.get(scanner, 0),
                 scanner_managed_be.get(scanner, []),
+                scanner_r_upper.get(scanner, []),
+                scanner_managed_be_upper.get(scanner, []),
+                ambiguous_scanner.get(scanner, 0),
             )
         summary["r_semantics"] = (
             "avg_r = Level-R (TP2 volles Geometrie-R, unmanaged); "
@@ -2355,7 +2644,16 @@ def load_performance_summary(
             "beobachtbare Versandkohorten aus. "
             "be_activations/be_saved = BE-Markierungen / verhinderte Verlierer. "
             "win_rate_wilson_95 = Wilson-Konfidenzintervall der Trefferquote; "
-            "sample_reliable ab 30 entschiedenen Signalen. AUDIT 2026-07-24 (T1 + Kalibrier-Loop)."
+            "sample_reliable ab 30 entschiedenen Signalen. Aktien werden bis zum "
+            "beim Versand eingefrorenen Strategie-Horizont beobachtet; ORB, Swing, "
+            "BI/Biotech und Turtle verwenden deshalb nicht dasselbe Bar-Limit. "
+            "AUDIT 2026-07-24 (T1 + Kalibrier-Loop)."
+        )
+        summary["uncertainty_semantics"] = (
+            "Konservativ = Stop zuerst, wenn dieselbe OHLC-Bar Stop und Ziel "
+            "beruehrt. Upper = bester noch moeglicher Pfad nur fuer solche "
+            "reihenfolge-unklaren Bars. Upper ist kein Erwartungswert und keine "
+            "behauptete Performance, sondern die Obergrenze des Datenbands."
         )
         summary["recent"] = [
             {
@@ -2365,6 +2663,8 @@ def load_performance_summary(
                 "ticker": row.get("ticker"),
                 "asset_class": row.get("asset_class"),
                 "direction": row.get("direction"),
+                "trade_horizon": row.get("trade_horizon"),
+                "evaluation_horizon_bars": row.get("evaluation_horizon_bars"),
                 "status": row.get("status"),
                 "outcome_detail": row.get("outcome_detail") or "",
                 "entry": row.get("entry"),
@@ -2374,9 +2674,11 @@ def load_performance_summary(
                 "tp1": row.get("tp1"),
                 "tp2": row.get("tp2"),
                 "r_realized": row.get("r_realized"),
+                "r_realized_upper": _realized_upper(row),
                 "r_realized_be": row.get("r_realized_be"),
                 "r_managed_50_50": _managed_r_50_50(row),
                 "r_managed_50_50_be": simulate_managed_5050_breakeven(row),
+                "r_managed_50_50_be_upper": _managed_upper_r(row),
                 "tp1_hit_at": row.get("tp1_hit_at"),
             }
             for row in rows[:20]

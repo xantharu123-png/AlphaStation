@@ -19,6 +19,7 @@ from datetime import datetime, time as datetime_time, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
+from modules.backtests import simulate_50_50_daily_exit
 from modules.trade_levels import trade_geometry
 from modules.vrvp_levels import calculate_wilder_atr
 from modules.volume_metrics import historical_volume_baseline
@@ -1313,11 +1314,7 @@ def evaluate_penny_signal_outcome(
     spread_bps: float = 0.0,
     slippage_bps: float = 15.0,
 ) -> Dict[str, Any]:
-    """Conservative deterministic replay for calibration and regression tests.
-
-    If stop and target are touched in the same OHLC bar, stop wins because the
-    intrabar path is unknown. Costs are charged on entry and exit.
-    """
+    """Replay a penny setup with the canonical lower/upper OHLC path model."""
     entry = _num(entry)
     stop = _num(stop)
     tp1 = _num(tp1)
@@ -1327,82 +1324,73 @@ def evaluate_penny_signal_outcome(
     if not geometry.get("valid") or not data:
         return {"valid": False, "outcome": "INVALID", "net_r": None}
     risk = float(geometry["risk"])
+    total_cost_bps = max(0.0, spread_bps) + 2.0 * max(0.0, slippage_bps)
+    fee_pct = total_cost_bps / 100.0
+    round_trip_cost = entry * total_cost_bps / 10_000.0
+    simulated = simulate_50_50_daily_exit(
+        bars=data,
+        start_idx=0,
+        max_hold=len(data),
+        direction="LONG",
+        entry_price=entry,
+        stop_price=stop,
+        tp1_price=tp1,
+        tp2_price=tp2,
+        trail_fraction=0.0,
+        fee_pct=fee_pct,
+        first_bar_order_unknown=False,
+        post_tp1_stop_offset=round_trip_cost,
+    )
+    if not simulated:
+        return {"valid": False, "outcome": "INVALID", "net_r": None}
 
-    round_trip_cost = entry * (max(0.0, spread_bps) + 2.0 * max(0.0, slippage_bps)) / 10_000.0
-    tp1_seen = False
-    tp1_realized = False
-    realized_fraction = 0.0
-    realized_gross_profit = 0.0
-    remaining_fraction = 1.0
-    active_stop = stop
-    exit_price = data[-1]["close"]
-    outcome = "MARK_TO_MARKET"
-    bars_held = len(data)
-    for index, bar in enumerate(data, start=1):
-        if bar["low"] <= active_stop:
-            # A gap below the stop cannot be filled at the untouched stop.
-            # Use the worse opening print to avoid optimistic penny backtests.
-            exit_price = min(active_stop, bar["open"]) if bar["open"] > 0 else active_stop
-            realized_gross_profit += remaining_fraction * (exit_price - entry)
-            realized_fraction += remaining_fraction
-            remaining_fraction = 0.0
-            outcome = "BREAKEVEN_STOP" if tp1_realized else "STOP"
-            bars_held = index
-            break
-        if bar["high"] >= tp2:
-            exit_price = tp2
-            if not tp1_realized:
-                tp1_seen = True
-                tp1_realized = True
-                realized_gross_profit += 0.5 * (tp1 - entry)
-                realized_fraction += 0.5
-                remaining_fraction = 0.5
-            realized_gross_profit += remaining_fraction * (tp2 - entry)
-            realized_fraction += remaining_fraction
-            remaining_fraction = 0.0
-            outcome = "TP2"
-            bars_held = index
-            break
-        if bar["high"] >= tp1 and not tp1_realized:
-            tp1_seen = True
-            tp1_realized = True
-            realized_gross_profit += 0.5 * (tp1 - entry)
-            realized_fraction += 0.5
-            remaining_fraction = 0.5
-            active_stop = max(stop, entry + round_trip_cost)
-            if bar["low"] <= active_stop:
-                # Once TP1 is reached the remaining stop becomes active. OHLC
-                # data cannot reveal whether the later low happened before or
-                # after TP1, so assume the adverse sequence for calibration.
-                exit_price = active_stop
-                realized_gross_profit += remaining_fraction * (exit_price - entry)
-                realized_fraction += remaining_fraction
-                remaining_fraction = 0.0
-                outcome = "BREAKEVEN_STOP"
-                bars_held = index
-                break
+    def _outcome_label(reason: str) -> str:
+        return {
+            "BLENDED_TP": "TP2",
+            "TP1_STOP": "BREAKEVEN_STOP",
+            "TP1+EOD": "MARK_TO_MARKET",
+            "EOD": "MARK_TO_MARKET",
+        }.get(str(reason or ""), str(reason or "MARK_TO_MARKET"))
 
-    if remaining_fraction > 0:
-        exit_price = data[-1]["close"]
-        realized_gross_profit += remaining_fraction * (exit_price - entry)
-        realized_fraction += remaining_fraction
+    risk_pct = risk / entry * 100.0
     net_risk = risk + round_trip_cost
-    gross_r = realized_gross_profit / risk
-    net_r = (realized_gross_profit - round_trip_cost) / net_risk
-    weighted_exit_price = entry + realized_gross_profit / max(realized_fraction, 0.000001)
+    net_risk_pct = net_risk / entry * 100.0
+    lower_pnl = float(simulated["pnl_pct"])
+    upper_pnl = float(simulated["pnl_pct_upper"])
+    gross_r = (lower_pnl + fee_pct) / risk_pct if risk_pct > 0 else 0.0
+    gross_r_upper = (upper_pnl + fee_pct) / risk_pct if risk_pct > 0 else 0.0
+    net_r = lower_pnl / net_risk_pct if net_risk_pct > 0 else 0.0
+    net_r_upper = upper_pnl / net_risk_pct if net_risk_pct > 0 else 0.0
+    outcome = _outcome_label(simulated["exit_reason"])
+    outcome_upper = _outcome_label(simulated["exit_reason_upper"])
+    closed_outcomes = {"STOP", "BREAKEVEN_STOP", "TP2"}
+    remaining_fraction = 0.0 if outcome in closed_outcomes else (0.5 if simulated["tp1_hit"] else 1.0)
+    assumption = (
+        "stop-first lower bound and target-first upper bound for ambiguous same-bar OHLC paths; "
+        "net R uses spread/slippage-adjusted risk and moves the runner stop to cost break-even after TP1"
+    )
+    if simulated.get("intrabar_ambiguous"):
+        assumption += "; ambiguous same-bar result is reported as a range"
     return {
         "valid": True,
         "outcome": outcome,
-        "tp1_seen": tp1_seen,
-        "tp1_realized": tp1_realized,
-        "partial_exit_fraction": 0.5 if tp1_realized else 0.0,
-        "remaining_fraction": 0.0 if outcome in {"STOP", "BREAKEVEN_STOP", "TP2"} else remaining_fraction,
-        "active_stop_after_tp1": _round_price(max(stop, entry + round_trip_cost)) if tp1_realized else _round_price(stop),
-        "bars_held": bars_held,
-        "exit_price": _round_price(weighted_exit_price),
+        "outcome_upper": outcome_upper,
+        "tp1_seen": bool(simulated["tp1_hit"] or simulated["tp1_hit_upper"]),
+        "tp1_realized": bool(simulated["tp1_hit"]),
+        "partial_exit_fraction": 0.5 if simulated["tp1_hit"] else 0.0,
+        "remaining_fraction": remaining_fraction,
+        "active_stop_after_tp1": _round_price(max(stop, entry + round_trip_cost)) if simulated["tp1_hit"] else _round_price(stop),
+        "bars_held": simulated["bars_held"],
+        "exit_price": _round_price(simulated["exit_price"]),
+        "exit_price_upper": _round_price(simulated["exit_price_upper"]),
         "gross_r": round(gross_r, 3),
+        "gross_r_upper": round(gross_r_upper, 3),
         "net_r": round(net_r, 3),
+        "net_r_upper": round(net_r_upper, 3),
         "net_risk": _round_price(net_risk),
         "round_trip_cost": _round_price(round_trip_cost),
-        "assumption": "stop-first within each OHLC bar; net R uses cost-adjusted stop loss; TP1 realizes 50%, then an ambiguous same-bar or later retrace exits the remainder at cost break-even",
+        "intrabar_ambiguous": bool(simulated.get("intrabar_ambiguous")),
+        "ambiguity_reason": simulated.get("ambiguity_reason"),
+        "ohlc_path_policy": simulated.get("ohlc_path_policy"),
+        "assumption": assumption,
     }

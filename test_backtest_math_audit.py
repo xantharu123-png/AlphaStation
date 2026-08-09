@@ -2,6 +2,7 @@ from datetime import date, timedelta
 import inspect
 
 import api
+import pytest
 import modules.analysis as analysis_module
 import modules.backtests as backtests
 import modules.patterns as patterns_module
@@ -99,6 +100,75 @@ def test_bi_and_biotech_backtests_use_canonical_wilder_atr():
     assert "tr_values" not in biotech_source
 
 
+def test_bi_retest_requires_extension_on_an_earlier_completed_bar():
+    bar = _bar(
+        "2026-01-02",
+        open_=10.5,
+        high=12.0,
+        low=9.8,
+        close=10.4,
+    )
+
+    same_bar_only = backtests._bi_retest_close_entry(
+        bar,
+        "long",
+        zone_lower=10.0,
+        zone_upper=11.0,
+        stop=9.0,
+        previous_extreme=10.8,
+        slippage=0.001,
+    )
+    confirmed_before = backtests._bi_retest_close_entry(
+        bar,
+        "long",
+        zone_lower=10.0,
+        zone_upper=11.0,
+        stop=9.0,
+        previous_extreme=11.5,
+        slippage=0.001,
+    )
+
+    assert same_bar_only is None
+    assert confirmed_before == pytest.approx(10.4104)
+
+
+def test_bi_retest_fill_uses_observed_close_and_respects_invalidation():
+    valid = _bar(
+        "2026-01-02",
+        open_=10.7,
+        high=11.2,
+        low=9.7,
+        close=10.2,
+    )
+    invalidated = {**valid, "low": 8.9}
+
+    assert backtests._bi_retest_close_entry(
+        valid,
+        "long",
+        zone_lower=10.0,
+        zone_upper=11.0,
+        stop=9.0,
+        previous_extreme=11.5,
+        slippage=0.0,
+    ) == pytest.approx(10.2)
+    assert backtests._bi_retest_close_entry(
+        invalidated,
+        "long",
+        zone_lower=10.0,
+        zone_upper=11.0,
+        stop=9.0,
+        previous_extreme=11.5,
+        slippage=0.0,
+    ) is None
+
+
+def test_backtest_decision_scope_excludes_no_fill_and_unresolved():
+    assert backtests._is_decided_backtest_trade({"outcome": "TP1_PARTIAL"}) is True
+    assert backtests._is_decided_backtest_trade({"outcome": "NO_FILL"}) is False
+    assert backtests._is_decided_backtest_trade({"outcome": "UNRESOLVED"}) is False
+    assert backtests._is_decided_backtest_trade({}) is False
+
+
 def test_live_scanner_and_chart_paths_share_canonical_wilder_atr():
     autotrader_source = inspect.getsource(scanner_module.autotrader_scan_once)
     bi_source = inspect.getsource(scanner_module._bi_background_scan)
@@ -161,6 +231,73 @@ def test_prev_high_gap_fills_at_open_not_at_stale_trigger():
     assert trade["entry_price"] > trade["entry_trigger"]
 
 
+def test_trigger_touch_does_not_treat_pre_entry_session_open_as_gap_stop():
+    bars = [
+        _bar("2026-01-01", open_=98, high=100, low=97, close=99),
+        _bar("2026-01-02", open_=99, high=99.5, low=98, close=99),
+        _bar("2026-01-03", open_=90, high=102, low=89, close=101),
+    ]
+
+    trade = backtests.simulate_trade(bars, 1, _prev_high_strategy())
+
+    assert trade is not None
+    assert trade["entry_fill_basis"] == "trigger_touch"
+    assert trade["exit_reason"] == "STOP"
+    assert trade["exit_price"] > 94
+    assert trade["exit_price"] < 96
+    assert trade["exit_reason_upper"] == "EOD"
+    assert trade["intrabar_ambiguous"] is True
+    assert "entry_bar_pre_post_fill_order_unknown" in trade["ambiguity_reason"]
+
+
+def test_real_overnight_gap_through_stop_is_not_an_ohlc_order_ambiguity():
+    strategy = {
+        "direction": "long",
+        "entry": "at_close",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.0,
+        "tp2_rr": 3.0,
+        "max_hold_days": 1,
+    }
+    bars = [
+        _bar("2026-01-01", open_=99, high=101, low=98, close=100),
+        _bar("2026-01-02", open_=90, high=110, low=89, close=105),
+    ]
+
+    trade = backtests.simulate_trade(bars, 0, strategy)
+
+    assert trade is not None
+    assert trade["exit_reason"] == "STOP"
+    assert trade["exit_reason_upper"] == "STOP"
+    assert trade["exit_price"] < trade["stop_price"]
+    assert trade["intrabar_ambiguous"] is False
+
+
+def test_same_daily_bar_stop_and_tp2_is_reported_as_result_band():
+    strategy = {
+        "direction": "long",
+        "entry": "at_close",
+        "stop_pct": 0.05,
+        "tp1_rr": 1.0,
+        "tp2_rr": 3.0,
+        "max_hold_days": 1,
+    }
+    bars = [
+        _bar("2026-01-01", open_=99, high=101, low=98, close=100),
+        _bar("2026-01-02", open_=100, high=116, low=94, close=105),
+    ]
+
+    trade = backtests.simulate_trade(bars, 0, strategy)
+
+    assert trade is not None
+    assert trade["exit_reason"] == "STOP"
+    assert trade["exit_reason_upper"] == "BLENDED_TP"
+    assert trade["r_multiple"] < 0
+    assert trade["r_multiple_upper"] > 1
+    assert trade["intrabar_ambiguous"] is True
+    assert "same_bar_stop_and_target" in trade["ambiguity_reason"]
+
+
 def test_at_close_entry_date_is_signal_date_not_next_bar():
     strategy = {
         "direction": "long",
@@ -211,6 +348,27 @@ def test_backtest_stats_maps_current_blended_exit_reasons():
     assert stats["eod_rate"] == 25.0
 
 
+def test_backtest_stats_expose_conservative_and_favorable_ohlc_bounds():
+    trades = [
+        {
+            **_stats_trade("STOP", -1.0, winner=False),
+            "intrabar_ambiguous": True,
+            "pnl_pct_upper": 10.0,
+            "r_multiple_upper": 2.0,
+        },
+        _stats_trade("BLENDED_TP", 2.0, winner=True, tp1_hit=True),
+    ]
+
+    stats = backtests.compute_backtest_stats(trades)
+
+    assert stats["ambiguous_trades"] == 1
+    assert stats["ambiguity_rate"] == 50.0
+    assert stats["win_rate"] == 50.0
+    assert stats["win_rate_upper"] == 100.0
+    assert stats["total_r"] == 1.0
+    assert stats["total_r_upper"] == 4.0
+
+
 def test_profit_factor_without_losses_is_unbounded_not_magic_number():
     summary = profit_factor_metrics(12.5, 0)
     stats = backtests.compute_backtest_stats(
@@ -223,6 +381,77 @@ def test_profit_factor_without_losses_is_unbounded_not_magic_number():
     assert stats["profit_factor"] is None
     assert stats["profit_factor_display"] == "INF"
     assert stats["avg_loss"] == 0
+
+
+def test_backtest_stats_exclude_explicit_non_decided_rows():
+    decided = {
+        **_stats_trade("TP2", 2.0, winner=True, tp1_hit=True),
+        "outcome": "TP2",
+    }
+    no_fill = {"outcome": "NO_FILL", "ticker": "MISS"}
+    unresolved = {"outcome": "UNRESOLVED", "ticker": "OPEN"}
+
+    stats = backtests.compute_backtest_stats([decided, no_fill, unresolved])
+
+    assert stats["total_input_trades"] == 3
+    assert stats["total_filled"] == 2
+    assert stats["total_decided"] == 1
+    assert stats["total_trades"] == 1
+    assert stats["no_fill"] == 1
+    assert stats["unresolved"] == 1
+    assert stats["statistics_scope"] == "decided_filled_trades_only"
+    assert stats["win_rate"] == 100.0
+    assert stats["total_r"] == 2.0
+
+
+def test_backtest_stats_keep_non_decided_only_sample_out_of_performance():
+    stats = backtests.compute_backtest_stats(
+        [
+            {"outcome": "NO_FILL", "ticker": "MISS"},
+            {"outcome": "UNRESOLVED", "ticker": "OPEN"},
+        ]
+    )
+
+    assert stats["total_input_trades"] == 2
+    assert stats["total_filled"] == 1
+    assert stats["total_decided"] == 0
+    assert stats["total_trades"] == 0
+    assert stats["no_fill"] == 1
+    assert stats["unresolved"] == 1
+    assert stats["statistics_scope"] == "decided_filled_trades_only"
+    assert stats["win_rate"] == 0
+    assert stats["total_r"] == 0
+
+
+def test_conservative_exit_index_uses_later_ohlc_path():
+    date_to_index = {
+        "2026-01-02": 2,
+        "2026-01-04": 4,
+    }
+
+    exit_index = backtests.conservative_trade_exit_index(
+        {
+            "exit_date": "2026-01-02",
+            "exit_date_upper": "2026-01-04",
+        },
+        date_to_index,
+        fallback_index=1,
+    )
+
+    assert exit_index == 4
+
+
+@pytest.mark.parametrize("rule", [{}, {"max_hold_days": 0}, {"max_hold_days": 2.5}])
+def test_api_backtest_rule_rejects_missing_or_invalid_horizon(rule):
+    with pytest.raises(ValueError, match="max_hold_days"):
+        api._validated_backtest_max_hold_days(rule, "Unit Test")
+
+
+def test_api_backtest_rule_accepts_explicit_integer_horizon():
+    assert api._validated_backtest_max_hold_days(
+        {"max_hold_days": 3},
+        "Unit Test",
+    ) == 3
 
 
 def test_classic_backtest_keeps_same_day_signals_from_different_strategies(monkeypatch):
@@ -249,7 +478,11 @@ def test_classic_backtest_keeps_same_day_signals_from_different_strategies(monke
         "compute_daily_metrics",
         lambda _bars, _idx: {"price": 10, "change_pct": 2, "rvol": 2},
     )
-    monkeypatch.setattr(backtests, "check_signal", lambda _metrics, _signal: True)
+    monkeypatch.setattr(
+        backtests,
+        "evaluate_rule_signal",
+        lambda _bars, _idx, _strategy: {"price": 10, "change_pct": 2, "rvol": 2},
+    )
     monkeypatch.setattr(
         backtests,
         "simulate_trade",
@@ -400,6 +633,160 @@ def test_backtest_drawdown_is_chronological_not_input_order():
     assert [trade["ticker"] for trade in result["trades"]] == ["FIRST", "SECOND", "THIRD"]
 
 
+def test_crypto_backtest_exposes_same_bar_stop_target_uncertainty():
+    bars = [{
+        "date": "2026-01-02",
+        "open": 10.0,
+        "high": 12.5,
+        "low": 8.5,
+        "close": 10.5,
+    }]
+
+    trade = api._simulate_crypto_trade(
+        bars=bars,
+        entry_idx=0,
+        direction="long",
+        entry=10.0,
+        stop=9.0,
+        tp1=11.0,
+        tp2=12.0,
+        max_hold=1,
+        fee_pct=0.0,
+    )
+
+    assert trade is not None
+    assert trade["outcome"] == "STOP"
+    assert trade["intrabar_ambiguous"] is True
+    assert trade["r_multiple"] == pytest.approx(-1.0)
+    assert trade["r_multiple_upper"] == pytest.approx(1.5)
+
+
+def test_api_backtest_stats_report_ohlc_path_bounds():
+    trades = [{
+        "ticker": "TEST",
+        "entry_date": "2026-01-02",
+        "pnl_pct": -10.0,
+        "r_multiple": -1.0,
+        "pnl_pct_upper": 15.0,
+        "r_multiple_upper": 1.5,
+        "is_winner_upper": True,
+        "intrabar_ambiguous": True,
+    }]
+
+    result = api._backtest_stats(trades, "TEST", "Strategy", 6)
+
+    assert result["ambiguous_trades"] == 1
+    assert result["ambiguity_rate"] == 100.0
+    assert result["win_rate"] == 0.0
+    assert result["win_rate_upper"] == 100.0
+    assert result["avg_r"] == pytest.approx(-1.0)
+    assert result["total_r_upper"] == pytest.approx(1.5)
+
+
+def test_api_backtest_stats_exclude_explicit_non_decided_rows():
+    decided = {
+        "ticker": "DONE",
+        "entry_date": "2026-01-02",
+        "outcome": "TP1",
+        "pnl_pct": 5.0,
+        "r_multiple": 1.0,
+    }
+    no_fill = {
+        "ticker": "NOFILL",
+        "entry_date": "2026-01-03",
+        "outcome": "NO_FILL",
+        "pnl_pct": 0.0,
+        "r_multiple": 0.0,
+    }
+    unresolved = {
+        "ticker": "OPEN",
+        "entry_date": "2026-01-04",
+        "outcome": "UNRESOLVED",
+        "pnl_pct": -99.0,
+        "r_multiple": -99.0,
+    }
+
+    result = api._backtest_stats(
+        [decided, no_fill, unresolved],
+        "TEST",
+        "Strategy",
+        6,
+    )
+
+    assert result["total_input_trades"] == 3
+    assert result["total_filled"] == 2
+    assert result["total_decided"] == 1
+    assert result["total_trades"] == 1
+    assert result["no_fill"] == 1
+    assert result["unresolved"] == 1
+    assert result["avg_r"] == pytest.approx(1.0)
+    assert [trade["ticker"] for trade in result["trades"]] == ["DONE"]
+    assert result["statistics_scope"] == "decided_filled_trades_only"
+    assert result["open_trades"] == [unresolved]
+
+
+def test_legacy_ema_series_is_aligned_to_source_bars():
+    result = api._calc_aligned_ema_series([1, 2, 3, 4, 5], 3)
+
+    assert result[:2] == [None, None]
+    assert result[2] == pytest.approx(2.0)
+    assert result[3] == pytest.approx(3.0)
+    assert result[4] == pytest.approx(4.0)
+
+
+def test_legacy_rsi_uses_wilder_smoothing_and_source_alignment():
+    result = api._calc_wilder_rsi_series([10, 11, 12, 11, 13, 12], period=3)
+
+    assert result[:3] == [None, None, None]
+    assert result[3] == pytest.approx(66.6666667)
+    assert result[4] == pytest.approx(83.3333333)
+    assert result[5] == pytest.approx(60.6060606)
+
+
+def test_close_confirmed_indicator_signal_fills_only_at_next_open():
+    dates = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    opens = [10.0, 11.0, 12.0]
+
+    position = api._indicator_entry_on_next_open(0, dates, opens)
+    trade = api._indicator_exit_on_next_open(position, 1, dates, opens)
+
+    assert position["signal_date"] == "2026-01-01"
+    assert position["entry_date"] == "2026-01-02"
+    assert position["entry_price"] == 11.0
+    assert trade["exit_signal_date"] == "2026-01-02"
+    assert trade["exit_date"] == "2026-01-03"
+    assert trade["exit_price"] == 12.0
+
+
+def test_last_bar_indicator_signal_has_no_fictional_fill():
+    dates = ["2026-01-01", "2026-01-02"]
+    opens = [10.0, 11.0]
+
+    assert api._indicator_entry_on_next_open(1, dates, opens) is None
+
+
+def test_open_indicator_trade_is_disclosed_but_not_scored():
+    position = {
+        "signal_date": "2026-01-01",
+        "entry_date": "2026-01-02",
+        "entry_price": 11.0,
+        "dir": "long",
+        "fill_model": "next_session_open_after_close_signal",
+    }
+    unresolved = api._indicator_unresolved_trade(
+        position,
+        ["2026-01-01", "2026-01-02"],
+    )
+
+    result = api._backtest_stats([unresolved], "TEST", "ema_crossover", 6)
+
+    assert result["total_filled"] == 1
+    assert result["total_decided"] == 0
+    assert result["unresolved"] == 1
+    assert result["total_trades"] == 0
+    assert result["open_trades"] == [unresolved]
+
+
 def test_oos_split_keeps_all_same_day_trades_on_one_side():
     start = date(2026, 1, 1)
     trades = []
@@ -512,9 +899,10 @@ def test_trade_health_uses_net_rr_when_execution_costs_are_available():
     assert health["metrics"]["live_rr_net"] == 0.82
     assert health["metrics"]["live_rr"] == 0.82
     assert health["metrics"]["rr_cost_basis"] == "net"
-    # Costs make the current entry untradeable. An intact high-volume setup may
-    # remain a wait-for-better-entry candidate instead of being discarded.
-    assert health["decision"] == "WAIT_FOR_CONTINUATION"
+    # Costs make the current entry untradeable, and the 1% stop is also below
+    # the crypto noise floor. That geometry is a hard no-trade, not a wait state.
+    assert health["decision"] == "NO_TRADE"
+    assert "stop_distance_below_noise_floor" in health["exclusion_reasons"]
     assert health["decision"] != "TRADEABLE"
 
 
