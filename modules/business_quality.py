@@ -9,6 +9,7 @@ scores and is not suitable for point-in-time backtests without filing vintages.
 from __future__ import annotations
 
 import os
+import statistics
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,10 +24,12 @@ _SEC_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 _SUCCESS_TTL_SECONDS = 24 * 3600
 _ERROR_TTL_SECONDS = 3600
 _MIN_SEC_INTERVAL_SECONDS = 0.12
+BUSINESS_QUALITY_MODEL_VERSION = 2
 
 _cache_lock = threading.RLock()
 _request_lock = threading.Lock()
-_quality_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_company_facts_cache: Dict[str, Tuple[float, Dict[str, Any], Dict[str, Any]]] = {}
+_error_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _ticker_map_cache: Tuple[float, Dict[str, Dict[str, Any]]] = (0.0, {})
 _last_sec_request_monotonic = 0.0
 
@@ -156,6 +159,106 @@ def _annual_series(
     return [(end, by_end[end][1]) for end in sorted(by_end)[-limit:]]
 
 
+def _preferred_annual_series(
+    companyfacts: Dict[str, Any],
+    tags: Sequence[str],
+    *,
+    units: Sequence[str] = ("USD",),
+    instant: bool = False,
+    limit: int = 5,
+) -> List[Tuple[str, float]]:
+    """Choose one coherent SEC concept instead of mixing alternative tags.
+
+    Company Facts often exposes the same economic item under several tags. A
+    merged series can silently combine overlapping concepts or let the latest
+    filing overwrite a different component. Prefer the concept with the most
+    recent observation, then the longest history, while retaining tag order as
+    the final tie-breaker.
+    """
+    candidates: List[Tuple[str, int, int, List[Tuple[str, float]]]] = []
+    for priority, tag in enumerate(tags):
+        series = _annual_series(
+            companyfacts,
+            (tag,),
+            units=units,
+            instant=instant,
+            limit=limit,
+        )
+        if series:
+            candidates.append((series[-1][0], len(series), -priority, series))
+    if not candidates:
+        return []
+    return max(candidates, key=lambda item: item[:3])[3]
+
+
+def _sum_series_by_end(
+    left: Sequence[Tuple[str, float]],
+    right: Sequence[Tuple[str, float]],
+    *,
+    limit: int = 5,
+) -> List[Tuple[str, float]]:
+    """Sum components only where both belong to the same fiscal period.
+
+    Treating a missing component as zero understates debt. If the components
+    do not overlap, the caller must fall back to the best available series and
+    expose the resulting coverage loss instead of inventing a total.
+    """
+    left_by_end = dict(left)
+    right_by_end = dict(right)
+    combined = []
+    for end in sorted(set(left_by_end) & set(right_by_end)):
+        combined.append((end, left_by_end[end] + right_by_end[end]))
+    return combined[-limit:]
+
+
+def _total_debt_series(companyfacts: Dict[str, Any], limit: int = 5) -> List[Tuple[str, float]]:
+    """Return total debt without confusing current and non-current components."""
+    direct = _preferred_annual_series(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligations",
+            "LongTermDebtAndCapitalLeaseObligations",
+            "DebtAndFinanceLeaseObligations",
+            "DebtLongtermAndShorttermCombinedAmount",
+        ),
+        instant=True,
+        limit=limit,
+    )
+    current = _preferred_annual_series(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligationsCurrent",
+            "LongTermDebtCurrent",
+        ),
+        instant=True,
+        limit=limit,
+    )
+    noncurrent = _preferred_annual_series(
+        companyfacts,
+        (
+            "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+            "LongTermDebtNoncurrent",
+            "LongTermDebt",
+        ),
+        instant=True,
+        limit=limit,
+    )
+    components = (
+        _sum_series_by_end(current, noncurrent, limit=limit)
+        if current and noncurrent
+        else list(noncurrent or current)[-limit:]
+    )
+    candidates = [series for series in (direct, components) if series]
+    if not candidates:
+        return []
+    # Prefer the freshest fiscal period. On an equal period, prefer the direct
+    # total because it cannot omit a current/non-current component.
+    return max(
+        candidates,
+        key=lambda series: (series[-1][0], series is direct, len(series)),
+    )
+
+
 def _latest(series: Sequence[Tuple[str, float]]) -> Optional[float]:
     return series[-1][1] if series else None
 
@@ -165,6 +268,69 @@ def _positive_ratio(series: Sequence[Tuple[str, float]], limit: int = 3) -> Opti
     if not values:
         return None
     return sum(1 for value in values if value > 0) / len(values)
+
+
+def _annualized_growth(series: Sequence[Tuple[str, float]], limit: int = 5) -> Optional[float]:
+    usable = [(end, value) for end, value in series[-limit:] if value > 0]
+    if len(usable) < 2:
+        return None
+    try:
+        first_date = datetime.fromisoformat(usable[0][0]).date()
+        last_date = datetime.fromisoformat(usable[-1][0]).date()
+    except ValueError:
+        return None
+    years = (last_date - first_date).days / 365.2425
+    if years < 0.75:
+        return None
+    return (usable[-1][1] / usable[0][1]) ** (1.0 / years) - 1.0
+
+
+def _up_year_ratio(series: Sequence[Tuple[str, float]], limit: int = 5) -> Optional[float]:
+    values = [value for _, value in series[-limit:]]
+    if len(values) < 2:
+        return None
+    return sum(1 for previous, current in zip(values, values[1:]) if current >= previous) / (len(values) - 1)
+
+
+def _matched_ratios(
+    numerator: Sequence[Tuple[str, float]],
+    denominator: Sequence[Tuple[str, float]],
+    *,
+    limit: int = 5,
+) -> List[float]:
+    denominator_by_end = dict(denominator)
+    ratios = []
+    for end, value in numerator[-limit:]:
+        base = denominator_by_end.get(end)
+        if base is not None and base > 0:
+            ratios.append(value / base)
+    return ratios
+
+
+def _margin_stability_score(margins: Sequence[float]) -> Optional[float]:
+    if len(margins) < 3:
+        return None
+    volatility = statistics.pstdev(margins)
+    if volatility <= 0.02:
+        return 95.0
+    if volatility <= 0.05:
+        return 80.0
+    if volatility <= 0.10:
+        return 60.0
+    if volatility <= 0.20:
+        return 35.0
+    return 15.0
+
+
+def _data_freshness(as_of: Optional[str]) -> Tuple[Optional[int], str]:
+    if not as_of:
+        return None, "UNKNOWN"
+    try:
+        period_end = datetime.fromisoformat(as_of).date()
+    except ValueError:
+        return None, "UNKNOWN"
+    age_days = max(0, (datetime.now(timezone.utc).date() - period_end).days)
+    return age_days, "STALE" if age_days > 550 else "CURRENT"
 
 
 def _score_yield(value: Optional[float]) -> Optional[float]:
@@ -234,6 +400,34 @@ def _valuation_label(score: Optional[float]) -> str:
     return "TEUER/UNPROFITABEL"
 
 
+def _holding_fit(
+    score: Optional[float],
+    valuation_score: Optional[float],
+    *,
+    status: str,
+    freshness_status: str,
+    severe_risk: bool,
+) -> Tuple[str, str, float]:
+    """Translate slow-moving fundamentals into a holding profile, not an entry."""
+    if severe_risk:
+        return "AVOID_LONG_TERM", "Nicht langfristig halten", 0.0
+    if score is None or status in {"missing", "limited"} or freshness_status in {"STALE", "UNKNOWN"}:
+        return "DATA_LIMITED", "Unternehmensdaten pruefen", 0.5
+    if status == "partial":
+        if score >= 65:
+            return "SWING_SUPPORT", "Qualitaet stuetzt das Halten; Spezialdaten fehlen", 0.75
+        return "DATA_LIMITED", "Unternehmensdaten pruefen", 0.5
+    if score >= 80 and valuation_score is not None and valuation_score >= 55:
+        return "LONG_TERM_CANDIDATE", "Langfristig pruefenswert; Moat offen", 1.0
+    if score >= 70 and valuation_score is not None and valuation_score < 40:
+        return "QUALITY_EXPENSIVE", "Qualitaet, aber teuer", 0.65
+    if score >= 65:
+        return "SWING_SUPPORT", "Unternehmensqualitaet stuetzt das Halten", 0.85
+    if score < 50:
+        return "TRADE_ONLY", "Nur technischer Trade", 0.5
+    return "NEUTRAL", "Fundamental neutral", 0.75
+
+
 def analyze_company_facts(
     companyfacts: Dict[str, Any],
     *,
@@ -250,54 +444,71 @@ def analyze_company_facts(
             "label": "DATEN FEHLEN",
             "valuation_score": None,
             "valuation_label": "NICHT BEWERTBAR",
+            "holding_fit": "DATA_LIMITED",
+            "holding_fit_label": "Daten pruefen",
+            "position_size_cap": 0.5,
             "coverage_pct": 0,
+            "data_age_days": None,
+            "freshness_status": "UNKNOWN",
             "severe_risk": False,
             "severe_reasons": [],
+            "value_trap_risk": False,
             "strengths": [],
             "risks": ["Keine verwertbaren Unternehmensberichte"],
             "profile": "unknown",
-            "methodology": "live_fundamentals_not_point_in_time_backtest",
+            "metrics": {},
+            "methodology": "live_sec_filing_quality_not_point_in_time_backtest",
+            "cashflow_methodology": "cfo_minus_total_capex_proxy_not_owner_earnings",
+            "specialist_data_required": False,
+            "qualitative_limits": [
+                "Wettbewerbsvorteil (Moat) nicht automatisch bewertet",
+                "Management und Kapitalallokation nicht automatisch bewertet",
+            ],
+            "quality_excludes_valuation": True,
+            "backtest_eligible": False,
+            "model_version": BUSINESS_QUALITY_MODEL_VERSION,
         }
 
-    revenue = _annual_series(
+    revenue = _preferred_annual_series(
         companyfacts,
         ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"),
     )
-    net_income = _annual_series(companyfacts, ("NetIncomeLoss", "ProfitLoss"))
-    operating_cash = _annual_series(companyfacts, ("NetCashProvidedByUsedInOperatingActivities",))
-    capex = _annual_series(companyfacts, ("PaymentsToAcquirePropertyPlantAndEquipment",))
-    equity = _annual_series(
+    net_income = _preferred_annual_series(companyfacts, ("NetIncomeLoss", "ProfitLoss"))
+    operating_cash = _preferred_annual_series(
+        companyfacts,
+        ("NetCashProvidedByUsedInOperatingActivities",),
+    )
+    capex = _preferred_annual_series(
+        companyfacts,
+        ("PaymentsToAcquirePropertyPlantAndEquipment",),
+    )
+    equity = _preferred_annual_series(
         companyfacts,
         ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
         instant=True,
     )
-    debt = _annual_series(
-        companyfacts,
-        (
-            "LongTermDebtAndFinanceLeaseObligationsCurrent",
-            "LongTermDebtCurrent",
-            "LongTermDebtNoncurrent",
-            "LongTermDebt",
-        ),
-        instant=True,
-    )
-    cash = _annual_series(
+    debt = _total_debt_series(companyfacts)
+    cash = _preferred_annual_series(
         companyfacts,
         ("CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"),
         instant=True,
     )
-    shares = _annual_series(
+    entity_shares = _preferred_annual_series(
         companyfacts,
         ("EntityCommonStockSharesOutstanding",),
         units=("shares",),
         instant=True,
     )
-    if len(shares) < 2:
-        shares = _annual_series(
-            companyfacts,
-            ("WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingBasic"),
-            units=("shares",),
-        )
+    weighted_shares = _preferred_annual_series(
+        companyfacts,
+        ("WeightedAverageNumberOfDilutedSharesOutstanding", "WeightedAverageNumberOfSharesOutstandingBasic"),
+        units=("shares",),
+    )
+    # Weighted-average EPS shares are normally restated for stock splits and
+    # are therefore the safer dilution series. Point-in-time entity shares are
+    # retained for the current market-cap fallback only.
+    dilution_shares = weighted_shares if len(weighted_shares) >= 2 else entity_shares
+    dilution_basis = "weighted_average_diluted" if len(weighted_shares) >= 2 else "point_in_time_unadjusted"
 
     fcf: List[Tuple[str, float]] = []
     capex_by_end = dict(capex)
@@ -311,9 +522,28 @@ def analyze_company_facts(
     latest_cfo = _latest(operating_cash)
     latest_fcf = _latest(fcf)
     latest_equity = _latest(equity)
-    latest_debt = _latest(debt) or 0.0
-    latest_cash = _latest(cash) or 0.0
-    latest_shares = shares_outstanding or _latest(shares)
+    latest_debt = _latest(debt)
+    latest_cash = _latest(cash)
+    net_debt = (
+        latest_debt - latest_cash
+        if latest_debt is not None and latest_cash is not None
+        else None
+    )
+    # Missing cash is handled conservatively with gross debt. Missing debt is
+    # not debt-free: in that case the leverage dimension remains unavailable.
+    debt_for_leverage = (
+        latest_debt - latest_cash
+        if latest_debt is not None and latest_cash is not None
+        else latest_debt
+    )
+    leverage_basis = (
+        "net_debt"
+        if latest_debt is not None and latest_cash is not None
+        else "gross_debt"
+        if latest_debt is not None
+        else "unavailable"
+    )
+    latest_shares = shares_outstanding or _latest(entity_shares) or _latest(weighted_shares)
     effective_market_cap = _safe_float(market_cap)
     if (effective_market_cap is None or effective_market_cap <= 0) and price and latest_shares:
         effective_market_cap = float(price) * float(latest_shares)
@@ -321,24 +551,32 @@ def analyze_company_facts(
     profile = _industry_profile(companyfacts, industry)
     dimensions: Dict[str, Dict[str, Any]] = {}
 
-    income_positive = _positive_ratio(net_income)
+    income_positive = _positive_ratio(net_income, limit=5)
     margin = (
         latest_income / latest_revenue
         if latest_income is not None and latest_revenue and latest_revenue > 0
         else None
     )
-    growth_score = None
-    if len(revenue) >= 3 and revenue[-3][1] > 0 and revenue[-1][1] > 0:
-        annualized_growth = (revenue[-1][1] / revenue[-3][1]) ** 0.5 - 1.0
-        growth_score = _clamp(55.0 + annualized_growth * 220.0)
-    margin_score = None if margin is None else _clamp(45.0 + margin * 250.0)
-    earnings_score = _mean_available(
-        [income_positive * 100.0 if income_positive is not None else None, margin_score, growth_score]
+    annualized_growth = _annualized_growth(revenue)
+    growth_score = (
+        _clamp(55.0 + annualized_growth * 220.0)
+        if annualized_growth is not None
+        else None
     )
+    margin_score = None if margin is None else _clamp(45.0 + margin * 250.0)
+    earnings_inputs = [
+        income_positive * 100.0 if income_positive is not None else None,
+        growth_score,
+    ]
+    # Bank and insurer margins are not comparable with operating-company net
+    # margins. Their specialist quality remains partial below.
+    if profile == "operating_company":
+        earnings_inputs.append(margin_score)
+    earnings_score = _mean_available(earnings_inputs)
     dimensions["earnings"] = {"score": earnings_score, "applicable": earnings_score is not None}
 
-    cfo_positive = _positive_ratio(operating_cash)
-    fcf_positive = _positive_ratio(fcf)
+    cfo_positive = _positive_ratio(operating_cash, limit=5)
+    fcf_positive = _positive_ratio(fcf, limit=5)
     conversion_score = None
     if latest_cfo is not None and latest_income is not None and latest_income > 0:
         conversion_score = _clamp((latest_cfo / latest_income) * 65.0)
@@ -350,9 +588,12 @@ def analyze_company_facts(
     cashflow_applicable = profile == "operating_company" and cashflow_score is not None
     dimensions["cashflow"] = {"score": cashflow_score, "applicable": cashflow_applicable}
 
+    roe = None
     roe_score = None
-    if latest_income is not None and latest_equity is not None and latest_equity > 0:
-        roe = latest_income / latest_equity
+    recent_equity = [value for _, value in equity[-2:] if value > 0]
+    average_equity = sum(recent_equity) / len(recent_equity) if recent_equity else None
+    if latest_income is not None and average_equity is not None and average_equity > 0:
+        roe = latest_income / average_equity
         if roe >= 0.20:
             roe_score = 100.0
         elif roe >= 0.15:
@@ -368,21 +609,21 @@ def analyze_company_facts(
     dimensions["returns"] = {"score": roe_score, "applicable": roe_score is not None}
 
     leverage_score = None
-    if profile == "operating_company" and latest_cfo is not None:
-        net_debt = latest_debt - latest_cash
-        if net_debt <= 0:
+    debt_to_cfo = None
+    if profile == "operating_company" and latest_cfo is not None and debt_for_leverage is not None:
+        if debt_for_leverage <= 0:
             leverage_score = 95.0
         elif latest_cfo <= 0:
             leverage_score = 10.0
         else:
-            coverage = net_debt / latest_cfo
-            if coverage <= 1:
+            debt_to_cfo = debt_for_leverage / latest_cfo
+            if debt_to_cfo <= 1:
                 leverage_score = 90.0
-            elif coverage <= 2:
+            elif debt_to_cfo <= 2:
                 leverage_score = 78.0
-            elif coverage <= 3:
+            elif debt_to_cfo <= 3:
                 leverage_score = 62.0
-            elif coverage <= 5:
+            elif debt_to_cfo <= 5:
                 leverage_score = 40.0
             else:
                 leverage_score = 15.0
@@ -390,8 +631,9 @@ def analyze_company_facts(
 
     dilution = None
     dilution_score = None
-    if len(shares) >= 2 and shares[-2][1] > 0:
-        dilution = shares[-1][1] / shares[-2][1] - 1.0
+    dilution_reliable = dilution_basis == "weighted_average_diluted"
+    if len(dilution_shares) >= 2 and dilution_shares[-2][1] > 0:
+        dilution = dilution_shares[-1][1] / dilution_shares[-2][1] - 1.0
         if dilution <= 0:
             dilution_score = 92.0
         elif dilution <= 0.02:
@@ -404,7 +646,35 @@ def analyze_company_facts(
             dilution_score = 25.0
         else:
             dilution_score = 5.0
-    dimensions["dilution"] = {"score": dilution_score, "applicable": dilution_score is not None}
+    dimensions["dilution"] = {
+        "score": dilution_score,
+        "applicable": dilution_score is not None and dilution_reliable,
+    }
+
+    revenue_up_ratio = _up_year_ratio(revenue, limit=5)
+    income_up_ratio = _up_year_ratio(net_income, limit=5)
+    margins = _matched_ratios(net_income, revenue, limit=5)
+    margin_stability = _margin_stability_score(margins)
+    if profile == "financial":
+        # Net margins are not comparable between banks/insurers and operating
+        # companies. Use profitability persistence and income direction instead.
+        consistency_inputs = [
+            income_positive * 100.0 if income_positive is not None else None,
+            income_up_ratio * 100.0 if income_up_ratio is not None else None,
+        ]
+    else:
+        consistency_inputs = [
+            income_positive * 100.0 if income_positive is not None else None,
+            revenue_up_ratio * 100.0 if revenue_up_ratio is not None else None,
+            margin_stability,
+        ]
+    if profile == "operating_company":
+        consistency_inputs.append(fcf_positive * 100.0 if fcf_positive is not None else None)
+    consistency_score = _mean_available(consistency_inputs)
+    dimensions["consistency"] = {
+        "score": consistency_score,
+        "applicable": consistency_score is not None,
+    }
 
     earnings_yield = (
         latest_income / effective_market_cap
@@ -432,16 +702,18 @@ def analyze_company_facts(
     )
     dimensions["valuation"] = {"score": valuation_score, "applicable": valuation_score is not None}
 
+    # Quality and price are separate decisions. A cheap weak company must not
+    # receive a high business score merely because its valuation multiple is low.
     weights = (
-        {"earnings": 0.35, "returns": 0.25, "dilution": 0.15, "valuation": 0.25}
+        {"earnings": 0.30, "returns": 0.25, "dilution": 0.15, "consistency": 0.30}
         if profile in {"financial", "reit"}
         else {
-            "earnings": 0.25,
-            "cashflow": 0.20,
+            "earnings": 0.20,
+            "cashflow": 0.25,
             "returns": 0.15,
             "leverage": 0.15,
             "dilution": 0.10,
-            "valuation": 0.15,
+            "consistency": 0.15,
         }
     )
     weighted = 0.0
@@ -458,6 +730,11 @@ def analyze_company_facts(
     if raw_score is not None:
         confidence = min(1.0, used_weight / 0.65)
         score = round(_clamp(50.0 + (raw_score - 50.0) * confidence))
+    preliminary_status = "ok" if coverage_pct >= 70 else "partial" if coverage_pct > 35 else "limited"
+    if preliminary_status == "limited":
+        # A precise-looking score from one isolated fact is less useful than an
+        # explicit data limitation.
+        score = None
 
     severe_reasons: List[str] = []
     recent_income = [value for _, value in net_income[-3:]]
@@ -470,13 +747,14 @@ def analyze_company_facts(
         and all(value < 0 for value in recent_fcf)
     ):
         severe_reasons.append("Anhaltende Verluste und negativer freier Cashflow")
-    if dilution is not None and dilution > 0.25:
+    if dilution_reliable and dilution is not None and dilution > 0.25:
         severe_reasons.append("Aktienverwaesserung ueber 25%")
     if (
         profile == "operating_company"
         and latest_equity is not None
         and latest_equity <= 0
-        and latest_debt > latest_cash
+        and latest_debt is not None
+        and (latest_cash is None or latest_debt > latest_cash)
         and (latest_cfo is None or latest_cfo <= 0)
     ):
         severe_reasons.append("Negatives Eigenkapital, Nettoschulden und schwacher Cashflow")
@@ -487,33 +765,122 @@ def analyze_company_facts(
         strengths.append("Gewinne mehrheitlich positiv")
     elif income_positive is not None and income_positive <= 1 / 3:
         risks.append("Gewinnhistorie schwach")
-    if fcf_positive is not None and fcf_positive >= 2 / 3:
+    if profile == "operating_company" and fcf_positive is not None and fcf_positive >= 2 / 3:
         strengths.append("Freier Cashflow mehrheitlich positiv")
     elif profile == "operating_company" and fcf_positive is not None and fcf_positive <= 1 / 3:
         risks.append("Freier Cashflow schwach")
-    if dilution is not None and dilution > 0.10:
+    if dilution_reliable and dilution is not None and dilution > 0.10:
         risks.append(f"Aktienverwaesserung {dilution * 100:.0f}%")
     if leverage_score is not None and leverage_score < 35:
         risks.append("Verschuldung im Verhaeltnis zum Cashflow hoch")
+    if consistency_score is not None and consistency_score >= 75:
+        strengths.append("Mehrjaehrige Ertragsqualitaet stabil")
+    elif consistency_score is not None and consistency_score < 40:
+        risks.append("Ertragsentwicklung unbestaendig")
 
-    latest_periods = [series[-1][0] for series in (revenue, net_income, operating_cash, equity) if series]
-    as_of = max(latest_periods) if latest_periods else None
-    status = "ok" if coverage_pct >= 70 else "partial" if coverage_pct >= 35 else "limited"
+    quality_source_series: List[Sequence[Tuple[str, float]]] = [revenue, net_income]
+    if cashflow_applicable:
+        quality_source_series.extend((operating_cash, capex))
+    if roe_score is not None:
+        quality_source_series.append(equity)
+    if leverage_score is not None:
+        quality_source_series.append(debt)
+        if cash:
+            quality_source_series.append(cash)
+    if dimensions["dilution"]["applicable"]:
+        quality_source_series.append(dilution_shares)
+    latest_periods = [series[-1][0] for series in quality_source_series if series]
+    # Freshness is bounded by the oldest component actually used. A recent
+    # balance-sheet fact must not make older earnings/cash-flow history look new.
+    as_of = min(latest_periods) if latest_periods else None
+    status = preliminary_status
+    specialist_data_required = profile in {"financial", "reit"}
+    if profile == "reit":
+        # GAAP net income and book value do not replace FFO/AFFO, lease expiry
+        # and debt-maturity analysis. Do not publish a pseudo-precise REIT
+        # quality/valuation verdict from generic Company Facts.
+        score = None
+        valuation_score = None
+        status = "limited"
+        risks.append("REIT erfordert FFO/AFFO und Laufzeitdaten")
+    elif profile == "financial" and status == "ok":
+        # Bank/insurer quality additionally needs capital, credit/underwriting
+        # and funding data. Keep the numeric snapshot visible but never label it
+        # as fully covered for long-term holding decisions.
+        status = "partial"
+        risks.append("Finanzwert erfordert Kapital- und Kreditqualitaetsdaten")
+    data_age_days, freshness_status = _data_freshness(as_of)
+    value_trap_risk = bool(
+        score is not None
+        and score < 50
+        and valuation_score is not None
+        and valuation_score >= 70
+    )
+    if value_trap_risk:
+        risks.append("Niedrige Bewertung bei schwacher Qualitaet: Value-Trap-Risiko")
+    holding_fit, holding_fit_label, position_size_cap = _holding_fit(
+        score,
+        valuation_score,
+        status=status,
+        freshness_status=freshness_status,
+        severe_risk=bool(severe_reasons),
+    )
+
+    def percentage(value: Optional[float]) -> Optional[float]:
+        return round(value * 100.0, 2) if value is not None else None
+
     return {
         "status": status,
         "score": score,
         "label": _label_for_score(score),
         "valuation_score": round(valuation_score) if valuation_score is not None else None,
         "valuation_label": _valuation_label(valuation_score),
+        "holding_fit": holding_fit,
+        "holding_fit_label": holding_fit_label,
+        # Informational downside cap only. It is deliberately not wired into
+        # broker sizing until forward results calibrate it.
+        "position_size_cap": position_size_cap,
         "coverage_pct": coverage_pct,
+        "data_age_days": data_age_days,
+        "freshness_status": freshness_status,
         "severe_risk": bool(severe_reasons),
         "severe_reasons": severe_reasons,
+        "value_trap_risk": value_trap_risk,
         "strengths": strengths[:3],
         "risks": list(dict.fromkeys(risks + severe_reasons))[:4],
         "profile": profile,
         "as_of": as_of,
         "market_cap": effective_market_cap,
-        "methodology": "live_fundamentals_not_point_in_time_backtest",
+        "methodology": "live_sec_filing_quality_not_point_in_time_backtest",
+        "cashflow_methodology": "cfo_minus_total_capex_proxy_not_owner_earnings",
+        "specialist_data_required": specialist_data_required,
+        "qualitative_limits": [
+            "Wettbewerbsvorteil (Moat) nicht automatisch bewertet",
+            "Management und Kapitalallokation nicht automatisch bewertet",
+        ],
+        "quality_excludes_valuation": True,
+        "backtest_eligible": False,
+        "model_version": BUSINESS_QUALITY_MODEL_VERSION,
+        "metrics": {
+            "revenue_cagr_pct": percentage(annualized_growth),
+            "net_margin_pct": percentage(margin),
+            "roe_pct": percentage(roe),
+            "earnings_yield_pct": percentage(earnings_yield),
+            "fcf_yield_pct": percentage(fcf_yield),
+            "share_dilution_pct": percentage(dilution),
+            "share_dilution_basis": dilution_basis,
+            "share_dilution_reliable": dilution_reliable,
+            "latest_debt": latest_debt,
+            "latest_cash": latest_cash,
+            "net_debt": net_debt,
+            "leverage_basis": leverage_basis,
+            "debt_to_cfo": round(debt_to_cfo, 2) if debt_to_cfo is not None else None,
+            "net_debt_to_cfo": (
+                round(debt_to_cfo, 2)
+                if debt_to_cfo is not None and leverage_basis == "net_debt"
+                else None
+            ),
+        },
         "dimensions": dimensions,
     }
 
@@ -532,18 +899,22 @@ def fetch_business_quality(
         return analyze_company_facts({})
     now = time.time()
     with _cache_lock:
-        cached = _quality_cache.get(symbol)
-        if cached:
-            cached_at, value = cached
-            ttl = _SUCCESS_TTL_SECONDS if value.get("status") in {"ok", "partial", "limited"} else _ERROR_TTL_SECONDS
-            if now - cached_at < ttl:
-                return dict(value)
+        cached_error = _error_cache.get(symbol)
+        if cached_error and now - cached_error[0] < _ERROR_TTL_SECONDS:
+            return dict(cached_error[1])
+        cached_facts = _company_facts_cache.get(symbol)
     try:
-        ticker_info = _load_sec_ticker_map().get(symbol)
-        if not ticker_info:
-            raise LookupError("Ticker nicht in offizieller Unternehmensliste")
+        if cached_facts and now - cached_facts[0] < _SUCCESS_TTL_SECONDS:
+            _, facts, ticker_info = cached_facts
+        else:
+            ticker_info = _load_sec_ticker_map().get(symbol)
+            if not ticker_info:
+                raise LookupError("Ticker nicht in offizieller Unternehmensliste")
+            cik = str(ticker_info["cik"]).zfill(10)
+            facts = _sec_get_json(f"{_SEC_BASE}/api/xbrl/companyfacts/CIK{cik}.json")
+            with _cache_lock:
+                _company_facts_cache[symbol] = (now, dict(facts), dict(ticker_info))
         cik = str(ticker_info["cik"]).zfill(10)
-        facts = _sec_get_json(f"{_SEC_BASE}/api/xbrl/companyfacts/CIK{cik}.json")
         result = analyze_company_facts(
             facts,
             price=price,
@@ -566,6 +937,6 @@ def fetch_business_quality(
             "error": str(exc)[:180],
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
-    with _cache_lock:
-        _quality_cache[symbol] = (now, dict(result))
+        with _cache_lock:
+            _error_cache[symbol] = (now, dict(result))
     return result

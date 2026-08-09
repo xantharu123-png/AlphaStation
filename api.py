@@ -100,7 +100,7 @@ from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import minimum_stop_distance, normalize_alert_trade_levels, trade_geometry, trade_plan_quality
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline, project_partial_rvol
-from modules.business_quality import fetch_business_quality
+from modules.business_quality import BUSINESS_QUALITY_MODEL_VERSION, fetch_business_quality
 from modules.stock_execution import (
     aggregate_regular_session_4h_bars,
     stock_swing_4h_execution_state,
@@ -6618,6 +6618,25 @@ _STOCK_MOMENTUM_MAIL_MIN_MEDIAN_DOLLAR_VOLUME_20D = 2_000_000.0
 # brutto) — die Cents-Ziele wirken "lachhaft", weil das Vehikel sich nicht
 # bewegt, nicht weil die Mathematik falsch waere.
 _STOCK_STRATEGY_MAIL_MIN_ATR_PCT = 2.0
+_BUSINESS_QUALITY_ROW_TTL_SECONDS = 24 * 3600
+
+
+def _business_quality_payload_fresh(quality: Any) -> bool:
+    if not isinstance(quality, dict):
+        return False
+    if quality.get("model_version") != BUSINESS_QUALITY_MODEL_VERSION:
+        return False
+    fetched_at = str(quality.get("fetched_at") or "").strip()
+    if not fetched_at:
+        return False
+    try:
+        fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return -300 <= age_seconds <= _BUSINESS_QUALITY_ROW_TTL_SECONDS
 
 
 def _stock_business_quality_context(row: Dict[str, Any]) -> bool:
@@ -6638,10 +6657,39 @@ def _stock_business_quality_context(row: Dict[str, Any]) -> bool:
 
 def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
     """Attach current filing quality without changing the technical score."""
-    if not isinstance(row, dict) or not _stock_business_quality_context(row):
+    if not isinstance(row, dict):
+        return row
+    # Remove the legacy technical/fundamental blend even from cached rows. A
+    # high-quality company is not automatically a timely trade and vice versa.
+    row.pop("Investment_Score", None)
+    if not _stock_business_quality_context(row):
         return row
     if row.get("Business_Data_Status"):
-        return row
+        quality = row.get("Business_Quality")
+        if _business_quality_payload_fresh(quality):
+            row["Business_Quality_Score"] = quality.get("score")
+            row["Business_Quality_Label"] = quality.get("label") or "DATEN FEHLEN"
+            row["Valuation_Score"] = quality.get("valuation_score")
+            row["Valuation_Label"] = quality.get("valuation_label") or "NICHT BEWERTBAR"
+            row["Business_Coverage_Pct"] = quality.get("coverage_pct") or 0
+            row["Business_Severe_Risk"] = bool(quality.get("severe_risk"))
+            row["Business_Severe_Reasons"] = list(quality.get("severe_reasons") or [])
+            row["Business_As_Of"] = quality.get("as_of")
+            row["Business_Holding_Fit"] = quality.get("holding_fit")
+            row["Business_Holding_Fit_Label"] = quality.get("holding_fit_label")
+            row["Business_Position_Size_Cap"] = quality.get("position_size_cap")
+            row["Business_Data_Age_Days"] = quality.get("data_age_days")
+            row["Business_Freshness_Status"] = quality.get("freshness_status")
+            row["Business_Value_Trap_Risk"] = bool(quality.get("value_trap_risk"))
+            row["Business_Metrics"] = dict(quality.get("metrics") or {})
+            row["Business_Backtest_Eligible"] = bool(quality.get("backtest_eligible"))
+            if not row.get("company_name") and quality.get("company_name"):
+                row["company_name"] = quality["company_name"]
+            return row
+        # A scanner cache may still contain a result from the retired blended
+        # model. Recompute it instead of silently presenting mixed semantics.
+        row.pop("Business_Data_Status", None)
+        row.pop("Business_Quality", None)
 
     ticker = _extract_alert_ticker(row)
     if not ticker:
@@ -6671,9 +6719,19 @@ def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
             "label": "DATEN FEHLEN",
             "valuation_score": None,
             "valuation_label": "NICHT BEWERTBAR",
+            "holding_fit": "DATA_LIMITED",
+            "holding_fit_label": "Unternehmensdaten pruefen",
+            "position_size_cap": 0.5,
             "coverage_pct": 0,
+            "data_age_days": None,
+            "freshness_status": "UNKNOWN",
             "severe_risk": False,
             "severe_reasons": [],
+            "value_trap_risk": False,
+            "metrics": {},
+            "backtest_eligible": False,
+            "model_version": BUSINESS_QUALITY_MODEL_VERSION,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
             "error": str(exc)[:180],
         }
 
@@ -6687,19 +6745,16 @@ def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
     row["Business_Severe_Risk"] = bool(quality.get("severe_risk"))
     row["Business_Severe_Reasons"] = list(quality.get("severe_reasons") or [])
     row["Business_As_Of"] = quality.get("as_of")
+    row["Business_Holding_Fit"] = quality.get("holding_fit")
+    row["Business_Holding_Fit_Label"] = quality.get("holding_fit_label")
+    row["Business_Position_Size_Cap"] = quality.get("position_size_cap")
+    row["Business_Data_Age_Days"] = quality.get("data_age_days")
+    row["Business_Freshness_Status"] = quality.get("freshness_status")
+    row["Business_Value_Trap_Risk"] = bool(quality.get("value_trap_risk"))
+    row["Business_Metrics"] = dict(quality.get("metrics") or {})
+    row["Business_Backtest_Eligible"] = bool(quality.get("backtest_eligible"))
     if not row.get("company_name") and quality.get("company_name"):
         row["company_name"] = quality["company_name"]
-
-    technical_score = _alert_float(row.get("score", row.get("Score")), None)
-    business_score = _alert_float(quality.get("score"), None)
-    if technical_score is not None:
-        if quality.get("status") in {"ok", "partial"} and business_score is not None:
-            row["Investment_Score"] = round(
-                0.72 * technical_score + 0.28 * business_score,
-                1,
-            )
-        else:
-            row["Investment_Score"] = round(technical_score, 1)
     return row
 
 
@@ -6727,18 +6782,25 @@ def _business_quality_alert_html(row: Dict[str, Any]) -> str:
         return ""
     label = html.escape(str(row.get("Business_Quality_Label") or "NEUTRAL"))
     valuation = html.escape(str(row.get("Valuation_Label") or "NICHT BEWERTBAR"))
-    investment = _alert_float(row.get("Investment_Score"), None)
-    investment_text = f" | Gesamt {investment:.0f}/100" if investment is not None else ""
+    holding_fit = html.escape(str(row.get("Business_Holding_Fit_Label") or "Fundamental neutral"))
+    as_of = html.escape(str(row.get("Business_As_Of") or "unbekannt"))
+    coverage = int(_alert_float(row.get("Business_Coverage_Pct"), 0) or 0)
+    freshness = str(row.get("Business_Freshness_Status") or "UNKNOWN").upper()
     severe = bool(row.get("Business_Severe_Risk"))
-    color = "#dc2626" if severe else "#475569"
+    value_trap = bool(row.get("Business_Value_Trap_Risk"))
+    color = "#dc2626" if severe or value_trap else "#475569"
     detail = ""
     if severe:
         reasons = html.escape(", ".join(row.get("Business_Severe_Reasons") or [])[:220])
         detail = f" | Schweres Risiko: {reasons}" if reasons else " | Schweres Risiko"
+    elif value_trap:
+        detail = " | Value-Trap-Risiko"
+    freshness_text = " | Daten veraltet" if freshness == "STALE" else ""
     return (
         f'<br><span style="color:{color};font-size:11px">'
         f'Unternehmen {score:.0f}/100 {label} | Bewertung {valuation}'
-        f'{investment_text}{detail}</span>'
+        f' | Halteprofil {holding_fit} | Stand {as_of}, Abdeckung {coverage}%'
+        f'{freshness_text}{detail}</span>'
     )
 
 

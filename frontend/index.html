@@ -5615,9 +5615,13 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                         <div className="text-lg font-bold">{item.score?.toFixed(1) || '–'}</div>
                                         <div className="text-xs text-gray-500">Score</div>
                                         {item.Business_Quality_Score != null && (
-                                            <div className="text-xs text-gray-500 mt-1">
+                                            <div
+                                                className="text-xs text-gray-500 mt-1"
+                                                title={`Aktuelle Unternehmensdaten; Stand ${item.Business_As_Of || 'unbekannt'}, Abdeckung ${Number(item.Business_Coverage_Pct || 0)}%. Nicht Teil des technischen Trade-Scores.`}
+                                            >
                                                 Unternehmen {Number(item.Business_Quality_Score).toFixed(0)}/100
-                                                {item.Investment_Score != null ? ` · Gesamt ${Number(item.Investment_Score).toFixed(0)}` : ''}
+                                                {item.Valuation_Label ? ` · ${item.Valuation_Label}` : ''}
+                                                {item.Business_Holding_Fit_Label ? <><br />{item.Business_Holding_Fit_Label}</> : null}
                                             </div>
                                         )}
                                     </div>
@@ -5701,9 +5705,13 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                 <td className="py-3 px-2 text-right font-semibold">
                                     <div>{item.score?.toFixed(1)}</div>
                                     {item.Business_Quality_Score != null && (
-                                        <div className="text-xs text-gray-500 font-normal" title="Aktuelle Unternehmensqualitaet; nicht Teil des technischen Scanner-Scores">
+                                        <div
+                                            className="text-xs text-gray-500 font-normal"
+                                            title={`Aktuelle Unternehmensdaten; Stand ${item.Business_As_Of || 'unbekannt'}, Abdeckung ${Number(item.Business_Coverage_Pct || 0)}%. Nicht Teil des technischen Trade-Scores.`}
+                                        >
                                             Unternehmen {Number(item.Business_Quality_Score).toFixed(0)}
-                                            {item.Investment_Score != null ? ` · Gesamt ${Number(item.Investment_Score).toFixed(0)}` : ''}
+                                            {item.Valuation_Label ? ` · ${item.Valuation_Label}` : ''}
+                                            {item.Business_Holding_Fit_Label ? <><br />{item.Business_Holding_Fit_Label}</> : null}
                                         </div>
                                     )}
                                 </td>
