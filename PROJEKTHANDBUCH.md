@@ -1,13 +1,17 @@
 # Alpha Station — Projekthandbuch
 
-**Stand:** 5. August 2026 · **Arbeitsbranch:** `nachaudit-fixes-2026-07-21` · **Tests:** 1405 (alle grün)
+**Stand:** 11. August 2026 · **Arbeitsbranch:** `main` · **Tests:** 1501/1501 gruen
 **Repository:** `C:\Users\miros\Desktop\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`
-**Produktionsnachweis:** GitHub enthält `5aea225`; der Server-Rollout dieses Commits wurde
-in der aktuellen Sitzung wegen fehlender SSH-Anmeldung **nicht verifiziert**.
+**Code-Baseline vor dem Übergabecommit:** `1bd9a48` auf `main`.
+**Produktionsnachweis:** Der exakte Server-Rollout dieses Übergabestands wurde in
+dieser Sitzung **nicht verifiziert**. GitHub-Push und Server-Deployment bleiben
+getrennte Nachweise.
 
-> Dieses Handbuch ist das Master-Dokument. Es ersetzt keine Detail-Lektüre, sondern
-> verweist auf die Einzel-Dokumente (Abschnitt 8). Es trennt strikt zwischen
+> Dieses Handbuch ist die chronologische Betriebs- und Statusdokumentation. Die
+> verbindlichen Produkt-, Trading- und Sicherheitsregeln stehen in
+> `PROJEKTBIBEL.md`; dieses Handbuch verweist auf die Einzel-Dokumente (Abschnitt 8)
+> und trennt strikt zwischen
 > **Git-Stand**, **gepush-tem Stand** und **auf dem Server ausgerolltem Stand** —
 > diese drei sind niemals still gleichzusetzen.
 
@@ -26,6 +30,18 @@ Ausführbarkeit **getrennt** und liefert über Web-App, E-Mail und optional Tele
 - **Struktur statt Fantasie-R:R** — Entry/Stop/TP aus Invalidation, S/R, VRVP, ATR, Fibonacci, Measured Move.
 - **Statistische Ehrlichkeit** — Trefferquoten nur mit Stichprobengröße, Konfidenzintervall und klarer R-Semantik.
 - **Keine Anlageberatung** — keine Gewinnversprechen, keine künstlich schöngerechneten Ziele.
+
+**Aktueller Übergabestatus (11.08.2026):**
+
+| Ebene | Status |
+|---|---|
+| Verbindliche Fach-/Mathematikregeln | In `PROJEKTBIBEL.md` konsolidiert |
+| Entwicklungszweig | `main`, Code-Baseline `1bd9a48` vor dem Dokumentencommit |
+| Scanner/Mail/Tracker | Implementiert; Forward-Performance weiter empirisch zu belegen |
+| Persönliche Positionen | Auswahl, genaue Setup-Zuordnung und empfängerbezogene Folge-/Stop-Mails implementiert |
+| IBKR-AutoTrader | Geschützter Paper-V2 implementiert; echter DU-Soak offen, Live blockiert |
+| Deployment | Revisionsgebundener Auto-Deploy implementiert; aktueller Serverstand separat zu prüfen |
+| Kommerzielle Freigabe | Technische Bausteine vorhanden; Recht/Steuer/Datenlizenz/TLS/Live-Stripe offen zu bestätigen |
 
 **Scanner-Landschaft:** Aktien-Strategie-Sweep (Momentum Breakout/Gap Momentum Long/Short),
 BI Long/Short, Biotech, ORB (intraday-only), Bear, Crash-Monitor, Penny-Lifecycle,
@@ -50,16 +66,20 @@ Override per `BG_SCAN_SET`.
 
 **Deploy-Workflow (der einzige gültige Weg):**
 1. Lokal entwickeln + volle Suite grün.
-2. `git push origin HEAD:main` (Arbeitsbranch `nachaudit-fixes-2026-07-21`).
+2. Auf `main` committen und `git push origin main`.
 3. Der Server darf über `deploy/auto_update.sh` (Cron) aktualisieren oder manuell mit
    `cd /home/tradingbot/app && git pull --ff-only origin main` aktualisiert werden.
 4. Deployment ausschließlich über `bash deploy/safe_deploy.sh`: Runtime erkennen,
    Abhängigkeiten/Compile/Tests prüfen, Services neu starten, Healthcheck abwarten;
    bei Fehlern nicht still weiterlaufen.
 5. **Immer separat verifizieren:** `git log --oneline -1`,
-   `systemctl status tradingbot-api tradingbot-bg tradingbot-frontend` sowie
+   `systemctl status tradingbot-api tradingbot-bg nginx` sowie
    `/api/health`/`/api/system-health` und Journald-Logs. Ein erfolgreicher Push ist
    noch kein Beleg für einen erfolgreichen Produktions-Rollout.
+
+Produktionsziel ist FastAPI plus Hintergrunddienst hinter nginx. Ein alter
+`tradingbot-frontend`-Service ist nur noch Legacy-Kompatibilität und kein Zielbild
+für den kommerziellen Betrieb.
 
 **Lokale Tests (Windows):**
 ```bash
@@ -1133,9 +1153,73 @@ Frontend-Bundle-Hash **0c8663e92b1c** sind grün.
   Python-Compile und Frontend-Bundle-Pruefung waren gruen. Der separate
   Produktionsnachweis bleibt bis zur Serverpruefung offen.
 
+### 3.35 8. August - Persönliche Positionen und exakte Folge-Mail-Zuordnung
+
+- Nutzer können ein versendetes Setup als tatsächlich gekauft/geshortet markieren
+  und dabei Richtung, Setup-Referenz, Fill und Stückzahl festhalten.
+- Folge-, Signal-Update- und Stop-Mails können je Empfänger wahlweise nur die
+  persönlichen Positionen oder weiterhin alle globalen Signale enthalten.
+- Erstsignal-Mails, Scanneruniversum und objektiver globaler Forward-Track-Record
+  bleiben davon unberührt. Persönliche Auswahl darf die Modellstatistik nicht
+  nachträglich selektieren.
+- Deduplizierung und Retry erfolgen je Empfänger und Signalidentität. Die Auswahl
+  eines Nutzers kann die Zustellung eines anderen nicht mehr verbrauchen.
+- Same-Day-Auswertung und stabile Setup-Identität verhindern, dass gleichnamige
+  Ticker/Scannerläufe oder neu berechnete Level mit einer alten Position vermischt
+  werden (`cb80b90`, `5f5c410`).
+
+### 3.36 8.-10. August - Geschützter IBKR-Paper-AutoTrader V2
+
+- Broker-Reconciliation, stabile Order-/Setup-Referenzen, Bracket-/OCA-Orders,
+  Partial-Fill-/Reject-Verarbeitung, Restart-Sicherheit, Stop-Manager,
+  Tagesverlust-/Exposure-Limits, Kill-Switch, Admin-UI und Audit-Log wurden als
+  defensive Paper-Infrastruktur zusammengeführt (`aa5c395`).
+- IBKR bleibt Quelle für Positionen, Fills, Orders und PnL. Lokale Scheinpositionen
+  oder blindes Löschen/Glattstellen sind ausgeschlossen.
+- Die Ausführung ist standardmäßig deaktiviert und auf ein `DU...`-Paperkonto
+  begrenzt. Ein mehrtägiger realer TWS-/IB-Gateway-Soak wurde noch nicht belegt;
+  Live-Trading bleibt ausdrücklich blockiert.
+
+### 3.37 9.-10. August - Signalmathematik, Business Quality und ehrliche Auswertung
+
+- Rechenkern, Tracker, Backtests, Stop-/Zielpläne und Mail-Gates wurden auf dieselbe
+  R-Geometrie ausgerichtet. Ungültige Ziele dürfen nicht mit `abs()` positiv
+  gerechnet werden; Live-R:R nutzt den aktuellen ausführbaren Preis.
+- Gefüllt, entschieden, offen, No-Fill und unaufgelöst werden in Statistik und
+  Backtest getrennt. Same-Bar-Stop/TP ohne Intraday-Reihenfolge wird konservativ
+  oder als Ergebnisintervall behandelt statt chronologisch erfunden.
+- Gap-through-Stop, Kosten, Slippage, strategieabhängige Haltedauer und
+  Entry-Bar-Kausalität wurden gehärtet. Ein enger Stop darf das beworbene R:R nicht
+  künstlich schönrechnen (`1d3145a`).
+- Business-/Asset-Qualität, strukturelle Setup-Qualität und aktuelles Trade-Timing
+  sind getrennte Größen. Ein hochwertiges Unternehmen ist nicht automatisch ein
+  guter Einstieg; ein guter Trigger repariert kein schlechtes Basis-Setup
+  (`744e9b2`).
+
+### 3.38 10. August - Post-Pump-Swing-Shorts und 4H-Rejection
+
+- Ein stark gestiegener Wert wird nicht allein wegen einer roten Kerze zum
+  Swing-Short. Für Post-Pump-Shorts wird eine bestätigte 4H-Rejection bzw. ein
+  Strukturbruch verlangt.
+- Der OPHC-Fall zeigte die Gefahr: ein Gap-Momentum-Short direkt nach vertikalem
+  Anstieg konnte trotz rechnerisch gutem R:R fachlich unbestätigt sein. Der neue
+  Guard blockiert solche Sofortfreigaben und verlangt eine nachweisbare Umkehr
+  (`1bd9a48`).
+
+### 3.39 11. August - Projektbibel und PC-Übergabe
+
+- `PROJEKTBIBEL.md` ist ab jetzt die normative Referenz für Zustände, Mathematik,
+  Datenfrische, Scannerlogik, Stops/Ziele, Tracker, Broker, UX und Deployment.
+- `HANDOFF_PC_WECHSEL_2026-08-11.md` trennt Git-Bestand, Secrets, Serverdaten und
+  Produktionsnachweis und enthält den reproduzierbaren Setup-/Test-/Deploy-Ablauf
+  für den neuen Windows-PC.
+- Das Handbuch bleibt Chronik und aktueller Betriebsstand. Alte Chat- oder
+  Audit-Aussagen gelten nicht als implementiert, wenn Patch, Test und aktueller
+  Code sie nicht belegen.
+
 ---
 
-## 4. Das Mail-System (Stand 06.08.2026)
+## 4. Das Mail-System (Stand 11.08.2026)
 
 **Klassen:** `trade` / `swing_trade` (handelbar, Telegram-Spiegel), `watch` (Opt-in),
 `info` (Passwort, Test, Reports). Betreff-Präfixe: 🚨 JETZT (nur Intraday-`trade`) /
@@ -1146,6 +1230,13 @@ Plan hat E-Mail-Alerts → `email_alerts_enabled` → Watch-Opt-in (nur watch-Kl
 Narrative-Frequenz (nur narrative_pulse) → Trade-Horizont (swing/intraday/both) →
 **Mail-Kanal** (seit 28.07.). Betreiber-Fallback (`ALERT_EMAIL`) bekommt alle Klassen,
 Kanal-Opt-out greift aber auch dort (28.07.).
+
+**Persönliche Positionen (seit 08.08.):** Ein Nutzer kann ein konkretes versendetes
+Setup mit tatsächlicher Richtung, Fill und Stückzahl markieren. Folge- und
+Stop-Mails lassen sich wahlweise auf diese Positionen begrenzen oder wie bisher
+für alle Signale empfangen. Erstsignal-Mails und der globale Forward-Track-Record
+bleiben vollständig. Dedupe/Retry sind empfängerbezogen, damit persönliche Filter
+keinen anderen Empfänger blockieren.
 
 **Kanäle:** `stocks_swing`, `stocks_intraday`, `crypto`, `biotech`, `bear`,
 `new_listing` und seit 29.07. **`stocks_premarket`** — der Pre-Market-Radar
@@ -1221,6 +1312,11 @@ Symbol geraten werden; Asset-Typ und Ticker bleiben die verbindliche Identität.
   Mail-Zustellung und Trading-Ergebnis werden separat berichtet. „System gesund"
   bedeutet nicht „Strategie profitabel" und ein hoher Setup-Score ist keine
   Eintrittswahrscheinlichkeit in Prozent.
+- **Backtest-Kausalität:** Entry erst nach Signalentstehung; strategieabhängige
+  Haltedauer, reale Kosten, Gap-through-Stop und Same-Bar-Ambiguität werden
+  berücksichtigt. Wo Tages-OHLC die Reihenfolge von Stop und Ziel nicht beweist,
+  wird konservativ bzw. mit Ergebnisgrenzen berichtet, niemals mit erfundener
+  Intrabar-Chronologie.
 - **Server-Verifikation:** `scripts/smoke_signal_performance.py` prüft die Felder live
   gegen `signal_tracker.sqlite`; `scripts/preview_weekly_report.py` rendert den Report
   ohne Versand; `scripts/signal_performance_breakdown.py` (29.07.) bricht dieselbe
@@ -1233,9 +1329,12 @@ Symbol geraten werden; Asset-Typ und Ticker bleiben die verbindliche Identität.
 
 ## 6. Testlandschaft
 
-**1405 Tests, alle grün** (05.08.2026). Der Stand umfasst Rechenkern,
-Scanner-/Mail-Verträge, Scheduler-Recovery, Tracker-Kohorten, Regime-Filter,
-ORB-Zielpläne, Aktienidentität und ausfallsichere Stop-Updates. Wichtige Suiten:
+**1501 Tests, alle gruen** (11.08.2026; Laufzeit 71,92 s). Zusaetzlich ist
+`scripts/verify_frontend_bundle.py` gruen; Quell- und Bundle-Hash stimmen ueberein.
+Der Stand umfasst Rechenkern, Scanner-/Mail-Vertraege, Scheduler-Recovery,
+Tracker-Kohorten, Regime-Filter, ORB-Zielplaene, Aktienidentitaet,
+persoenliche Positionen, Paper-AutoTrader-Schutz und ausfallsichere Stop-Updates.
+Wichtige Suiten:
 
 | Datei | Deckt ab |
 |---|---|
@@ -1287,7 +1386,10 @@ Wochenreport-Sektion, Pipeline-Integration, alle grün) →
 50/50-Payoffs, ORB-Zielpläne/Sortierung, Unternehmensidentität, atomisches Dedupe
 und persistente Stop-Update-Retries; alle grün) →
 1405 (05.08. persönliche Positionen, empfängerbezogene Folge-/Stop-Mails,
-per-Empfänger-Dedupe und isolierter Retry; alle grün).
+per-Empfänger-Dedupe und isolierter Retry; alle grün) →
+1501 (11.08. Übergabestand: exakte Signalidentität, Paper-AutoTrader-Schutz,
+Business-Quality/Timing-Trennung, verschärfte Signalmathematik und
+Post-Pump-Short-Gates; volle Suite und Frontend-Bundle-Prüfung grün).
 
 ---
 
@@ -1295,7 +1397,7 @@ per-Empfänger-Dedupe und isolierter Retry; alle grün).
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **Aktuellen Branch-Stand produktiv verifizieren:** Server-HEAD, alle drei Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30/3.31 |
+| 1 | **Aktuellen `main`-Stand produktiv verifizieren:** Server-HEAD, produktive Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30/3.31; `HANDOFF_PC_WECHSEL_2026-08-11.md` |
 | 2 | **Mail-Zustellung beobachten:** Outbox-Zahlen (`pending`, `retry`, `dead_letter`) und offene `be_mail_sent_at`-Aktivierungen prüfen; Testmail plus absichtlich simulierten temporären Fehler nachvollziehen. | 3.26/3.30, Abschnitt 4 |
 | 3 | **Forward-Kalibrierung statt Bauchgefühl:** je Scanner und Regime mindestens 30 vollständig beobachtete Signale sammeln; freigegebene Signale gegen Shadow-Kohorte mit Hit-Rate, Wilson-KI, Level-R und Managed-R vergleichen. Erst dann Schwellen verändern. | Abschnitt 5 |
 | 4 | **PM-/Swing-/Orts-Gates produktiv messen:** Reject-Gründe und Ergebnisdaten nach mehreren Handelstagen auswerten. Lockerung nur, wenn verpasster Erwartungswert statistisch höher als vermiedener Verlust ist. | 3.7, Commits `cdeff7e`/`da6c4be` |
@@ -1312,7 +1414,9 @@ per-Empfänger-Dedupe und isolierter Retry; alle grün).
 
 | Dokument | Inhalt |
 |---|---|
-| `PROJEKTHANDBUCH.md` | **dieses Master-Dokument** |
+| `PROJEKTBIBEL.md` | **Normative Hauptquelle:** unverhandelbare Fach-, Mathematik-, Daten-, Mail-, Broker- und Deploymentregeln |
+| `PROJEKTHANDBUCH.md` | Chronologischer Ist-Stand, Architektur, Fixhistorie, Testlandschaft und offene Nachweise |
+| `HANDOFF_PC_WECHSEL_2026-08-11.md` | Reproduzierbare Übergabe auf einen neuen PC: Clone, Secrets, Tests, Git, Deploy und Produktionsprüfung |
 | `PROJEKTHANDBUCH_CLAUDE.md` | Ausführliches Vorgänger-Handbuch (Stand 21.07.): Produktvision, Signalmodell, Invarianten, Architekturdetails |
 | `AUDIT_ABSCHLUSSBERICHT_2026-07-24.md` | Tagesdokumentation Vollaudit 24.07. |
 | `AUDIT_MATHEMATIK_2026-07-24.md` | Rechenkern-Prüfung im Detail |
@@ -1338,3 +1442,6 @@ per-Empfänger-Dedupe und isolierter Retry; alle grün).
 3. **Server-Anweisung immer mitgeben** — Pull + Restart der betroffenen Services + Verifikationsbefehl.
 4. **Ehrlichkeit vor Tempo** — ungeprüfte Annahmen als solche markieren; Schwellen als Kalibrierung kennzeichnen.
 5. **Bestandsverhalten schützen** — neue Gates greifen nur mit vorhandenen Metadaten; Defaults ändern nichts für Bestandsnutzer.
+6. **Nie auf Produktion entwickeln oder committen** — lokal ändern, testen und nach `main` pushen; der Server zieht nur den geprüften Commit.
+7. **Secrets und Zustandsdaten getrennt halten** — `.env`, `data_cache/`, Tracker-/Outbox-DB und Brokerzustand weder committen noch bei einer Migration überschreiben.
+8. **Technik, Produktion und Performance getrennt abnehmen** — grüne Tests beweisen Codekonsistenz, Health beweist Erreichbarkeit, Forward-Daten beweisen erst die reale Signalgüte.
