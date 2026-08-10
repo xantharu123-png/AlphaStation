@@ -274,3 +274,204 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
     if state["Swing_4H_Execution_Status"] == "RECLAIMED" and run_state is not None:
         return run_state
     return state
+
+
+def stock_swing_4h_short_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Require causal 4H confirmation before shorting a post-pump high base.
+
+    A large red live candle is not a completed breakdown.  This classifier is
+    deliberately selective: ordinary bearish setups remain ``CLEAR``.  It only
+    intervenes after a statistically large run that has formed a compact base
+    near the highs, where shorting inside the base has asymmetric squeeze risk.
+    """
+    base_state: Dict[str, Any] = {
+        "Swing_Short_4H_Execution_Checked": True,
+        "Swing_Short_4H_Execution_Status": "CLEAR",
+        "Swing_Short_4H_Execution_Reason": "no_post_parabolic_high_base",
+        "Swing_Short_4H_Post_Parabolic": False,
+    }
+    cleaned: List[Dict[str, Any]] = []
+    for raw in bars or []:
+        if not isinstance(raw, dict):
+            continue
+        open_price = _finite_float(raw.get("open", raw.get("o")))
+        high = _finite_float(raw.get("high", raw.get("h")))
+        low = _finite_float(raw.get("low", raw.get("l")))
+        close = _finite_float(raw.get("close", raw.get("c")))
+        volume = _finite_float(raw.get("volume", raw.get("v")), 0.0) or 0.0
+        if None in (open_price, high, low, close):
+            continue
+        if open_price <= 0 or close <= 0 or high < max(open_price, close) or low > min(open_price, close):
+            continue
+        cleaned.append({
+            "open": float(open_price),
+            "high": float(high),
+            "low": float(low),
+            "close": float(close),
+            "volume": float(volume),
+            "timestamp": raw.get("timestamp", raw.get("time", raw.get("t"))),
+            "partial": bool(raw.get("partial_source_bar", raw.get("partial", False))),
+        })
+
+    completed = [item for item in cleaned if not item["partial"]]
+    if len(completed) < 10:
+        return {
+            **base_state,
+            "Swing_Short_4H_Execution_Status": "DATA_UNAVAILABLE",
+            "Swing_Short_4H_Execution_Reason": "insufficient_completed_4h_history",
+            "Swing_Short_4H_Latest_Partial": bool(cleaned and cleaned[-1]["partial"]),
+        }
+
+    # Search backwards for a compact 4H base in the upper part of a strong run.
+    # Up to three completed post-base bars are allowed so a break/retest can be
+    # classified without letting the breakdown candle become part of the base.
+    best: Optional[Dict[str, Any]] = None
+    max_post = min(3, max(0, len(completed) - 8))
+    for post_count in range(max_post + 1):
+        base_end = len(completed) - post_count
+        max_base_len = min(8, base_end - 4)
+        for base_len in range(4, max_base_len + 1):
+            base_start = base_end - base_len
+            prior = completed[max(0, base_start - 12):base_start]
+            if len(prior) < 4:
+                continue
+            base = completed[base_start:base_end]
+            base_high = max(item["high"] for item in base)
+            sorted_lows = sorted(item["low"] for item in base)
+            # Ignore one isolated lower wick; a close must still hold this floor.
+            base_floor = sorted_lows[min(1, len(sorted_lows) - 1)]
+            run_low = min(item["low"] for item in prior)
+            if run_low <= 0 or base_high <= run_low:
+                continue
+            run_range = base_high - run_low
+            run_pct = (run_range / run_low) * 100.0
+            base_width_pct = ((base_high - base_floor) / base_high) * 100.0
+            floor_location = (base_floor - run_low) / run_range
+            hold_level = run_low + run_range * 0.68
+            hold_ratio = sum(item["close"] >= hold_level for item in base) / len(base)
+            if base[-1]["close"] < base_floor * 0.995:
+                continue
+
+            impulse_start = max(1, base_start - 6)
+            impulse_end = min(len(completed), base_start + 2)
+            max_close_gain = 0.0
+            max_body_gain = 0.0
+            for index in range(impulse_start, impulse_end):
+                item = completed[index]
+                previous_close = completed[index - 1]["close"]
+                if previous_close > 0:
+                    max_close_gain = max(max_close_gain, ((item["close"] - previous_close) / previous_close) * 100.0)
+                if item["open"] > 0:
+                    max_body_gain = max(max_body_gain, ((item["close"] - item["open"]) / item["open"]) * 100.0)
+
+            is_parabolic = run_pct >= 25.0 and (
+                max(max_close_gain, max_body_gain) >= 5.5 or run_pct >= 35.0
+            )
+            is_high_base = (
+                base_width_pct <= 18.0
+                and floor_location >= 0.62
+                and hold_ratio >= 0.60
+            )
+            if not is_parabolic or not is_high_base:
+                continue
+
+            score = (
+                min(run_pct, 80.0)
+                + floor_location * 30.0
+                + hold_ratio * 15.0
+                - base_width_pct
+                - post_count * 0.5
+            )
+            candidate = {
+                "score": score,
+                "base_start": base_start,
+                "base_end": base_end,
+                "base_high": base_high,
+                "base_floor": base_floor,
+                "run_low": run_low,
+                "run_pct": run_pct,
+                "base_width_pct": base_width_pct,
+                "floor_location": floor_location,
+                "hold_ratio": hold_ratio,
+                "max_impulse_pct": max(max_close_gain, max_body_gain),
+                "post_count": post_count,
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+
+    if best is None:
+        return base_state
+
+    base_end = int(best["base_end"])
+    base_floor = float(best["base_floor"])
+    completed_after = completed[base_end:]
+    latest_partial = cleaned[-1] if cleaned and cleaned[-1]["partial"] else None
+    recent_structure = completed[int(best["base_start"]):] + ([latest_partial] if latest_partial else [])
+    recent_high = max(item["high"] for item in recent_structure)
+    true_ranges: List[float] = []
+    for index, item in enumerate(completed[-10:]):
+        previous_close = completed[-10:][index - 1]["close"] if index else item["open"]
+        true_ranges.append(max(
+            item["high"] - item["low"],
+            abs(item["high"] - previous_close),
+            abs(item["low"] - previous_close),
+        ))
+    stop_buffer = max(recent_high * 0.003, _median(true_ranges) * 0.10)
+    stop_floor = recent_high + stop_buffer
+
+    state: Dict[str, Any] = {
+        **base_state,
+        "Swing_Short_4H_Post_Parabolic": True,
+        "Swing_Short_4H_Base_High": round(float(best["base_high"]), 6),
+        "Swing_Short_4H_Base_Low": round(base_floor, 6),
+        "Swing_Short_4H_Recent_Swing_High": round(recent_high, 6),
+        "Swing_Short_4H_Stop_Floor": round(stop_floor, 6),
+        "Swing_Short_4H_Run_Pct": round(float(best["run_pct"]), 2),
+        "Swing_Short_4H_Base_Width_Pct": round(float(best["base_width_pct"]), 2),
+        "Swing_Short_4H_Base_Hold_Ratio": round(float(best["hold_ratio"]), 3),
+        "Swing_Short_4H_Max_Impulse_Pct": round(float(best["max_impulse_pct"]), 2),
+        "Swing_Short_4H_Latest_Partial": bool(latest_partial),
+        "Swing_Short_4H_Completed_Post_Base_Bars": len(completed_after),
+    }
+
+    break_threshold = base_floor * 0.995
+    below = [item["close"] < break_threshold for item in completed_after]
+    failed_reclaim = False
+    first_break_index: Optional[int] = None
+    for index, is_below in enumerate(below):
+        if is_below and first_break_index is None:
+            first_break_index = index
+        if first_break_index is not None and index > first_break_index:
+            item = completed_after[index]
+            if item["high"] >= base_floor * 0.995 and item["close"] < break_threshold:
+                failed_reclaim = True
+
+    two_closes_below = any(
+        below[index - 1] and below[index]
+        for index in range(1, len(below))
+    )
+    live_reclaimed = bool(latest_partial and latest_partial["close"] > base_floor * 1.003)
+    state["Swing_Short_4H_Failed_Reclaim"] = failed_reclaim
+    state["Swing_Short_4H_Two_Closes_Below"] = two_closes_below
+
+    if first_break_index is None:
+        state["Swing_Short_4H_Execution_Status"] = "WAIT_BREAKDOWN"
+        state["Swing_Short_4H_Execution_Reason"] = (
+            "live_4h_candle_not_a_completed_breakdown"
+            if latest_partial and latest_partial["close"] < break_threshold
+            else "high_base_floor_not_broken"
+        )
+    elif live_reclaimed:
+        state["Swing_Short_4H_Execution_Status"] = "WAIT_RETEST"
+        state["Swing_Short_4H_Execution_Reason"] = "live_4h_reclaim_invalidates_confirmation"
+    elif two_closes_below or failed_reclaim:
+        state["Swing_Short_4H_Execution_Status"] = "CONFIRMED"
+        state["Swing_Short_4H_Execution_Reason"] = (
+            "completed_4h_failed_reclaim"
+            if failed_reclaim
+            else "two_completed_4h_closes_below_base"
+        )
+    else:
+        state["Swing_Short_4H_Execution_Status"] = "WAIT_RETEST"
+        state["Swing_Short_4H_Execution_Reason"] = "first_completed_break_wait_failed_reclaim"
+    return state

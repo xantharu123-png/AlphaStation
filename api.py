@@ -104,6 +104,7 @@ from modules.business_quality import BUSINESS_QUALITY_MODEL_VERSION, fetch_busin
 from modules.stock_execution import (
     aggregate_regular_session_4h_bars,
     stock_swing_4h_execution_state,
+    stock_swing_4h_short_execution_state,
 )
 from modules.email_dedupe import (
     email_dedupe_active as _shared_email_dedupe_active,
@@ -1588,6 +1589,9 @@ _SHADOW_TRACKABLE_TIMING_REASONS = frozenset({
     "swing_short_bottom_entry_extended_wait_retest",
     "swing_short_current_candle_reclaim",
     "swing_short_not_closing_weak",
+    "swing_short_4h_wait_breakdown",
+    "swing_short_4h_wait_failed_reclaim",
+    "swing_short_4h_state_missing_wait_trigger",
 })
 _LONG_ENTRY_ALERT_SCANNERS = {
     "bi_long", "biotech", "turtle", "penny_stocks"
@@ -5260,7 +5264,79 @@ def _fetch_recent_stock_4h_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
 
 
 def _fetch_stock_swing_execution_state(ticker: str) -> Dict[str, Any]:
-    return stock_swing_4h_execution_state(_fetch_recent_stock_4h_bars(ticker, limit=24))
+    bars = _fetch_recent_stock_4h_bars(ticker, limit=24)
+    state = stock_swing_4h_execution_state(bars)
+    state.update(stock_swing_4h_short_execution_state(bars))
+    return state
+
+
+def _ceil_trade_price(price: float) -> float:
+    """Round a short invalidation upward so it never slips inside structure."""
+    scale = 100 if price >= 1 else 1_000 if price >= 0.1 else 100_000
+    return math.ceil(float(price) * scale - 1e-9) / scale
+
+
+def _apply_stock_short_4h_stop_floor(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Move a post-pump short stop above the real 4H high-base invalidation.
+
+    Targets stay structural. Widening the stop must therefore lower the
+    advertised R:R; if the targets no longer compensate the risk, the common
+    trade-plan gate blocks the mail instead of preserving an idealized ratio.
+    """
+    enriched = dict(row)
+    if not bool(enriched.get("Swing_Short_4H_Post_Parabolic")):
+        return enriched
+    stop_floor = _alert_float(enriched.get("Swing_Short_4H_Stop_Floor"), None)
+    if stop_floor is None or stop_floor <= 0:
+        enriched["Swing_Short_4H_Stop_Geometry_Valid"] = False
+        return enriched
+
+    levels = _alert_trade_levels(enriched)
+    entry = _alert_float(levels.get("entry"), None)
+    stop = _alert_float(levels.get("stop"), None)
+    tp1 = _alert_float(levels.get("tp1"), None)
+    tp2 = _alert_float(levels.get("tp2"), None)
+    required_stop = _ceil_trade_price(stop_floor)
+    enriched["Swing_Short_4H_Required_Stop"] = required_stop
+
+    if None in (entry, stop, tp1, tp2) or entry <= 0:
+        enriched["Swing_Short_4H_Stop_Geometry_Valid"] = False
+        return enriched
+    if stop >= required_stop:
+        enriched["Swing_Short_4H_Stop_Geometry_Valid"] = bool(levels.get("valid"))
+        return enriched
+
+    geometry = trade_geometry(entry, required_stop, tp1, tp2, "SHORT")
+    enriched["Swing_Short_4H_Stop_Adjusted"] = True
+    enriched["Swing_Short_4H_Original_Stop"] = stop
+    enriched["Swing_Short_4H_Stop_Geometry_Valid"] = bool(geometry.get("valid"))
+    if not geometry.get("valid"):
+        return enriched
+
+    for key in ("StopLoss", "stop_loss", "Stop", "stop", "SL", "invalidation_stop"):
+        enriched[key] = required_stop
+    for key in ("Risk", "risk"):
+        enriched[key] = geometry["risk"]
+    for key in ("RiskReward", "risk_reward", "rr", "rr_effective", "live_rr_ratio"):
+        enriched[key] = geometry["rr"]
+    enriched["rr_tp1"] = geometry["rr_tp1"]
+    enriched["rr_tp2"] = geometry["rr_tp2"]
+    enriched["Stop_Source"] = "4H high-base invalidation"
+    enriched["stop_source"] = "4H high-base invalidation"
+
+    setup = dict(enriched.get("trade_setup") or {})
+    setup.update({
+        "stop": required_stop,
+        "StopLoss": required_stop,
+        "risk": geometry["risk"],
+        "rr": geometry["rr"],
+        "rr_effective": geometry["rr"],
+        "rr_tp1": geometry["rr_tp1"],
+        "rr_tp2": geometry["rr_tp2"],
+        "stop_source": "4H high-base invalidation",
+    })
+    enriched["trade_setup"] = setup
+    return enriched
 
 
 def _stock_breakout_freshness_state(
@@ -6583,6 +6659,16 @@ def _stock_swing_short_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("swing_short_not_closing_weak")
     if rvol is not None and rvol < 0.7:
         reasons.append("rvol_below_bear_threshold")
+
+    execution_checked = bool(row.get("Swing_Short_4H_Execution_Checked"))
+    execution_status = str(row.get("Swing_Short_4H_Execution_Status") or "").upper()
+    if execution_checked:
+        if execution_status == "WAIT_BREAKDOWN":
+            reasons.append("swing_short_4h_wait_breakdown")
+        elif execution_status == "WAIT_RETEST":
+            reasons.append("swing_short_4h_wait_failed_reclaim")
+        elif execution_status == "DATA_UNAVAILABLE":
+            reasons.append("swing_short_4h_state_missing_wait_trigger")
     return list(dict.fromkeys(reasons))
 
 
@@ -6829,6 +6915,24 @@ def _stock_strategy_mail_quality_state(
             return False, "stock_swing_mail_blocked_4h_rejection"
         if execution_status == "DATA_UNAVAILABLE":
             return False, "stock_swing_mail_blocked_missing_4h_state"
+    else:
+        short_execution_checked = bool(row.get("Swing_Short_4H_Execution_Checked"))
+        short_execution_status = str(row.get("Swing_Short_4H_Execution_Status") or "").upper()
+        if short_execution_checked:
+            if short_execution_status == "WAIT_BREAKDOWN":
+                return False, "stock_swing_short_mail_blocked_wait_4h_breakdown"
+            if short_execution_status == "WAIT_RETEST":
+                return False, "stock_swing_short_mail_blocked_wait_4h_retest"
+            if short_execution_status == "DATA_UNAVAILABLE":
+                return False, "stock_swing_short_mail_blocked_missing_4h_state"
+
+            if bool(row.get("Swing_Short_4H_Post_Parabolic")):
+                if not bool(row.get("Swing_Short_4H_Stop_Geometry_Valid")):
+                    return False, "stock_swing_short_mail_blocked_invalid_4h_stop_geometry"
+                required_stop = _alert_float(row.get("Swing_Short_4H_Required_Stop"), None)
+                stop = _alert_float(_alert_trade_levels(row).get("stop"), None)
+                if required_stop is None or stop is None or stop < required_stop:
+                    return False, "stock_swing_short_mail_blocked_stop_inside_4h_base"
 
     # Volatilitaetsbudget (Long UND Short): ohne ausreichend Tages-ATR ist
     # kein Swing-Setup mail-wuerdig. Rows ohne ATR-Metadaten: Bestandsverhalten.
@@ -7350,11 +7454,16 @@ def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strateg
         enriched.setdefault("entry_quality", "SWING_SETUP")
         enriched.setdefault("swing_timeframe", "daily_swing")
         score = _alert_float(_extract_alert_score(enriched), 0) or 0
-        if (
-            score >= _ALERT_MIN_SCORE
-            and not _stock_alert_is_short_context(scanner_name, enriched, strategy_name)
-        ):
+        if score >= _ALERT_MIN_SCORE:
             enriched.update(_fetch_stock_swing_execution_state(ticker))
+            if _stock_alert_is_short_context(scanner_name, enriched, strategy_name):
+                enriched = _apply_stock_short_4h_stop_floor(enriched)
+                enriched["short_block_reasons"] = _stock_swing_short_rule_reasons(enriched)
+                # Swing-Shorts werden auf Daily/4h bestaetigt. Die Intraday-
+                # Qualitaet aus _bear_entry_quality() liest 5m-Reclaim-Felder
+                # und darf einen mehrtaegigen Plan nicht nachtraeglich sperren.
+                enriched["entry_quality"] = "SWING_SETUP"
+                enriched["alertable_short"] = not enriched["short_block_reasons"]
         return enriched
 
     if (
@@ -7419,6 +7528,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "bottom_entry_extended_wait_retest",
         "swing_short_current_candle_reclaim",
         "swing_short_not_closing_weak",
+        "swing_short_4h_wait_failed_reclaim",
         "early_mover_retest_not_near_entry",
         "trade_health_wait_for_retest",
         "orb_recent_hold_weak",
@@ -7434,6 +7544,8 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "near_structural_barrier_wait_trigger",
         "momentum_breakout_freshness_unconfirmed",
         "swing_4h_state_missing_wait_trigger",
+        "swing_short_4h_wait_breakdown",
+        "swing_short_4h_state_missing_wait_trigger",
         "momentum_breakout_stale_wait_trigger",
         "orb_breakout_volume_unconfirmed",
         "orb_no_active_breakout",

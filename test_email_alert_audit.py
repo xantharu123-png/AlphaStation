@@ -550,6 +550,16 @@ def test_bear_alert_audit_allows_fresh_breakdown_near_lows(tmp_path):
 def test_bear_swing_alert_audit_ignores_latest_5m_reclaim_when_daily_state_is_weak(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BOUNCE"}, "unit"))
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_swing_execution_state",
+        lambda ticker: {
+            "Swing_Short_4H_Execution_Checked": True,
+            "Swing_Short_4H_Execution_Status": "CLEAR",
+            "Swing_Short_4H_Execution_Reason": "no_post_parabolic_high_base",
+            "Swing_Short_4H_Post_Parabolic": False,
+        },
+    )
     cache_file = tmp_path / "bear_5m_reclaim.json"
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
