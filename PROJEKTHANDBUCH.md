@@ -1,12 +1,13 @@
 # Alpha Station — Projekthandbuch
 
-**Stand:** 11. August 2026 · **Arbeitsbranch:** `main` · **Tests:** 1501/1501 gruen
-**Repository:** `C:\Users\miros\Desktop\TradingBot` → GitHub `xantharu123-png/AlphaStation`
+**Stand:** 11. August 2026 · **Arbeitsbranch:** `main` · **Tests:** 1503/1503 gruen
+**Repository:** `C:\Projekt\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`
-**Code-Baseline vor dem Übergabecommit:** `1bd9a48` auf `main`.
-**Produktionsnachweis:** Der exakte Server-Rollout dieses Übergabestands wurde in
-dieser Sitzung **nicht verifiziert**. GitHub-Push und Server-Deployment bleiben
-getrennte Nachweise.
+**Letzter geprüfter Code-Commit:** `d11eb4c` lokal auf `main`; `origin/main` steht
+weiter auf `9987c7f`.
+**Produktionsnachweis:** Der Server ist per SSH erreichbar, aber auf dem neuen PC
+fehlt noch ein autorisierter SSH-Schlüssel. Der exakte Server-Rollout wurde daher
+**nicht verifiziert**. GitHub-Push und Server-Deployment bleiben getrennte Nachweise.
 
 > Dieses Handbuch ist die chronologische Betriebs- und Statusdokumentation. Die
 > verbindlichen Produkt-, Trading- und Sicherheitsregeln stehen in
@@ -83,7 +84,7 @@ für den kommerziellen Betrieb.
 
 **Lokale Tests (Windows):**
 ```bash
-.codex_test_venv/Scripts/python.exe -m pytest -q --tb=line -p no:cacheprovider --basetemp=tmp/pytest_audit
+.venv/Scripts/python.exe -m pytest -q --tb=line -p no:cacheprovider --basetemp=tmp/pytest_audit
 ```
 
 ---
@@ -1217,6 +1218,24 @@ Frontend-Bundle-Hash **0c8663e92b1c** sind grün.
   Audit-Aussagen gelten nicht als implementiert, wenn Patch, Test und aktueller
   Code sie nicht belegen.
 
+### 3.40 11. August - Neuer PC: reproduzierter Build und Secret-Redaktion
+
+- Python 3.12, die exakten `requirements.txt`-Abhängigkeiten und Node.js LTS wurden
+  auf dem neuen Windows-PC eingerichtet. Python-Compile und Frontend-Bundle-Prüfung
+  sind grün; der Bundle-Quellhash ist `a9df895d5455`.
+- Der Turtle-Regressionsfall isoliert jetzt den Common-Stock-Universe-Loader. Der
+  Test ist damit offline-deterministisch; das produktive Fail-closed-Verhalten des
+  Asset-Guards wurde ausdrücklich nicht gelockert.
+- Polygon-Schlüssel in URL-Querywerten werden vor der Fehlerausgabe zentral
+  redigiert. Sowohl `api.py` als auch `bg_service.py` verwenden denselben Helper;
+  Canary-Regressionstests belegen Maskierung und unverändertes Fallback-Verhalten.
+- Endabnahme des Code-Commits `d11eb4c`: **1503/1503 Tests grün**, Python-Compile,
+  Frontend-Bundle und `git diff --check` grün. Die vier lokal hinterlegten
+  API-Schlüssel haben jeweils null Treffer in versionierten Dateien.
+- `d11eb4c` ist bewusst nur lokal committed. Ein Push könnte den Produktions-
+  Auto-Updater auslösen; gepusht wird erst, wenn der SSH-Zugang wiederhergestellt
+  ist und der Rollout danach separat überwacht werden kann.
+
 ---
 
 ## 4. Das Mail-System (Stand 11.08.2026)
@@ -1397,7 +1416,7 @@ Post-Pump-Short-Gates; volle Suite und Frontend-Bundle-Prüfung grün).
 
 | Prio | Punkt | Kontext |
 |---|---|---|
-| 1 | **Aktuellen `main`-Stand produktiv verifizieren:** Server-HEAD, produktive Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30/3.31; `HANDOFF_PC_WECHSEL_2026-08-11.md` |
+| 1 | **SSH-Zugang wiederherstellen und aktuellen `main`-Stand produktiv verifizieren:** autorisierten privaten Schlüssel sicher auf den neuen PC übertragen; danach Server-HEAD, produktive Services, `/api/health`, `/api/system-health`, Scheduler-/Mail-Logs und tatsächlich ausgelieferte Frontend-Datei prüfen. GitHub-Push allein reicht nicht. | Deployment-Vertrag, 3.30/3.31/3.40; `HANDOFF_PC_WECHSEL_2026-08-11.md` |
 | 2 | **Mail-Zustellung beobachten:** Outbox-Zahlen (`pending`, `retry`, `dead_letter`) und offene `be_mail_sent_at`-Aktivierungen prüfen; Testmail plus absichtlich simulierten temporären Fehler nachvollziehen. | 3.26/3.30, Abschnitt 4 |
 | 3 | **Forward-Kalibrierung statt Bauchgefühl:** je Scanner und Regime mindestens 30 vollständig beobachtete Signale sammeln; freigegebene Signale gegen Shadow-Kohorte mit Hit-Rate, Wilson-KI, Level-R und Managed-R vergleichen. Erst dann Schwellen verändern. | Abschnitt 5 |
 | 4 | **PM-/Swing-/Orts-Gates produktiv messen:** Reject-Gründe und Ergebnisdaten nach mehreren Handelstagen auswerten. Lockerung nur, wenn verpasster Erwartungswert statistisch höher als vermiedener Verlust ist. | 3.7, Commits `cdeff7e`/`da6c4be` |
