@@ -1,3 +1,5 @@
+import api
+
 from api import (
     _calculate_directional_fib_levels,
     _decorate_scan_results,
@@ -52,7 +54,12 @@ def test_turtle_score_is_capped_when_live_confirmation_is_weak():
     assert "Tagesmomentum noch schwach" in flags
 
 
-def test_turtle_decoration_syncs_stale_score_and_grade():
+def test_turtle_decoration_syncs_stale_score_and_grade(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_load_common_stock_universe",
+        lambda *args, **kwargs: ({"BANX"}, "unit"),
+    )
     row = {
         "Ticker": "BANX",
         "Score": 95,

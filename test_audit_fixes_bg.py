@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bg_service  # noqa: E402
+from modules import data_fetchers  # noqa: E402
 
 
 def _load_scanner_helpers():
@@ -205,6 +206,33 @@ def test_bg_atomic_write_keeps_old_file_and_raises(tmp_path, monkeypatch):
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"state": "OLD"}
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_common_stock_guard_redacts_polygon_key_from_fetch_errors(
+    tmp_path, monkeypatch, caplog
+):
+    canary = "polygon-bg-secret-for-redaction-test"
+    monkeypatch.setattr(
+        bg_service,
+        "_COMMON_STOCK_UNIVERSE_CACHE",
+        str(tmp_path / "missing-common-stock-universe.json"),
+    )
+
+    def fail_request(*args, **kwargs):
+        raise RuntimeError(
+            "request failed: https://api.polygon.io/v3/reference/tickers"
+            f"?apiKey={canary}&cursor=next"
+        )
+
+    monkeypatch.setattr(data_fetchers, "rate_limited_get", fail_request)
+
+    tickers, source = bg_service._load_common_stock_universe(canary)
+
+    log_text = "\n".join(caplog.messages)
+    assert tickers is None
+    assert source == "unavailable"
+    assert canary not in log_text
+    assert "apiKey=<redacted>" in log_text
 
 
 # ══════════════════════════════════════════════════════════════════

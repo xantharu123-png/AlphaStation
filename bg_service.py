@@ -75,7 +75,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from modules.trade_levels import normalize_alert_trade_levels, trade_plan_quality
 from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
-from modules.data_fetchers import rate_limited_get
+from modules.data_fetchers import rate_limited_get, redact_sensitive_query_values
 from modules.stock_execution import (
     aggregate_regular_session_4h_bars,
     stock_swing_4h_execution_state,
@@ -1171,7 +1171,10 @@ def _load_common_stock_universe(poly_key, max_age_seconds=24 * 3600):
             _atomic_write_json(_COMMON_STOCK_UNIVERSE_CACHE, {"cached_at": now_ts, "tickers": sorted(tickers)})
             return tickers, "polygon_reference"
     except Exception as exc:
-        log.warning(f"Common stock universe fetch failed: {exc}")
+        log.warning(
+            "Common stock universe fetch failed: %s",
+            redact_sensitive_query_values(exc),
+        )
     if stale_cached_tickers:
         return stale_cached_tickers, stale_cached_source
     return None, "unavailable"

@@ -87,6 +87,7 @@ from modules import paper_autotrader as _paper_autotrader
 from modules.helpers import get_current_trading_session
 from modules.data_fetchers import (
     rate_limited_get,
+    redact_sensitive_query_values,
     fetch_ohlcv_for_chart,
     fetch_grouped_daily,
     fetch_daily_candles_crypto,
@@ -948,7 +949,7 @@ def _load_common_stock_universe(
             })
             return tickers, "polygon_reference"
     except Exception as e:
-        print(f"[Common Stock Universe] fetch error: {e}")
+        print(f"[Common Stock Universe] fetch error: {redact_sensitive_query_values(e)}")
 
     if stale_cached_tickers:
         _COMMON_STOCK_UNIVERSE_MEM.update({

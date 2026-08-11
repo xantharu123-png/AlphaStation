@@ -67,6 +67,33 @@ def test_common_stock_guard_uses_stale_cache_when_reference_unavailable(tmp_path
     assert source == "stale_file_cache"
 
 
+def test_common_stock_guard_redacts_polygon_key_from_fetch_errors(tmp_path, monkeypatch, capsys):
+    polygon_key = "polygon-secret-for-redaction-test"
+    monkeypatch.setattr(api, "COMMON_STOCK_UNIVERSE_CACHE", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(api, "POLYGON_KEY", polygon_key)
+    monkeypatch.setattr(
+        api,
+        "_COMMON_STOCK_UNIVERSE_MEM",
+        {"loaded_at": 0, "tickers": None, "source": "not_loaded"},
+    )
+
+    def fail_request(url, params=None, timeout=None):
+        raise RuntimeError(
+            "request failed: "
+            f"https://api.polygon.io/v3/reference/tickers?apiKey={polygon_key}&market=stocks"
+        )
+
+    monkeypatch.setattr(api, "rate_limited_get", fail_request)
+
+    tickers, source = api._load_common_stock_universe(max_age_seconds=1)
+    output = capsys.readouterr().out
+
+    assert tickers is None
+    assert source == "unavailable"
+    assert polygon_key not in output
+    assert "apiKey=<redacted>" in output
+
+
 def test_email_status_reports_common_stock_guard_without_keys(tmp_path, monkeypatch):
     cache_file = tmp_path / "common_stock.json"
     cache_file.write_text(json.dumps({

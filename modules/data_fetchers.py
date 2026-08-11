@@ -27,6 +27,15 @@ _CANDLE_ANALYSIS_CACHE = {}
 _CANDLE_CACHE_TTL = 300  # 5 Minuten
 _COINGECKO_INTRADAY_MAX_DAYS = 90
 
+_SENSITIVE_QUERY_VALUE_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|token|secret|password)=)[^&\s)]+"
+)
+
+
+def redact_sensitive_query_values(value):
+    """Remove credentials from URLs embedded in exception and log text."""
+    return _SENSITIVE_QUERY_VALUE_RE.sub(r"\1<redacted>", str(value))
+
 # BPIQ catalyst cache — fetches from BPIQ API if key is available
 import os as _os
 from pathlib import Path as _Path
