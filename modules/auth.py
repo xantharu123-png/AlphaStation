@@ -87,6 +87,15 @@ def _secret_is_compromised(value: Any, blocked_hashes: set[str]) -> bool:
     return digest in blocked_hashes
 
 
+def _auth_user_log_key(email: Any) -> str:
+    """Return a stable, irreversible actor key for operational logs."""
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return "user:unknown"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"user:{digest[:16]}"
+
+
 def _jwt_secret_is_rejected(value: Any = None) -> bool:
     candidate = JWT_SECRET if value is None else value
     return (
@@ -1230,7 +1239,10 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
 
     eligibility = get_checkout_eligibility(email, plan)
     if not eligibility.get("allowed"):
-        print(f"[Auth] Checkout blocked ({eligibility.get('code')}): {email}")
+        print(
+            f"[Auth] Checkout blocked ({eligibility.get('code')}): "
+            f"{_auth_user_log_key(email)}"
+        )
         return None
 
     is_trial = (plan == "trial")
@@ -1292,7 +1304,10 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
         )
         return session.url
     except Exception as e:
-        print(f"[Auth] Stripe checkout error: {e}")
+        print(
+            f"[Auth] Stripe checkout error ({type(e).__name__}): "
+            f"{_auth_user_log_key(email)}"
+        )
         return None
 
 
@@ -1313,7 +1328,7 @@ def create_billing_portal(email: str, return_url: str) -> Optional[str]:
         )
         return session.url
     except Exception as e:
-        print(f"[Auth] Billing portal error: {e}")
+        print(f"[Auth] Billing portal error: {type(e).__name__}")
         return None
 
 
@@ -1502,7 +1517,9 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                 if updated_user is None:
                     return {"success": False, "error": "Checkout user not found"}
                 changed = True
-                print(f"[Auth] Checkout activated: {email} -> {plan}")
+                print(
+                    f"[Auth] Checkout activated: {_auth_user_log_key(email)} -> {plan}"
+                )
 
             elif event_type == "customer.subscription.updated":
                 customer_id = data.get("customer")
@@ -1582,7 +1599,10 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                     if _update_user_atomic(matched_email, _activate_subscription) is None:
                         return {"success": False, "error": "Subscription user not found"}
                     changed = True
-                    print(f"[Auth] Plan updated: {matched_email} -> {matched_plan}")
+                    print(
+                        f"[Auth] Plan updated: {_auth_user_log_key(matched_email)} "
+                        f"-> {matched_plan}"
+                    )
                 else:
                     def _expire_subscription(current: Dict[str, Any]) -> None:
                         if current.get("stripe_customer_id") != customer_id:
@@ -1598,7 +1618,10 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                     if _update_user_atomic(matched_email, _expire_subscription) is None:
                         return {"success": False, "error": "Subscription user not found"}
                     changed = True
-                    print(f"[Auth] Subscription ended: {matched_email} -> expired")
+                    print(
+                        f"[Auth] Subscription ended: {_auth_user_log_key(matched_email)} "
+                        "-> expired"
+                    )
 
             elif event_type == "customer.subscription.deleted":
                 customer_id = data.get("customer")
@@ -1659,7 +1682,10 @@ def handle_stripe_webhook(payload: bytes, sig_header: str) -> Dict[str, Any]:
                 if _update_user_atomic(matched_email, _delete_subscription) is None:
                     return {"success": False, "error": "Subscription user not found"}
                 changed = True
-                print(f"[Auth] Subscription deleted: {matched_email} -> expired")
+                print(
+                    f"[Auth] Subscription deleted: {_auth_user_log_key(matched_email)} "
+                    "-> expired"
+                )
             else:
                 ignored_reason = "event_type_not_used_for_access"
 

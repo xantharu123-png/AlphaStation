@@ -463,6 +463,20 @@ def test_penny_buy_mail_explains_confirmed_exit_policy(monkeypatch):
 
     captured = {}
     monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda _scanner: (True, "ok"))
+    monkeypatch.setattr(api, "_stock_quote_session_at", lambda _timestamp: "US_REGULAR")
+    monkeypatch.setattr(api, "_load_common_stock_universe", lambda **_kwargs: ({"PUMP"}, "test"))
+
+    def _revalidate(row, **_kwargs):
+        validated = dict(row)
+        validated.update({
+            "price_observed_at": "2026-08-13T14:00:00+00:00",
+            "price_session": "US_REGULAR",
+            "quote_evidence_verified": True,
+        })
+        return validated, "ok"
+
+    monkeypatch.setattr(api, "_penny_revalidate_buy_candidate", _revalidate)
+    monkeypatch.setattr(api.time, "time", lambda: 1786629600.0)
 
     def _capture(subject, body, **kwargs):
         captured.update(subject=subject, body=body, kwargs=kwargs)
@@ -493,6 +507,40 @@ def test_penny_buy_mail_explains_confirmed_exit_policy(monkeypatch):
     assert sent is True
     assert "bestaetigten Strukturbruch" in captured["body"]
     assert "Ein einzelnes Warnmerkmal ist noch kein Exit" in captured["body"]
+
+
+def test_penny_buy_mail_revalidates_immediately_and_fails_closed(monkeypatch):
+    import api
+
+    calls = []
+    monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda _scanner: (True, "ok"))
+    monkeypatch.setattr(
+        api,
+        "_penny_revalidate_buy_candidate",
+        lambda _row, **_kwargs: (None, "fresh_closed_5m_trigger_missing"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
+    )
+
+    row = {"ticker": "LATE", "_dedupe_key": "late-key"}
+    assert api._penny_buy_email([row]) is False
+    assert row["mail_revalidation_reason"] == "fresh_closed_5m_trigger_missing"
+    assert calls == []
+
+
+def test_penny_buy_mail_rejects_multi_candidate_batch(monkeypatch):
+    import api
+
+    monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda _scanner: (True, "ok"))
+    monkeypatch.setattr(
+        api,
+        "_penny_revalidate_buy_candidate",
+        lambda row, **_kwargs: (dict(row), "ok"),
+    )
+    assert api._penny_buy_email([{"ticker": "ONE"}, {"ticker": "TWO"}]) is False
 
 
 def test_penny_exit_mail_names_only_confirmed_exit_reasons(monkeypatch):
@@ -776,8 +824,21 @@ def test_api_wrapper_tracks_model_position_when_buy_mail_fails(monkeypatch, tmp_
         "ask": 1.046,
         "spread_bps": 19.1,
         "spread_known": True,
-        "quote_age_seconds": 1.0,
+        "observed_ts": now_ts,
+        "receipt_ts": now_ts,
+        "quote_age_seconds": 0.0,
     })
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_market_path",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bars": [{"timestamp": now_ts, "high": 1.046, "low": 1.044}],
+            "first_timestamp": now_ts,
+            "last_timestamp": now_ts,
+            "source": "polygon_1m_aggs",
+        },
+    )
     monkeypatch.setattr(api, "_penny_fetch_daily_bars", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "_penny_vrvp_resistances", lambda *args, **kwargs: _targets())
     # Simulate SMTP failure: UI/cache still published a validated entry, so

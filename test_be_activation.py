@@ -51,18 +51,24 @@ def _signal(ticker):
 
 
 def _bars_after(ticker, specs):
-    """Daily-Bars an den Folgetagen des Alerts; specs = [(high, low, close), ...]."""
-    d0 = datetime.fromisoformat(_signal(ticker)["created_at"]).date()
-    return [
-        {
-            "date": (d0 + timedelta(days=i)).isoformat(),
+    """Complete Daily bars in consecutive US-equity sessions after the alert."""
+    cursor = datetime.fromisoformat(_signal(ticker)["created_at"]).astimezone(
+        st.ZoneInfo("America/New_York")
+    ).date()
+    bars = []
+    for h, l, c in specs:
+        cursor += timedelta(days=1)
+        while not st._is_us_equity_session(cursor):
+            cursor += timedelta(days=1)
+        bars.append({
+            "date": cursor.isoformat(),
             "open": 100.0,
             "high": h,
             "low": l,
             "close": c,
-        }
-        for i, (h, l, c) in enumerate(specs, start=1)
-    ]
+            "interval_complete": True,
+        })
+    return bars
 
 
 def _stock_fetcher(bars_by_ticker):
@@ -83,7 +89,9 @@ def test_tracker_mfe_1r_marks_be_exactly_once(tracker):
     """Tag 1: High 106 => MFE +1.2R >= 1R => be_activated_at persistiert und
     genau EINE be_activation; Re-Eval erzeugt weder neue Aktivierung noch
     einen neuen Zeitstempel."""
-    tracker.record_alert_signals("breakout", [_base_row()])
+    tracker.record_alert_signals(
+        "breakout", [_base_row()], mail_channel="stocks_swing"
+    )
     bars = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
     r1 = tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
     assert len(r1["be_activations"]) == 1
@@ -91,13 +99,15 @@ def test_tracker_mfe_1r_marks_be_exactly_once(tracker):
     assert set(act) == {
         "id", "ticker", "scanner", "direction", "entry", "entry_fill_price",
         "stop", "tp1", "tp2", "mfe", "asset_class", "activated_at",
-        "mail_class", "channel",
+        "mail_class", "channel", "mail_channel",
         "strategy", "trade_horizon", "setup_key",
+        "delivery_recipient_keys_json",
     }
     assert act["ticker"] == "AAPL"
     assert act["scanner"] == "breakout"
     assert act["mail_class"] == "trade"
     assert act["channel"] == "email"
+    assert act["mail_channel"] == "stocks_swing"
     assert act["direction"] == "LONG"
     assert act["entry"] == pytest.approx(100.0)
     assert act["stop"] == pytest.approx(95.0)
@@ -132,6 +142,7 @@ def test_tracker_be_then_stop_realizes_zero_r(tracker):
     bars1 = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
     tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars1}))
     assert _signal("AAPL")["be_activated_at"]
+    tracker.mark_be_alerts_sent([_signal("AAPL")["id"]])
     bars2 = _bars_after("AAPL", [(106.0, 99.0, 105.5), (104.0, 94.5, 95.5)])
     result = tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars2}))
     assert result["be_activations"] == []  # BE war bereits aktiviert
@@ -173,8 +184,17 @@ def test_breakeven_adjusted_r_pure_cases(tracker):
     assert f({"r_realized": None}) is None
     assert f({"r_realized": -1.0}) == pytest.approx(-1.0)          # nie aktiviert
     assert f({"r_realized": 0.8, "be_activated_at": "x"}) == pytest.approx(0.8)
-    assert f({"r_realized": -1.0, "be_activated_at": "x"}) == pytest.approx(0.0)
-    assert f({"r_realized": -0.2, "be_activated_at": "x"}) == pytest.approx(0.0)
+    assert f({"r_realized": -1.0, "be_activated_at": "x"}) is None
+    assert f({"r_realized": -0.2, "be_activated_at": "x"}) is None
+    assert f({
+        "r_realized": -1.0,
+        "be_activated_at": "x",
+        "be_exit_at": "2026-08-13T14:05:00+00:00",
+        "be_exit_fill_price": 100.0,
+        "entry_fill_price": 100.0,
+        "stop": 95.0,
+        "direction": "LONG",
+    }) == pytest.approx(0.0)
     assert f({"r_realized": -1.0, "be_activated_at": "x",
               "outcome_detail": "ambiguous_same_day"}) == pytest.approx(-1.0)
 
@@ -192,7 +212,13 @@ def test_tracker_return_stays_backward_compatible_with_be(tracker):
 
 
 def test_tracker_be_mail_stays_pending_until_acknowledged(tracker):
-    tracker.record_alert_signals("breakout", [_base_row()])
+    recipient_key = "a" * 64
+    tracker.record_alert_signals(
+        "breakout",
+        [_base_row()],
+        delivery_recipient_keys=[recipient_key],
+        mail_channel="stocks_premarket",
+    )
     bars = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
     result = tracker.evaluate_open_signals(
         stock_daily_fetcher=_stock_fetcher({"AAPL": bars})
@@ -203,7 +229,9 @@ def test_tracker_be_mail_stays_pending_until_acknowledged(tracker):
     assert len(pending) == 1
     assert pending[0]["id"] == signal_id
     assert pending[0]["channel"] == "email"
+    assert pending[0]["mail_channel"] == "stocks_premarket"
     assert pending[0]["tracker_persisted"] is True
+    assert pending[0]["delivery_recipient_keys_json"] == f'["{recipient_key}"]'
 
     assert tracker.mark_be_alerts_sent([signal_id]) == 1
     assert tracker.load_pending_be_activations() == []
@@ -212,12 +240,15 @@ def test_tracker_be_mail_stays_pending_until_acknowledged(tracker):
 
 # ── Helpers bg (Muster test_exit_update_mails.py) ────────────────────────────
 def _activation(**overrides):
+    recipient_key = bg_service._recipient_delivery_key("followup@example.com")
     act = {
         "id": 21, "ticker": "XYZ", "scanner": "stock_strategy", "direction": "LONG",
         "entry": 100.0, "entry_fill_price": 100.0, "stop": 95.0, "tp1": 105.0,
         "tp2": 110.0, "mfe": 1.2, "asset_class": "stock",
         "activated_at": "2026-07-30T10:00:00",
         "mail_class": "trade", "channel": "email",
+        "trade_horizon": "swing",
+        "delivery_recipient_keys": [recipient_key],
     }
     act.update(overrides)
     return act
@@ -232,7 +263,27 @@ def _setup_bg(monkeypatch, tmp_path, activations, origin_keys=()):
     payload = {"evaluated": len(activations), "closed": 0, "errors": 0,
                "transitions": [], "be_activations": list(activations)}
     monkeypatch.setattr(bg_service, "evaluate_open_signals", lambda **kw: payload)
+    monkeypatch.setattr(
+        bg_service, "_reconcile_pending_accepted_deliveries", lambda: 0
+    )
+    monkeypatch.setattr(bg_service, "load_pending_terminal_updates", lambda: [])
     monkeypatch.setattr(bg_service, "load_pending_be_activations", lambda: [])
+    monkeypatch.setattr(
+        bg_service,
+        "_followup_recipient_profiles",
+        lambda _secrets: [
+            {
+                "email": "followup@example.com",
+                "position_update_scope": "all",
+                "personal_positions": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_current_followup_recipient_emails",
+        lambda _event, _cache: {"followup@example.com"},
+    )
     monkeypatch.setattr(
         bg_service,
         "mark_be_alerts_sent",
@@ -266,7 +317,7 @@ def test_bg_be_activations_send_one_info_mail_scanner_aware(monkeypatch, tmp_pat
     bg_service._run_signal_eval_job(secrets={})
     assert len(sent) == 1
     mail = sent[0]
-    assert mail["mail_class"] == "info"
+    assert mail["mail_class"] == "signal_update"
     assert mail["subject"] == "Stop-Update: 2 Trade(s) auf Einstand sichern (+1R gelaufen)"
     body = mail["body"]
     assert "XYZ" in body and "50% verkaufen" in body
@@ -363,6 +414,7 @@ def test_summary_reports_be_metrics(tracker):
     tracker.record_alert_signals("breakout", [_base_row()])
     bars1 = _bars_after("AAPL", [(106.0, 99.0, 105.5)])
     tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars1}))
+    tracker.mark_be_alerts_sent([_signal("AAPL")["id"]])
     bars2 = _bars_after("AAPL", [(106.0, 99.0, 105.5), (104.0, 94.5, 95.5)])
     tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars2}))
     summary = tracker.load_performance_summary(days=7)

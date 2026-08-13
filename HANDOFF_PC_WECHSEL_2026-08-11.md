@@ -312,3 +312,116 @@ Noch nicht als produktiv/empirisch bewiesen:
 - **Secrets/Live-Daten:** separat und verschluesselt, nie aus Git
 - **Tradingstatus:** Analyse- und Paper-Infrastruktur vorhanden; keine
   Gewinnzusage, keine Live-AutoTrader-Freigabe
+
+---
+
+## 15. Nachtrag 13.08.2026 - Signal-Pipeline sicher uebernehmen
+
+Der neue Signal-Pipeline-Vertrag steht in `PROJEKTBIBEL.md`, der technische und
+forensische Beleg in `AUDIT_SIGNAL_PIPELINE_2026-08-13.md`. Der lokale
+Arbeitsstand ist erst dann Produktion, wenn Server-HEAD, API-Revision,
+Frontend-Bundle, Services und Health exakt denselben ausgerollten Commit
+nachweisen. Lokale Implementierung, gruene Tests oder ein Push sind weder
+Produktions- noch Profitabilitaetsbeleg.
+
+### 15.1 Vor jeder Signalbewertung pruefen
+
+- Tracking beginnt erst bei belegter SMTP-DATA-Akzeptanz fuer die konkrete
+  Empfaengerkohorte oder dokumentiertem Brokerfill. Scanstart, vorbereitete Mail
+  und Vorversandquote sind kein Fill.
+- Ohne Brokerfill stammt der First Executable Price aus der ersten realistisch
+  ausfuehrbaren Beobachtung ab Akzeptanzzeit: Long zum Ask, Short zum Bid;
+  Stop-/BE-Gaps werden symmetrisch inklusive Spread, Slippage und Kosten
+  behandelt.
+- Daily-Bars benoetigen ein echtes Open. Close-als-Open, laufende Bars oder ein
+  lueckenhafter Post-Alert-Pfad duerfen keine erfundene Ausfuehrung erzeugen.
+- Delivery-Intent und Empfaenger-Akzeptanzjournal muessen vorhanden sein.
+  Unbekannter DATA-Ausgang bleibt quarantainiert; bei Teilannahme umfasst die
+  Kohorte nur die im selben Versuch akzeptierten Empfaenger.
+- `legacy_open_cohort_unknown` bleibt sichtbar und degradiert. Alte Empfaenger
+  werden nicht geraten; Folgeupdates gehen nur an die belegte Ursprungskohorte
+  geschnitten mit aktuellem Opt-in.
+
+### 15.2 Zahlen richtig einordnen
+
+Der Mailaudit vom 06.-12.08.2026 fand 16 Update-Digests, 45 Ereigniszeilen und
+nach Plan-Dedupe 41 Plaene: 33 terminal, 8 nur mit TP1-offenem Rest. Die
+terminalen Ereignisse umfassten 12 positive und 21 negative Ausgaenge, netto
+-2,11R. Das ist ein unvollstaendiger Update-Ereignisstrom, keine vollstaendige
+Created-/Matured-Kohorte und keine belastbare Trefferprognose.
+
+Die begrenzten Korrekturen lauten ONON -4,65R auf -3,94R, ECO -1,27R auf
+-1,00R und CBLL -1,57R auf `NO_FILL`. AURA bleibt konservativ -1,38R;
+-1,00R ist ohne eindeutigen Erstmail-/Produktions-DB-Nachweis nur wahrscheinlich.
+Die konservative Summe dieser vier Faelle verbessert sich von -8,87R auf
+-6,32R (+2,55R, ein entschiedener Verlust weniger). Das beweist keine positive
+Erwartung.
+
+Performance wird getrennt nach Created/Matured, gefuellt/entschieden,
+`NO_FILL`, `OPEN`, `UNTRACKED` und unresolved ausgewiesen. Unbewiesene
+Break-even-Zustellung bleibt `managed_be_unresolved`. Eine Freigabe braucht in
+der gemeinsamen Zelle Scanner x Richtung x Horizont x exogenes Marktregime
+mindestens 30 vollstaendig beobachtete Entscheidungen, Wilson-95-Prozent-
+Intervall und null unresolved Kontrollfaelle.
+
+### 15.3 Historische Reparatur: Dry-Run zuerst
+
+Verbindliches Runbook: `deploy/SIGNAL_TRACKER_REPAIR.md`; Werkzeug:
+`scripts/signal_tracker_repair.py`. Niemals Werte aus Mailbetreff oder
+Tickernaehe raten.
+
+1. Kandidaten read-only inspizieren und mit Originalmail/Marktdaten eindeutig
+   identifizieren.
+2. Manifest mit exaktem Vorzustand und externer Evidenz erstellen.
+3. Dry-Run pruefen; keine Datenbankaenderung zulassen.
+4. Produktionsbackup von Tracker, Zustelljournal und Outbox erstellen und eine
+   Vier-Augen-Pruefung durchfuehren.
+5. Im Wartungsfenster beide Writer (`tradingbot-api`, `tradingbot-bg`) stoppen;
+   nur dann bestaetigten Apply ausfuehren.
+6. Services starten und Health, Repair-Audit, Backup-/Manifest-Hash sowie die
+   identische Performance-Kohorte vor/nach Repair dokumentieren.
+
+### 15.4 Rollout-Gates
+
+Vor Produktion muessen volle lokale Testsuite, Python-Compile, neu gebautes und
+verifiziertes Frontend-Bundle, `git diff --check`, Secret-Diff-Scan und Push
+gruen sein. Danach separat nachweisen:
+
+1. Server-HEAD, `origin/main`, API-Revision und Bundle-Hash identisch,
+2. API, Background-Service und nginx aktiv; Health ohne unbekannte Zustelllage,
+3. Realtime-Quote-Berechtigung und erforderliche Quote-Recency produktiv,
+4. unbekannte DATA-Ausgaenge und offene Legacy-Kohorten null oder dokumentiert
+   manuell behandelt,
+5. Repair nur nach erfolgreichem Dry-Run, Backup und Vier-Augen-Pruefung,
+6. neue kausal vollstaendige Forward-Kohorte sammeln; historische Rohdaten
+   niemals still umdeuten.
+
+### 15.5 App Store und Google Play sind ein eigener Releasepfad
+
+Dieses Repository belegt derzeit die responsive Web-App, aber keine native
+iOS-/Android-Huelle, kein Xcode-/Gradle-Projekt und kein Release-Signing. Fuer
+eine Store-Einreichung muessen Architektur, echtes Geraete-QA, Store-IAP,
+Privacy-/Trackingangaben, Entwicklerkonten, Signierung und Store-Metadaten
+separat aufgebaut und nachgewiesen werden. Ein Frontend-Bundle oder ein
+erfolgreicher Server-Rollout schliesst diese Gates nicht.
+
+### 15.6 Reproduzierbare lokale Abnahme vom 13.08.2026
+
+Auf diesem PC wurde der finale Arbeitsbaum in einer isolierten Testumgebung
+abgenommen: 1768/1768 Tests bestanden, 47 geaenderte/neue Python-Dateien
+kompilierten, das Frontend-Bundle wurde als `a6c74874a925` neu gebaut und
+verifiziert, JavaScript-Syntax, `git diff --check` und Secret-Musterscan waren
+gruen. Der unabhaengige Endaudit meldete P0 0, P1 0 und P2 0.
+
+Die reale Browserpruefung nutzte 1440 x 1100 und 390 x 844 Pixel. Es gab keinen
+horizontalen Overflow und keine Konsolenfehler; die lokale Tailwind-Runtime
+meldet lediglich ihre bekannte allgemeine Production-Build-Warnung. Das
+Smart-Money-Radar bestand einen DOM-Injection-Gegenversuch. Screenshots liegen
+lokal unter `output/playwright/` und sind absichtlich durch `.gitignore` vom
+Repository ausgeschlossen.
+
+Die lokale reale Mail-Outbox enthielt bei Abschluss 0 aktive
+`pending/sending/delivering/uncertain` Eintraege. Dies ist kein Beleg fuer den
+Produktionsserver. Nach Clone/PC-Wechsel muessen Bundle-Hash und Tests erneut
+reproduziert und danach Server-HEAD, API-Revision, Services, Health,
+Quote-Berechtigung und Zustelljournale separat geprueft werden.

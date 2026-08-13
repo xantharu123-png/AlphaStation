@@ -12,6 +12,7 @@ Komplett offline: HTTP wird am Modul-Rand gemockt (_http_get_*).
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -70,7 +71,7 @@ def test_fetch_etf_flows_ok_and_error(monkeypatch):
     monkeypatch.setattr(smr, "_http_get_text", _boom)
     sec2 = smr.fetch_etf_flows()
     assert sec2["status"] == "error"
-    assert "dns kaputt" in sec2["error"]
+    assert sec2["error"] == "etf_flows_unavailable"
     assert sec2["rows"] == []
 
 
@@ -372,7 +373,7 @@ def test_fetch_stock_waves_error_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(smr, "_polygon_market_snapshot", _boom)
     sec = smr.fetch_stock_waves("KEY", history_path=str(tmp_path / "v.json"))
     assert sec["status"] == "error"
-    assert "polygon down" in sec["error"]
+    assert sec["error"] == "stock_waves_unavailable"
     assert sec["waves"] == []
 
 
@@ -508,7 +509,7 @@ def test_fetch_insider_trades_error_never_raises(monkeypatch):
     monkeypatch.setattr(smr.requests, "get", _boom)
     sec = smr.fetch_insider_trades()
     assert sec["status"] == "error"
-    assert "sec.gov down" in sec["error"]
+    assert sec["error"] == "insider_trades_unavailable"
     assert sec["trades"] == []
 
 
@@ -585,8 +586,9 @@ def test_fetch_insider_clusters_building_then_cluster(monkeypatch, tmp_path):
     assert json.loads(open(path, encoding="utf-8").read())["trades"]
 
     # Vorbefuellter Verlauf mit echtem Cluster + EDGAR down -> Verlauf allein reicht
+    cluster_date = datetime.now(timezone.utc).date().isoformat()
     trades = {
-        f"k{i}": _ins_trade("AAA", f"I{i}", "buy", "2026-07-29", link=f"L{i}")
+        f"k{i}": _ins_trade("AAA", f"I{i}", "buy", cluster_date, link=f"L{i}")
         for i in range(3)
     }
     path2 = tmp_path / "hist2.json"

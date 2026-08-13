@@ -18,23 +18,23 @@ if str(ROOT) not in sys.path:
 
 import api  # noqa: E402  (Import ist zugleich der Smoke-Test fuer Fix 3)
 
-_BG_OWNED = ("bi_long", "bi_short", "biotech")
+_HEAVY_ENTRY_SCANNERS = ("bi_long", "bi_short", "biotech")
 
 
 # ── Fix 1: Scan-Ownership ───────────────────────────────────────────────────
 
-def test_scheduler_skips_bg_owned_by_default(monkeypatch):
-    """Default (ENV unset oder "1"): schwere bg-owned Scanner werden geskippt."""
+def test_scheduler_keeps_heavy_entry_scanners_api_owned(monkeypatch):
+    """Der API-Scheduler behaelt die Scanner mit sicherem Mailvertrag."""
     monkeypatch.delenv("API_SCAN_SKIP_BG_OWNED", raising=False)
-    for name in _BG_OWNED:
-        assert api._api_scheduler_should_skip(name) is True, name
-        assert api._api_scheduler_should_skip(name, env_value="1") is True, name
-    assert api._BG_OWNED_SCANNERS == frozenset(_BG_OWNED)
+    for name in _HEAVY_ENTRY_SCANNERS:
+        assert api._api_scheduler_should_skip(name) is False, name
+        assert api._api_scheduler_should_skip(name, env_value="1") is False, name
+    assert api._BG_OWNED_SCANNERS == frozenset()
 
 
-def test_scheduler_env_zero_restores_old_behaviour():
-    """ENV "0" (oder false/no): altes Verhalten, api scannt wieder mit."""
-    for name in _BG_OWNED:
+def test_scheduler_legacy_env_zero_remains_api_owned():
+    """Der Alt-Schalter kann den unsicheren BG-Mailowner nicht reaktivieren."""
+    for name in _HEAVY_ENTRY_SCANNERS:
         assert api._api_scheduler_should_skip(name, env_value="0") is False, name
         assert api._api_scheduler_should_skip(name, env_value="false") is False, name
 
@@ -64,7 +64,7 @@ def test_only_scheduler_skips_manual_scan_routes_untouched():
     # Ownership-Vertrag mit bg_service (NUR Quelltext-Check, kein Import):
     bg_src = (ROOT / "bg_service.py").read_text(encoding="utf-8")
     assert "BG_API_OWNED_OVERLAP" in bg_src
-    for name in _BG_OWNED:
+    for name in _HEAVY_ENTRY_SCANNERS:
         assert f'"{name}"' in bg_src, f"bg_service kennt {name} nicht mehr"
 
 

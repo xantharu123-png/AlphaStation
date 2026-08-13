@@ -30,6 +30,11 @@ def _offline_guards(monkeypatch, tmp_path):
     """Asset-Guard + Dedupe offline halten; Cooldowns je Test sauber."""
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *a, **k: ({"AAA", "BBB", "NVST"}, "unit"))
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
     api._EMAIL_COOLDOWN.clear()
     yield
     api._EMAIL_COOLDOWN.clear()
@@ -130,7 +135,8 @@ def test_classify_premarket_candidate_alertable():
     state = api._classify_premarket_candidate("stock_strategy", _pm_row())
     assert state["alertable_now"] is True
     assert state["suppression_reasons"] == []
-    assert state["cooldown_key"] == "stock_strategy_AAA_pm"
+    assert state["cooldown_key"].startswith("stock_strategy_AAA_")
+    assert state["cooldown_key"].endswith("__premarket")
     assert state["pm_dollar_vol"] == 2_000_000
 
 
@@ -168,12 +174,14 @@ def test_classify_premarket_candidate_missing_levels():
 
 
 def test_classify_premarket_candidate_cooldown_namespace():
-    api._EMAIL_COOLDOWN["stock_strategy_AAA_pm"] = time.time()
-    state = api._classify_premarket_candidate("stock_strategy", _pm_row())
+    row = _pm_row()
+    identity_key = api._alert_signal_identity_key("stock_strategy", row, "AAA")
+    api._EMAIL_COOLDOWN[f"{identity_key}__premarket"] = time.time()
+    state = api._classify_premarket_candidate("stock_strategy", row)
     assert state["alertable_now"] is False
     assert "cooldown_active" in state["suppression_reasons"]
     # ... waehrend der Regular-Cooldown desselben Tickers frei ist
-    assert "stock_strategy_AAA" not in api._EMAIL_COOLDOWN
+    assert identity_key not in api._EMAIL_COOLDOWN
 
 
 # ── B2: PM-Mail-Pfad Ende-zu-Ende ──────────────────────────────
@@ -208,8 +216,14 @@ def test_premarket_mail_sends_with_own_channel_and_warning(monkeypatch):
     assert "BBB" not in mail["body"]
     assert "Score >= 85" in mail["body"] or "ab Score 85" in mail["body"]
     # Eigener Cooldown-Namespace: Regular-Mail nach Open bleibt moeglich
-    assert "stock_strategy_AAA_pm" in api._EMAIL_COOLDOWN
-    assert "stock_strategy_AAA" not in api._EMAIL_COOLDOWN
+    assert any(
+        key.startswith("stock_strategy_AAA_") and key.endswith("__premarket")
+        for key in api._EMAIL_COOLDOWN
+    )
+    assert not any(
+        key.startswith("stock_strategy_AAA_") and not key.endswith("__premarket")
+        for key in api._EMAIL_COOLDOWN
+    )
 
 
 def test_premarket_mail_skips_when_no_pm_rows(monkeypatch):

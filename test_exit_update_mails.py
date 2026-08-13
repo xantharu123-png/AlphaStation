@@ -55,18 +55,24 @@ def _signal(ticker):
 
 
 def _bars_after(ticker, specs):
-    """Daily-Bars an den Folgetagen des Alerts; specs = [(high, low, close), ...]."""
-    d0 = datetime.fromisoformat(_signal(ticker)["created_at"]).date()
-    return [
-        {
-            "date": (d0 + timedelta(days=i)).isoformat(),
+    """Complete Daily bars in consecutive US-equity sessions after the alert."""
+    cursor = datetime.fromisoformat(_signal(ticker)["created_at"]).astimezone(
+        st.ZoneInfo("America/New_York")
+    ).date()
+    bars = []
+    for h, l, c in specs:
+        cursor += timedelta(days=1)
+        while not st._is_us_equity_session(cursor):
+            cursor += timedelta(days=1)
+        bars.append({
+            "date": cursor.isoformat(),
             "open": 100.0,
             "high": h,
             "low": l,
             "close": c,
-        }
-        for i, (h, l, c) in enumerate(specs, start=1)
-    ]
+            "interval_complete": True,
+        })
+    return bars
 
 
 def _stock_fetcher(bars_by_ticker):
@@ -85,7 +91,13 @@ def tracker(tmp_path, monkeypatch):
 # ── Teil 1: evaluate_open_signals -> result['transitions'] ───────────────────
 def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     """STOP-Transition enthaelt Status, Fill-Qualitaet und Live-R:R."""
-    tracker.record_alert_signals("breakout", [_base_row()])
+    recipient_key = "b" * 64
+    tracker.record_alert_signals(
+        "breakout",
+        [_base_row()],
+        delivery_recipient_keys=[recipient_key],
+        mail_channel="stocks_swing",
+    )
     bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])  # Tag 1: Low <= Stop
     result = tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
     transitions = result["transitions"]
@@ -96,17 +108,22 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
         "entry", "entry_fill_price", "stop", "tp1", "tp2", "r_realized",
         "r_realized_upper", "outcome_detail", "evaluation_horizon_bars",
         "tp1_hit_this_run", "asset_class",
-        "mail_class", "channel",
+        "mail_class", "channel", "mail_channel",
         "adverse_slippage_r", "adverse_slippage_pct",
         "live_rr_tp1", "live_effective_rr",
         "fill_quality", "fill_rejection_reason",
         "strategy", "trade_horizon", "setup_key",
+        "exit_fill_price", "stop_gap_slippage_r", "stop_gap_slippage_pct",
+        "code_revision", "fill_evidence_mode",
+        "delivery_recipient_keys_json",
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"
     assert tr["scanner"] == "breakout"
     assert tr["mail_class"] == "trade"
     assert tr["channel"] == "email"
+    assert tr["mail_channel"] == "stocks_swing"
+    assert tr["delivery_recipient_keys_json"] == f'["{recipient_key}"]'
     assert tr["direction"] == "LONG"
     assert tr["old_status"] == "OPEN"
     assert tr["new_status"] == "STOP_HIT"
@@ -116,6 +133,9 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert tr["tp1"] == pytest.approx(105.0)
     assert tr["tp2"] == pytest.approx(110.0)
     assert tr["r_realized"] == pytest.approx(-1.0)
+    assert tr["exit_fill_price"] == pytest.approx(95.0)
+    assert tr["stop_gap_slippage_r"] == pytest.approx(0.0)
+    assert tr["stop_gap_slippage_pct"] == pytest.approx(0.0)
     assert tr["tp1_hit_this_run"] is False
     assert tr["asset_class"] == "stock"
 
@@ -147,6 +167,33 @@ def test_tracker_tp2_transition_with_implied_tp1(tracker):
     assert _signal("AAPL")["status"] == "TP2_HIT"
 
 
+def test_terminal_update_is_durable_until_idempotent_ack(tracker):
+    recipient_key = "c" * 64
+    tracker.record_alert_signals(
+        "breakout",
+        [_base_row()],
+        delivery_recipient_keys=[recipient_key],
+        mail_channel="stocks_premarket",
+    )
+    bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"AAPL": bars})
+    )
+    signal_id = result["transitions"][0]["id"]
+
+    pending = tracker.load_pending_terminal_updates()
+    assert len(pending) == 1
+    assert pending[0]["id"] == signal_id
+    assert pending[0]["new_status"] == "STOP_HIT"
+    assert pending[0]["tracker_persisted"] is True
+    assert pending[0]["mail_channel"] == "stocks_premarket"
+    assert pending[0]["delivery_recipient_keys_json"] == f'["{recipient_key}"]'
+
+    assert tracker.mark_terminal_updates_sent([signal_id]) == 1
+    assert tracker.load_pending_terminal_updates() == []
+    assert tracker.mark_terminal_updates_sent([signal_id]) == 0
+
+
 def test_tracker_no_status_change_means_empty_transitions(tracker):
     """Kein Level beruehrt => Signal bleibt OPEN, transitions leer."""
     tracker.record_alert_signals("breakout", [_base_row()])
@@ -176,12 +223,15 @@ def test_tracker_return_stays_backward_compatible(tracker):
 
 # ── Helpers bg (Muster test_mail_gates_bg.py) ────────────────────────────────
 def _transition(**overrides):
+    recipient_key = bg_service._recipient_delivery_key("followup@example.com")
     tr = {
         "id": 7, "ticker": "UNF", "scanner": "bi_long", "direction": "LONG",
         "old_status": "OPEN", "new_status": "STOP_HIT", "entry": 10.0,
         "stop": 9.5, "tp1": 11.0, "tp2": 11.8, "r_realized": -1.0,
         "tp1_hit_this_run": False, "asset_class": "stock",
         "mail_class": "trade", "channel": "email",
+        "trade_horizon": "swing",
+        "delivery_recipient_keys": [recipient_key],
     }
     tr.update(overrides)
     return tr
@@ -196,14 +246,46 @@ def _setup_bg(monkeypatch, tmp_path, transitions, origin_keys=()):
     payload = {"evaluated": len(transitions), "closed": 0, "errors": 0,
                "transitions": list(transitions)}
     monkeypatch.setattr(bg_service, "evaluate_open_signals", lambda **kw: payload)
+    monkeypatch.setattr(
+        bg_service, "_reconcile_pending_accepted_deliveries", lambda: 0
+    )
+    monkeypatch.setattr(bg_service, "load_pending_terminal_updates", lambda: [])
+    monkeypatch.setattr(
+        bg_service,
+        "mark_terminal_updates_sent",
+        lambda signal_ids: len(list(signal_ids)),
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_followup_recipient_profiles",
+        lambda _secrets: [
+            {
+                "email": "followup@example.com",
+                "position_update_scope": "all",
+                "personal_positions": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_current_followup_recipient_emails",
+        lambda _event, _cache: {"followup@example.com"},
+    )
     if origin_keys:
         Path(bg_service._EMAIL_DEDUPE_FILE).write_text(
             json.dumps({key: time.time() for key in origin_keys})
         )
     sent = []
 
-    def _recorder(subject, body_html, secrets, mail_class="trade"):
-        sent.append({"subject": subject, "body": body_html, "mail_class": mail_class})
+    def _recorder(subject, body_html, secrets, mail_class="trade", **kwargs):
+        sent.append(
+            {
+                "subject": subject,
+                "body": body_html,
+                "mail_class": mail_class,
+                "recipients": kwargs.get("recipient_emails"),
+            }
+        )
         return True
 
     monkeypatch.setattr(bg_service, "_send_email_alert", _recorder)
@@ -232,7 +314,8 @@ def test_bg_transitions_send_exactly_one_info_mail(monkeypatch, tmp_path):
     bg_service._run_signal_eval_job(secrets={})
     assert len(sent) == 1
     mail = sent[0]
-    assert mail["mail_class"] == "info"  # ℹ️-Praefix setzt _send_email_alert selbst
+    assert mail["mail_class"] == "signal_update"
+    assert mail["recipients"] == ["followup@example.com"]
     assert mail["subject"] == "Signal-Update: 3 Position(en) — 1 Stop / 1 TP"
     body = mail["body"]
     assert "UNF" in body and "Stop erreicht" in body and "-1.00R" in body
@@ -251,6 +334,85 @@ def test_bg_same_transition_second_run_is_deduped(monkeypatch, tmp_path):
     assert "signal_update_7_STOP_HIT" in marks
     bg_service._run_signal_eval_job(secrets={})
     assert len(sent) == 1
+
+
+def test_bg_reloads_terminal_transition_after_crash_and_acks_once(
+    tracker, monkeypatch, tmp_path
+):
+    """A crash after tracker commit but before enqueue loses no exit update."""
+    recipient_key = bg_service._recipient_delivery_key("followup@example.com")
+    tracker.record_alert_signals(
+        "breakout",
+        [_base_row()],
+        delivery_recipient_keys=[recipient_key],
+        mail_channel="stocks_swing",
+    )
+    bars = _bars_after("AAPL", [(101.0, 94.5, 96.0)])
+    committed = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"AAPL": bars})
+    )
+    assert len(committed["transitions"]) == 1
+    # Simulated process loss: the in-memory transition is discarded here.
+    sent, _ = _setup_bg(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        bg_service, "load_pending_terminal_updates",
+        tracker.load_pending_terminal_updates,
+    )
+    monkeypatch.setattr(
+        bg_service, "mark_terminal_updates_sent",
+        tracker.mark_terminal_updates_sent,
+    )
+
+    bg_service._run_signal_eval_job(secrets={})
+    assert len(sent) == 1
+    assert "AAPL" in sent[0]["body"]
+    assert tracker.load_pending_terminal_updates() == []
+
+    bg_service._run_signal_eval_job(secrets={})
+    assert len(sent) == 1
+
+
+def test_bg_reconciles_cross_db_acceptance_without_second_smtp(
+    monkeypatch,
+):
+    recipient_key = bg_service._recipient_delivery_key("a@example.com")
+    finalized = []
+    acknowledged = []
+
+    class JournalOutbox:
+        @staticmethod
+        def load_tracker_acceptance_pending():
+            return [{
+                "intent_key": "intent:accepted",
+                "accepted_recipient_keys": [recipient_key],
+                "accepted_at": 12_345.0,
+            }]
+
+        @staticmethod
+        def mark_tracker_acceptance_done(intent_key):
+            acknowledged.append(intent_key)
+            return True
+
+    def _finalize(intent_key, recipient_keys, accepted_at=None):
+        finalized.append((intent_key, tuple(recipient_keys), accepted_at))
+        return {"activated": True, "signal_ids": [41, 42]}
+
+    monkeypatch.setattr(bg_service, "_mail_outbox", JournalOutbox())
+    monkeypatch.setattr(bg_service, "load_pending_accepted_deliveries", lambda: [])
+    monkeypatch.setattr(bg_service, "finalize_alert_delivery", _finalize)
+    monkeypatch.setattr(
+        bg_service,
+        "_send_email_alert",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("acceptance reconciliation must never call SMTP")
+        ),
+    )
+
+    assert bg_service._reconcile_pending_accepted_deliveries() == 2
+    assert finalized == [
+        ("intent:accepted", (recipient_key,), 12_345.0)
+    ]
+    assert acknowledged == ["intent:accepted"]
 
 
 def test_bg_no_transitions_no_mail(monkeypatch, tmp_path):

@@ -19,7 +19,7 @@ from collections import defaultdict
 from modules.data_fetchers import (
     rate_limited_get, fetch_grouped_daily, get_ticker_details,
     _get_bpiq_catalysts, _calculate_biotech_catalyst_score,
-    get_premium_catalyst_tickers
+    get_premium_catalyst_tickers, redact_sensitive_query_values,
 )
 from modules.indicators import (
     calculate_sma, calculate_ema, calculate_rsi_from_bars,
@@ -1066,7 +1066,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 next_url = None
                 for _page in range(12):  # Max 12 Seiten = 12000 Aktien
                     if next_url:
-                        resp = rate_limited_get(next_url, timeout=15)
+                        # Never embed credentials in pagination URLs: request
+                        # exceptions and traces routinely render the URL.
+                        resp = rate_limited_get(
+                            next_url, params={"apiKey": poly_key}, timeout=15
+                        )
                     else:
                         resp = rate_limited_get(url, params=params, timeout=15)
                     if resp.status_code != 200:
@@ -1092,9 +1096,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         seen.add(t)
                         candidates.append(t)
                     next_url = data.get("next_url")
-                    if next_url:
-                        next_url = f"{next_url}&apiKey={poly_key}"
-                    else:
+                    if not next_url:
                         break
                     _bi_progress_write(direction, "scanning",
                                        detail=f"Universe: {len(candidates)} Aktien geladen (Seite {_page+1})...")
@@ -1125,7 +1127,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                    detail=f"{len(candidates)} Kandidaten — starte Analyse")
                 print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
             except Exception as e:
-                _bi_progress_write(direction, "error", detail=f"Universe-Fehler: {str(e)[:50]}")
+                safe_error = redact_sensitive_query_values(e)
+                _bi_progress_write(
+                    direction,
+                    "error",
+                    detail=f"Universe-Fehler: {safe_error[:50]}",
+                )
                 raise RuntimeError(f"BI {direction} Universe konnte nicht geladen werden") from e
 
         if not candidates:
@@ -1722,7 +1729,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     print(f"[BI {direction}] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
             except Exception as e:
                 analysis_errors += 1
-                print(f"[BI {direction}] Error analyzing {ticker}: {e}")
+                print(
+                    f"[BI {direction}] Error analyzing {ticker}: "
+                    f"{redact_sensitive_query_values(e)}"
+                )
                 continue
 
         # Finale Sortierung + Speichern
@@ -1756,8 +1766,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                            detail=pipeline)
 
     except Exception as e:
-        _bi_progress_write(direction, "error", detail=f"Fehler: {str(e)[:100]}")
-        raise
+        safe_error = redact_sensitive_query_values(e)
+        _bi_progress_write(direction, "error", detail=f"Fehler: {safe_error[:100]}")
+        raise RuntimeError(safe_error) from None
 
 
 def _biotech_config_load():

@@ -9,6 +9,7 @@ Muster (Cache schreiben, _send_email_alert mocken) aus test_mail_gates_bg.py.
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -98,24 +99,13 @@ def _mock_tracker_record(monkeypatch):
 
 # ── 1) Logging nach Versand: Original-Rows, nur bei Erfolg ─────────────────
 
-def test_record_called_with_original_rows_after_successful_send(monkeypatch, tmp_path):
-    """Nach Erfolgs-Versand: record_alert_signals mit ORIGINAL-Rows der gemailten
-    Ticker (inkl. Entry/StopLoss) — nicht mit den aufbereiteten Mail-Dicts."""
+def test_bg_entry_path_neither_sends_nor_tracks(monkeypatch, tmp_path):
+    """BG-Caches duerfen weder Entry-SMTP noch Schein-Tracking erzeugen."""
     sent = _setup_bi(monkeypatch, tmp_path, [_base_row("GOOD")])
     calls = _mock_tracker_record(monkeypatch)
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    assert len(calls) == 1
-    assert calls[0]["scanner"] == "bi_long"
-    assert calls[0]["mail_class"] == "trade"
-    assert calls[0]["channel"] == "email"
-    rows = calls[0]["rows"]
-    assert len(rows) == 1
-    assert rows[0]["ticker"] == "GOOD"
-    # Beweis Original-Row: Entry/Stop-Zahlen vorhanden, kein Mail-Aufbereitungsfeld.
-    assert rows[0]["Entry"] == 10.0
-    assert rows[0]["StopLoss"] == 9.5
-    assert "trade_plan_html" not in rows[0]
+    assert sent == []
+    assert calls == []
 
 
 def test_record_not_called_when_send_fails(monkeypatch, tmp_path):
@@ -127,9 +117,8 @@ def test_record_not_called_when_send_fails(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_record_failure_never_breaks_mail_path(monkeypatch, tmp_path):
-    """Kontrakt 'wirft nie' + Defensive: selbst ein werfender Tracker darf den
-    Mail-Pfad (Cooldown/Dedupe-Marks) nicht brechen."""
+def test_bg_tracker_failure_cannot_reactivate_entry_mail(monkeypatch, tmp_path):
+    """Ein Trackerfehler darf den fail-closed BG-Entry-Pfad nicht reaktivieren."""
     sent = _setup_bi(monkeypatch, tmp_path, [_base_row("GOOD")])
 
     def _boom(*a, **k):
@@ -137,19 +126,37 @@ def test_record_failure_never_breaks_mail_path(monkeypatch, tmp_path):
 
     monkeypatch.setattr(bg_service, "record_alert_signals", _boom, raising=False)
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    marks = json.loads(Path(bg_service._EMAIL_DEDUPE_FILE).read_text())
-    assert "bi_long_GOOD" in marks  # Dedupe-Mark trotz Tracker-Fehler gesetzt
+    assert sent == []
 
 
-def test_nls_record_uses_signal_fields_after_send(monkeypatch, tmp_path):
-    """NLS-Pfad: nach Versand record mit Roh-Signal-Feldern (entry/stop_loss/tp)."""
+def test_nls_bg_entry_is_api_authoritative_and_never_crosses_smtp_boundary(
+    monkeypatch, tmp_path
+):
+    """Der optionale BG-NLS-Pfad darf kein Entry-DATA/Tracker-Split erzeugen.
+
+    Selbst ein hypothetischer SMTP-Erfolg mit anschließendem Tracker-Ausfall ist
+    hier unmöglich: der BG-Worker stoppt vor beiden Side Effects.  Nur die
+    getrennten Invalidierungs-Info-Updates bleiben aktiv.
+    """
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     monkeypatch.setattr(bg_service, "_EMAIL_COOLDOWN", {})
-    monkeypatch.setattr(bg_service, "_alert_nls_invalidations", lambda *a, **k: None)
-    monkeypatch.setattr(bg_service, "_alert_trade_plan_ok", lambda *a, **k: True)
-    monkeypatch.setattr(bg_service, "_send_email_alert", lambda *a, **k: True)
-    calls = _mock_tracker_record(monkeypatch)
+    invalidation_calls = []
+    monkeypatch.setattr(
+        bg_service,
+        "_alert_nls_invalidations",
+        lambda rows, secrets: invalidation_calls.append((rows, secrets)),
+    )
+
+    def _smtp_data_must_not_be_reached(*args, **kwargs):
+        raise AssertionError("BG NLS entry crossed the SMTP DATA boundary")
+
+    def _tracker_must_not_be_reached(*args, **kwargs):
+        raise AssertionError("BG NLS entry attempted tracker activation")
+
+    monkeypatch.setattr(bg_service, "_send_email_alert", _smtp_data_must_not_be_reached)
+    monkeypatch.setattr(
+        bg_service, "record_alert_signals", _tracker_must_not_be_reached, raising=False
+    )
     results = {
         "signals": [{
             "symbol": "TSTUSDT",
@@ -164,14 +171,10 @@ def test_nls_record_uses_signal_fields_after_send(monkeypatch, tmp_path):
             },
         }]
     }
-    bg_service._alert_nls_signals(results, {})
-    assert len(calls) == 1
-    assert calls[0]["scanner"] == "new_listing"
-    rows = calls[0]["rows"]
-    assert rows[0]["symbol"] == "TSTUSDT"  # Roh-Symbol fuer Tracker-Key
-    assert rows[0]["entry"] == 1.0
-    assert rows[0]["stop_loss"] == 1.1
-    assert rows[0]["tp1"] == 0.7
+    secrets = {"POLYGON_KEY": "not-used"}
+    assert bg_service._alert_nls_signals(results, secrets) is False
+    assert invalidation_calls == [(results, secrets)]
+    assert not Path(bg_service._EMAIL_DEDUPE_FILE).exists()
 
 
 # ── 2) Telegram-Hook in _send_email_alert ──────────────────────────────────
@@ -307,6 +310,44 @@ def test_tracker_stock_fetcher_http_error_returns_none(monkeypatch):
 
 # ── 3b) _tracker_crypto_fetcher (CoinGecko-Markets-Cache) ──────────────────
 
+def test_tracker_stock_intraday_fetcher_marks_unaligned_boundary_candle(monkeypatch):
+    monkeypatch.setattr(bg_service, "_load_secrets", lambda: {"POLYGON_KEY": "k"})
+    since = datetime(2026, 8, 11, 14, 0, 1, tzinfo=timezone.utc)
+    boundary_start = since.replace(second=0, microsecond=0)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"results": [
+                {
+                    "t": int(boundary_start.timestamp() * 1000),
+                    "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.0,
+                },
+                {
+                    "t": int((boundary_start + timedelta(minutes=5)).timestamp() * 1000),
+                    "o": 100.0, "h": 102.0, "l": 99.0, "c": 101.0,
+                },
+            ]}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: _Resp())
+    observation = bg_service._tracker_stock_intraday_fetcher(
+        "AAPL",
+        since=since.isoformat(),
+        until=(boundary_start + timedelta(minutes=10)).isoformat(),
+    )
+
+    assert observation["interval_complete"] is True
+    assert len(observation["intervals"]) == 2
+    assert observation["intervals"][0]["boundary_overlap"] is True
+    assert observation["intervals"][0]["started_at"] == boundary_start.isoformat()
+    assert observation["intervals"][0]["observed_at"] == (
+        boundary_start + timedelta(minutes=5)
+    ).isoformat()
+    assert observation["intervals"][1]["boundary_overlap"] is False
+
+
 def test_tracker_crypto_fetcher_matches_cache_and_strips_suffix(monkeypatch, tmp_path):
     cache = tmp_path / "cg.json"
     cache.write_text(json.dumps({"coins": [
@@ -333,6 +374,41 @@ def test_tracker_crypto_fetcher_matches_cache_and_strips_suffix(monkeypatch, tmp
 
 
 # ── 4) Stuendlicher Eval-Job ───────────────────────────────────────────────
+
+def test_tracker_crypto_fetcher_marks_unaligned_boundary_candle(monkeypatch):
+    import modules.new_listing_scanner as new_listing_scanner
+
+    since = datetime(2026, 8, 11, 14, 0, 1, tzinfo=timezone.utc)
+    boundary_start = since.replace(second=0, microsecond=0)
+    monkeypatch.setattr(
+        new_listing_scanner,
+        "fetch_candles_for",
+        lambda *args, **kwargs: [
+            {
+                "timestamp": boundary_start.timestamp(),
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+            },
+            {
+                "timestamp": (boundary_start + timedelta(minutes=5)).timestamp(),
+                "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0,
+            },
+        ],
+    )
+    observation = bg_service._tracker_crypto_fetcher(
+        "BTC",
+        instrument_id="bitcoin",
+        venue="binance",
+        contract_symbol="BTCUSDT",
+        since=since.isoformat(),
+        until=(boundary_start + timedelta(minutes=10)).isoformat(),
+    )
+
+    assert observation["interval_complete"] is True
+    assert len(observation["intervals"]) == 2
+    assert observation["intervals"][0]["boundary_overlap"] is True
+    assert observation["intervals"][0]["started_at"] == boundary_start.isoformat()
+    assert observation["intervals"][1]["boundary_overlap"] is False
+
 
 def test_eval_job_calls_evaluate_with_both_fetchers(monkeypatch):
     seen = {}

@@ -1464,3 +1464,154 @@ Post-Pump-Short-Gates; volle Suite und Frontend-Bundle-Prüfung grün).
 6. **Nie auf Produktion entwickeln oder committen** — lokal ändern, testen und nach `main` pushen; der Server zieht nur den geprüften Commit.
 7. **Secrets und Zustandsdaten getrennt halten** — `.env`, `data_cache/`, Tracker-/Outbox-DB und Brokerzustand weder committen noch bei einer Migration überschreiben.
 8. **Technik, Produktion und Performance getrennt abnehmen** — grüne Tests beweisen Codekonsistenz, Health beweist Erreichbarkeit, Forward-Daten beweisen erst die reale Signalgüte.
+
+---
+
+## 10. Nachtrag 13.08.2026 - Signal-Pipeline, Mailforensik und Rollout-Grenze
+
+### 10.1 Warum der bisherige Track Record nicht belastbar genug war
+
+Die forensische Sichtung der Signal-Update-Mails vom 06.-12.08.2026 ergab 16
+Digests mit 45 Ereigniszeilen. Nach Deduplizierung identischer Plangeometrien
+blieben 41 Plaene: 33 terminale Ereignisse und 8 Faelle mit TP1, deren Rest noch
+offen war. In den 33 terminalen Ereignissen standen 12 positive und 21 negative
+Ausgaenge, +21,70R und -23,81R, damit netto -2,11R.
+
+Diese Zahl beschreibt nur den beobachteten Update-Ereignisstrom. Sie ist keine
+vollstaendige Created- oder Matured-Kohorte der in diesem Zeitraum versendeten
+Entries: den Update-Mails fehlten stabile Signal-ID und urspruengliche
+Signalzeit; aeltere Plaene koennen enthalten sein, waehrend `NO_FILL`,
+`UNTRACKED`, offene Signale ohne TP1 und ausgefallene Zustellungen fehlen
+koennen. Auch die 12:21-Aufteilung ist deshalb keine belastbare kuenftige
+Trefferwahrscheinlichkeit.
+
+Vier Extremfaelle wurden gegen Marktdaten und vorhandene Mailbelege neu
+eingeordnet:
+
+| Fall | Rohwert | Auditwert | Grenze/Ursache |
+|---|---:|---:|---|
+| ONON | -4,65R | -3,94R | fehlendes echtes Daily-Open war durch laufenden Close ersetzt worden |
+| ECO | -1,27R | -1,00R | echtes Open lag ueber Stop; normale spaetere Stopberuehrung |
+| CBLL | -1,57R | `NO_FILL` | Planpreis war vor Mail veraltet; Markt lag bereits unter Stop |
+| AURA | -1,38R | konservativ -1,38R; wahrscheinlich -1,00R | gleiche Missing-Open-Signatur, aber Erstmailzeit nicht eindeutig belegt |
+
+Konservativ ergeben diese vier Faelle -6,32R statt -8,87R: Verbesserung um
++2,55R, drei Verluste plus ein `NO_FILL` statt vier Verlusten. Die wahrscheinliche
+AURA-Variante ergaebe +2,93R Verbesserung, bleibt aber ausdruecklich
+unbestaetigt. Die Korrektur erklaert einen Teil der extremen Ausschlaege; sie
+wandelt den negativen Rohstrom nicht in einen Profitabilitaetsnachweis um.
+
+### 10.2 Neuer kausaler Mail-/Fill-Vertrag
+
+Der Produktionspfad muss Signalzeit, Datenzeit, Scanzeit, vorbereiteten
+Delivery-Intent, SMTP-Akzeptanzzeit und Fillzeit getrennt halten. Eine Quote
+unmittelbar vor Versand validiert Preis, Spread, Session und Marktpfad, ist aber
+kein Fill. Tracking beginnt nur mit nachgewiesener DATA-Akzeptanz fuer die
+konkrete Empfaengerkohorte oder einem dokumentierten Brokerfill.
+
+Ohne Brokerfill ist der First Executable Price die erste realistisch handelbare
+Beobachtung ab diesem Start: Long zum Ask, Short zum Bid, inklusive Spread,
+Slippage und Kosten. Daily-Auswertung braucht ein echtes Open;
+laufende Bars oder Close-als-Open duerfen weder Gap-Fill noch terminalen Exit
+erzeugen. Fehlt ein lueckenloser Post-Alert-Pfad, bleibt der Datensatz `OPEN`
+oder `UNTRACKED`; eine guenstige oder unguenstige Intrabar-Reihenfolge wird nicht
+erfunden.
+
+### 10.3 Delivery-Intent, Teilannahme und Legacy-Kohorten
+
+Vor SMTP wird ein stabiler Intent aus Signalidentitaet, Mailklasse und
+vorgesehener Empfaengerliste persistiert. Nur der atomare Owner von
+`PREPARED -> ATTEMPTED` darf DATA senden. Jede tatsaechliche Annahme wird sofort
+mit pseudonymisiertem Empfaenger und Akzeptanzzeit journalisiert.
+
+- Unbekannter DATA-Ausgang: Quarantaene, kein automatischer Neuversand.
+- Teilannahme: nur die in diesem Versuch akzeptierten Empfaenger bilden die
+  kausale Signal-Kohorte; ein spaeterer Retry wird nicht in diesen Start gemischt.
+- Folge-, Exit- und Break-even-Mails: nur Ursprungskohorte geschnitten mit
+  aktuellem Opt-in; kein Exit an neue Abonnenten ohne Entry.
+- Altes offenes Signal ohne Empfaengerledger:
+  `legacy_open_cohort_unknown`, keine geratenen Empfaenger, degradierter Health-
+  Status und manuelle Behandlung.
+- Terminale und Break-even-Updates bleiben durable pending, bis ihre Zustellung
+  bestaetigt wurde.
+
+### 10.4 Ehrliche Kohorten, Managed BE und Kalibrierung
+
+Created- und Matured-in-window, gefuellt, entschieden, `NO_FILL`, `OPEN`,
+`UNTRACKED` und unaufgeloest werden getrennt berichtet. Hit-Rate, Wilson-
+Intervall und Profit Factor verwenden nur gefuellte und entschiedene Signale.
+Level-R, 50/50-Managed-R und 50/50-plus-Break-even-R sind getrennte Semantiken.
+Ist die BE-Anweisung nicht nachweisbar zugestellt, bleibt
+`managed_be_unresolved`; der Fall wird weder als 0R gewertet noch aus den
+Verlusten entfernt.
+
+Eine Scannerfreigabe darf nur aus der gemeinsamen Zelle Scanner x Richtung x
+Horizont x exogenem, zum Signalzeitpunkt persistiertem Marktregime entstehen.
+Je Zelle sind mindestens 30 vollstaendig beobachtete Entscheidungen, ein
+Wilson-95-Prozent-Intervall und null unresolved Kontrollfaelle erforderlich.
+Scannerweite Mischwerte duerfen schwache Richtungs-, Horizont- oder Regimezellen
+nicht kaschieren.
+
+### 10.5 Repair-Runbook und Produktionsgates
+
+Historische Korrekturen laufen ausschliesslich nach
+`deploy/SIGNAL_TRACKER_REPAIR.md` mit
+`scripts/signal_tracker_repair.py`: read-only Kandidateninspektion, extern
+belegtes Manifest, exakter Before-State, Dry-Run, gestoppte API- und BG-Writer,
+konsistentes Backup, `BEGIN IMMEDIATE`-Recheck, append-only Audit und
+Nachverifikation. Bei AURA wird ohne eindeutigen Erstmail-/DB-Nachweis nichts
+angewendet; generell werden keine Werte geraten.
+
+Vor einem Rollout sind volle lokale Testsuite, Python-Compile, neu gebautes und
+verifiziertes Frontend-Bundle, `git diff --check`, Secret-Diff-Scan und Push
+zwingend. Produktion braucht zusaetzlich Backup von Tracker, Zustelljournal und
+Outbox, bei Repair eine Vier-Augen-Pruefung sowie denselben Commit in
+Server-HEAD, API-Revision, Bundle-Hash, Services und Health. Realtime-Quote-
+Berechtigung und Quote-Recency muessen produktiv belegt sein; offene Legacy-
+Kohorten und unbekannte SMTP-Ausgaenge muessen null oder dokumentiert manuell
+behandelt sein.
+
+Der ausfuehrliche Beleg steht in `AUDIT_SIGNAL_PIPELINE_2026-08-13.md`. Die
+lokale Implementierung ist kein Nachweis fuer einen Server-Rollout und weder
+historische Korrektur noch gruene Tests beweisen Profitabilitaet. Diese kann nur
+eine neue kausal vollstaendige Forward-Kohorte zeigen.
+
+### 10.6 Mobile-/Store-Grenze
+
+Der aktuelle Dateibaum enthaelt keine nachgewiesene native iOS-/Android-Huelle,
+kein Xcode-/Gradle-Projekt und keine Store-Signing-Konfiguration. Die vorhandene
+responsive Web-App ist deshalb nicht allein durch einen gruenen Frontend-Build
+App-Store- oder Google-Play-bereit. Vor einer Store-Einreichung braucht es eine
+bewusste native Architektur, reale iOS-/Android-Geraetetests, macOS/Xcode fuer
+iOS, Android-SDK/JDK, Release-Signing, Store-Produkte/IAP statt ausschliesslich
+Stripe-Webcheckout, Datenschutz-/Trackingdeklarationen, Store-Texte und die
+jeweiligen Entwicklerkonten. Kein Codex-Plugin ersetzt diese Nachweise.
+
+### 10.7 Verifizierter lokaler Endstand dieses Audits
+
+Der finale Arbeitsbaum wurde nach allen Reparaturen und zwei unabhaengigen
+Folgeaudit-Runden erneut vollstaendig geprueft:
+
+- 1768/1768 Pytest-Faelle bestanden (isolierte DB-/Outbox-/SMTP-Umgebung),
+- 47 geaenderte/neue Python-Dateien kompiliert,
+- Bundle `a6c74874a925` aus der Quelle neu gebaut und verifiziert,
+- `node --check`, `git diff --check` und Secret-Musterscan gruen,
+- lokale reale Outbox: 0 aktive Eintraege,
+- finaler unabhaengiger Audit: P0 0, P1 0, P2 0.
+
+Die Browser-QA bestaetigte bei 1440 px und 390 px keinen horizontalen Overflow
+und keine Konsolenfehler. Die Landingpage entfernt unbelegte Profit-/Social-
+Proof-Aussagen; Paperzahlen sind als illustrative Demo ohne echte Ergebnisse
+gekennzeichnet. Das externe Smart-Money-Skript ist CSP-kompatibel und zeigte im
+HTML-Injection-Test keine DOM-Ausfuehrung. Als nicht-blockierender P3-Hinweis
+bleibt die allgemeine Tailwind-Runtime-Warnung des lokal vendorten Skripts.
+
+Aktien-Reminder verwenden nur frische, abgeschlossene 5-Minuten-Kerzen in einer
+ausfuehrbaren US-Session und benennen Preis, UTC-Kerzenschluss und die Grenze
+`kein Live-Bid/Ask` explizit. Stale Daten fuehren weder zu Mail noch Tracking;
+der Reminder bleibt fuer einen spaeteren sicheren Retry aktiv.
+
+Der Server wurde mit diesem Stand nicht als aktualisiert nachgewiesen. Deshalb
+bleiben Deployment, produktive Realtime-Quote-Berechtigung, Legacy-Kohorten,
+Forward-Performance, IBKR-Paper-Soak und App-Store-/Google-Play-Freigabe eigene
+offene Nachweise.

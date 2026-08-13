@@ -21,13 +21,72 @@ Whale-Alert (optionaler Key). Jede Sektion traegt eigenen status
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
 
 import requests
+
+log = logging.getLogger("bg_service")
+
+_SENSITIVE_PROVIDER_VALUE_RE = re.compile(
+    r"(?i)((?:api[_-]?key|apikey|access[_-]?token|token|secret|password)"
+    r"\s*(?:=|:|%3[dD])\s*['\"]?)[^'\"&\s,}]+"
+)
+
+
+def _sanitized_provider_exception(exc: BaseException) -> str:
+    """Return diagnostic provider context without credentials/query values."""
+    raw = f"{type(exc).__name__}: {exc}"
+    return _SENSITIVE_PROVIDER_VALUE_RE.sub(r"\1[REDACTED]", raw)[:500]
+
+
+def _log_provider_failure(section: str, exc: BaseException) -> None:
+    log.warning(
+        "Smart-money provider failure [%s]: %s",
+        str(section or "unknown")[:80],
+        _sanitized_provider_exception(exc),
+    )
+
+
+def _section_error(section: str, empty_key: str, exc: BaseException) -> dict[str, Any]:
+    _log_provider_failure(section, exc)
+    return {
+        "status": "error",
+        "error": f"{section}_unavailable",
+        empty_key: [],
+    }
+
+
+def _public_radar_payload(radar: dict[str, Any]) -> dict[str, Any]:
+    """Strip legacy cached provider exception text before public delivery."""
+    payload = dict(radar or {})
+    raw_sections = payload.get("sections")
+    if isinstance(raw_sections, dict):
+        clean_sections: dict[str, Any] = {}
+        for section_name, raw_section in raw_sections.items():
+            if not isinstance(raw_section, dict):
+                clean_sections[section_name] = raw_section
+                continue
+            section = dict(raw_section)
+            if "error" in section:
+                section["error"] = f"{section_name}_unavailable"
+            if "partial_errors" in section:
+                failures = section.get("partial_errors")
+                failure_count = len(failures) if isinstance(failures, list) else 1
+                section["partial_errors"] = [
+                    f"provider_failure_{index + 1}"
+                    for index in range(min(max(failure_count, 1), 20))
+                ]
+            clean_sections[section_name] = section
+        payload["sections"] = clean_sections
+    if "error" in payload:
+        payload["error"] = "smart_money_radar_unavailable"
+    return payload
 
 FARSIDE_BTC_URL = "https://farside.co.uk/btc/"
 WHALE_ALERT_URL = "https://api.whale-alert.io/v1/transactions"
@@ -166,7 +225,7 @@ def fetch_etf_flows() -> dict[str, Any]:
             "rows": rows,
         }
     except Exception as exc:
-        return {"status": "error", "error": str(exc)[:200], "rows": []}
+        return _section_error("etf_flows", "rows", exc)
 
 
 # ── 2) Volumen-Wellen (Polygon Aggs) ─────────────────────────────────────────
@@ -224,7 +283,8 @@ def fetch_volume_waves(api_key: str | None) -> dict[str, Any]:
         try:
             bars_by_symbol[symbol] = _polygon_daily_bars(symbol, api_key)
         except Exception as exc:
-            errors.append(f"{symbol}: {str(exc)[:80]}")
+            _log_provider_failure(f"volume_waves:{symbol}", exc)
+            errors.append(f"{symbol}:provider_unavailable")
     waves = compute_waves(bars_by_symbol)
     for w in waves:
         w["label"] = labels.get(w["symbol"], w["symbol"])
@@ -397,7 +457,7 @@ def fetch_stock_waves(api_key: str | None, history_path: str | None = None) -> d
             "waves": waves,
         }
     except Exception as exc:
-        return {"status": "error", "error": str(exc)[:200], "waves": []}
+        return _section_error("stock_waves", "waves", exc)
 
 
 # ── 2c) Insider-Trades (SEC EDGAR Form 4, gratis + namentlich) ───────────────
@@ -548,7 +608,7 @@ def fetch_insider_trades() -> dict[str, Any]:
             out["partial_errors"] = errors
         return out
     except Exception as exc:
-        return {"status": "error", "error": str(exc)[:200], "trades": []}
+        return _section_error("insider_trades", "trades", exc)
 
 
 # ── 2d) Insider-Cluster (staerkstes Insider-Signal: 3+ Kauefer, gleiche Firma) ─
@@ -663,7 +723,7 @@ def fetch_insider_clusters(history_path: str | None = None) -> dict[str, Any]:
             "clusters": result["clusters"],
         }
     except Exception as exc:
-        return {"status": "error", "error": str(exc)[:200], "clusters": []}
+        return _section_error("insider_clusters", "clusters", exc)
 
 
 # ── 3) Whale-Alerts (optional, WHALE_ALERT_KEY) ──────────────────────────────
@@ -714,7 +774,7 @@ def fetch_whale_alerts(api_key: str | None, lookback_sec: int = 6 * 3600,
             "transactions": txs,
         }
     except Exception as exc:
-        return {"status": "error", "error": str(exc)[:200], "transactions": []}
+        return _section_error("whale_alerts", "transactions", exc)
 
 
 # ── Gesamt-Block mit Cache ───────────────────────────────────────────────────
@@ -729,7 +789,7 @@ def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
         cached = _read_cache(path)
         if cached and now - float(cached.get("_cached_at") or 0) < ttl_sec:
             cached["cache"] = "fresh"
-            return cached
+            return _public_radar_payload(cached)
     polygon_key = polygon_key if polygon_key is not None else os.environ.get("POLYGON_KEY")
     whale_key = whale_key if whale_key is not None else os.environ.get("WHALE_ALERT_KEY")
     try:
@@ -748,15 +808,16 @@ def build_radar(polygon_key: str | None = None, whale_key: str | None = None,
             "cache": "new",
         }
         _write_cache(path, radar)
-        return radar
+        return _public_radar_payload(radar)
     except Exception as exc:  # Doppelfang — Sektionen fangen bereits selbst
+        _log_provider_failure("radar", exc)
         stale = _read_cache(path)
         if stale:
             stale["cache"] = "stale"
-            return stale
-        return {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            return _public_radar_payload(stale)
+        return _public_radar_payload({"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "disclaimer": DISCLAIMER, "sections": {}, "cache": "error",
-                "error": str(exc)[:200]}
+                "error": "smart_money_radar_unavailable"})
 
 
 def _read_cache(path: str) -> dict[str, Any] | None:

@@ -44,7 +44,8 @@ def _as_admin(monkeypatch, captured):
     )
     monkeypatch.setattr(
         api, "load_performance_summary",
-        lambda days=90: captured.append(days) or {"days": days, "signals": 5},
+        lambda days=90, mature_only=True: captured.append((days, mature_only))
+        or {"days": days, "signals": 5, "mature_only": mature_only},
     )
 
 
@@ -77,7 +78,7 @@ def test_days_query_clamped_to_1_and_365(monkeypatch):
     api.api_signal_performance(days=9999, authorization="Bearer admin-token")
     api.api_signal_performance(days=90, authorization="Bearer admin-token")
 
-    assert captured == [1, 365, 90]
+    assert captured == [(1, True), (365, True), (90, True)]
 
 
 def test_days_default_is_30(monkeypatch):
@@ -87,11 +88,12 @@ def test_days_default_is_30(monkeypatch):
     # Direkter Aufruf ohne days: FastAPI uebergibt das Query-Objekt nicht,
     # der Endpoint faellt kontrolliert auf den Default 30 zurueck.
     api.api_signal_performance(authorization="Bearer admin-token")
-    assert captured == [30]
+    assert captured == [(30, True)]
 
     # HTTP-Seite: Query-Default ist ebenfalls 30.
     sig = inspect.signature(api.api_signal_performance)
     assert sig.parameters["days"].default.default == 30
+    assert sig.parameters["mature_only"].default.default is True
 
 
 # ── 3) Zugriff: Admin weiter erlaubt, eingeloggter User kommt durch ──
@@ -110,7 +112,11 @@ def test_admin_remains_allowed(monkeypatch):
 def test_logged_in_non_admin_allowed_anonymous_stays_403(monkeypatch):
     monkeypatch.setattr(
         api, "load_performance_summary",
-        lambda days=90: {"days": days, "signals": 2},
+        lambda days=90, mature_only=True: {
+            "days": days,
+            "signals": 2,
+            "mature_only": mature_only,
+        },
     )
     monkeypatch.setattr(api, "HAS_AUTH", True)
     # Gueltiger Token eines Nicht-Admins: _require_admin lehnt ab (403),
@@ -141,6 +147,12 @@ def test_frontend_signal_performance_tab_registered():
     assert "Track-Record: Hit-Rate & R-Bilanz aller Signale" in source
     assert "activeTab === 'signal-performance' && <SignalPerformanceTab" in source
     assert "function SignalPerformanceTab" in source
+    assert "mature_only=${matureOnly}" in source
+    assert "Reife Kohorte" in source
+    assert "Alle vorläufig" in source
+    assert "Performance pro kausaler Modellzelle" in source
+    assert "Horizont / Regime" in source
+    assert "fill_evidence_mode" in source
 
 
 # ── 5) Frontend: Tabelle (Hit-Rate / Ø R / Σ R) + Zeilen-Toenung ──
@@ -171,10 +183,8 @@ def test_frontend_status_badges_hint_period_switch_and_403():
     assert "{ label: 'STOP', cls: 'bg-red-100 text-red-700' }" in source
     assert "{ label: 'EXPIRED', cls: 'bg-gray-100 text-gray-600' }" in source
 
-    assert (
-        "Auswertung: First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto stündlicher Spot-Check."
-        in source
-    )
+    assert "Standard ist die vollständig beobachtete Versandkohorte." in source
+    assert "vollständigen chronologischen Intervallen" in source
 
     assert "[7, 30, 90].map" in source
     assert "const [days, setDays] = useState(30);" in source
@@ -204,3 +214,6 @@ def test_frontend_managed_r_wilson_and_reliability_visible():
     # 50/50-R bei den letzten Signalen + Methodik-Fusszeile
     assert "50/50: {fmtR(sig.r_managed_50_50)}" in source
     assert "Wilson-95%-Konfidenzintervall" in source
+    assert "managed_be_unresolved" in source
+    assert "sperren die Managed-BE-Freigabe" in source
+    assert "lösten den BE-Prozess aus" in source

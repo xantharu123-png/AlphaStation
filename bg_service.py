@@ -29,6 +29,7 @@ import logging
 import threading
 import traceback
 import smtplib
+import ssl
 import re
 import html
 import atexit
@@ -38,6 +39,7 @@ import glob
 import hashlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import make_msgid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -86,6 +88,9 @@ from modules.email_dedupe import (
     email_dedupe_mark as _shared_email_dedupe_mark,
     email_dedupe_release as _shared_email_dedupe_release,
     email_dedupe_remaining as _shared_email_dedupe_remaining,
+    email_delivery_claim as _shared_email_delivery_claim,
+    email_delivery_mark as _shared_email_delivery_mark,
+    email_delivery_release as _shared_email_delivery_release,
     load_email_dedupe as _shared_load_email_dedupe,
     save_email_dedupe as _shared_save_email_dedupe,
 )
@@ -140,9 +145,13 @@ try:
     from modules.signal_tracker import (
         record_alert_signals,
         evaluate_open_signals,
+        finalize_alert_delivery,
         has_open_equivalent_signal,
+        load_pending_accepted_deliveries,
         load_pending_be_activations,
+        load_pending_terminal_updates,
         mark_be_alerts_sent,
+        mark_terminal_updates_sent,
         load_performance_summary,
         scanner_verdict,
         shadow_summary,
@@ -150,9 +159,13 @@ try:
 except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Parallel-Rollout
     record_alert_signals = None
     evaluate_open_signals = None
+    finalize_alert_delivery = None
     has_open_equivalent_signal = None
+    load_pending_accepted_deliveries = None
     load_pending_be_activations = None
+    load_pending_terminal_updates = None
     mark_be_alerts_sent = None
+    mark_terminal_updates_sent = None
     load_performance_summary = None
     scanner_verdict = None
     shadow_summary = None
@@ -380,7 +393,16 @@ _SIGNAL_UPDATE_DEDUPE_SEC = 7 * 86400
 _BG_STARTED_AT = time.time()
 _BG_STARTUP_MAIL_DELAY = 300
 # B6: Mail-Klassen-Praefixe (mit api-Team abgestimmt, identische Konvention).
-_MAIL_CLASS_PREFIXES = {"trade": "🚨 JETZT: ", "watch": "👁️ WATCH: ", "info": "ℹ️ "}
+_MAIL_CLASS_PREFIXES = {
+    "trade": "🚨 JETZT: ",
+    "watch": "👁️ WATCH: ",
+    "info": "ℹ️ ",
+    # Tracker-Folgemails sind zeitkritischer als allgemeine Info-Mails, tragen
+    # aber weiterhin das sichtbare Info-Praefix.
+    "signal_update": "ℹ️ ",
+}
+_EMAIL_DELIVERY_CONTEXT = threading.local()
+_FOLLOWUP_RESOLUTION_CONTEXT = threading.local()
 _NON_STOCK_PRODUCT_TICKERS = {
     "IREX", "IREZ", "APLZ", "LCIZ", "NBIZ", "MSTX", "MSTU", "MSTZ", "TSLL", "TSLQ",
     "NVDL", "NVDQ", "NVDU", "NVDD", "CONL", "GGLL", "GGLS", "AAPU", "AAPD",
@@ -1284,6 +1306,73 @@ def _email_dedupe_release(key, claimed_at=None):
         return False
 
 
+def _email_delivery_claim(key, sent_ttl_seconds, now=None):
+    """Acquire only a short SMTP-send lease; never write the sent marker."""
+    uncertain_checker = getattr(
+        _mail_outbox, "has_uncertain_delivery_key", None
+    )
+    if callable(uncertain_checker):
+        try:
+            if uncertain_checker(str(key)):
+                log.error(
+                    "E-Mail-Delivery %s bleibt wegen unklarem SMTP-DATA-"
+                    "Ausgang bis zur manuellen Klaerung gesperrt",
+                    key,
+                )
+                return False
+        except Exception as exc:
+            # Ein nicht lesbares Quarantaene-Ledger ist kein Beleg dafuer,
+            # dass ein erneuter Versand sicher waere.
+            log.error(
+                "E-Mail-Quarantaene konnte nicht geprueft werden; Claim %s "
+                "bleibt fail-closed: %s",
+                key,
+                exc,
+            )
+            return False
+    try:
+        return _shared_email_delivery_claim(
+            _EMAIL_DEDUPE_FILE,
+            key,
+            sent_ttl_seconds,
+            # Provider-Revalidation + MIME-Aufbau + SMTP-Handshake duerfen den
+            # kurzen Claim nicht waehrend eines legitimen Versands verlieren.
+            # Gleiches Sicherheitsfenster wie der kanonische API-Mailer.
+            claim_ttl_seconds=900,
+            now=now,
+        )
+    except Exception as exc:
+        log.warning(f"E-Mail-Delivery-Lease konnte nicht gespeichert werden: {exc}")
+        return False
+
+
+def _email_delivery_mark(key, now=None):
+    try:
+        return _shared_email_delivery_mark(_EMAIL_DEDUPE_FILE, key, now=now)
+    except Exception as exc:
+        log.warning(f"E-Mail-Delivery-Markierung konnte nicht gespeichert werden: {exc}")
+        return None
+
+
+def _email_delivery_release(key, claimed_at=None):
+    try:
+        return _shared_email_delivery_release(
+            _EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at
+        )
+    except Exception as exc:
+        log.warning(f"E-Mail-Delivery-Lease konnte nicht freigegeben werden: {exc}")
+        return False
+
+
+def _email_delivery_release_or_quarantine(key, claimed_at=None):
+    """Release a definite failure, suppress retry for an unknown DATA result."""
+    if _last_email_delivery().get("outcome_unknown"):
+        _email_delivery_mark(key, now=claimed_at)
+        return "uncertain"
+    _email_delivery_release(key, claimed_at=claimed_at)
+    return "released"
+
+
 def _cleanup_email_cooldown():
     """Entfernt abgelaufene Cooldown-Einträge (verhindert Memory Leak über Tage/Wochen)"""
     now = time.time()
@@ -1326,7 +1415,68 @@ _signal_eval_warned_missing = False
 _CRYPTO_QUOTE_SUFFIXES = ("USDT", "USDC", "PERP", "USD", "EUR", "BTC")
 
 
-def _record_alert_signals_safe(scanner_name, rows, mail_class="trade", channel="email"):
+def _recipient_delivery_key(email):
+    """Pseudonyme, stabile Empfaenger-ID fuer den Tracker-Vertrag."""
+    normalized = str(email or "").strip().lower()
+    if "@" not in normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _set_last_email_delivery(
+    *, intended=(), accepted=(), pending=(), queued=False, outcome_unknown=False
+):
+    """Thread-lokales Ergebnis des letzten SMTP-Aufrufs setzen.
+
+    Rohadressen verlassen diesen Prozesszustand nie. Der Tracker erhaelt nur
+    die SHA-256-Schluessel aus ``accepted``.
+    """
+    _EMAIL_DELIVERY_CONTEXT.result = {
+        "intended": tuple(sorted({str(v).strip().lower() for v in intended if "@" in str(v)})),
+        "accepted": tuple(sorted({str(v).strip().lower() for v in accepted if "@" in str(v)})),
+        "pending": tuple(sorted({str(v).strip().lower() for v in pending if "@" in str(v)})),
+        "queued": bool(queued),
+        "outcome_unknown": bool(outcome_unknown),
+    }
+
+
+def _last_email_delivery():
+    value = getattr(_EMAIL_DELIVERY_CONTEXT, "result", None)
+    if not isinstance(value, dict):
+        return {
+            "intended": (),
+            "accepted": (),
+            "pending": (),
+            "queued": False,
+            "outcome_unknown": False,
+        }
+    return {
+        "intended": tuple(value.get("intended") or ()),
+        "accepted": tuple(value.get("accepted") or ()),
+        "pending": tuple(value.get("pending") or ()),
+        "queued": bool(value.get("queued")),
+        "outcome_unknown": bool(value.get("outcome_unknown")),
+    }
+
+
+def _last_delivery_recipient_keys():
+    return tuple(sorted({
+        key
+        for key in (
+            _recipient_delivery_key(value)
+            for value in _last_email_delivery().get("accepted", ())
+        )
+        if key
+    }))
+
+
+def _record_alert_signals_safe(
+    scanner_name,
+    rows,
+    mail_class="trade",
+    channel="email",
+    mail_channel=None,
+):
     """Erfasst gemailte Signale im Tracker (Kontrakt: wirft nie).
 
     Trotzdem gekapselt: fehlendes Modul / unerwartete Fehler dürfen den
@@ -1335,9 +1485,50 @@ def _record_alert_signals_safe(scanner_name, rows, mail_class="trade", channel="
     """
     if record_alert_signals is None or not rows:
         return 0
+    delivery_recipient_keys = (
+        _last_delivery_recipient_keys()
+        if str(mail_class or "").strip().lower() == "trade"
+        else ()
+    )
+    if str(mail_class or "").strip().lower() == "trade" and not delivery_recipient_keys:
+        log.warning(
+            "[SignalTracker] %s nicht erfasst: keine bestaetigte Erst-Mail-Kohorte",
+            scanner_name,
+        )
+        return 0
+    resolved_mail_channel = str(mail_channel or "").strip().lower()
+    if not resolved_mail_channel and scanner_mail_channel is not None:
+        try:
+            resolved_mail_channel = str(
+                scanner_mail_channel(scanner_name) or ""
+            ).strip().lower()
+        except Exception:
+            resolved_mail_channel = ""
     try:
-        count = record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
+        count = record_alert_signals(
+            scanner_name,
+            rows,
+            mail_class=mail_class,
+            channel=channel,
+            delivery_recipient_keys=delivery_recipient_keys,
+            mail_channel=resolved_mail_channel or None,
+        )
         log.info(f"[SignalTracker] {scanner_name}: {count} Signal(e) erfasst (mail_class={mail_class})")
+        return count
+    except TypeError as exc:
+        # Ein gemischter Rollout darf keine Trade-Zeile ohne Kohorte erzeugen.
+        # Shadow-Tracking enthaelt absichtlich keine Mail-Empfaenger und bleibt
+        # mit einem aelteren Tracker-Modul kompatibel.
+        if str(mail_class or "").strip().lower() == "trade":
+            log.warning(
+                "[SignalTracker] record ohne Kohorten-Schnittstelle blockiert (%s): %s",
+                scanner_name,
+                exc,
+            )
+            return 0
+        count = record_alert_signals(
+            scanner_name, rows, mail_class=mail_class, channel=channel
+        )
         return count
     except Exception as exc:
         log.warning(f"[SignalTracker] record fehlgeschlagen ({scanner_name}): {exc}")
@@ -1484,10 +1675,14 @@ def _tracker_stock_intraday_fetcher(
 
         since_ts = since_dt.timestamp()
         until_ts = until_dt.timestamp()
-        # Only bars that started after the previous evaluation may affect the
-        # result. Including a bar already open at alert time creates look-back
-        # leakage from highs/lows that happened before the signal was sent.
-        interval_start = math.ceil(since_ts / 300.0) * 300
+        # Include the completed 5m candle that straddles an unaligned causal
+        # boundary.  The tracker treats it as boundary evidence only: any
+        # relevant level touch is unresolved because OHLC cannot separate the
+        # pre- and post-acceptance portions.  Silently starting at ceil(since)
+        # would instead create an unobservable gap for practically every SMTP
+        # timestamp (which normally contains seconds/microseconds).
+        interval_start = math.floor(since_ts / 300.0) * 300
+        boundary_overlap = interval_start < since_ts
         completed = []
         for bar in resp.json().get("results") or []:
             try:
@@ -1510,8 +1705,12 @@ def _tracker_stock_intraday_fetcher(
             return None
         completed.sort(key=lambda item: item[0])
         interval_complete = bool(
-            completed[0][0] <= interval_start + 600
-            and completed[-1][0] + 300 >= until_ts - 600
+            completed[0][0] == interval_start
+            and all(
+                completed[index][0] == completed[index - 1][0] + 300
+                for index in range(1, len(completed))
+            )
+            and completed[-1][0] + 300 >= until_ts - 300
         )
         return {
             "current": completed[-1][4],
@@ -1520,6 +1719,26 @@ def _tracker_stock_intraday_fetcher(
             "interval_low": min(item[3] for item in completed),
             "interval_complete": interval_complete,
             "source": "polygon:stock:5m",
+            "intervals": [
+                {
+                    "current": item[4],
+                    "interval_open": item[1],
+                    "interval_high": item[2],
+                    "interval_low": item[3],
+                    "interval_complete": True,
+                    "boundary_overlap": bool(
+                        boundary_overlap and item[0] == interval_start
+                    ),
+                    "source": "polygon:stock:5m",
+                    "observed_at": datetime.fromtimestamp(
+                        item[0] + 300, tz=timezone.utc
+                    ).isoformat(),
+                    "started_at": datetime.fromtimestamp(
+                        item[0], tz=timezone.utc
+                    ).isoformat(),
+                }
+                for item in completed
+            ] if interval_complete else [],
         }
     except Exception as exc:
         log.debug(f"[SignalTracker] Stock-5m-Fetcher {ticker} fehlgeschlagen: {exc}")
@@ -1586,7 +1805,11 @@ def _tracker_crypto_fetcher(
                 ) or []
                 since_ts = since_dt.timestamp()
                 until_ts = until_dt.timestamp()
-                interval_start = (int(since_ts) // 300) * 300
+                # See the stock fetcher above: preserve the full candle that
+                # overlaps a non-aligned causal boundary and mark it explicitly
+                # for conservative tracker-side treatment.
+                interval_start = math.floor(since_ts / 300.0) * 300
+                boundary_overlap = interval_start < since_ts
                 available = []
                 for candle in candles:
                     if not isinstance(candle, dict):
@@ -1614,13 +1837,14 @@ def _tracker_crypto_fetcher(
                     interval_open = range_rows[0][1]
                     interval_high = max(item[2] for item in range_rows)
                     interval_low = min(item[3] for item in range_rows)
-                    expected_completed = max(1, int(max(0.0, until_ts - interval_start) // 300))
-                    coverage = len(completed) / expected_completed
                     interval_complete = bool(
                         completed
-                        and completed[0][0] <= interval_start + 300
+                        and completed[0][0] == interval_start
+                        and all(
+                            completed[index][0] == completed[index - 1][0] + 300
+                            for index in range(1, len(completed))
+                        )
                         and completed[-1][0] + 300 >= until_ts - 300
-                        and coverage >= 0.80
                     )
                     return {
                         "current": current,
@@ -1629,6 +1853,26 @@ def _tracker_crypto_fetcher(
                         "interval_low": interval_low,
                         "interval_complete": interval_complete,
                         "source": f"{venue_norm}:5m",
+                        "intervals": [
+                            {
+                                "current": item[4],
+                                "interval_open": item[1],
+                                "interval_high": item[2],
+                                "interval_low": item[3],
+                                "interval_complete": True,
+                                "boundary_overlap": bool(
+                                    boundary_overlap and item[0] == interval_start
+                                ),
+                                "source": f"{venue_norm}:5m",
+                                "observed_at": datetime.fromtimestamp(
+                                    item[0] + 300, tz=timezone.utc
+                                ).isoformat(),
+                                "started_at": datetime.fromtimestamp(
+                                    item[0], tz=timezone.utc
+                                ).isoformat(),
+                            }
+                            for item in completed
+                        ] if interval_complete else [],
                     }
             except Exception as exc:
                 log.debug(
@@ -1782,6 +2026,7 @@ def _signal_origin_was_mailed(origin, ticker=None, now=None):
 
 def _followup_recipient_profiles(secrets):
     """Resolve recipient-specific rules for tracker follow-up emails."""
+    _FOLLOWUP_RESOLUTION_CONTEXT.profiles_resolved = True
     config = secrets if isinstance(secrets, dict) else {}
     profiles = {}
     send_to_subscribers = str(
@@ -1809,20 +2054,43 @@ def _followup_recipient_profiles(secrets):
                     "email": email,
                     "position_update_scope": scope,
                     "personal_positions": positions if isinstance(positions, list) else [],
+                    "operator_followup_optin": False,
                 }
         except Exception as exc:
+            _FOLLOWUP_RESOLUTION_CONTEXT.profiles_resolved = False
             log.warning(f"Persoenliche Folge-Mail-Empfaenger konnten nicht geladen werden: {exc}")
+    elif send_to_subscribers:
+        _FOLLOWUP_RESOLUTION_CONTEXT.profiles_resolved = False
+        log.warning(
+            "Persoenliche Folge-Mail-Empfaenger nicht verfuegbar; "
+            "Zustell-Acknowledge bleibt offen"
+        )
 
-    operator_value = config.get("ALERT_EMAIL") or config.get("GMAIL_USER") or ""
-    for raw_email in str(operator_value).split(","):
-        email = raw_email.strip().lower()
-        if "@" not in email or email in profiles:
-            continue
-        profiles[email] = {
-            "email": email,
-            "position_update_scope": "all",
-            "personal_positions": [],
-        }
+    # Die Betreiberadresse ist kein implizites Folge-Mail-Opt-in. Sie kann
+    # zugleich zu einem Auth-Konto gehoeren, das global, per Kanal oder per
+    # Horizont abgewählt hat. Nur ein eigener, expliziter Betreiber-Schalter
+    # darf diese Auth-Regeln fuer Tracker-Folgemails bewusst uebersteuern.
+    operator_followup_optin = str(
+        config.get(
+            "ALERT_OPERATOR_FOLLOWUP_OPTIN",
+            os.environ.get("ALERT_OPERATOR_FOLLOWUP_OPTIN", "0"),
+        )
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if operator_followup_optin:
+        operator_value = config.get("ALERT_EMAIL") or config.get("GMAIL_USER") or ""
+        for raw_email in str(operator_value).split(","):
+            email = raw_email.strip().lower()
+            if "@" not in email:
+                continue
+            profile = profiles.setdefault(
+                email,
+                {
+                    "email": email,
+                    "position_update_scope": "all",
+                    "personal_positions": [],
+                },
+            )
+            profile["operator_followup_optin"] = True
     return sorted(profiles.values(), key=lambda item: item["email"])
 
 
@@ -1909,6 +2177,230 @@ def _followup_recipient_dedupe_key(base_key, email):
     return f"{base_key}_recipient_{recipient_hash}"
 
 
+def _unknown_delivery_quarantine_keys(
+    subject, body_html, mail_class, base_keys, recipients, *, include_base
+):
+    """Opaque event/recipient keys for indefinite unknown-DATA quarantine."""
+    normalized_bases = sorted({
+        str(value).strip()[:240]
+        for value in (base_keys or [])
+        if str(value).strip() and "@" not in str(value)
+    })
+    if not normalized_bases:
+        content_seed = json.dumps(
+            [str(subject or ""), str(body_html or ""), str(mail_class or "")],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        normalized_bases = [
+            "smtp_unknown_"
+            + hashlib.sha256(content_seed.encode("utf-8")).hexdigest()
+        ]
+    keys = set(normalized_bases if include_base else [])
+    for email in recipients or []:
+        if "@" not in str(email):
+            continue
+        recipient_suffix = "_recipient_" + hashlib.sha256(
+            str(email).strip().lower().encode("utf-8")
+        ).hexdigest()[:16]
+        already_scoped = [
+            base_key for base_key in normalized_bases
+            if base_key.endswith(recipient_suffix)
+        ]
+        if already_scoped:
+            keys.update(already_scoped)
+            continue
+        for base_key in normalized_bases:
+            keys.add(_followup_recipient_dedupe_key(base_key, email))
+    return sorted(keys)
+
+
+def _quarantine_unknown_email_delivery(
+    subject,
+    body_html,
+    recipients,
+    *,
+    mail_class,
+    telegram_text="",
+    delivery_dedupe_keys=None,
+    include_base=True,
+    error="SMTP DATA outcome unknown",
+):
+    """Persist an unknown DATA result, with a fallback receipt required."""
+    if _mail_outbox is None:
+        return None
+    clean_recipients = sorted({
+        str(value).strip().lower()
+        for value in (recipients or [])
+        if "@" in str(value)
+    })
+    quarantine_keys = _unknown_delivery_quarantine_keys(
+        subject,
+        body_html,
+        mail_class,
+        delivery_dedupe_keys,
+        clean_recipients,
+        include_base=include_base,
+    )
+    receipt = None
+    quarantine_fn = getattr(_mail_outbox, "quarantine", None)
+    if callable(quarantine_fn):
+        try:
+            receipt = quarantine_fn(
+                subject,
+                body_html,
+                clean_recipients,
+                mail_class=mail_class,
+                telegram_text=telegram_text,
+                delivery_dedupe_keys=quarantine_keys,
+                error=error,
+            )
+        except Exception as exc:
+            log.error("SMTP-Quarantaene-Write fehlgeschlagen: %s", exc)
+    if receipt is None:
+        fallback_fn = getattr(
+            _mail_outbox, "register_uncertain_delivery_keys", None
+        )
+        if callable(fallback_fn):
+            try:
+                receipt = fallback_fn(
+                    quarantine_keys,
+                    subject=subject,
+                    body_html=body_html,
+                    recipients=clean_recipients,
+                    mail_class=mail_class,
+                    error=error,
+                )
+            except Exception as exc:
+                log.error("SMTP-Quarantaene-Fallback fehlgeschlagen: %s", exc)
+    return receipt
+
+
+def _followup_recipient_uncertain_key(recipient_key):
+    return f"{str(recipient_key)}_delivery_uncertain"
+
+
+def _followup_recipient_delivery_uncertain(recipient_key, now=None):
+    """Durable manual-review gate for an unknown SMTP DATA outcome."""
+    checker = getattr(_mail_outbox, "has_uncertain_delivery_key", None)
+    if callable(checker):
+        try:
+            if checker(str(recipient_key)):
+                return True
+        except Exception:
+            # The local JSON marker below covers the immediate fallback. The
+            # outbox implementation itself fails closed on ledger errors.
+            pass
+    return _email_dedupe_active(
+        _followup_recipient_uncertain_key(recipient_key),
+        _SIGNAL_UPDATE_DEDUPE_SEC,
+        now=now,
+    )
+
+
+def _event_delivery_recipient_keys(event):
+    """Persistierte Erst-Mail-Kohorte eines Tracker-Ereignisses lesen."""
+    if not isinstance(event, dict):
+        return set()
+    raw = event.get("delivery_recipient_keys")
+    if raw in (None, ""):
+        raw = event.get("delivery_recipient_keys_json")
+    if raw in (None, ""):
+        raw = event.get("accepted_recipient_keys")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return set()
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {
+        str(value).strip().lower()
+        for value in raw
+        if re.fullmatch(r"[0-9a-fA-F]{64}", str(value).strip())
+    }
+
+
+def _event_followup_route(event):
+    """Return the event's original opt-in dimensions or fail closed.
+
+    ``channel`` in tracker rows means the delivery medium (email), not the
+    user-selectable mail channel. New rows may carry ``mail_channel``
+    explicitly; for existing rows the scanner mapping is the only safe,
+    deterministic derivation.
+    """
+    if not isinstance(event, dict):
+        return None
+    mail_channel = str(event.get("mail_channel") or "").strip().lower()
+    if not mail_channel and scanner_mail_channel is not None:
+        try:
+            mail_channel = str(
+                scanner_mail_channel(event.get("scanner")) or ""
+            ).strip().lower()
+        except Exception:
+            mail_channel = ""
+    if not mail_channel:
+        return None
+
+    raw_horizon = str(event.get("trade_horizon") or "").strip().lower()
+    horizon_aliases = {
+        "swing": "swing",
+        "daily": "swing",
+        "mehrtagig": "swing",
+        "intraday": "intraday",
+        "daytrade": "intraday",
+        "daytrading": "intraday",
+        "5m": "intraday",
+    }
+    trade_horizon = horizon_aliases.get(raw_horizon)
+    if trade_horizon is None:
+        # Nur bei einem eindeutig horizontgebundenen Kanal ist eine Ableitung
+        # ohne persistiertes Feld sicher. Crypto/Biotech/Bear bleiben dagegen
+        # bei fehlendem Horizont absichtlich fail-closed.
+        if mail_channel == "stocks_swing":
+            trade_horizon = "swing"
+        elif mail_channel in {"stocks_intraday", "stocks_premarket"}:
+            trade_horizon = "intraday"
+        else:
+            return None
+    return mail_channel, trade_horizon
+
+
+def _current_followup_recipient_emails(event, cache):
+    """Resolve current global/channel/horizon opt-ins for one event."""
+    route = _event_followup_route(event)
+    if route is None or get_email_alert_recipients is None:
+        return None
+    if route in cache:
+        return cache[route]
+    mail_channel, trade_horizon = route
+    try:
+        current = {
+            str(value).strip().lower()
+            for value in (
+                get_email_alert_recipients(
+                    trade_horizon=trade_horizon,
+                    mail_class="trade",
+                    mail_channel=mail_channel,
+                )
+                or []
+            )
+            if "@" in str(value)
+        }
+    except Exception as exc:
+        # Aktuelles Opt-in kann bei Auth-/DB-Fehlern nicht bewiesen werden.
+        # Kein Fallback ohne Kanal/Horizont, sonst wuerden Opt-outs umgangen.
+        log.warning(
+            "Folge-Mail-Opt-in konnte nicht geladen werden (%s/%s): %s",
+            mail_channel,
+            trade_horizon,
+            exc,
+        )
+        current = None
+    cache[route] = current
+    return current
+
+
 def _dispatch_followup_digest(
     pending,
     secrets,
@@ -1918,74 +2410,170 @@ def _dispatch_followup_digest(
     *,
     enqueue_on_failure=True,
 ):
-    """Send a follow-up digest globally or filtered per recipient.
+    """Folge-Events nur an Erstempfaenger mit aktuellem Opt-in senden.
 
-    The global event key is finalized only after every relevant recipient was
-    either delivered successfully or intentionally excluded by their personal
-    position filter.
+    Pro Event gilt strikt: persistierte akzeptierte Erst-Mail-Kohorte
+    geschnitten mit den aktuell aktiven Folge-Mail-Profilen. Ein fehlender
+    Kohortennachweis ist fail-closed. Versand erfolgt einzeln, damit SMTP-
+    Teilerfolge und das Dedupe-Ledger empfaengerscharf bleiben.
     """
+    _FOLLOWUP_RESOLUTION_CONTEXT.profiles_resolved = True
     profiles = _followup_recipient_profiles(secrets)
-    personalized = any(
-        profile.get("position_update_scope") == "mine" for profile in profiles
-    )
+    config = secrets if isinstance(secrets, dict) else {}
+    send_to_subscribers = str(
+        config.get(
+            "ALERT_SEND_TO_SUBSCRIBERS",
+            os.environ.get("ALERT_SEND_TO_SUBSCRIBERS", "1"),
+        )
+    ).strip().lower() not in {"0", "false", "no", "off"}
     now = time.time()
-
-    if not personalized:
-        subject, body_html = build_digest(pending)
-        send_kwargs = {"mail_class": "info"}
-        if not enqueue_on_failure:
-            send_kwargs["enqueue_on_failure"] = False
-        sent = _send_email_alert(subject, body_html, secrets, **send_kwargs)
-        if sent:
-            for item in pending:
-                _email_dedupe_mark(base_key_from_item(item), now=now)
-        return bool(sent), bool(sent)
-
     any_sent = False
-    all_complete = True
+    all_complete = bool(
+        getattr(_FOLLOWUP_RESOLUTION_CONTEXT, "profiles_resolved", True)
+    )
+    current_optin_cache = {}
+    current_by_item = {}
+    for item_index, item in enumerate(pending):
+        event = event_from_item(item)
+        if not _event_delivery_recipient_keys(event):
+            # Ohne persistierte, akzeptierte Erstempfaenger gibt es keine
+            # beweisbare Schnittmenge. Das Ereignis bleibt fuer Reparatur offen.
+            current_by_item[item_index] = None
+            all_complete = False
+            log.warning(
+                "Folge-Mail fuer Signal %s bleibt offen: "
+                "akzeptierte Erstempfaenger-Kohorte fehlt",
+                event.get("id") if isinstance(event, dict) else "?",
+            )
+            continue
+        current = (
+            _current_followup_recipient_emails(
+                event, current_optin_cache
+            )
+            if send_to_subscribers
+            else set()
+        )
+        current_by_item[item_index] = current
+        if current is None:
+            all_complete = False
+
+    # Beide Auth-Aufloeser muessen konsistent sein. Wenn ein aktuell
+    # berechtigter Originalempfaenger kein Folgeprofil bekam, darf der globale
+    # Event-Key nicht als erledigt markiert werden.
+    profile_emails = {
+        str(profile.get("email") or "").strip().lower()
+        for profile in profiles
+        if isinstance(profile, dict)
+    }
+    for item_index, item in enumerate(pending):
+        current = current_by_item.get(item_index)
+        if current is None:
+            continue
+        cohort = _event_delivery_recipient_keys(event_from_item(item))
+        relevant_current = {
+            email
+            for email in current
+            if _recipient_delivery_key(email) in cohort
+        }
+        if not relevant_current.issubset(profile_emails):
+            all_complete = False
+            log.warning(
+                "Folge-Mail-Profil fehlt fuer %s aktuell berechtigte(n) "
+                "Originalempfaenger; Acknowledge bleibt offen",
+                len(relevant_current - profile_emails),
+            )
+
     for profile in profiles:
         email = profile["email"]
+        recipient_delivery_key = _recipient_delivery_key(email)
+        if not recipient_delivery_key:
+            continue
+        operator_override = bool(profile.get("operator_followup_optin"))
+        cohort_selected = []
+        for item_index, item in enumerate(pending):
+            if recipient_delivery_key not in _event_delivery_recipient_keys(
+                event_from_item(item)
+            ):
+                continue
+            current = current_by_item.get(item_index)
+            if operator_override or (current is not None and email in current):
+                cohort_selected.append(item)
         if profile.get("position_update_scope") == "mine":
             positions = profile.get("personal_positions") or []
             selected = [
                 item
-                for item in pending
+                for item in cohort_selected
                 if any(
                     _followup_event_matches_position(event_from_item(item), position)
                     for position in positions
                 )
             ]
         else:
-            selected = list(pending)
+            selected = cohort_selected
 
         unsent = []
         for item in selected:
             recipient_key = _followup_recipient_dedupe_key(base_key_from_item(item), email)
-            if not _email_dedupe_active(recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
-                unsent.append((recipient_key, item))
+            uncertain_key = _followup_recipient_uncertain_key(recipient_key)
+            if _followup_recipient_delivery_uncertain(
+                recipient_key, now=now
+            ):
+                # Manual review is required. Durable BE rows stay unacked, but
+                # automatic jobs must never resend an unknown DATA outcome.
+                all_complete = False
+                continue
+            if _email_dedupe_active(
+                recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
+            ):
+                continue
+            if not _email_delivery_claim(
+                recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
+            ):
+                # Another worker currently owns the short send lease. If it
+                # has not yet produced a sent marker, this batch is incomplete.
+                if not _email_dedupe_active(
+                    recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
+                ):
+                    all_complete = False
+                continue
+            unsent.append((recipient_key, uncertain_key, item))
         if not unsent:
             continue
 
-        recipient_pending = [item for _, item in unsent]
+        recipient_pending = [item for _, _, item in unsent]
         subject, body_html = build_digest(recipient_pending)
+        _set_last_email_delivery()
         sent = _send_email_alert(
             subject,
             body_html,
             secrets,
-            mail_class="info",
+            mail_class="signal_update",
             recipient_emails=[email],
             enqueue_on_failure=enqueue_on_failure,
+            outbox_dedupe_keys=[key for key, _, _ in unsent],
         )
-        if sent:
+        delivery = _last_email_delivery()
+        accepted = bool(sent)
+        if delivery.get("intended"):
+            accepted = email in set(delivery.get("accepted") or ())
+        if accepted:
             any_sent = True
-            for recipient_key, _ in unsent:
-                _email_dedupe_mark(recipient_key, now=now)
+            for recipient_key, _uncertain_key, _ in unsent:
+                _email_delivery_mark(recipient_key, now=now)
+        elif delivery.get("outcome_unknown"):
+            for recipient_key, uncertain_key, _ in unsent:
+                _email_dedupe_mark(uncertain_key, now=now)
+                _email_delivery_release(recipient_key, claimed_at=now)
+            all_complete = False
         else:
+            if not delivery.get("queued"):
+                for recipient_key, _uncertain_key, _ in unsent:
+                    _email_delivery_release(recipient_key, claimed_at=now)
             all_complete = False
 
     if all_complete:
         for item in pending:
-            _email_dedupe_mark(base_key_from_item(item), now=now)
+            _email_delivery_mark(base_key_from_item(item), now=now)
     return any_sent, all_complete
 
 
@@ -2025,10 +2613,23 @@ def _build_signal_update_digest(pending):
             slip_r = tr.get("adverse_slippage_r")
             slip_pct = tr.get("adverse_slippage_pct")
             if isinstance(slip_r, (int, float)):
-                slip_text = f"Slippage {float(slip_r):+.2f}R"
+                slip_text = f"Entry-Slippage {float(slip_r):+.2f}R"
                 if isinstance(slip_pct, (int, float)):
                     slip_text += f" / {float(slip_pct):+.2f}%"
                 execution_parts.append(slip_text)
+            if tr.get("new_status") == "STOP_HIT":
+                exit_fill = tr.get("exit_fill_price")
+                if isinstance(exit_fill, (int, float)):
+                    execution_parts.append(
+                        f"Stop-Exit-Fill {_format_alert_price(exit_fill)}"
+                    )
+                stop_gap_r = tr.get("stop_gap_slippage_r")
+                stop_gap_pct = tr.get("stop_gap_slippage_pct")
+                if isinstance(stop_gap_r, (int, float)):
+                    stop_gap_text = f"Stop-Gap-Slippage {float(stop_gap_r):+.2f}R"
+                    if isinstance(stop_gap_pct, (int, float)):
+                        stop_gap_text += f" / {float(stop_gap_pct):+.2f}%"
+                    execution_parts.append(stop_gap_text)
             live_rr = tr.get("live_effective_rr")
             if isinstance(live_rr, (int, float)):
                 execution_parts.append(f"Live R:R {float(live_rr):.2f}")
@@ -2091,6 +2692,7 @@ def _send_signal_update_mail(transitions, secrets):
         return False
     now = time.time()
     pending = []
+    already_complete_ids = []
     for tr in transitions:
         if not isinstance(tr, dict):
             continue
@@ -2109,8 +2711,21 @@ def _send_signal_update_mail(transitions, secrets):
             continue
         dedupe_key = f"signal_update_{tr.get('id')}_{new_status}"
         if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
+            # SMTP war bereits vollstaendig abgeschlossen, nur der anschliessende
+            # Tracker-Ack kann vor einem Prozessabbruch gefehlt haben.
+            if tr.get("tracker_persisted"):
+                already_complete_ids.append(tr.get("id"))
             continue
         pending.append((dedupe_key, event, tr))
+    if already_complete_ids and mark_terminal_updates_sent is not None:
+        acknowledged = mark_terminal_updates_sent(already_complete_ids)
+        if acknowledged < len(set(already_complete_ids)):
+            log.warning(
+                "[SignalTracker] Bereits versendete Terminal-Updates: nur %s/%s "
+                "Tracker-Acks rekonstruiert",
+                acknowledged,
+                len(set(already_complete_ids)),
+            )
     if not pending:
         return False
 
@@ -2121,6 +2736,26 @@ def _send_signal_update_mail(transitions, secrets):
         lambda item: item[2],
         lambda item: item[0],
     )
+    if complete:
+        signal_ids = []
+        for _, _, transition in pending:
+            if not transition.get("tracker_persisted"):
+                continue
+            try:
+                signal_id = int(transition.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if signal_id > 0 and signal_id not in signal_ids:
+                signal_ids.append(signal_id)
+        if signal_ids and mark_terminal_updates_sent is not None:
+            acknowledged = mark_terminal_updates_sent(signal_ids)
+            if acknowledged < len(signal_ids):
+                log.warning(
+                    "[SignalTracker] Terminal-Update abgeschlossen, aber nur %s/%s "
+                    "Zustellungen dauerhaft bestaetigt",
+                    acknowledged,
+                    len(signal_ids),
+                )
     tickers = ", ".join(str(tr.get("ticker") or "?") for _, _, tr in pending)
     if sent:
         log.info(
@@ -2138,6 +2773,124 @@ def _send_signal_update_mail(transitions, secrets):
             f"{len(pending)} Transition(en); Ereignisse abgeschlossen"
         )
     return bool(sent)
+
+
+def _reconcile_pending_accepted_deliveries():
+    """Activate already accepted entry mails without issuing SMTP again."""
+    if finalize_alert_delivery is None:
+        return 0
+    pending_by_intent = {}
+    try:
+        tracker_pending = (
+            load_pending_accepted_deliveries() or []
+            if load_pending_accepted_deliveries is not None
+            else []
+        )
+    except Exception as exc:
+        log.warning(
+            "[SignalTracker] Akzeptierte Erstzustellungen konnten nicht geladen werden: %s",
+            exc,
+        )
+        tracker_pending = []
+    for delivery in tracker_pending:
+        if not isinstance(delivery, dict):
+            continue
+        intent_key = str(delivery.get("intent_key") or "").strip()
+        if intent_key:
+            pending_by_intent[intent_key] = dict(delivery)
+
+    journal_loader = getattr(
+        _mail_outbox, "load_tracker_acceptance_pending", None
+    )
+    journal_marker = getattr(
+        _mail_outbox, "mark_tracker_acceptance_done", None
+    )
+    journal_pending = []
+    if callable(journal_loader):
+        try:
+            journal_pending = journal_loader()
+        except Exception as exc:
+            log.error(
+                "[SignalTracker] Cross-DB-Akzeptanzjournal konnte nicht "
+                "geladen werden; Reconcile bleibt fail-closed: %s",
+                exc,
+            )
+            journal_pending = None
+        if journal_pending is None:
+            log.error(
+                "[SignalTracker] Cross-DB-Akzeptanzjournal ist nicht lesbar; "
+                "Reconcile bleibt fail-closed"
+            )
+            journal_pending = []
+    for delivery in journal_pending:
+        if not isinstance(delivery, dict):
+            continue
+        intent_key = str(delivery.get("intent_key") or "").strip()
+        if not intent_key:
+            continue
+        pending_by_intent[intent_key] = {
+            **pending_by_intent.get(intent_key, {}),
+            **delivery,
+        }
+
+    activated = 0
+    for intent_key, delivery in pending_by_intent.items():
+        if not isinstance(delivery, dict):
+            continue
+        recipient_keys = sorted(_event_delivery_recipient_keys(delivery))
+        if not intent_key or not recipient_keys:
+            log.warning(
+                "[SignalTracker] Akzeptierte Erstzustellung bleibt offen: "
+                "Intent oder Empfaenger-Kohorte fehlt"
+            )
+            continue
+        try:
+            result = finalize_alert_delivery(
+                intent_key,
+                recipient_keys,
+                accepted_at=delivery.get("accepted_at"),
+            ) or {}
+        except Exception as exc:
+            log.warning(
+                "[SignalTracker] Akzeptierte Erstzustellung %s nicht aktiviert: %s",
+                intent_key,
+                exc,
+            )
+            continue
+        if result.get("activated"):
+            activated += len(result.get("signal_ids") or delivery.get("signal_ids") or [])
+            if callable(journal_marker) and any(
+                str(item.get("intent_key") or "") == intent_key
+                for item in journal_pending
+                if isinstance(item, dict)
+            ):
+                try:
+                    journal_acknowledged = bool(journal_marker(intent_key))
+                except Exception as exc:
+                    journal_acknowledged = False
+                    log.warning(
+                        "[SignalTracker] Cross-DB-Journal-Ack %s warf: %s",
+                        intent_key,
+                        exc,
+                    )
+                if not journal_acknowledged:
+                    log.warning(
+                        "[SignalTracker] Aktivierung %s bestaetigt, aber "
+                        "Cross-DB-Journal-Ack bleibt offen",
+                        intent_key,
+                    )
+        else:
+            log.warning(
+                "[SignalTracker] Akzeptierte Erstzustellung %s wartet weiter auf Aktivierung",
+                intent_key,
+            )
+    if activated:
+        log.info(
+            "[SignalTracker] %s bereits akzeptierte(s) Signal(e) ohne neuen "
+            "SMTP-Versand aktiviert",
+            activated,
+        )
+    return activated
 
 
 def _build_be_update_digest(pending):
@@ -2313,6 +3066,9 @@ def _run_signal_eval_job(secrets=None):
             _signal_eval_warned_missing = True
         return None
     try:
+        # Ein vorheriger SMTP-Erfolg darf nach einem Tracker-Aktivierungscrash
+        # niemals eine zweite Entry-Mail erzeugen. Reconcile ist rein lokal.
+        _reconcile_pending_accepted_deliveries()
         stats = evaluate_open_signals(
             stock_daily_fetcher=_tracker_stock_fetcher,
             stock_intraday_fetcher=_tracker_stock_intraday_fetcher,
@@ -2325,10 +3081,24 @@ def _run_signal_eval_job(secrets=None):
         # Exit-Update-Mails: tolerant gegen alte Tracker-Versionen ohne
         # 'transitions'-Feld (.get) und gegen JEDEN Fehler im Mail-Bau.
         try:
-            transitions = stats.get("transitions") or []
-            if transitions:
+            pending_by_id = {}
+            for transition in stats.get("transitions") or []:
+                if not isinstance(transition, dict) or transition.get("id") is None:
+                    continue
+                pending_by_id[str(transition.get("id"))] = dict(transition)
+            if load_pending_terminal_updates is not None:
+                for transition in load_pending_terminal_updates() or []:
+                    if not isinstance(transition, dict) or transition.get("id") is None:
+                        continue
+                    key = str(transition.get("id"))
+                    pending_by_id[key] = {
+                        **pending_by_id.get(key, {}),
+                        **transition,
+                    }
+            if pending_by_id:
                 _send_signal_update_mail(
-                    transitions, secrets if secrets is not None else _load_secrets()
+                    list(pending_by_id.values()),
+                    secrets if secrets is not None else _load_secrets(),
                 )
         except Exception as exc:
             log.warning(f"[SignalTracker] Exit-Update-Mail fehlgeschlagen (Eval-Ergebnis "
@@ -2417,33 +3187,63 @@ def _save_verdict_state(state):
 
 
 def _verdict_alerts(summary, prev_state):
-    """Kalibrier-Loop-Alarme aus Verdikt-Vergleich (Woche vs. Vorwoche).
+    """Build alerts only from reliable joint calibration cells.
 
-    Alarmiert bei (a) Ueberschreiten der 30er-Marke und (b) Verdikt-Wechsel
-    (deckt 'behalten -> ...' bei gebrochener KI-Untergrenze ab). Erster Lauf
-    ohne State = Baseline, bewusst still. Rueckgabe (alarm_lines, new_state);
-    new_state wird erst nach erfolgreichem Versand gespeichert.
+    Scanner aggregates must never release a product strategy.  The sole unit
+    is scanner x direction x horizon x market regime, with at least 30 fully
+    resolved Managed-BE observations.  The first run is a silent baseline;
+    state is persisted by the caller only after successful delivery.
     """
     alerts = []
     new_state = {}
-    per_scanner = summary.get("per_scanner") or {}
-    for name in sorted(per_scanner):
-        bucket = per_scanner[name] or {}
-        decided = bucket.get("decided_signals") or 0
+    cells = summary.get("calibration_cells") or []
+    if not isinstance(cells, list):
+        return alerts, new_state
+    eligible = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        dimensions = tuple(
+            str(cell.get(key) or "").strip()
+            for key in ("scanner", "direction", "horizon", "market_regime")
+        )
+        if not all(dimensions):
+            continue
+        decided = cell.get("managed_be_decided_signals")
+        unresolved = cell.get("managed_be_unresolved")
+        if (
+            not isinstance(decided, int)
+            or isinstance(decided, bool)
+            or decided < 30
+            or not isinstance(unresolved, int)
+            or isinstance(unresolved, bool)
+            or unresolved != 0
+            or cell.get("managed_be_sample_reliable") is not True
+        ):
+            continue
+        cell_id = str(cell.get("cell_id") or "").strip()
+        if not cell_id:
+            cell_id = "|".join(dimensions)
+        eligible.append((cell_id, dimensions, cell, decided))
+
+    for cell_id, dimensions, bucket, decided in sorted(
+        eligible, key=lambda item: item[0]
+    ):
         verdict, why = scanner_verdict(bucket)
-        new_state[name] = {"decided": decided, "verdict": verdict}
-        prev = prev_state.get(name) or {}
+        new_state[cell_id] = {"decided": decided, "verdict": verdict}
+        prev = prev_state.get(cell_id) or {}
         prev_decided = prev.get("decided", 0)
         prev_verdict = prev.get("verdict")
+        label = " / ".join(dimensions)
         if prev_decided < 30 <= decided:
             alerts.append(
-                f"<b>{html.escape(str(name))}</b>: überschreitet 30er-Marke "
+                f"<b>{html.escape(label)}</b>: überschreitet 30er-Marke "
                 f"({prev_decided} → {decided} entschieden) — Verdikt jetzt: "
                 f"<b>{verdict}</b> ({html.escape(str(why))})"
             )
         elif prev_verdict and prev_verdict != verdict:
             alerts.append(
-                f"<b>{html.escape(str(name))}</b>: Verdikt-Wechsel "
+                f"<b>{html.escape(label)}</b>: Verdikt-Wechsel "
                 f"{html.escape(str(prev_verdict))} → <b>{verdict}</b> "
                 f"({html.escape(str(why))})"
             )
@@ -3121,7 +3921,9 @@ def _run_weekly_report(secrets=None, now_et=None):
             return False
         dedupe_key = _weekly_report_dedupe_key(now_et)
         claim_now = time.time()
-        if not _email_dedupe_claim(dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC, now=claim_now):
+        if not _email_delivery_claim(
+            dedupe_key, _WEEKLY_REPORT_DEDUPE_SEC, now=claim_now
+        ):
             # Bisher stiller Ausstieg — jetzt sichtbar (z. B. nach erfolgreichem
             # Versand oder nach Claim durch einen anderen Prozess).
             log.info("[Wochenreport] Dedupe aktiv (%s) — kein erneuter Versand", dedupe_key)
@@ -3157,23 +3959,34 @@ def _run_weekly_report(secrets=None, now_et=None):
                 shadow=shadow,
                 performance_summary=performance_summary,
             )
+            _set_last_email_delivery()
             sent = _send_email_alert(
                 subject, body_html,
                 secrets if secrets is not None else _load_secrets(),
                 mail_class="info",
+                outbox_dedupe_keys=[dedupe_key],
             )
         except Exception:
-            _email_dedupe_release(dedupe_key, claimed_at=claim_now)
+            _email_delivery_release(dedupe_key, claimed_at=claim_now)
             raise
         if sent:
-            _email_dedupe_mark(dedupe_key, now=claim_now)
+            _email_delivery_mark(dedupe_key, now=claim_now)
             if scanner_verdict is not None:
                 _save_verdict_state(new_verdict_state)
             log.info(f"[Wochenreport] 📧 Wochen-Bilanz versendet ({dedupe_key})")
         else:
-            _email_dedupe_release(dedupe_key, claimed_at=claim_now)
-            log.warning(f"[Wochenreport] Mail nicht versendet ({dedupe_key}) — "
-                        f"Retry beim naechsten Takt im Fenster")
+            failure_state = _email_delivery_release_or_quarantine(
+                dedupe_key, claimed_at=claim_now
+            )
+            if failure_state == "uncertain":
+                log.error(
+                    "[Wochenreport] SMTP-DATA-Ausgang unklar (%s) — "
+                    "automatischer Retry gesperrt",
+                    dedupe_key,
+                )
+            else:
+                log.warning(f"[Wochenreport] Mail nicht versendet ({dedupe_key}) — "
+                            f"Retry beim naechsten Takt im Fenster")
         return bool(sent)
     except Exception as exc:
         log.warning(f"[Wochenreport] Report fehlgeschlagen (Scheduler laeuft weiter): {exc}")
@@ -3281,9 +4094,15 @@ def _run_insider_cluster_alert(secrets=None, now_et=None):
         section = _fetch_insider_clusters() or {}
         buy_clusters = [c for c in (section.get("clusters") or [])
                         if c.get("side") == "buy"]
-        new_clusters = [c for c in buy_clusters
-                        if not _email_dedupe_active(_insider_cluster_key(c),
-                                                    _INSIDER_CLUSTER_DEDUPE_SEC)]
+        new_clusters = [
+            c for c in buy_clusters
+            if not _email_dedupe_active(
+                _insider_cluster_key(c), _INSIDER_CLUSTER_DEDUPE_SEC
+            )
+            and not _followup_recipient_delivery_uncertain(
+                _insider_cluster_key(c)
+            )
+        ]
         if not new_clusters:
             _email_dedupe_mark(day_key)  # heute gescannt, nichts Neues
             return False
@@ -3292,6 +4111,10 @@ def _run_insider_cluster_alert(secrets=None, now_et=None):
             subject, body_html,
             secrets if secrets is not None else _load_secrets(),
             mail_class="info",
+            outbox_dedupe_keys=[
+                day_key,
+                *[_insider_cluster_key(c) for c in new_clusters],
+            ],
         )
         if sent:
             _email_dedupe_mark(day_key)
@@ -3323,32 +4146,163 @@ def _smtp_timeout_seconds(secrets):
         return 15
 
 
-def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout=15):
-    """Zustellung ueber Gmail mit Transport-Fallback.
+class _SMTPDeliveryResult(str):
+    """Abwaertskompatibler Transport-Tag mit empfaengerscharfem Ergebnis."""
 
-    AUDIT 2026-08-01 (Vorfall KW31-Wochenreport): bisher NUR SSL:465. Ein
-    Port-465-Problem (Provider-Block, IPv6-Haenger, Google-Rate-Limit) liess
-    JEDE Mail 3x in den Timeout laufen (~30 s/Versuch) und kostete sie
-    endgueltig. Jetzt: primaer 465/SSL, bei Fehler Fallback 587/STARTTLS —
-    Standard-Praxis und deckt die haeufigsten Transport-Ausfaelle ab.
+    def __new__(cls, transport, recipients, refused):
+        obj = str.__new__(cls, str(transport))
+        intended = tuple(sorted({
+            str(value).strip().lower()
+            for value in recipients or []
+            if "@" in str(value)
+        }))
+        refused_lookup = {
+            str(value).strip().lower()
+            for value in (refused or {})
+            if "@" in str(value)
+        }
+        obj.intended = intended
+        obj.refused = tuple(value for value in intended if value in refused_lookup)
+        obj.accepted = tuple(value for value in intended if value not in refused_lookup)
+        return obj
 
-    Rueckgabe: Transport-Tag ("ssl465" | "starttls587"). Wirft nach beiden
-    Versuchen die letzte Exception (Retry-Loop des Callers entscheidet).
-    """
+
+class _SMTPDataOutcomeUnknown(RuntimeError):
+    """Connection failed after DATA started; automatic resend is unsafe."""
+
+
+class _SMTPDefinitiveDeliveryFailure(RuntimeError):
+    """Server explicitly rejected the transaction; retry cannot duplicate."""
+
+
+def _smtp_abort_session(server):
+    close = getattr(server, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _smtp_finish_after_delivery(server, transport):
+    """QUIT nach abgeschlossenem DATA ist Cleanup, niemals Retry-Signal."""
+    quit_fn = getattr(server, "quit", None)
+    if not callable(quit_fn):
+        return
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=timeout) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, recipients, msg_string)
-        return "ssl465"
+        quit_fn()
+    except Exception as exc:
+        log.warning(
+            "SMTP %s: QUIT nach akzeptierter Zustellung fehlgeschlagen (%s); "
+            "kein erneuter DATA-Versand",
+            transport,
+            exc,
+        )
+        _smtp_abort_session(server)
+
+
+def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout=15):
+    """Ein Versuch; Ergebnis nennt akzeptierte und abgelehnte Empfaenger.
+
+    Sobald ``sendmail`` ein Ergebnis geliefert hat, wird nie ueber den zweiten
+    Port erneut gesendet. Dadurch koennen QUIT-/Context-Cleanup-Fehler keine
+    bereits akzeptierte Nachricht duplizieren.
+    """
+    normalized_recipients = sorted({
+        str(value).strip().lower()
+        for value in recipients or []
+        if "@" in str(value)
+    })
+    if not normalized_recipients:
+        raise ValueError("SMTP recipients missing")
+
+    server = None
+    try:
+        server = smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        server.login(gmail_user, gmail_pass)
+        try:
+            refused = server.sendmail(
+                gmail_user, normalized_recipients, msg_string
+            ) or {}
+        except smtplib.SMTPRecipientsRefused as exc:
+            refused = getattr(exc, "recipients", None) or {
+                value: (550, b"recipient refused")
+                for value in normalized_recipients
+            }
+        except smtplib.SMTPResponseException as exc:
+            raise _SMTPDefinitiveDeliveryFailure(
+                f"SMTP 465 explicitly rejected DATA ({exc.smtp_code})"
+            ) from exc
+        except Exception as exc:
+            raise _SMTPDataOutcomeUnknown(
+                "SMTP 465 DATA outcome unknown; automatic resend blocked"
+            ) from exc
+        result = _SMTPDeliveryResult("ssl465", normalized_recipients, refused)
+    except _SMTPDataOutcomeUnknown:
+        if server is not None:
+            _smtp_abort_session(server)
+        raise
+    except _SMTPDefinitiveDeliveryFailure:
+        if server is not None:
+            _smtp_abort_session(server)
+        raise
     except Exception as exc465:
-        log.warning(f"⚠️ SMTP 465/SSL fehlgeschlagen ({exc465}) — Fallback 587/STARTTLS")
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=timeout) as server:
+        if server is not None:
+            _smtp_abort_session(server)
+        log.warning(
+            "SMTP 465/SSL fehlgeschlagen (%s) - Fallback 587/STARTTLS",
+            exc465,
+        )
+    else:
+        _smtp_finish_after_delivery(server, result)
+        return result
+
+    server = None
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=timeout)
         server.ehlo()
-        server.starttls()
+        server.starttls(context=ssl.create_default_context())
         server.ehlo()
         server.login(gmail_user, gmail_pass)
-        server.sendmail(gmail_user, recipients, msg_string)
-    return "starttls587"
+        try:
+            refused = server.sendmail(
+                gmail_user, normalized_recipients, msg_string
+            ) or {}
+        except smtplib.SMTPRecipientsRefused as exc:
+            refused = getattr(exc, "recipients", None) or {
+                value: (550, b"recipient refused")
+                for value in normalized_recipients
+            }
+        except smtplib.SMTPResponseException as exc:
+            raise _SMTPDefinitiveDeliveryFailure(
+                f"SMTP 587 explicitly rejected DATA ({exc.smtp_code})"
+            ) from exc
+        except Exception as exc:
+            raise _SMTPDataOutcomeUnknown(
+                "SMTP 587 DATA outcome unknown; automatic resend blocked"
+            ) from exc
+        result = _SMTPDeliveryResult(
+            "starttls587", normalized_recipients, refused
+        )
+    except _SMTPDataOutcomeUnknown:
+        if server is not None:
+            _smtp_abort_session(server)
+        raise
+    except _SMTPDefinitiveDeliveryFailure:
+        if server is not None:
+            _smtp_abort_session(server)
+        raise
+    except Exception:
+        if server is not None:
+            _smtp_abort_session(server)
+        raise
+    _smtp_finish_after_delivery(server, result)
+    return result
 
 
 def _send_email_alert(
@@ -3363,15 +4317,18 @@ def _send_email_alert(
     enqueue_on_failure=True,
     subject_is_final=False,
     body_is_final=False,
+    outbox_dedupe_keys=None,
 ):
     """Sendet E-Mail Alert via Gmail SMTP. Benötigt GMAIL_USER + GMAIL_APP_PASSWORD in secrets.toml
 
     mail_class (B6, mit api-Team abgestimmt): "trade" -> '🚨 JETZT: ',
-    "watch" -> '👁️ WATCH: ', "info" -> 'ℹ️ ' als Betreff-Praefix.
+    "watch" -> '👁️ WATCH: ', "info"/"signal_update" -> 'ℹ️ ' als
+    Betreff-Praefix.
     telegram_text (optional, gleiches Muster wie api): Kurztext für den
     Telegram-Spiegel; bei trade-Mails wird nach Erfolg zusätzlich Telegram
     benachrichtigt (sofern modules.notify_telegram konfiguriert ist).
     """
+    _set_last_email_delivery()
     if not subject_is_final:
         subject = _apply_mail_class_prefix(subject, mail_class)
     if _email_has_blocked_etf_content(subject, body_html):
@@ -3417,6 +4374,7 @@ def _send_email_alert(
         except Exception as exc:
             log.warning(f"Subscriber-Alert-Empfaenger konnten nicht geladen werden: {exc}")
     recipients = sorted(set(addr for addr in recipients if "@" in addr))
+    _set_last_email_delivery(intended=recipients, pending=recipients)
 
     if not gmail_user or not gmail_pass:
         log.warning("⚠️ E-Mail Alert: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt in secrets.toml")
@@ -3436,52 +4394,196 @@ def _send_email_alert(
         else str(body_html or "") + disclaimer
     )
 
-    # B-03: Retry logic with exponential backoff
+    # Eine stabile MIME-Nachricht/Message-ID fuer alle Transportversuche.
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"TradingBot Alert <{gmail_user}>"
+    msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
+    msg["Subject"] = subject
+    message_domain = str(gmail_user).partition("@")[2].strip() or None
+    msg["Message-ID"] = make_msgid(domain=message_domain)
+    plain = final_body_html.replace("<br>", "\n").replace("</tr>", "\n")
+    plain = re.sub(r"<[^>]+>", "", plain)
+    msg.attach(MIMEText(plain, "plain", "utf-8"))
+    msg.attach(MIMEText(final_body_html, "html", "utf-8"))
+    msg_string = msg.as_string()
+
+    # B-03: Nur abgelehnte/noch offene Empfaenger erneut versuchen.
     max_retries = 3
+    pending = list(recipients)
+    accepted = set()
+    transports = []
+    last_error = ""
+    outcome_unknown = False
     for attempt in range(max_retries):
         try:
-            msg = MIMEMultipart("alternative")
-            msg["From"] = f"TradingBot Alert <{gmail_user}>"
-            msg["To"] = ", ".join(recipients)
-            msg["Subject"] = subject
-            # Plain-Text Fallback
-            plain = final_body_html.replace("<br>", "\n").replace("</tr>", "\n")
-            import re
-            plain = re.sub(r"<[^>]+>", "", plain)
-            msg.attach(MIMEText(plain, "plain", "utf-8"))
-            msg.attach(MIMEText(final_body_html, "html", "utf-8"))
-
             transport = _smtp_transport_send(
-                msg.as_string(), gmail_user, gmail_pass, recipients,
+                msg_string,
+                gmail_user,
+                gmail_pass,
+                pending,
                 timeout=_smtp_timeout_seconds(secrets),
             )
+            transports.append(str(transport))
+            accepted.update(transport.accepted)
+            pending = list(transport.refused)
+            _set_last_email_delivery(
+                intended=recipients, accepted=accepted, pending=pending
+            )
+            if not pending:
+                break
+            last_error = f"SMTP refused {len(pending)} recipient(s)"
+            log.warning(
+                "SMTP-Teilerfolg: %s akzeptiert, %s noch abgelehnt",
+                len(accepted),
+                len(pending),
+            )
+        except _SMTPDataOutcomeUnknown as exc:
+            last_error = str(exc)
+            outcome_unknown = True
+            log.error(
+                "SMTP-DATA-Ausgang unbekannt; kein automatischer Retry/"
+                "Port-Fallback fuer %s Empfaenger",
+                len(pending),
+            )
+            break
+        except Exception as exc:
+            last_error = str(exc)
+        if pending and attempt < max_retries - 1:
+            wait_time = 2 ** attempt
+            log.warning(
+                "E-Mail Fehler/Teilablehnung (Versuch %s/%s): %s; warte %ss",
+                attempt + 1,
+                max_retries,
+                last_error or "unbekannt",
+                wait_time,
+            )
+            time.sleep(wait_time)
 
-            log.info(f"📧 E-Mail Alert gesendet ({transport}): {subject}")
-            # Telegram-Spiegel nur für trade-Mails, nur nach Mail-Erfolg;
-            # subject ist hier bereits der finale (geprefixte) Betreff.
-            _send_telegram_companion(subject, mail_class, telegram_text)
-            return True
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                log.warning(f"⚠️ E-Mail Fehler (Versuch {attempt+1}/{max_retries}): {e}, warte {wait_time}s...")
-                time.sleep(wait_time)
+    queued = False
+    if pending:
+        log.error(
+            "E-Mail nach %s Versuchen fuer %s/%s Empfaenger offen: %s",
+            max_retries,
+            len(pending),
+            len(recipients),
+            last_error or "SMTP refusal",
+        )
+        normalized_class = str(mail_class or "").strip().lower()
+        if outcome_unknown and _mail_outbox is not None:
+            quarantine_id = _quarantine_unknown_email_delivery(
+                subject,
+                final_body_html,
+                pending,
+                mail_class=mail_class,
+                telegram_text=telegram_text,
+                delivery_dedupe_keys=outbox_dedupe_keys or [],
+                # An earlier retry may already have accepted part of the
+                # cohort. Quarantine only the unresolved recipients then.
+                include_base=not bool(accepted),
+                error=last_error or "SMTP DATA outcome unknown",
+            )
+            if quarantine_id is not None:
+                log.error(
+                    "E-Mail-Zustellung unklar und quarantänisiert "
+                    "(Outbox #%s): %s",
+                    quarantine_id,
+                    subject,
+                )
             else:
-                log.error(f"❌ E-Mail Fehler nach {max_retries} Versuchen: {e}")
-                if enqueue_on_failure and _mail_outbox is not None:
-                    queued_id = _mail_outbox.enqueue(
-                        subject,
-                        final_body_html,
-                        recipients,
-                        mail_class=mail_class,
-                        telegram_text=telegram_text,
-                    )
-                    if queued_id is not None:
-                        log.warning(
-                            "E-Mail Alert persistent vorgemerkt "
-                            f"(Outbox #{queued_id}): {subject}"
-                        )
-                return False
+                log.critical(
+                    "E-Mail-Zustellung unklar, aber Quarantaene konnte nicht "
+                    "bestaetigt werden: %s",
+                    subject,
+                )
+        elif (
+            enqueue_on_failure
+            and _mail_outbox is not None
+            and normalized_class not in {"trade", "swing_trade"}
+        ):
+            queued_id = _mail_outbox.enqueue(
+                subject,
+                final_body_html,
+                pending,
+                mail_class=mail_class,
+                telegram_text=telegram_text,
+                delivery_dedupe_keys=outbox_dedupe_keys or [],
+            )
+            queued = queued_id is not None
+            if queued:
+                log.warning(
+                    "E-Mail Alert persistent vorgemerkt (Outbox #%s): %s",
+                    queued_id,
+                    subject,
+                )
+        elif normalized_class in {"trade", "swing_trade"}:
+            log.warning(
+                "Zeitkritische Entry-Mail nicht nachtraeglich eingereiht: %s",
+                subject,
+            )
+
+    _set_last_email_delivery(
+        intended=recipients,
+        accepted=accepted,
+        pending=pending,
+        queued=queued,
+        outcome_unknown=outcome_unknown,
+    )
+    if accepted:
+        try:
+            log.info(
+                "E-Mail Alert gesendet (%s; status=%s; %s/%s): %s",
+                ",".join(transports) or "smtp",
+                "vollstaendig" if not pending else "teilweise",
+                len(accepted),
+                len(recipients),
+                subject,
+            )
+        except Exception:
+            pass
+        try:
+            _send_telegram_companion(subject, mail_class, telegram_text)
+        except Exception as exc:
+            log.warning("Telegram-Begleitversand fehlgeschlagen (ignoriert): %s", exc)
+        return True
+    return False
+
+
+class _OutboxDeliveryIncomplete(RuntimeError):
+    def __init__(self, pending_recipients):
+        self.pending_recipients = tuple(sorted({
+            str(value).strip().lower()
+            for value in pending_recipients or []
+            if "@" in str(value)
+        }))
+        super().__init__(
+            f"persistent mail delivery incomplete ({len(self.pending_recipients)} pending)"
+        )
+
+
+class _OutboxDeliveryUncertain(RuntimeError):
+    suppress_retry = True
+
+    def __init__(self, recipients):
+        self.uncertain_recipients = tuple(sorted({
+            str(value).strip().lower()
+            for value in recipients or []
+            if "@" in str(value)
+        }))
+        super().__init__(
+            "persistent mail DATA outcome unknown; automatic retry quarantined"
+        )
+
+
+class _OutboxUnsafeActionableEntry(RuntimeError):
+    """Legacy queued entry mail that lacks current quote/tracker evidence."""
+
+    suppress_retry = True
+
+    def __init__(self, mail_class):
+        normalized = str(mail_class or "trade").strip().lower() or "trade"
+        super().__init__(
+            f"unsafe legacy {normalized} outbox entry blocked; manual review required"
+        )
 
 
 def _run_mail_outbox_job(secrets):
@@ -3490,6 +4592,18 @@ def _run_mail_outbox_job(secrets):
         return {"sent": 0, "failed": 0, "expired": 0, "dead": 0}
 
     def _deliver(item):
+        normalized_class = str(item.get("mail_class") or "info").strip().lower()
+        if normalized_class in {"trade", "swing_trade"}:
+            # Old deployments could persist actionable Entry mails. They have
+            # neither a fresh final quote/path nor a PREPARED tracker intent at
+            # worker time, so delayed delivery would be unsafe. Quarantine the
+            # row before SMTP; current immediate senders never enqueue these
+            # classes.
+            log.error(
+                "Mail-Outbox blockiert veraltete Entry-Mailklasse %s vor SMTP",
+                normalized_class,
+            )
+            raise _OutboxUnsafeActionableEntry(normalized_class)
         sent = _send_email_alert(
             item.get("subject", ""),
             item.get("body_html", ""),
@@ -3499,20 +4613,45 @@ def _run_mail_outbox_job(secrets):
             recipient_emails=item.get("recipients", []),
             bypass_startup_delay=True,
             enqueue_on_failure=False,
+            outbox_dedupe_keys=item.get("delivery_dedupe_keys", []),
             subject_is_final=True,
             body_is_final=True,
         )
+        delivery = _last_email_delivery()
+        if delivery.get("outcome_unknown"):
+            raise _OutboxDeliveryUncertain(
+                delivery.get("pending") or delivery.get("intended")
+            )
+        if delivery.get("pending"):
+            # process_outbox reduziert den geleasten Datensatz atomar auf die
+            # noch offenen Empfaenger; bereits akzeptierte werden nie erneut
+            # in denselben Retry aufgenommen.
+            raise _OutboxDeliveryIncomplete(delivery["pending"])
         if not sent:
             raise RuntimeError("persistent mail delivery failed")
 
     result = _mail_outbox.process_outbox(_deliver, limit=10)
-    if any(int(result.get(key, 0) or 0) for key in ("sent", "failed", "expired", "dead")):
+    for sent_row in result.get("sent_rows") or []:
+        for dedupe_key in sent_row.get("delivery_dedupe_keys") or []:
+            try:
+                _email_delivery_mark(str(dedupe_key), now=time.time())
+            except Exception as exc:
+                log.warning(
+                    "Mail-Outbox Dedupe-Acknowledge fehlgeschlagen (%s): %s",
+                    dedupe_key,
+                    exc,
+                )
+    if any(
+        int(result.get(key, 0) or 0)
+        for key in ("sent", "failed", "expired", "dead", "uncertain")
+    ):
         log.info(
             "Mail-Outbox: "
             f"{result.get('sent', 0)} gesendet, "
             f"{result.get('failed', 0)} fehlgeschlagen, "
             f"{result.get('expired', 0)} abgelaufen, "
-            f"{result.get('dead', 0)} dauerhaft fehlgeschlagen"
+            f"{result.get('dead', 0)} dauerhaft fehlgeschlagen, "
+            f"{result.get('uncertain', 0)} DATA-Ausgang unklar"
         )
     return result
 
@@ -3533,7 +4672,22 @@ def _alert_cache_path(scanner_name):
 
 
 def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
-    """Prüft Scan-Ergebnisse auf Grade S/A und sendet E-Mail Alert"""
+    """Prüft Scan-Ergebnisse auf Grade S/A und sendet E-Mail Alert.
+
+    Stock-Entry-Mails bleiben hier bis zu einem nachgewiesenen finalen
+    Bid/Ask-plus-Pfad-Revalidator fail-closed. Der FastAPI-Sender ist der
+    kanonische Stock-Trade-Mailpfad; Cachepreise dürfen kein JETZT-Signal
+    auslösen. Watch-/Info-Mailpfade sind davon unberührt.
+    """
+    log.info(
+        "[Alert] %s: BG-Stock-Trade-Mail fail-closed; "
+        "FastAPI-Revalidator ist authoritative",
+        scanner_name,
+    )
+    return False
+
+    # Legacy implementation intentionally retained below for audit history;
+    # it is unreachable until a quote/path revalidator replaces this gate.
     now = time.time()
     claimed_alerts = []
     mail_sent = False
@@ -3724,7 +4878,7 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
 
         claimed_alerts = [
             alert for alert in alerts
-            if _email_dedupe_claim(
+            if _email_delivery_claim(
                 alert["cooldown_key"],
                 _alert_dedupe_ttl_seconds(scanner_name),
                 now=now,
@@ -3793,9 +4947,14 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
         # rollt denselben Parameter parallel aus; alte Mocks/Signaturen ohne
         # telegram_text bleiben funktionsfähig).
         try:
+            _set_last_email_delivery()
             sent = _send_email_alert(subject, body_html, secrets, mail_class="trade",
                                      telegram_text=_format_telegram_text(alert_source_rows),
-                                     mail_channel=scanner_mail_channel(scanner_name) if scanner_mail_channel else "")
+                                     mail_channel=scanner_mail_channel(scanner_name) if scanner_mail_channel else "",
+                                     outbox_dedupe_keys=[
+                                         alert["cooldown_key"]
+                                         for alert in claimed_alerts
+                                     ])
         except TypeError:
             sent = _send_email_alert(subject, body_html, secrets, mail_class="trade")
         if sent:
@@ -3803,20 +4962,31 @@ def _check_and_alert_scan_results(scanner_name, secrets, trade_horizon="swing"):
             # B2: Cooldown + persistentes Dedupe NUR bei erfolgreichem Versand setzen.
             for alert in alerts:
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
-                _email_dedupe_mark(alert["cooldown_key"], now=now)
+                _email_delivery_mark(alert["cooldown_key"], now=now)
                 if scanner_name == "bi_short":
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
             # Signal-Tracking NUR nach erfolgreichem Versand (wirft nie).
-            _record_alert_signals_safe(scanner_name, alert_source_rows,
-                                       mail_class="trade", channel="email")
+            _record_alert_signals_safe(
+                scanner_name,
+                alert_source_rows,
+                mail_class="trade",
+                channel="email",
+                mail_channel=(
+                    scanner_mail_channel(scanner_name)
+                    if scanner_mail_channel
+                    else None
+                ),
+            )
         else:
             for alert in claimed_alerts:
-                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                _email_delivery_release_or_quarantine(
+                    alert["cooldown_key"], claimed_at=now
+                )
 
     except Exception as e:
         if not mail_sent:
             for alert in claimed_alerts:
-                _email_dedupe_release(alert.get("cooldown_key", ""), claimed_at=now)
+                _email_delivery_release(alert.get("cooldown_key", ""), claimed_at=now)
         log.error(f"⚠️ Alert-Check {scanner_name}: {e}")
 
 
@@ -4085,22 +5255,27 @@ def _run_bi_scanner(poly_key, direction="long"):
                 next_url = None
                 for _ in range(20):
                     if next_url:
-                        resp = rate_limited_get(next_url, timeout=30)
+                        # Keep credentials out of provider pagination URLs so
+                        # exception/trace text cannot contain the raw key.
+                        resp = rate_limited_get(
+                            next_url, params={"apiKey": poly_key}, timeout=30
+                        )
                     else:
                         resp = rate_limited_get(url, params=params, timeout=30)
                     data = resp.json()
                     for r in data.get("results", []):
                         cs_set.add(r.get("ticker", "").upper())
                     next_url = data.get("next_url")
-                    if next_url:
-                        next_url = f"{next_url}&apiKey={poly_key}"
-                    else:
+                    if not next_url:
                         break
                 if cs_set:
                     _atomic_write_json(cs_file, list(cs_set))
                     log.info(f"  CS-Liste von API: {len(cs_set)} Ticker")
             except Exception as e:
-                log.warning(f"  CS-Liste Fehler: {e}")
+                log.warning(
+                    "  CS-Liste Fehler: %s",
+                    redact_sensitive_query_values(e),
+                )
 
         # 4) Filter
         if direction == "long":
@@ -4175,9 +5350,13 @@ def _run_bi_scanner(poly_key, direction="long"):
         return payload.get("results", [])
 
     except Exception as e:
-        log.error(f"❌ {label}: {e}\n{traceback.format_exc()}")
-        _update_status(f"bi_{direction}", "error", str(e))
-        raise
+        safe_error = redact_sensitive_query_values(e)
+        safe_traceback = redact_sensitive_query_values(traceback.format_exc())
+        log.error("❌ %s: %s\n%s", label, safe_error, safe_traceback)
+        _update_status(f"bi_{direction}", "error", safe_error)
+        # Do not re-expose a requests exception whose rendered URL may contain
+        # credentials to a caller that logs the exception again.
+        raise RuntimeError(safe_error) from None
 
 
 def _run_bear_scanner(poly_key, secrets):
@@ -4356,7 +5535,9 @@ def _run_bear_scanner(poly_key, secrets):
             for cs in crash_stocks:
                 ticker = str(cs.get("ticker", "?")).upper()
                 dedupe_key = f"crash_stock_{crash_date}_{ticker}"
-                if _email_dedupe_claim(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now=now):
+                if _email_delivery_claim(
+                    dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now=now
+                ):
                     fresh_crash_stocks.append(cs)
                     crash_dedupe_keys.append(dedupe_key)
                 else:
@@ -4370,7 +5551,7 @@ def _run_bear_scanner(poly_key, secrets):
             crash_summary_key = _crash_ck
             if (
                 _crash_ck not in _EMAIL_COOLDOWN
-                and _email_dedupe_claim(_crash_ck, 3600, now=now)
+                and _email_delivery_claim(_crash_ck, 3600, now=now)
             ):
                 _crash_rows = ""
                 for cs in crash_stocks[:8]:
@@ -4401,34 +5582,44 @@ def _run_bear_scanner(poly_key, secrets):
                 {_crash_rows}</table>
                 <p style="color:#999;font-size:11px;margin-top:12px">Automatische Risikowarnung; kein sofortiges Entry-Signal.</p>
                 </body></html>'''
+                _set_last_email_delivery()
                 sent = _send_email_alert(
                     f"Crash-Risiko: {len(crash_stocks)} Aktien aktiv beobachten",
                     _body,
                     secrets,
                     mail_class="info",
                     mail_channel="bear",
+                    outbox_dedupe_keys=[_crash_ck, *crash_dedupe_keys],
                 )
                 if sent:
                     crash_mail_sent = True
                     _EMAIL_COOLDOWN[_crash_ck] = now
-                    _email_dedupe_mark(_crash_ck, now=now)
+                    _email_delivery_mark(_crash_ck, now=now)
                     for dedupe_key in crash_dedupe_keys:
-                        _email_dedupe_mark(dedupe_key, now=now)
+                        _email_delivery_mark(dedupe_key, now=now)
                     log.info(f"  CRASH RISK INFO sent: {[c['ticker'] for c in crash_stocks]}")
                 else:
-                    _email_dedupe_release(_crash_ck, claimed_at=now)
+                    _email_delivery_release_or_quarantine(
+                        _crash_ck, claimed_at=now
+                    )
                     for dedupe_key in crash_dedupe_keys:
-                        _email_dedupe_release(dedupe_key, claimed_at=now)
+                        _email_delivery_release_or_quarantine(
+                            dedupe_key, claimed_at=now
+                        )
             else:
                 for dedupe_key in crash_dedupe_keys:
-                    _email_dedupe_release(dedupe_key, claimed_at=now)
+                    _email_delivery_release(dedupe_key, claimed_at=now)
 
     except Exception as e:
         if not crash_mail_sent:
             if crash_summary_key:
-                _email_dedupe_release(crash_summary_key, claimed_at=locals().get("now"))
+                _email_delivery_release(
+                    crash_summary_key, claimed_at=locals().get("now")
+                )
             for dedupe_key in crash_dedupe_keys:
-                _email_dedupe_release(dedupe_key, claimed_at=locals().get("now"))
+                _email_delivery_release(
+                    dedupe_key, claimed_at=locals().get("now")
+                )
         log.error(f"Bear Scanner: {e}\n{traceback.format_exc()}")
         _update_status("bear_scan", "error", str(e))
 
@@ -4722,7 +5913,17 @@ def _run_strategy_scanner(poly_key, secrets):
             </p>
             </body></html>"""
 
-            sent = _send_email_alert(subject, body_html, secrets, mail_class="trade", mail_channel="stocks_swing")
+            sent = _send_email_alert(
+                subject,
+                body_html,
+                secrets,
+                mail_class="trade",
+                mail_channel="stocks_swing",
+                outbox_dedupe_keys=[
+                    f"strat_{a['_strategy']}_{a['Ticker']}"
+                    for a in all_alerts
+                ],
+            )
             if sent:
                 # B8: Cooldown/Dedupe erst NACH erfolgreichem Versand setzen.
                 for a in all_alerts:
@@ -4731,8 +5932,13 @@ def _run_strategy_scanner(poly_key, secrets):
                     _email_dedupe_mark(_ck, now=now)
                 # Signal-Tracking (Pfad dormant, gegen Reaktivierung abgesichert):
                 # all_alerts SIND hier die Original-Rows inkl. Entry/Stop/TP.
-                _record_alert_signals_safe("strategy_scan", all_alerts,
-                                           mail_class="trade", channel="email")
+                _record_alert_signals_safe(
+                    "strategy_scan",
+                    all_alerts,
+                    mail_class="trade",
+                    channel="email",
+                    mail_channel="stocks_swing",
+                )
 
     except Exception as e:
         log.error(f"❌ Strategy Scanner: {e}\n{traceback.format_exc()}")
@@ -5695,7 +6901,9 @@ def _alert_nls_invalidations(results, secrets):
         if not _email_dedupe_active(signal_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
             continue
         invalidation_key = f"new_listing_invalidated_{raw_symbol}"
-        if not _email_dedupe_claim(invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now):
+        if not _email_delivery_claim(
+            invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC, now=now
+        ):
             continue
         display = _display_crypto_contract_symbol(raw_symbol)
         reason = html.escape(str(entry.get("status_reason", "") or "Stop gerissen"))
@@ -5717,24 +6925,36 @@ def _alert_nls_invalidations(results, secrets):
         </p>
         </body></html>"""
         try:
+            _set_last_email_delivery()
             sent = _send_email_alert(
                 f"Signal invalidiert — Stop gerissen: {display}",
                 body_html, secrets, mail_class="info",
+                outbox_dedupe_keys=[invalidation_key],
             )
         except Exception:
-            _email_dedupe_release(invalidation_key, claimed_at=now)
+            _email_delivery_release(invalidation_key, claimed_at=now)
             raise
         if sent:
-            _email_dedupe_mark(invalidation_key, now=now)
+            _email_delivery_mark(invalidation_key, now=now)
             log.info(f"NLS Invalidierungs-Update gesendet: {display} ({raw_symbol})")
         else:
-            _email_dedupe_release(invalidation_key, claimed_at=now)
+            _email_delivery_release_or_quarantine(
+                invalidation_key, claimed_at=now
+            )
 
 
 def _alert_nls_signals(results, secrets):
-    """Override: mail only active, safe Pump-&-Dump SHORT-now signals."""
+    """Process NLS info updates; entry mail is API-authoritative/fail-closed.
+
+    This BG path cannot atomically prepare a tracker intent before SMTP and
+    reconcile accepted DATA afterwards.  Sending here could therefore leave a
+    subscriber with an entry mail but no tracker/follow-up after a process or
+    tracker-DB failure.  The API sender owns the full PREPARED -> ATTEMPTED ->
+    acceptance-journal -> ACTIVE contract.  Keep invalidation *info* updates
+    alive, but never issue a new trade entry from this optional overlap worker.
+    """
     if not results:
-        return
+        return False
     # B5: Invalidierungs-Updates zuerst — unabhaengig davon, ob neue Signale da sind.
     try:
         _alert_nls_invalidations(results, secrets)
@@ -5742,8 +6962,17 @@ def _alert_nls_signals(results, secrets):
         log.warning(f"NLS Invalidierungs-Update fehlgeschlagen: {exc}")
     signals = results.get("signals", [])
     if not signals:
-        return
+        return False
+    log.warning(
+        "NLS BG-Entry-Mail fail-closed: API delivery-intent/journal sender "
+        "is authoritative (%s candidate(s) suppressed)",
+        len(signals),
+    )
+    return False
 
+    # Legacy implementation intentionally retained below for audit history;
+    # it is unreachable until this worker implements the same durable tracker
+    # intent and per-sendmail acceptance contract as api.py.
     now = time.time()
     alerts = []
     # Signal-Tracking: Original-Signal-Dicts (entry/stop_loss/tp1/tp2 — Tracker
@@ -5852,7 +7081,9 @@ def _alert_nls_signals(results, secrets):
 
     claimed_alerts = []
     for alert in alerts:
-        if _email_dedupe_claim(alert["cooldown_key"], _EMAIL_COOLDOWN_SEC, now=now):
+        if _email_delivery_claim(
+            alert["cooldown_key"], _EMAIL_COOLDOWN_SEC, now=now
+        ):
             claimed_alerts.append(alert)
     alerts = claimed_alerts
     if not alerts:
@@ -5903,28 +7134,37 @@ def _alert_nls_signals(results, secrets):
     # telegram_text TypeError-tolerant (B7-Muster, s. _check_and_alert_scan_results).
     sent = False
     try:
+        _set_last_email_delivery()
         try:
             sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets,
                                      mail_class="trade",
                                      telegram_text=_format_telegram_text(alert_source_rows),
-                                     mail_channel="new_listing")
+                                     mail_channel="new_listing",
+                                     outbox_dedupe_keys=claimed_keys)
         except TypeError:
             sent = _send_email_alert(f"Pump & Dump: {n} SHORT Top-Signal(e)", body_html, secrets, mail_class="trade")
     except Exception:
         for claimed_key in claimed_keys:
-            _email_dedupe_release(claimed_key, claimed_at=now)
+            _email_delivery_release(claimed_key, claimed_at=now)
         raise
     if sent:
         for alert in alerts:
             _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
-            _email_dedupe_mark(alert["cooldown_key"], now=now)
+            _email_delivery_mark(alert["cooldown_key"], now=now)
         log.info(f"NLS Alert: {n} Dump-Signale gesendet ({', '.join(a['symbol'] for a in alerts)})")
         # Signal-Tracking NUR nach erfolgreichem Versand (wirft nie).
-        _record_alert_signals_safe("new_listing", alert_source_rows,
-                                   mail_class="trade", channel="email")
+        _record_alert_signals_safe(
+            "new_listing",
+            alert_source_rows,
+            mail_class="trade",
+            channel="email",
+            mail_channel="new_listing",
+        )
     else:
         for claimed_key in claimed_keys:
-            _email_dedupe_release(claimed_key, claimed_at=now)
+            _email_delivery_release_or_quarantine(
+                claimed_key, claimed_at=now
+            )
         log.warning(f"NLS Alert konnte nicht gesendet werden ({', '.join(a['symbol'] for a in alerts)})")
 
 
@@ -5972,21 +7212,18 @@ def _signal_handler(sig, frame):
 # api.py _scheduler_loop scannt bereits (light): crypto_explosion, early_movers,
 # crash_monitor, market_context, btc_divergenz, volume_spikes, money_flow, orb,
 # bear, strategy_scan, turtle, new_listing und crypto_trade_signals.
-# Audit-Überlappung bg↔api: crash_monitor, btc_divergence(btc_divergenz),
-# bear_scan(bear), strategies(strategy_scan), orb, new_listing → Default-Ownership: api.
-# bg behält: bi_long, bi_short, biotech (Email-Alerts + feste ET-Zeitfenster)
-# New Listing bleibt API-owned, damit Crypto-Listing-Mails nicht still ausfallen,
-# wenn tradingbot-bg hängt/stale ist. Per BG_SCAN_SET kann bg new_listing weiter
-# explizit übernehmen; geteilte Dedupe schützt dann vor Doppel-Mails.
-# Hinweis: bi_long/bi_short/biotech stehen auch im api-Scheduler —
-# dortige Skip-Logik ist api-Team-Thema (siehe Audit-Report H-9).
+# Alle Entry-Scanner sind API-owned, weil nur api.py den finalen Quote/Pfad-
+# Guard und den dauerhaften Delivery-Intent besitzt. Der BG-Dienst hat deshalb
+# standardmaessig keine Scan-Ownership; er evaluiert Tracker, Folgeupdates und
+# Outbox. Ein expliziter Override braucht ALLOW_DUPLICATE_SCAN_OWNERSHIP=1 und
+# darf den fail-closed BG-Entry-Mailpfad trotzdem nicht reaktivieren.
 # Override per ENV: BG_SCAN_SET="crash_monitor,btc_divergence,..." (kommasepariert).
 BG_ALL_SCANS = {
     "bi_long", "bi_short", "biotech", "crash_monitor", "strategies",
     "bear_scan", "btc_divergence", "new_listing", "orb",
 }
-BG_API_OWNED_OVERLAP = {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb", "new_listing"}
-BG_DEFAULT_SCAN_SET = BG_ALL_SCANS - BG_API_OWNED_OVERLAP
+BG_API_OWNED_OVERLAP = set(BG_ALL_SCANS)
+BG_DEFAULT_SCAN_SET = set()
 
 
 def _resolve_bg_scan_set(env_value=None, allow_api_overlap=None):

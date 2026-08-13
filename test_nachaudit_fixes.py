@@ -12,6 +12,7 @@ L8 (Monitoring-Purge), H8 (Dreieck mit exakt 3 Swings), H9 (Downside-Z-Score),
 Biotech-News-Reihenfolge, pos_90d-or-Falle.
 """
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -222,6 +223,9 @@ def test_tracker_crypto_fetcher_blockt_stale_cache(monkeypatch, tmp_path):
 
     # Kein Zeitfeld -> Fallback auf Datei-mtime (frisch geschrieben) -> Preis
     cache_file.write_text(json.dumps({"coins": coins}))
+    # Windows may retain the previous timestamp for rapid rewrites in the same
+    # filesystem tick.  Make the freshness evidence explicit for this branch.
+    os.utime(cache_file, None)
     _assert_fresh_fallback()
 
 

@@ -198,18 +198,27 @@ def _confirmed_fresh_row(monkeypatch, bar_date):
     return row
 
 
-def test_k2b_afterhours_confirmed_fresh_sends_dailyclose_mail(monkeypatch):
+def test_k2b_afterhours_dailyclose_cannot_bypass_executable_revalidation(monkeypatch):
     sent = _mock_mail_env(monkeypatch, allowed=False)  # Session ZU (Afterhours)
     row = _confirmed_fresh_row(monkeypatch, _today_et_str())
+    validations = []
+    tracked = []
+    monkeypatch.setattr(
+        api,
+        "_safe_record_alert_signals",
+        lambda *args, **kwargs: tracked.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda *_args, **kwargs: validations.append(kwargs.get("price_session"))
+        or {"ok": False, "reason": "final_price_session_not_executable"},
+    )
 
     api._send_strategy_scan_alerts("Cup and Handle Breakout", [row], "stocks")
-    assert len(sent) == 1
-    assert "(Daily Close bestätigt)" in sent[0]["subject"]
-    assert "Bestätigt per Tagesschluss" in sent[0]["body"]
-    # Eigener Dedupe-Namespace verhindert Tages-Doppel:
-    assert any(key.endswith("_dailyclose") for key in api._EMAIL_COOLDOWN)
-    api._send_strategy_scan_alerts("Cup and Handle Breakout", [row], "stocks")
-    assert len(sent) == 1, "Zweite Mail am selben Tag muss am _dailyclose-Dedupe scheitern"
+    assert validations == ["CLOSED"]
+    assert sent == []
+    assert tracked == []
 
 
 def test_k2b_open_session_sends_no_mail(monkeypatch):

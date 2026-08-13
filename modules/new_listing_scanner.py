@@ -241,8 +241,26 @@ def _parse_book_side(side):
     return parsed
 
 
+_SUPPORTED_MARKET_VENUES = frozenset({
+    "crypto.com",
+    "mexc",
+    "bitget",
+    "binance",
+})
+
+
+def _normalize_market_venue(exchange):
+    value = str(exchange or "").strip().lower().replace(" ", "_")
+    if value == "crypto_com":
+        value = "crypto.com"
+    return value if value in _SUPPORTED_MARKET_VENUES else None
+
+
 def _monitor_key(symbol, exchange):
-    return f"{str(exchange or 'crypto.com').lower()}:{symbol}"
+    venue = _normalize_market_venue(exchange)
+    if venue is None:
+        raise ValueError("unsupported_market_venue")
+    return f"{venue}:{symbol}"
 
 
 def _is_tradeable_short_signal(signal):
@@ -788,26 +806,32 @@ def fetch_bitget_candles(symbol, timeframe="1h", count=50):
 
 def fetch_ticker_for(symbol, exchange):
     """Holt Ticker für ein Symbol von der richtigen Exchange."""
-    if exchange == "mexc":
+    venue = _normalize_market_venue(exchange)
+    if venue == "mexc":
         return fetch_mexc_ticker(symbol)
-    elif exchange == "bitget":
+    elif venue == "bitget":
         return fetch_bitget_ticker(symbol)
-    elif exchange == "binance":
+    elif venue == "binance":
         return fetch_binance_ticker(symbol)
-    else:
+    elif venue == "crypto.com":
         return fetch_cryptocom_ticker(symbol)
+    log.warning("NLS: ticker fetch blocked for unsupported venue")
+    return None
 
 
 def fetch_candles_for(symbol, exchange, timeframe="1h", count=50):
     """Holt Candles für ein Symbol von der richtigen Exchange."""
-    if exchange == "mexc":
+    venue = _normalize_market_venue(exchange)
+    if venue == "mexc":
         return fetch_mexc_candles(symbol, timeframe, count)
-    elif exchange == "bitget":
+    elif venue == "bitget":
         return fetch_bitget_candles(symbol, timeframe, count)
-    elif exchange == "binance":
+    elif venue == "binance":
         return fetch_binance_candles(symbol, timeframe, count)
-    else:
+    elif venue == "crypto.com":
         return fetch_cryptocom_candles(symbol, timeframe, count)
+    log.warning("NLS: candle fetch blocked for unsupported venue")
+    return []
 
 
 def _clean_listing_base_symbol(symbol):
@@ -1080,14 +1104,17 @@ def _attach_announcement_contracts(announcement_watchlist, all_perps, is_stock_t
 
 def fetch_orderbook_for(symbol, exchange, depth=20):
     """Holt ein echtes Orderbook fuer Safety/Spread-Checks."""
-    if exchange == "mexc":
+    venue = _normalize_market_venue(exchange)
+    if venue == "mexc":
         return fetch_mexc_orderbook(symbol, depth)
-    elif exchange == "bitget":
+    elif venue == "bitget":
         return fetch_bitget_orderbook(symbol, depth)
-    elif exchange == "binance":
+    elif venue == "binance":
         return fetch_binance_orderbook(symbol, depth)
-    else:
+    elif venue == "crypto.com":
         return fetch_cryptocom_orderbook(symbol, depth)
+    log.warning("NLS: orderbook fetch blocked for unsupported venue")
+    return None
 
 
 def detect_new_listings():
@@ -2691,20 +2718,24 @@ def save_monitoring_list(monitoring):
     MONITORING_FILE.write_text(json.dumps(monitoring, indent=2, default=str))
 
 
-def add_to_monitoring(symbol, exchange="crypto.com", listing_ts_ms=None, source="new_listing"):
+def add_to_monitoring(symbol, exchange=None, listing_ts_ms=None, source="new_listing"):
     """Fügt ein neues Listing zur Überwachung hinzu."""
+    venue = _normalize_market_venue(exchange)
+    if venue is None:
+        log.warning("NLS: monitoring add blocked for unsupported venue")
+        return load_monitoring_list()
     monitoring = load_monitoring_list()
-    key = _monitor_key(symbol, exchange)
+    key = _monitor_key(symbol, venue)
     if symbol in monitoring and key not in monitoring:
         monitoring[key] = monitoring.pop(symbol)
         monitoring[key]["symbol"] = symbol
-        monitoring[key]["exchange"] = exchange
+        monitoring[key]["exchange"] = venue
         save_monitoring_list(monitoring)
     listing_time = _exchange_timestamp_iso(listing_ts_ms)
     if key not in monitoring:
         monitoring[key] = {
             "symbol": symbol,
-            "exchange": exchange,
+            "exchange": venue,
             "detected_at": datetime.now(timezone.utc).isoformat(),
             "listing_time": listing_time,
             "source": source,
@@ -3105,13 +3136,18 @@ def run_new_listing_scanner():
                 or nl.get("create_time")
                 or nl.get("launch_time")
             )
+            venue = _normalize_market_venue(nl.get("exchange"))
+            if venue is None:
+                log.warning("NLS: listing blocked for unsupported venue")
+                results["errors"].append("NewListing:unsupported_market_venue")
+                continue
             monitoring = add_to_monitoring(
                 nl["symbol"],
-                nl.get("exchange", "crypto.com"),
+                venue,
                 listing_ts_ms=exchange_listing_ts,
                 source="new_listing",
             )
-            key = _monitor_key(nl["symbol"], nl.get("exchange", "crypto.com"))
+            key = _monitor_key(nl["symbol"], venue)
             if key in monitoring and nl.get("announcement_source"):
                 announcement_listing_time = None
                 try:
@@ -3186,7 +3222,11 @@ def run_new_listing_scanner():
             try:
                 time.sleep(0.5)  # Rate Limiting
                 symbol = mon_data.get("symbol") or str(mon_key).split(":", 1)[-1]
-                exchange = mon_data.get("exchange", "crypto.com")
+                exchange = _normalize_market_venue(mon_data.get("exchange"))
+                if exchange is None:
+                    log.warning("NLS: monitored row blocked for unsupported venue")
+                    results["errors"].append("Monitoring:unsupported_market_venue")
+                    continue
 
                 # Expiry is time-based and must not depend on a successful
                 # ticker request. Otherwise an unavailable/delisted contract
@@ -3445,7 +3485,7 @@ def run_new_listing_scanner():
 
                 entry = {
                     "symbol": symbol,
-                    "exchange": mon_data.get("exchange", "crypto.com"),
+                    "exchange": exchange,
                     "detected_at": mon_data.get("detected_at", ""),
                     "listing_source": source,
                     "listing_age_hours": signal.get("listing_age_hours"),

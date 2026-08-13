@@ -21,6 +21,11 @@ def _mock_common_stock_universe(monkeypatch, tmp_path, request):
     # real local tracker DB. Cross-scanner economic dedupe is covered with an
     # isolated temporary SQLite DB in test_signal_tracker.py.
     monkeypatch.setattr(api, "_has_open_equivalent_trade_safe", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: (test_stocks, "unit"))
     monkeypatch.setattr(
         api,
@@ -37,6 +42,18 @@ def _mock_common_stock_universe(monkeypatch, tmp_path, request):
             "session": "US_REGULAR",
             "reason": "unit-test market open",
         })
+
+
+def test_business_quality_payload_freshness_contract():
+    fresh = {
+        "model_version": api.BUSINESS_QUALITY_MODEL_VERSION,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    stale = dict(fresh, fetched_at="2020-01-01T00:00:00+00:00")
+
+    assert api._business_quality_payload_fresh(fresh) is True
+    assert api._business_quality_payload_fresh(stale) is False
+    assert api._business_quality_payload_fresh({}) is False
 
 
 def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
@@ -197,13 +214,14 @@ def test_strategy_email_only_cooldowns_visible_rows(monkeypatch):
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
 
-    assert sent
-    assert "Top 10 von 12" in sent[0][0]
-    assert "Top 10 von 12" in sent[0][1]
-    assert "R09" in sent[0][1]
-    assert "R10" not in sent[0][1]
-    assert "stock_strategy_R09" in api._EMAIL_COOLDOWN
-    assert "stock_strategy_R10" not in api._EMAIL_COOLDOWN
+    assert len(sent) == 10
+    assert all("Top 10 von 12" in subject for subject, _body in sent)
+    assert all("Top 10 von 12" in body for _subject, body in sent)
+    combined = "\n".join(body for _subject, body in sent)
+    assert "R09" in combined
+    assert "R10" not in combined
+    assert any(key.startswith("stock_strategy_R09_") for key in api._EMAIL_COOLDOWN)
+    assert not any(key.startswith("stock_strategy_R10_") for key in api._EMAIL_COOLDOWN)
 
 
 def test_email_alert_audit_summary_explains_blockers(tmp_path, monkeypatch):
@@ -299,7 +317,8 @@ def test_biotech_alert_persistent_dedupe_survives_restart(tmp_path, monkeypatch)
 
     assert len(sent) == 1
     dedupe = json.loads((tmp_path / "email_dedupe.json").read_text())
-    assert "biotech_PFE" in dedupe
+    identity_key = api._alert_signal_identity_key("biotech", row, "PFE")
+    assert identity_key in dedupe
     state_after_8h = api._classify_alert_candidate("biotech", row, time.time() + api._EMAIL_COOLDOWN_SEC + 60)
     assert state_after_8h["alertable_now"] is False
     assert "persistent_dedupe_active" in state_after_8h["suppression_reasons"]
@@ -866,7 +885,8 @@ def test_email_dedupe_persists_crash_ticker(tmp_path, monkeypatch):
 
     assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_000.0) is True
     assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_060.0) is False
-    assert json.loads(dedupe_file.read_text())[key] == 1_000_000.0
+    stored = json.loads(dedupe_file.read_text())
+    assert stored[f"__delivery_claim__:{key}"] == 1_000_000.0
     assert api._email_dedupe_claim(key, ttl_seconds=36 * 3600, now=1_000_000.0 + 37 * 3600) is True
 
 
@@ -1619,6 +1639,11 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    monkeypatch.setattr(
+        api,
+        "_revalidate_new_listing_mail_candidate",
+        lambda alert, now_ts=None: {"ok": True, "candidate": alert},
+    )
 
     payload = {
         "signals": [
@@ -1692,6 +1717,90 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
     assert "LOW" not in sent[0][1]
     assert "WATCH" not in sent[0][1]
     assert "RISK" not in sent[0][1]
+
+
+def test_new_listing_batch_is_split_into_one_wire_and_intent_per_setup(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    monkeypatch.setattr(
+        api,
+        "_extract_new_listing_signal_fields",
+        lambda entry: {"grade": "A", "rr_effective": 2.2},
+    )
+    monkeypatch.setattr(
+        api,
+        "_classify_alert_candidate",
+        lambda scanner, entry, now: {
+            "alertable_now": True,
+            "suppression_reasons": [],
+            "cooldown_key": f"new_listing_{entry['symbol']}",
+            "score": 90,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "_filter_open_equivalent_trade_rows",
+        lambda scanner, rows, source_key=None: (rows, 0),
+    )
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(api, "_email_dedupe_mark", lambda *args, **kwargs: True)
+    released = []
+    monkeypatch.setattr(
+        api,
+        "_email_dedupe_release",
+        lambda key, claimed_at=None: released.append(key) or True,
+    )
+    events = []
+
+    def _revalidate_one(alert, now_ts=None):
+        events.append(("revalidate", alert["symbol"]))
+        if alert["symbol"] == "STALE":
+            return {"ok": False, "reason": "final_executable_quote_stale"}
+        return {"ok": True, "candidate": alert}
+
+    monkeypatch.setattr(api, "_revalidate_new_listing_mail_candidate", _revalidate_one)
+    sent = []
+
+    def _send_one(subject, body, **kwargs):
+        symbol = kwargs["tracking_rows"][0]["ticker"]
+        events.append(("send", symbol))
+        sent.append((subject, body, kwargs))
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", _send_one)
+    payload = {
+        "timestamp": "2026-08-13T12:00:00+00:00",
+        "signals": [
+            {
+                "symbol": symbol,
+                "exchange": "binance",
+                "signal": {
+                    "entry": 10.0,
+                    "stop_loss": 11.0,
+                    "tp1": 9.0,
+                    "tp2": 8.0,
+                    "timestamp": "2026-08-13T12:00:00+00:00",
+                    "pump_data": {},
+                },
+            }
+            for symbol in ("ONEUSDT", "TWOUSDT", "STALEUSDT")
+        ],
+    }
+
+    api._send_new_listing_pipeline_alerts(payload)
+
+    assert len(sent) == 2
+    assert "ONE" in sent[0][1] and "TWO" not in sent[0][1]
+    assert "TWO" in sent[1][1] and "ONE" not in sent[1][1]
+    assert all(len(call[2]["tracking_rows"]) == 1 for call in sent)
+    assert all(len(call[2]["delivery_dedupe_keys"]) == 1 for call in sent)
+    assert events == [
+        ("revalidate", "ONE"),
+        ("send", "ONE"),
+        ("revalidate", "TWO"),
+        ("send", "TWO"),
+        ("revalidate", "STALE"),
+    ]
+    assert released == ["new_listing_STALEUSDT__trade"]
 
 
 def test_new_listing_pipeline_sends_dump_watch_when_no_short_now(monkeypatch):
@@ -2424,9 +2533,98 @@ def test_early_mover_email_sends_trade_plan_and_dedupes(tmp_path, monkeypatch):
     assert "Swing-Struktur" in sent[0][1]
 
 
-def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch):
+def test_early_mover_final_gate_rejection_releases_lease(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    releases = []
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        api,
+        "_email_dedupe_release",
+        lambda key, claimed_at=None: releases.append(key) or True,
+    )
+    monkeypatch.setattr(
+        api,
+        "_revalidate_early_mover_mail_candidate",
+        lambda candidate, now_ts=None: {
+            "ok": False,
+            "reason": "final_stop_touched_since_scan",
+        },
+    )
+    sent = []
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda *args, **kwargs: sent.append(kwargs) or True,
+    )
+
+    api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="REJECT")]})
+
+    assert sent == []
+    assert len(releases) == 1
+    assert "REJECT" in releases[0]
+
+
+def test_early_mover_unknown_data_outcome_keeps_lease(monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     _allow_final_early_mover_revalidation(monkeypatch)
+    releases = []
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        api,
+        "_email_dedupe_release",
+        lambda key, claimed_at=None: releases.append(key) or True,
+    )
+
+    def _unknown_send(*args, **kwargs):
+        api._set_last_delivery_outcome("unknown")
+        return False
+
+    monkeypatch.setattr(api, "_send_email_alert", _unknown_send)
+    try:
+        api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="UNKNOWN")]})
+    finally:
+        api._set_last_delivery_outcome("not_attempted")
+
+    assert releases == []
+
+
+def test_early_mover_definite_send_exception_releases_lease(monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    _allow_final_early_mover_revalidation(monkeypatch)
+    releases = []
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        api,
+        "_email_dedupe_release",
+        lambda key, claimed_at=None: releases.append(key) or True,
+    )
+
+    def _failed_before_data(*args, **kwargs):
+        api._set_last_delivery_outcome("failed")
+        raise RuntimeError("definite pre-DATA failure")
+
+    monkeypatch.setattr(api, "_send_email_alert", _failed_before_data)
+    try:
+        with pytest.raises(RuntimeError, match="pre-DATA"):
+            api._send_early_mover_long_alerts({
+                "coins": [_early_mover_row(Symbol="FAILED")]
+            })
+    finally:
+        api._set_last_delivery_outcome("not_attempted")
+
+    assert len(releases) == 1
+    assert "FAILED" in releases[0]
+
+
+def test_early_mover_fresh_symbols_get_separate_wires_and_intents(tmp_path, monkeypatch):
+    api._EMAIL_COOLDOWN.clear()
+    events = []
+
+    def _revalidate_one(candidate, now_ts=None):
+        events.append(("revalidate", candidate["symbol"]))
+        return {"ok": True, "candidate": candidate}
+
+    monkeypatch.setattr(api, "_revalidate_early_mover_mail_candidate", _revalidate_one)
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -2434,18 +2632,30 @@ def test_early_mover_digest_cooldown_blocks_fresh_symbols(tmp_path, monkeypatch)
         "volume_ratio": 1.6,
     })
     sent = []
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    def _send_one(subject, body, **kwargs):
+        symbol = kwargs["tracking_rows"][0]["symbol"]
+        events.append(("send", symbol))
+        sent.append((subject, body, kwargs))
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", _send_one)
 
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="FIRST")]})
     api._send_early_mover_long_alerts({"coins": [_early_mover_row(Symbol="SECOND")]})
 
-    assert len(sent) == 1
+    assert len(sent) == 2
     assert "FIRST" in sent[0][1]
     assert "SECOND" not in sent[0][1]
-    status = api._email_dedupe_status(now=time.time())
-    digest = [item for item in status["recent"] if item["key"] == api._EARLY_MOVER_DIGEST_KEY]
-    assert digest
-    assert 0 < digest[0]["remaining_seconds"] <= api._EARLY_MOVER_DIGEST_DEDUPE_SEC
+    assert "SECOND" in sent[1][1]
+    assert "FIRST" not in sent[1][1]
+    assert all(len(call[2]["tracking_rows"]) == 1 for call in sent)
+    assert all(len(call[2]["delivery_dedupe_keys"]) == 1 for call in sent)
+    assert events == [
+        ("revalidate", "FIRST"),
+        ("send", "FIRST"),
+        ("revalidate", "SECOND"),
+        ("send", "SECOND"),
+    ]
 
 
 def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
@@ -2466,10 +2676,12 @@ def test_early_mover_digest_limits_mail_to_top_rows(tmp_path, monkeypatch):
 
     api._send_early_mover_long_alerts({"coins": rows})
 
-    assert len(sent) == 1
-    assert f"{api._EARLY_MOVER_MAX_EMAIL_ROWS}/{len(rows)}" in sent[0][0]
+    assert len(sent) == api._EARLY_MOVER_MAX_EMAIL_ROWS
     assert "ROW0" in sent[0][1]
-    assert f"ROW{api._EARLY_MOVER_MAX_EMAIL_ROWS + 1}" not in sent[0][1]
+    assert all(
+        f"ROW{api._EARLY_MOVER_MAX_EMAIL_ROWS + 1}" not in body
+        for _, body in sent
+    )
 
 
 def test_early_mover_email_requires_realtime_5m_trigger(tmp_path, monkeypatch):
@@ -2604,6 +2816,25 @@ def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
     assert sent and sent[0][2] is True
 
 
+def test_personal_crypto_trade_reminder_is_routed_but_not_product_tracked(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: captured.update(kwargs) or True)
+    monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *args, **kwargs: pytest.fail("personal reminder contaminated product performance"))
+    monkeypatch.setattr(api, "_load_users", lambda: {"users": {
+        "owner@example.com": {"alert_email": "owner@example.com", "email_alerts_enabled": True}
+    }})
+    reminder = {
+        "owner_email": "owner@example.com", "ticker": "ETH", "asset_type": "crypto",
+        "channel": "email", "row": {"entry": 100, "stop": 95, "tp1": 110, "tp2": 120},
+    }
+
+    assert api._deliver_trade_reminder_email(reminder, {"entry": 100, "stop": 95, "tp1": 110, "tp2": 120})
+
+    assert captured["mail_channel"] == "crypto"
+    assert captured["trade_horizon"] == "intraday"
+    assert reminder["tracking_scope"] == "personal_reminder_only"
+
+
 def test_triggered_trade_reminder_retries_email_without_retriggering(tmp_path, monkeypatch):
     reminder_file = tmp_path / "trade_reminders.json"
     now = [1_000_000.0]
@@ -2662,13 +2893,26 @@ def test_triggered_trade_reminder_retries_email_without_retriggering(tmp_path, m
     assert len(sent) == 2
 
 
-def test_stock_trade_reminder_reads_nested_trade_setup(monkeypatch):
+def _stock_reminder_trigger_bars(direction, last_open_epoch):
+    if direction == "SHORT":
+        history = {"open": 10.16, "high": 10.22, "low": 10.10, "close": 10.15, "volume": 100}
+        trigger = {"open": 10.04, "high": 10.06, "low": 9.85, "close": 9.90, "volume": 180}
+    else:
+        history = {"open": 9.80, "high": 9.90, "low": 9.75, "close": 9.85, "volume": 100}
+        trigger = {"open": 9.96, "high": 10.18, "low": 9.94, "close": 10.12, "volume": 180}
     bars = [
-        {"open": 9.80, "high": 9.90, "low": 9.75, "close": 9.85, "volume": 100}
-        for _ in range(7)
+        dict(history, timestamp=last_open_epoch - ((7 - index) * 300))
+        for index in range(7)
     ]
-    bars.append({"open": 9.96, "high": 10.18, "low": 9.94, "close": 10.12, "volume": 180})
+    bars.append(dict(trigger, timestamp=last_open_epoch))
+    return bars
+
+
+def test_stock_trade_reminder_reads_nested_trade_setup(monkeypatch):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
+    bars = _stock_reminder_trigger_bars("LONG", now_epoch - 360)
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
 
     result = api._evaluate_stock_reminder({
         "ticker": "AAA",
@@ -2692,15 +2936,96 @@ def test_stock_trade_reminder_reads_nested_trade_setup(monkeypatch):
     assert result["stop"] == 9.5
     assert result["tp1"] == 10.8
     assert result["tp2"] == 11.4
+    assert result["price_evidence"] == "closed_5m_candle"
+    assert result["candle_timeframe"] == "5m"
+    assert result["candle_closed_at"] == "2026-08-12T15:05:00+00:00"
+
+
+def test_fresh_stock_short_trade_reminder_still_triggers(monkeypatch):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
+    bars = _stock_reminder_trigger_bars("SHORT", now_epoch - 360)
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        "created_at_epoch": now_epoch - 600,
+        "row": {
+            "direction": "SHORT",
+            "entry": 10.0,
+            "stop_loss": 10.5,
+            "tp1": 9.2,
+            "tp2": 8.6,
+        },
+    })
+
+    assert result["triggered"] is True
+    assert result["reason"] == "5m_trigger"
+    assert result["entry"] == 10.0
+    assert result["stop"] == 10.5
+    assert result["price_evidence"] == "closed_5m_candle"
+    assert result["candle_closed_at"] == "2026-08-12T15:05:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("direction", "stop"),
+    [("LONG", 9.5), ("SHORT", 10.5)],
+)
+def test_stock_reminder_email_labels_closed_5m_price_evidence(
+    monkeypatch,
+    direction,
+    stop,
+):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
+    bars = _stock_reminder_trigger_bars(direction, now_epoch - 360)
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
+    reminder = {
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        "created_at_epoch": now_epoch - 600,
+        "row": {"entry": 10.0, "stop_loss": stop, "direction": direction},
+    }
+
+    result = api._evaluate_stock_reminder(reminder)
+    body = api._format_reminder_email(reminder, result)
+
+    assert result["triggered"] is True
+    assert "5m-Trigger bestaetigt" in body
+    assert "Letzter abgeschlossener 5m-Schluss" in body
+    assert "Kerzenschluss / Beobachtung (UTC, ISO 8601)" in body
+    assert "2026-08-12T15:05:00+00:00" in body
+    assert "kein Live-Bid/Ask" in body
+    assert "Preis jetzt" not in body
+    assert "Trigger ist da" not in body
 
 
 def test_stock_trade_reminder_does_not_alert_stale_breakout(monkeypatch):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
     bars = [
-        {"open": 10.08, "high": 10.20, "low": 10.04, "close": 10.14, "volume": 100}
-        for _ in range(7)
+        {
+            "open": 10.08,
+            "high": 10.20,
+            "low": 10.04,
+            "close": 10.14,
+            "volume": 100,
+            "timestamp": now_epoch - 360 - ((7 - index) * 300),
+        }
+        for index in range(7)
     ]
-    bars.append({"open": 10.15, "high": 10.30, "low": 10.12, "close": 10.26, "volume": 180})
+    bars.append({
+        "open": 10.15,
+        "high": 10.30,
+        "low": 10.12,
+        "close": 10.26,
+        "volume": 180,
+        "timestamp": now_epoch - 360,
+    })
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
 
     result = api._evaluate_stock_reminder({
         "ticker": "AAA",
@@ -2746,12 +3071,28 @@ def test_stock_trade_reminder_waits_for_candle_closed_after_activation(monkeypat
 
 
 def test_stock_retest_reminder_rejects_falling_candle(monkeypatch):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
     bars = [
-        {"open": 10.08, "high": 10.20, "low": 10.04, "close": 10.12, "volume": 100}
-        for _ in range(7)
+        {
+            "open": 10.08,
+            "high": 10.20,
+            "low": 10.04,
+            "close": 10.12,
+            "volume": 100,
+            "timestamp": now_epoch - 360 - ((7 - index) * 300),
+        }
+        for index in range(7)
     ]
-    bars.append({"open": 10.10, "high": 10.11, "low": 9.88, "close": 9.91, "volume": 180})
+    bars.append({
+        "open": 10.10,
+        "high": 10.11,
+        "low": 9.88,
+        "close": 9.91,
+        "volume": 180,
+        "timestamp": now_epoch - 360,
+    })
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
 
     result = api._evaluate_stock_reminder({
         "ticker": "AAA",
@@ -2760,6 +3101,130 @@ def test_stock_retest_reminder_rejects_falling_candle(monkeypatch):
     })
 
     assert result["triggered"] is False
+
+
+@pytest.mark.parametrize(
+    ("direction", "stop"),
+    [("LONG", 9.5), ("SHORT", 10.5)],
+)
+def test_stock_trade_reminder_rejects_stale_trigger_candle_symmetrically(
+    monkeypatch,
+    direction,
+    stop,
+):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
+    last_open_epoch = now_epoch - (8 * 3600) - 300
+    bars = _stock_reminder_trigger_bars(direction, last_open_epoch)
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
+
+    result = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        # The stale candle did close after activation; freshness remains an
+        # independent mandatory contract.
+        "created_at_epoch": last_open_epoch + 240,
+        "row": {"entry": 10.0, "stop_loss": stop, "direction": direction},
+    })
+
+    assert result == {"triggered": False, "reason": "stale_stock_5m_candle"}
+
+
+def test_stock_trade_reminder_requires_timestamp_and_executable_session(monkeypatch):
+    now_epoch = datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()
+    untimestamped = _stock_reminder_trigger_bars("LONG", now_epoch - 360)
+    untimestamped[-1].pop("timestamp")
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: untimestamped)
+    monkeypatch.setattr(api, "_reminder_now", lambda: now_epoch)
+
+    missing_timestamp = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "condition": "trigger",
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    })
+
+    assert missing_timestamp == {
+        "triggered": False,
+        "reason": "stock_5m_candle_timestamp_missing",
+    }
+
+    fresh = _stock_reminder_trigger_bars("LONG", now_epoch - 360)
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: fresh)
+    monkeypatch.setattr(api, "_stock_trade_email_status", lambda *args, **kwargs: {
+        "allowed": False,
+        "session": "CLOSED",
+        "reason": "unit-test closed",
+    })
+
+    closed_session = api._evaluate_stock_reminder({
+        "ticker": "AAA",
+        "condition": "trigger",
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    })
+
+    assert closed_session == {
+        "triggered": False,
+        "reason": "stock_reminder_session_not_executable",
+    }
+
+
+def test_stale_stock_reminder_retries_later_without_mail_or_tracking(
+    tmp_path,
+    monkeypatch,
+):
+    reminders_file = tmp_path / "trade_reminders.json"
+    now = [datetime(2026, 8, 12, 15, 6, tzinfo=timezone.utc).timestamp()]
+    stale_last_open = now[0] - (8 * 3600) - 300
+    bars = [_stock_reminder_trigger_bars("LONG", stale_last_open)]
+    deliveries = []
+    tracked = []
+    monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(reminders_file))
+    monkeypatch.setattr(api, "_reminder_now", lambda: now[0])
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda ticker: bars[0])
+    monkeypatch.setattr(
+        api,
+        "_deliver_trade_reminder_email",
+        lambda reminder, result, checked_at: deliveries.append((reminder["id"], result)),
+    )
+    monkeypatch.setattr(
+        api,
+        "_safe_record_alert_signals",
+        lambda *args, **kwargs: tracked.append((args, kwargs)),
+    )
+    api._save_trade_reminders([{
+        "id": "stale-then-fresh",
+        "owner_email": "owner@example.test",
+        "ticker": "AAA",
+        "asset_type": "stock",
+        "condition": "trigger",
+        "status": "active",
+        "created_at_epoch": stale_last_open + 240,
+        "expires_at": now[0] + 3600,
+        "last_checked_at": 0,
+        "row": {"entry": 10.0, "stop_loss": 9.5, "direction": "LONG"},
+    }])
+
+    api._process_trade_reminders_once()
+
+    stale = api._load_trade_reminders()[0]
+    assert stale["status"] == "active"
+    assert stale["last_check"] == {
+        "triggered": False,
+        "reason": "stale_stock_5m_candle",
+    }
+    assert deliveries == []
+    assert tracked == []
+
+    now[0] += api._TRADE_REMINDER_CHECK_SEC + 1
+    bars[0] = _stock_reminder_trigger_bars("LONG", now[0] - 360)
+    api._process_trade_reminders_once()
+
+    fresh = api._load_trade_reminders()[0]
+    assert fresh["status"] == "triggered"
+    assert fresh["trigger_result"]["reason"] == "5m_trigger"
+    assert [delivery[0] for delivery in deliveries] == ["stale-then-fresh"]
+    assert tracked == []
 
 
 def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypatch):
@@ -2859,7 +3324,7 @@ def test_multi_recipient_alert_uses_undisclosed_to_header(monkeypatch):
         def ehlo(self):
             return None
 
-        def starttls(self):
+        def starttls(self, context=None):
             return None
 
         def login(self, *args, **kwargs):

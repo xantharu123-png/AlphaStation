@@ -440,3 +440,118 @@ einem Produktionsnachweis und belastbarer Forward-Performance rechtfertigt Vertr
   realen Empfaengern weiter beobachtet werden.
 - Commercial Launch benoetigt weiterhin menschliche Rechts-, Steuer- und
   Datenlizenzpruefung sowie Live-Stripe/TLS-Nachweis.
+
+---
+
+## 14. Verbindlicher Nachtrag: Signalkausalitaet und Ergebniswahrheit (13.08.2026)
+
+Dieser Nachtrag praezisiert die Abschnitte 3, 7, 8, 11 und 12. Er gilt fuer
+alle Scanner, Mailklassen, Tracker-Auswertungen und historischen Reparaturen.
+
+### 14.1 Mail, Fill und First Executable Price
+
+- Signalzeit, Datenzeit, Scanzeit, Zustellzeit und Fillzeit sind verschiedene
+  Ereignisse und werden getrennt persistiert. Kein frueheres Ereignis darf als
+  Platzhalter fuer ein spaeteres verwendet werden.
+- Forward-Tracking beginnt fruehestens mit nachgewiesener SMTP-DATA-Akzeptanz
+  fuer die konkrete Empfaengerkohorte oder mit einem dokumentierten Brokerfill.
+  Scanstart, Mailvorbereitung und eine Vorversandquote starten keine Performance-
+  Messung.
+- Eine Vorversandquote validiert ausschliesslich, ob Preis, Spread, Session,
+  Datenalter und Marktpfad unmittelbar vor der Mail noch handelbar sind. Stop
+  oder TP1 seit Scan bereits beruehrt, stale Quote oder lueckenhafter Pfad
+  blockieren die Einstiegsmail fail-closed.
+- Ohne Brokerfill ist der First Executable Price die erste realistisch
+  ausfuehrbare Marktbeobachtung ab dem belegten Zustellzeitpunkt: bei Long der
+  Ask, bei Short der Bid, jeweils inklusive Spread, Slippage und
+  Kosten. Ein alter Planpreis oder Vorversandkurs ist kein Fill.
+- Gap-Open, Stop-Gap und Break-even-Gap verwenden symmetrisch den ersten
+  ausfuehrbaren Preis. Daily-Bars brauchen ein echtes Open; Close darf fehlendes
+  Open nicht ersetzen. Laufende oder unvollstaendige Bars duerfen keine
+  terminale Entscheidung erzeugen.
+- Fehlt der vollstaendige kausale Post-Alert-Pfad, bleibt das Signal `OPEN` oder
+  `UNTRACKED`. Es darf weder ein Fill noch eine Intrabar-Reihenfolge erfunden
+  werden.
+
+### 14.2 Zustellintent und Empfaengerkohorte
+
+- Vor SMTP wird ein stabiler Delivery-Intent aus Signalidentitaet, Mailklasse und
+  vorgesehener Empfaengerkohorte dauerhaft vorbereitet. Nur der atomare Owner
+  des Uebergangs `PREPARED -> ATTEMPTED` darf SMTP DATA senden.
+- Akzeptierte Empfaenger und ihre Akzeptanzzeit werden unmittelbar und
+  pseudonymisiert journalisiert. Erst dieser Nachweis darf ein Mail-Signal fuer
+  die betreffende Kohorte aktivieren.
+- Ein unbekannter DATA-Ausgang wird quarantainiert und niemals automatisch
+  erneut gesendet. Bei Teilannahme gehoeren nur die im selben Versuch
+  akzeptierten Empfaenger zur kausalen Kohorte; spaetere Retries duerfen nicht
+  rueckwirkend denselben Signalstart erhalten.
+- Folge-, Exit- und Break-even-Mails gehen nur an die nachgewiesene
+  Ursprungskohorte, geschnitten mit dem aktuellen Opt-in. Neue Abonnenten
+  erhalten kein Exit zu einem nie erhaltenen Entry.
+- Offene Altsignale ohne Empfaengerledger sind
+  `legacy_open_cohort_unknown`. Empfaenger werden nicht geraten; Health bleibt
+  degradiert, bis diese Faelle dokumentiert manuell behandelt oder abgeschlossen
+  sind.
+
+### 14.3 Performance- und Kalibrierungsvertrag
+
+- `created_in_window`, `matured_in_window`, gefuellt, entschieden, `NO_FILL`,
+  `OPEN`, `UNTRACKED` und unaufgeloest sind getrennte Kohorten. Hit-Rate und
+  Profit Factor verwenden nur gefuellte und entschiedene Signale.
+- Level-R, 50/50-Managed-R und 50/50-plus-Break-even-R werden getrennt
+  ausgewiesen. Ist Aktivierung oder Zustellung der Break-even-Anweisung nicht
+  kausal belegt, lautet das Ergebnis `managed_be_unresolved`; es wird weder als
+  0R eingesetzt noch aus der Verlustmenge entfernt.
+- Kalibrierung und Freigabe erfolgen ausschliesslich in der gemeinsamen Zelle
+  Scanner x Richtung x Horizont x exogen zum Signalzeitpunkt persistiertes
+  Marktregime. Aggregierte Scannerwerte duerfen eine schwache Zelle nicht durch
+  eine starke Zelle verdecken.
+- `sample_reliable` und eine produktive Gate-Freigabe verlangen mindestens 30
+  vollstaendig beobachtete Entscheidungen in genau dieser gemeinsamen Zelle,
+  ein Wilson-95-Prozent-Intervall und null unaufgeloeste Kontrollfaelle.
+
+### 14.4 Forensischer Ausgangsbefund und Grenzen
+
+Die Untersuchung der Signal-Update-Mails vom 06.-12.08.2026 fand 16 Digests mit
+45 Ereigniszeilen, nach Plan-Dedupe 41 Plaene, davon 33 terminal und 8 nur mit
+TP1-offenem Rest. Die terminalen Ereignisse waren 12 positiv und 21 negativ;
++21,70R standen -23,81R gegenueber, netto -2,11R. Das ist ein Update-
+Ereignisstrom, keine vollstaendige Kohorte neu versendeter Einstiegssignale:
+stabile Signal-ID und Erstsignalzeit fehlten, alte Plaene koennen enthalten sein
+und `NO_FILL`, `UNTRACKED`, offene oder nicht zugestellte Signale koennen fehlen.
+
+Belegte bzw. begrenzte Einzelkorrekturen sind ONON -4,65R auf -3,94R, ECO
+-1,27R auf -1,00R und CBLL -1,57R auf `NO_FILL`. AURA -1,38R bleibt konservativ
+unveraendert; -1,00R ist nur wahrscheinlich und ohne eindeutigen Erstmail-/DB-
+Nachweis unbestaetigt. Fuer die vier Faelle zusammen lautet die konservative
+Korrektur -6,32R statt -8,87R, also +2,55R und ein entschiedener Verlust weniger.
+Diese Korrekturen sind weder Profitabilitaetsbeleg noch Rechtfertigung fuer eine
+nachtraegliche Schwellenoptimierung.
+
+### 14.5 Historische Reparatur und Rollout
+
+- Historische Trackerzeilen werden nur mit `scripts/signal_tracker_repair.py`
+  nach `deploy/SIGNAL_TRACKER_REPAIR.md` bearbeitet: read-only Inspektion,
+  belegtes Manifest mit exaktem Vorzustand, Dry-Run, Wartungsfenster, gestoppte
+  Writer, konsistentes Backup, gesperrter Recheck, append-only Audit und
+  Nachverifikation. Werte oder Empfaenger duerfen niemals geraten werden.
+- Vor Produktion muessen volle lokale Suite, Python-Compile, neu gebautes und
+  verifiziertes Frontend-Bundle, `git diff --check`, Secret-Diff-Scan und Push
+  gruen sein. Danach folgen Produktionsbackup, gegebenenfalls Repair mit
+  Vier-Augen-Pruefung sowie der Abgleich von Server-HEAD, API-Revision,
+  Bundle-Hash, Services und Health auf exakt denselben Commit.
+- Eine lokale Implementierung, ein gruener Testlauf oder ein Git-Push beweist
+  weder den Server-Rollout noch korrekte Realtime-Berechtigungen noch positive
+  reale Erwartung. Profitabilitaet kann nur eine neue, kausal vollstaendige
+  Forward-Kohorte nachweisen.
+
+### 14.6 Abnahmeprotokoll dieses Nachtrags
+
+Der lokale Endstand vom 13.08.2026 wurde mit 1768/1768 Tests, Python-Compile
+aller 47 geaenderten/neuen Python-Dateien, verifiziertem Frontend-Bundle
+`a6c74874a925`, JavaScript-Syntaxpruefung, sauberem `git diff --check`,
+Secret-Musterscan und realer Browserpruefung auf 1440 px sowie 390 px
+abgenommen. Der unabhaengige finale Read-only-Audit meldete P0 0, P1 0, P2 0.
+Diese Zahlen dokumentieren ausschliesslich die lokale technische Abnahme und
+aendern keine Produktions-, Performance-, Broker-, Rechts- oder Store-Grenze
+dieser Bibel.

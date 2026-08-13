@@ -163,7 +163,7 @@ def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     )
     sent_mails = []
 
-    def _recorder(subject, body_html, secrets, mail_class="trade"):
+    def _recorder(subject, body_html, secrets, mail_class="trade", **_kwargs):
         sent_mails.append({"subject": subject, "body": body_html,
                            "secrets": secrets, "mail_class": mail_class})
         return True
@@ -212,7 +212,7 @@ def test_failed_send_retries_later_in_window(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path)
     attempts = {"n": 0}
 
-    def _flaky(subject, body_html, secrets, mail_class="trade"):
+    def _flaky(subject, body_html, secrets, mail_class="trade", **_kwargs):
         attempts["n"] += 1
         if attempts["n"] == 1:
             return False  # SMTP down um 16:20
@@ -417,9 +417,32 @@ def _crash_bucket(decided=31):
             "win_rate_wilson_95": {"lower_pct": 37.5, "upper_pct": 71.2}}
 
 
+def _calibration_cell(scanner, bucket, *, direction="LONG",
+                      horizon="swing:20bars", market_regime="risk_on"):
+    """Joint release unit used by the production calibration contract."""
+    cell_id = "|".join((scanner, direction, horizon, market_regime))
+    return {
+        **bucket,
+        "cell_id": cell_id,
+        "scanner": scanner,
+        "direction": direction,
+        "horizon": horizon,
+        "market_regime": market_regime,
+        "managed_be_decided_signals": bucket.get("decided_signals", 0),
+        "managed_be_unresolved": 0,
+        "managed_be_sample_reliable": bucket.get("decided_signals", 0) >= 30,
+        "avg_r_managed_50_50_be": bucket.get("avg_r"),
+        "managed_be_win_rate_pct": bucket.get("win_rate_pct"),
+        "managed_be_win_rate_wilson_95": bucket.get("win_rate_wilson_95"),
+    }
+
+
 def _summary_with_crash(decided=31):
     s = _summary()
     s["per_scanner"] = {"crash": _crash_bucket(decided)}
+    s["calibration_cells"] = [
+        _calibration_cell("crash", _crash_bucket(decided))
+    ]
     return s
 
 
@@ -434,7 +457,10 @@ def _read_verdict_state(tmp_path):
 
 def test_verdict_alert_on_30_crossing(monkeypatch, tmp_path):
     """crash waechst 13 → 31 entschieden => 30er-Alarm, State aktualisiert."""
-    _write_verdict_state(tmp_path, {"crash": {"decided": 13, "verdict": "beobachten"}})
+    cell_id = "crash|LONG|swing:20bars|risk_on"
+    _write_verdict_state(
+        tmp_path, {cell_id: {"decided": 13, "verdict": "beobachten"}}
+    )
     sent = _setup(monkeypatch, tmp_path, summary=_summary_with_crash(31))
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
@@ -442,14 +468,17 @@ def test_verdict_alert_on_30_crossing(monkeypatch, tmp_path):
     assert "überschreitet 30er-Marke" in body
     assert "13 → 31 entschieden" in body
     assert "<b>behalten</b>" in body
-    assert _read_verdict_state(tmp_path)["crash"] == {"decided": 31,
-                                                      "verdict": "behalten"}
+    assert _read_verdict_state(tmp_path)[cell_id] == {
+        "decided": 31, "verdict": "behalten"
+    }
 
 
 def test_verdict_alert_on_verdict_change(monkeypatch, tmp_path):
     """behalten → abschalten (KI-Obergrenze 45% < Breakeven 50%) => Alarm."""
-    _write_verdict_state(tmp_path, {"stock_strategy": {"decided": 100,
-                                                       "verdict": "behalten"}})
+    cell_id = "stock_strategy|SHORT|swing:20bars|risk_off"
+    _write_verdict_state(
+        tmp_path, {cell_id: {"decided": 100, "verdict": "behalten"}}
+    )
     s = _summary()
     s["per_scanner"] = {
         "stock_strategy": {"signals": 130, "open": 5, "tp1_hit": 10, "tp2_hit": 8,
@@ -460,6 +489,14 @@ def test_verdict_alert_on_verdict_change(monkeypatch, tmp_path):
                            "win_rate_wilson_95": {"lower_pct": 22.0,
                                                   "upper_pct": 45.0}},
     }
+    s["calibration_cells"] = [
+        _calibration_cell(
+            "stock_strategy",
+            s["per_scanner"]["stock_strategy"],
+            direction="SHORT",
+            market_regime="risk_off",
+        )
+    ]
     sent = _setup(monkeypatch, tmp_path, summary=s)
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
@@ -469,12 +506,9 @@ def test_verdict_alert_on_verdict_change(monkeypatch, tmp_path):
 
 
 def test_no_verdict_alert_when_unchanged(monkeypatch, tmp_path):
-    """State entspricht dem aktuellen Bild => kein Alarm-Block in der Mail."""
-    _write_verdict_state(tmp_path, {
-        "bi_long": {"decided": 5, "verdict": "beobachten"},
-        "bear_scan": {"decided": 4, "verdict": "beobachten"},
-    })
-    sent = _setup(monkeypatch, tmp_path)  # _summary: bi_long 5, bear_scan 4
+    """No reliable joint cell means no alarm, regardless of aggregates."""
+    _write_verdict_state(tmp_path, {})
+    sent = _setup(monkeypatch, tmp_path)
     assert bg_service._run_weekly_report({}) is True
     assert "Verdikt-Alarm" not in sent[0]["body"]
 
@@ -485,19 +519,54 @@ def test_baseline_run_saves_state_without_alarm(monkeypatch, tmp_path):
     assert bg_service._run_weekly_report({}) is True
     assert "Verdikt-Alarm" not in sent[0]["body"]
     state = _read_verdict_state(tmp_path)
-    assert state["bi_long"] == {"decided": 5, "verdict": "beobachten"}
-    assert state["bear_scan"] == {"decided": 4, "verdict": "beobachten"}
+    assert state == {}
 
 
 def test_failed_send_keeps_old_verdict_state(monkeypatch, tmp_path):
     """Versand-Fehler => Verdikt-State bleibt alt, Alarm geht nicht verloren."""
-    old_state = {"crash": {"decided": 13, "verdict": "beobachten"}}
+    old_state = {
+        "crash|LONG|swing:20bars|risk_on": {
+            "decided": 13, "verdict": "beobachten"
+        }
+    }
     _write_verdict_state(tmp_path, old_state)
     _setup(monkeypatch, tmp_path, summary=_summary_with_crash(31))
     monkeypatch.setattr(bg_service, "_send_email_alert",
                         lambda *args, **kwargs: False)  # SMTP down
     assert bg_service._run_weekly_report({}) is False
     assert _read_verdict_state(tmp_path) == old_state
+
+
+def test_mature_scanner_aggregate_never_releases_without_joint_cell(
+    monkeypatch, tmp_path
+):
+    s = _summary()
+    s["per_scanner"] = {"crash": _crash_bucket(60)}
+    s["calibration_cells"] = []
+    _write_verdict_state(
+        tmp_path, {"crash": {"decided": 13, "verdict": "beobachten"}}
+    )
+
+    sent = _setup(monkeypatch, tmp_path, summary=s)
+    assert bg_service._run_weekly_report({}) is True
+    assert "Verdikt-Alarm" not in sent[0]["body"]
+    assert _read_verdict_state(tmp_path) == {}
+
+
+def test_unreliable_or_unresolved_joint_cell_never_releases(
+    monkeypatch, tmp_path
+):
+    unreliable = _calibration_cell("crash", _crash_bucket(31))
+    unreliable["managed_be_sample_reliable"] = False
+    unresolved = _calibration_cell("crash2", _crash_bucket(31))
+    unresolved["managed_be_unresolved"] = 1
+    s = _summary()
+    s["calibration_cells"] = [unreliable, unresolved]
+
+    sent = _setup(monkeypatch, tmp_path, summary=s)
+    assert bg_service._run_weekly_report({}) is True
+    assert "Verdikt-Alarm" not in sent[0]["body"]
+    assert _read_verdict_state(tmp_path) == {}
 
 
 # ── BE-Spalte + BE-Box (BE-Trigger, AUDIT 2026-07-30) ────────────────────────

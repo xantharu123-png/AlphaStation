@@ -528,7 +528,7 @@ const API = EXPLICIT_API_BASE || (
 
 const DEFAULT_PUBLIC_PLANS = [
     { id: 'basic', name: 'Basic', price: 29, interval: 'month', features: ['5 Scanner-Bereiche', 'Scan alle 30 Minuten', '30 Ticker-Details pro Stunde', 'Aktien-Long/Short, BI und Crash Monitor'], cta: 'Basic starten' },
-    { id: 'pro', name: 'Pro', price: 79, interval: 'month', popular: true, features: ['Alle Pro-Scanner inkl. Biotech und Krypto', 'Scanintervall ab 5 Minuten', 'Volle Sidebar-Chartanalyse', 'E-Mail-Alerts bei qualifizierten Signalen', 'Trade-Setups mit Entry, Stop und Zielen', 'Unbegrenzte Ticker-Details', 'KI-Analyse bis 20 Aufrufe pro Tag'], cta: 'Pro starten' },
+    { id: 'pro', name: 'Pro', price: 79, interval: 'month', featured: true, features: ['Alle Pro-Scanner inkl. Biotech und Krypto', 'Scanintervall ab 5 Minuten', 'Volle Sidebar-Chartanalyse', 'E-Mail-Alerts bei qualifizierten Signalen', 'Trade-Setups mit Entry, Stop und Zielen', 'Unbegrenzte Ticker-Details', 'KI-Analyse bis 20 Aufrufe pro Tag'], cta: 'Pro starten' },
     { id: 'elite', name: 'Elite', price: 149, interval: 'month', features: ['Alles aus Pro', 'ORB Scanner', 'Backtesting', 'API-Zugang', 'KI-Analyse mit hohem Nutzungslimit', 'Priority Support'], cta: 'Elite starten' },
 ];
 
@@ -863,10 +863,10 @@ function AuthPage({ onLogin, onRegister }) {
                 <div style={{ position: 'relative', maxWidth: 860, margin: '0 auto', padding: '0 24px' }}>
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 18px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: 24, fontSize: 13, fontWeight: 600, color: '#34d399', marginBottom: 32 }}>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981', animation: 'pulse 2s infinite' }} />
-                        SCANNER AKTIV — NÄCHSTER SCAN IN 5 MIN
+                        REGELBASIERTE SCANNER — PLANABHÄNGIGE INTERVALLE
                     </div>
                     <h1 style={{ fontSize: 'clamp(38px, 5.5vw, 68px)', fontWeight: 800, lineHeight: 1.08, marginBottom: 24, letterSpacing: '-2px' }}>
-                        <span style={{ background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Finde die besten Trades</span><br />
+                        <span style={{ background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Finde strukturierte Setups</span><br />
                         <span style={{ background: 'linear-gradient(135deg, #22d3ee 0%, #3b82f6 50%, #8b5cf6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>wenn Daten und Struktur zusammenpassen</span>
                     </h1>
                     <p style={{ fontSize: 'clamp(17px, 2vw, 21px)', color: '#94a3b8', maxWidth: 620, margin: '0 auto 20px', lineHeight: 1.65 }}>
@@ -916,8 +916,8 @@ Mehr erfahren ↓
             <section id="demo-preview" data-reveal style={{ padding: '80px 24px', maxWidth: 1100, margin: '0 auto' }} {...{id: 'sec-problem'}}>
                 <div style={revealStyle('sec-problem')}>
                     <div style={{ textAlign: 'center', marginBottom: 56 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-0.5px' }}>Hör auf, Chancen zu verpassen.</h2>
-                        <p style={{ color: '#94a3b8', fontSize: 18, maxWidth: 600, margin: '0 auto' }}>Andere Trader verlassen sich auf Glück. Du verlässt dich auf Daten.</p>
+                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-0.5px' }}>Beobachte Märkte systematisch.</h2>
+                        <p style={{ color: '#94a3b8', fontSize: 18, maxWidth: 600, margin: '0 auto' }}>Scanner bündeln technische Daten und Risikohinweise. Die Handelsentscheidung bleibt bei dir.</p>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 1fr', gap: 0, alignItems: 'stretch', maxWidth: 900, margin: '0 auto' }}>
@@ -953,8 +953,8 @@ Mehr erfahren ↓
             <section id="features" data-reveal style={{ padding: '80px 24px 40px' }} {...{id: 'sec-usp'}}>
                 <div style={{...revealStyle('sec-usp'), maxWidth: 1100, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 60 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Dein unfairer Vorteil.<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>15+ Scanner in einem Tool.</span></h2>
-                        <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner wurde für einen spezifischen Markt-Zustand entwickelt. Du bist vorbereitet — egal was passiert.</p>
+                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Dein Analyse-Werkzeug.<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>15+ Scanner in einem Tool.</span></h2>
+                        <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner betrachtet einen abgegrenzten Markt-Zustand mit eigener Daten- und Risikologik.</p>
                     </div>
 
                     {/* BI Scanner USP */}
@@ -1181,10 +1181,11 @@ Mehr erfahren ↓
                                         <span style={{ fontSize: 11, fontWeight: 700, padding: '6px 16px', borderRadius: 8, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>PAPER REVIEW</span>
                                         <span style={{ fontSize: 11, fontWeight: 700, padding: '6px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', color: '#64748b', border: '1px solid rgba(255,255,255,0.06)' }}>PAPER AUTO</span>
                                     </div>
+                                    <div style={{ textAlign: 'center', fontSize: 10, color: '#94a3b8', lineHeight: 1.5 }}>ILLUSTRATIVE PAPER-DEMO — KEINE ECHTEN ORDERS ODER ERGEBNISSE</div>
                                     {/* Order cards */}
                                     {[
-                                        { ticker: 'NVDA', grade: 'S', entry: '142.50', stop: '138.20', tp: '152.80', rr: '2.4', shares: 14, status: 'Filled' },
-                                        { ticker: 'PLTR', grade: 'B', entry: '28.15', stop: '26.80', tp: '31.20', rr: '2.3', shares: 71, status: 'Pending' },
+                                        { ticker: 'NVDA', grade: 'S', entry: '142.50', stop: '138.20', tp: '152.80', rr: '2.4', shares: 14, status: 'Demo-Fill' },
+                                        { ticker: 'PLTR', grade: 'B', entry: '28.15', stop: '26.80', tp: '31.20', rr: '2.3', shares: 71, status: 'Demo-Plan' },
                                     ].map((o, j) => (
                                         <div key={j} style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.35)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -1192,7 +1193,7 @@ Mehr erfahren ↓
                                                     <span style={{ fontSize: 15, fontWeight: 800, color: '#f1f5f9' }}>{o.ticker}</span>
                                                     <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'rgba(59,130,246,0.15)', color: '#60a5fa' }}>Grade {o.grade}</span>
                                                 </div>
-                                                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: o.status === 'Filled' ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)', color: o.status === 'Filled' ? '#10b981' : '#f59e0b' }}>{o.status}</span>
+                                                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: o.status === 'Demo-Fill' ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)', color: o.status === 'Demo-Fill' ? '#10b981' : '#f59e0b' }}>{o.status}</span>
                                             </div>
                                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, fontSize: 10 }}>
                                                 <div><span style={{ color: '#64748b' }}>Entry</span><div style={{ fontWeight: 700, color: '#f1f5f9' }}>${o.entry}</div></div>
@@ -1205,7 +1206,7 @@ Mehr erfahren ↓
                                     ))}
                                     {/* Stats bar */}
                                     <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                                        <div style={{ textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 800, color: '#10b981' }}>+1.8%</div><div style={{ fontSize: 9, color: '#64748b' }}>Tages P&L</div></div>
+                                        <div style={{ textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 800, color: '#94a3b8' }}>—</div><div style={{ fontSize: 9, color: '#64748b' }}>Keine Live-P&L</div></div>
                                         <div style={{ textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 800, color: '#3b82f6' }}>2/5</div><div style={{ fontSize: 9, color: '#64748b' }}>Positionen</div></div>
                                         <div style={{ textAlign: 'center' }}><div style={{ fontSize: 14, fontWeight: 800, color: '#f59e0b' }}>15m</div><div style={{ fontSize: 9, color: '#64748b' }}>Scan Intervall</div></div>
                                     </div>
@@ -1252,7 +1253,7 @@ Mehr erfahren ↓
                                         { svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316', name: 'BTC-Divergenz', desc: 'Altcoins gegen BTC tracken' },
                             { svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale' },
                             { svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1', name: 'Volume Spikes', desc: 'Ungewöhnliche Volumenveränderungen systematisch bewerten' },
-                            { svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899', name: 'ORB Scanner', desc: 'Opening Range Breakout — die erste Stunde profitabel nutzen' },
+                            { svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899', name: 'ORB Scanner', desc: 'Opening Range Breakout — Bewegungen nach der Eröffnungsrange prüfen' },
                         ].map((s, i) => (
                             <div key={i} style={{ padding: 24, background: 'rgba(30,41,59,0.4)', borderRadius: 14, border: '1px solid rgba(51,65,85,0.4)', transition: 'all 0.3s' }}
                                 onMouseOver={e => { e.currentTarget.style.borderColor='rgba(59,130,246,0.3)'; e.currentTarget.style.transform='translateY(-3px)'; }}
@@ -1274,9 +1275,9 @@ Mehr erfahren ↓
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40, alignItems: 'center' }}>
                         <div>
                             <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>TRADE SETUPS</div>
-                            <h2 style={{ fontSize: 'clamp(26px, 3vw, 36px)', fontWeight: 800, marginBottom: 16, lineHeight: 1.2 }}>Wir sagen dir wo Entry, Stop-Loss und Take-Profit liegen.</h2>
+                            <h2 style={{ fontSize: 'clamp(26px, 3vw, 36px)', fontWeight: 800, marginBottom: 16, lineHeight: 1.2 }}>Setups mit Entry-, Stop- und Zielzonen.</h2>
                             <p style={{ fontSize: 16, color: '#94a3b8', lineHeight: 1.75, marginBottom: 20 }}>
-                                Jedes Signal kommt mit einer konkreten Handelsempfehlung: wo du einsteigen kannst, wo dein Stop-Loss liegen sollte und wo du Gewinne mitnehmen kannst. Risk-Reward Ratio inklusive.
+                                Jedes Signal zeigt einen regelbasierten Setup-Plan mit möglicher Entry-Zone, Invalidierungsniveau, Zielzonen und rechnerischem Chance-Risiko-Verhältnis.
                             </p>
                             <p style={{ fontSize: 16, color: '#e2e8f0', lineHeight: 1.75, marginBottom: 24, fontWeight: 500 }}>
                                 Aber am Ende entscheidest immer du. Alpha Station gibt dir die Daten und die Analyse — du bist der Boss und triffst die finale Entscheidung.
@@ -1323,7 +1324,7 @@ Mehr erfahren ↓
                         {[
                             { step: '1', title: 'Registrieren & $1 Trial', desc: 'Account erstellen, $1 zahlen — sofort vollen Zugang zu allen Scannern für 24 Stunden.', color: '#3b82f6' },
                             { step: '2', title: 'Scanner startet', desc: 'Ein breites Marktuniversum wird gefiltert. Dauer und Abdeckung hängen von Scanner, Datenquelle und Tarif ab.', color: '#8b5cf6' },
-                            { step: '3', title: 'Trade profitabel', desc: 'Klick auf ein Signal, sieh die vollständige Analyse mit Entry, Stop-Loss und Take-Profit — und trade.', color: '#10b981' },
+                            { step: '3', title: 'Plan prüfen', desc: 'Öffne ein Signal, prüfe Analyse, Entry, Stop-Loss und Zielzonen — und entscheide eigenverantwortlich.', color: '#10b981' },
                         ].map((s, i) => (
                             <div key={i} style={{ position: 'relative', zIndex: 1, textAlign: 'center' }}>
                                 <div style={{ width: 64, height: 64, borderRadius: '50%', background: `linear-gradient(135deg, ${s.color}22, ${s.color}11)`, border: `2px solid ${s.color}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', fontSize: 24, fontWeight: 800, color: s.color }}>{s.step}</div>
@@ -1335,23 +1336,21 @@ Mehr erfahren ↓
                 </div>
             </section>
 
-            {/* ── Testimonials / Social Proof ── */}
+            {/* ── Typical workflows ── */}
             <section data-reveal style={{ padding: '60px 24px' }} {...{id: 'sec-social'}}>
                 <div style={{...revealStyle('sec-social'), maxWidth: 900, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 40 }}>
-                        <h2 style={{ fontSize: 28, fontWeight: 800 }}>Was Trader sagen</h2>
+                        <h2 style={{ fontSize: 28, fontWeight: 800 }}>Typische Arbeitsabläufe</h2>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 20 }}>
                         {[
-                            { text: 'Der BI Scanner ist ein Gamechanger. 20+ Indikatoren gleichzeitig prüfen — das hab ich vorher manuell gemacht und Stunden gebraucht. Jetzt bekomme ich nur Confluence-Signale. Meine Trefferquote ist massiv gestiegen.', name: 'Marc K.', role: 'Daytrader', rating: 5 },
-                            { text: 'Endlich ein Tool das AH und PM scannt. Hab damit schon mehrere Gap-Downs frühzeitig erkannt. Und der Biotech Scanner mit FDA-Tracking ist Gold wert für Catalyst Plays.', name: 'Lisa T.', role: 'Swing Trader', rating: 5 },
-                            { text: 'Der Crash Monitor hat mir im letzten Selloff buchstäblich Geld gespart. Fear Score war bei 85, ich hab alles gehedged. Dazu die Short Scanner — ich verdiene jetzt auch in Bärenmärkten.', name: 'Jonas R.', role: 'Portfolio Manager', rating: 5 },
+                            { text: 'Mehrere technische Faktoren in einem BI-Scan vergleichen und die Datenlage vor einer eigenen Entscheidung prüfen.', name: 'Marktvorbereitung', role: 'Confluence, Richtung und Datenstatus' },
+                            { text: 'Pre-Market, After-Hours und Catalyst-Daten getrennt beobachten, statt unterschiedliche Marktphasen zu vermischen.', name: 'Ereignisbeobachtung', role: 'Session- und Catalyst-Kontext' },
+                            { text: 'Crash-, Short- und Regime-Hinweise als Risikosicht verwenden und Positionsentscheidungen anschließend selbst bewerten.', name: 'Risikokontrolle', role: 'Regime, Volatilität und Invalidierung' },
                         ].map((t, i) => (
                             <div key={i} style={{ padding: 28, background: 'rgba(30,41,59,0.4)', borderRadius: 16, border: '1px solid rgba(51,65,85,0.4)' }}>
-                                <div style={{ display: 'flex', gap: 2, marginBottom: 14 }}>
-                                    {Array(t.rating).fill(0).map((_, j) => <span key={j} style={{ color: '#f59e0b', fontSize: 16 }}>★</span>)}
-                                </div>
-                                <p style={{ fontSize: 14, color: '#cbd5e1', lineHeight: 1.7, marginBottom: 18 }}>"{t.text}"</p>
+                                <div aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: '#3b82f6', marginBottom: 14 }} />
+                                <p style={{ fontSize: 14, color: '#cbd5e1', lineHeight: 1.7, marginBottom: 18 }}>{t.text}</p>
                                 <div>
                                     <div style={{ fontSize: 14, fontWeight: 600 }}>{t.name}</div>
                                     <div style={{ fontSize: 12, color: '#64748b' }}>{t.role}</div>
@@ -1366,13 +1365,13 @@ Mehr erfahren ↓
             <section id="pricing" data-reveal style={{ padding: '80px 24px' }} {...{id: 'sec-pricing'}}>
                 <div style={{...revealStyle('sec-pricing'), maxWidth: 1060, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 50 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Investiere in deinen Vorteil</h2>
+                        <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Wähle deinen Funktionsumfang</h2>
                         <p style={{ color: '#94a3b8', fontSize: 17 }}>Jederzeit kündbar. Starte mit dem $1 Trial.</p>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20, alignItems: 'start' }}>
                         {plans.map(plan => (
-                            <div key={plan.id} style={{ padding: 36, background: plan.popular ? 'linear-gradient(135deg, rgba(59,130,246,0.1) 0%, rgba(139,92,246,0.08) 100%)' : 'rgba(30,41,59,0.5)', borderRadius: 20, border: plan.popular ? '2px solid rgba(59,130,246,0.5)' : '1px solid #1e293b', position: 'relative', transform: plan.popular ? 'scale(1.04)' : 'none' }}>
-                                {plan.popular && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '5px 18px', borderRadius: 20, letterSpacing: '0.5px' }}>AM BELIEBTESTEN</div>}
+                            <div key={plan.id} style={{ padding: 36, background: (plan.featured || plan.popular) ? 'linear-gradient(135deg, rgba(59,130,246,0.1) 0%, rgba(139,92,246,0.08) 100%)' : 'rgba(30,41,59,0.5)', borderRadius: 20, border: (plan.featured || plan.popular) ? '2px solid rgba(59,130,246,0.5)' : '1px solid #1e293b', position: 'relative', transform: (plan.featured || plan.popular) ? 'scale(1.04)' : 'none' }}>
+                                {(plan.featured || plan.popular) && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '5px 18px', borderRadius: 20, letterSpacing: '0.5px' }}>HERVORGEHOBENER TARIF</div>}
                                 <h3 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{plan.name}</h3>
                                 <div style={{ marginBottom: 28 }}>
                                     <span style={{ fontSize: 48, fontWeight: 800, letterSpacing: '-2px' }}>${plan.price}</span>
@@ -1418,7 +1417,7 @@ Mehr erfahren ↓
             <section style={{ padding: '80px 24px 100px', textAlign: 'center', position: 'relative' }}>
                 <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 700, height: 700, borderRadius: '50%', background: 'radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 60%)', pointerEvents: 'none' }} />
                 <div style={{ position: 'relative' }}>
-                    <h2 style={{ fontSize: 'clamp(30px, 4vw, 46px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-1px' }}>Dein nächster Trade<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>wartet schon.</span></h2>
+                    <h2 style={{ fontSize: 'clamp(30px, 4vw, 46px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-1px' }}>Prüfe dein nächstes Setup<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>systematisch.</span></h2>
                     <p style={{ color: '#94a3b8', fontSize: 18, marginBottom: 36, maxWidth: 480, margin: '0 auto 36px' }}>$1. 24 Stunden. Alle Scanner. Starte jetzt und überzeug dich selbst.</p>
                     <button onClick={() => openAuth(false)} style={{ padding: '18px 52px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 18, fontWeight: 700, cursor: 'pointer', boxShadow: '0 10px 40px rgba(59,130,246,0.4)', transition: 'all 0.2s' }}
                         onMouseOver={e => { e.target.style.transform='translateY(-3px)'; e.target.style.boxShadow='0 14px 50px rgba(59,130,246,0.5)'; }}
@@ -6809,6 +6808,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 // ══════════════════════════════════════════════════════════════
 function SignalPerformanceTab() {
     const [days, setDays] = useState(30);
+    const [matureOnly, setMatureOnly] = useState(true);
     const [perf, setPerf] = useState(null);
     const [perfError, setPerfError] = useState('');
     const [forbidden, setForbidden] = useState(false);
@@ -6818,10 +6818,11 @@ function SignalPerformanceTab() {
         let cancelled = false;
         const loadPerformance = async () => {
             setLoading(true);
+            setPerf(null);
             setPerfError('');
             setForbidden(false);
             try {
-                const res = await fetch(`${API}/api/signal-performance?days=${days}`);
+                const res = await fetch(`${API}/api/signal-performance?days=${days}&mature_only=${matureOnly}`);
                 if (cancelled) return;
                 if (res.ok) {
                     setPerf(await res.json());
@@ -6832,15 +6833,19 @@ function SignalPerformanceTab() {
                     let detail = '';
                     try { detail = (await res.json()).detail || ''; } catch (e) {}
                     setPerfError(`Performance-Daten konnten nicht geladen werden (${res.status})${detail ? `: ${detail}` : ''}`);
+                    setPerf(null);
                 }
             } catch (err) {
-                if (!cancelled) setPerfError('Performance-Daten konnten nicht geladen werden (Netzwerkfehler).');
+                if (!cancelled) {
+                    setPerf(null);
+                    setPerfError('Performance-Daten konnten nicht geladen werden (Netzwerkfehler).');
+                }
             }
             if (!cancelled) setLoading(false);
         };
         loadPerformance();
         return () => { cancelled = true; };
-    }, [days]);
+    }, [days, matureOnly]);
 
     const fmtR = (v) => (v === null || v === undefined) ? '—' : `${Number(v) > 0 ? '+' : ''}${Number(v).toFixed(2)}R`;
     const fmtPct = (v) => (v === null || v === undefined) ? '—' : `${Number(v).toFixed(1)}%`;
@@ -6853,21 +6858,28 @@ function SignalPerformanceTab() {
         if (status === 'EXPIRED') return sig.tp1_hit_at
             ? { label: 'TP1', cls: 'bg-green-100 text-green-700' }
             : { label: 'EXPIRED', cls: 'bg-gray-100 text-gray-600' };
+        if (status === 'NO_FILL') return { label: 'NO FILL', cls: 'bg-amber-100 text-amber-800' };
         if (status === 'UNTRACKED') return { label: 'UNTRACKED', cls: 'bg-gray-100 text-gray-500' };
         return { label: 'OPEN', cls: 'bg-blue-100 text-blue-700' };
     };
 
     const total = perf?.total || {};
     const scanners = Object.entries(perf?.per_scanner || {}).sort((a, b) => (b[1].sum_r ?? 0) - (a[1].sum_r ?? 0));
+    const segments = [...(perf?.segments || [])].sort((a, b) =>
+        (b.decided_signals ?? 0) - (a.decided_signals ?? 0)
+        || String(a.strategy || '').localeCompare(String(b.strategy || ''))
+    );
+    const cohort = perf?.cohort || {};
     const recent = perf?.recent || [];
     const hasSignals = (total.signals || 0) > 0;
+    const hasCreatedSignals = (cohort.created_in_window || 0) > 0;
 
     // AUDIT 2026-07-24 (T1 + Kalibrier-Loop): Managed-R (50/50), Wilson-KI
     // der Trefferquote und Stichproben-Reliability sichtbar machen.
     const totalWilson = total.win_rate_wilson_95;
     const wilsonHint = totalWilson
         ? `95%-KI: ${Number(totalWilson.lower_pct).toFixed(1)}–${Number(totalWilson.upper_pct).toFixed(1)}%`
-        : 'TP1+TP2 vs. entschieden';
+        : 'Positive terminale R-Ausgänge vs. alle entschiedenen Fills';
 
     const headCards = [
         { label: 'Signale gesamt', value: String(total.signals ?? 0), cls: 'text-gray-900' },
@@ -6887,13 +6899,25 @@ function SignalPerformanceTab() {
                     <h2 className="text-lg font-bold text-gray-900">Signal-Performance</h2>
                     <div className="text-xs text-gray-500">Track-Record aller versendeten Trade-Signale — automatisch ausgewertet, nicht kuratiert.</div>
                 </div>
-                <div className="flex items-center gap-1">
-                    {[7, 30, 90].map(d => (
-                        <button key={d} onClick={() => setDays(d)}
-                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
-                            {d} Tage
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                    <div className="flex items-center gap-1">
+                        {[7, 30, 90].map(d => (
+                            <button key={d} onClick={() => setDays(d)}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                                {d} Tage
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex items-center gap-1" aria-label="Kohortenmodus">
+                        <button onClick={() => setMatureOnly(true)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${matureOnly ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                            Reife Kohorte
                         </button>
-                    ))}
+                        <button onClick={() => setMatureOnly(false)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${!matureOnly ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+                            Alle vorläufig
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -6914,13 +6938,24 @@ function SignalPerformanceTab() {
 
             {perf && !forbidden && !hasSignals && (
                 <div className="card border border-gray-200 p-8 rounded-lg text-center text-gray-500">
-                    <div className="font-semibold text-gray-700 mb-1">Noch keine Signale im gewählten Zeitraum</div>
-                    <div className="text-sm">Sobald Scanner-Alerts versendet werden, erscheint hier automatisch der Track-Record. Zeitraum vergrößern (90 Tage) kann helfen.</div>
+                    <div className="font-semibold text-gray-700 mb-1">{hasCreatedSignals ? 'Signale vorhanden, aber noch nicht reif' : 'Noch keine Signale im gewählten Zeitraum'}</div>
+                    <div className="text-sm">{hasCreatedSignals ? `${cohort.created_in_window} junge Signale bleiben bis zum vollständigen Beobachtungshorizont ausgeschlossen.` : 'Sobald Scanner-Alerts versendet werden, erscheint hier automatisch der Track-Record. Zeitraum vergrößern (90 Tage) kann helfen.'}</div>
                 </div>
             )}
 
             {perf && !forbidden && hasSignals && (
                 <>
+                    {matureOnly ? (
+                        <div className="card border border-emerald-200 bg-emerald-50 text-emerald-900 px-4 py-3 rounded-lg text-sm">
+                            <b>Im Zeitraum ausgereifte Versandkohorte:</b> {cohort.matured_in_window ?? cohort.included_signals ?? total.signals ?? 0} Signale. Im selben Zeitraum wurden {cohort.created_in_window ?? 0} neue Signale erstellt.
+                            {(cohort.excluded_not_mature ?? 0) > 0 && <> Davon bleiben {cohort.excluded_not_mature} bis zum Ende ihres Strategiehorizonts unreif.</>}
+                        </div>
+                    ) : (
+                        <div className="card border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 rounded-lg text-sm">
+                            <b>Vorläufige Erstellkohorte:</b> Junge offene Signale sind enthalten. Schnelle Stops können die Kennzahlen verzerren; aus diesem Modus keine Strategie- oder Schwellenentscheidung ableiten.
+                        </div>
+                    )}
+
                     {/* Stichproben-Warnung (Kalibrier-Loop): < 30 entschiedene Signale */}
                     {total.sample_reliable === false && (
                         <div className="card border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 rounded-lg text-sm">
@@ -6928,11 +6963,17 @@ function SignalPerformanceTab() {
                         </div>
                     )}
 
+                    {(total.managed_be_unresolved ?? 0) > 0 && (
+                        <div className="card border border-amber-300 bg-amber-50 text-amber-950 px-4 py-3 rounded-lg text-sm">
+                            <b>Einstand-Regel nicht vollständig belegbar:</b> {total.managed_be_unresolved} entschiedene Signale erreichten den BE-Bereich, aber Zustellung oder erster kausaler Exit ist nicht nachgewiesen. Diese Fälle werden separat als unresolved geführt und sperren die Managed-BE-Freigabe.
+                        </div>
+                    )}
+
                     {/* BE-Trigger (30.07.): Live-Wirkung der Einstand-Regel */}
                     {(total.be_activations ?? 0) > 0 && (
                         <div className="card border border-green-200 bg-green-50 text-green-900 px-4 py-3 rounded-lg text-sm">
-                            🛡 <b>Einstand-Regel (seit 30.07. live):</b> {total.be_activations} Signale waren +1R gelaufen und wurden auf Einstand gesichert
-                            {(total.be_saved ?? 0) > 0 && <>, davon <b>{total.be_saved} vor einem Verlust bewahrt</b></>}.
+                            🛡 <b>Einstand-Regel (seit 30.07. live):</b> {total.be_activations} Signale erreichten +1R und lösten den BE-Prozess aus
+                            {(total.be_saved ?? 0) > 0 && <>, davon wurden <b>{total.be_saved} mit belegtem Einstands-Exit vor einem Verlust bewahrt</b></>}.
                             {' '}Ø R Ist {fmtR(total.avg_r)} vs. Ø R mit Einstand-Regel <b>{fmtR(total.avg_r_be)}</b>.
                         </div>
                     )}
@@ -6959,6 +7000,9 @@ function SignalPerformanceTab() {
                                     <th className="text-right py-2 px-1">TP1</th>
                                     <th className="text-right py-2 px-1">TP2</th>
                                     <th className="text-right py-2 px-1">Stop</th>
+                                    <th className="text-right py-2 px-1">Expired</th>
+                                    <th className="text-right py-2 px-1">No Fill</th>
+                                    <th className="text-right py-2 px-1">Untracked</th>
                                     <th className="text-right py-2 px-1">Offen</th>
                                     <th className="text-right py-2 px-1">Hit-Rate</th>
                                     <th className="text-right py-2 px-1">Ø R</th>
@@ -6976,6 +7020,9 @@ function SignalPerformanceTab() {
                                         <td className="py-2 px-1 text-right text-green-700">{s.tp1_hit ?? 0}</td>
                                         <td className="py-2 px-1 text-right text-green-700 font-semibold">{s.tp2_hit ?? 0}</td>
                                         <td className="py-2 px-1 text-right text-red-600">{s.stop_hit ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-gray-600">{s.expired ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-amber-700">{s.no_fill ?? 0}</td>
+                                        <td className="py-2 px-1 text-right text-gray-500">{s.untracked ?? 0}</td>
                                         <td className="py-2 px-1 text-right text-blue-600">{s.open ?? 0}</td>
                                         <td className="py-2 px-1 text-right font-medium">
                                             {fmtPct(s.win_rate_pct)}
@@ -6993,6 +7040,54 @@ function SignalPerformanceTab() {
                             </tbody>
                         </table>
                     </div>
+
+                    {/* Gemeinsame Scanner-/Strategie-/Richtungs-/Horizont-/Regimezellen verhindern,
+                        dass verschiedene Modelle unter stock_strategy vermischt werden. */}
+                    {segments.length > 0 && (
+                        <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
+                            <h3 className="font-semibold text-gray-900 mb-1">Performance pro kausaler Modellzelle</h3>
+                            <div className="text-xs text-gray-500 mb-3">Scanner, Strategie, Richtung, Horizont, Marktregime, Revision und Fill-Nachweis bleiben getrennt.</div>
+                            <table className="w-full text-sm">
+                                <thead className="border-b border-gray-200 text-gray-500">
+                                    <tr>
+                                        <th className="text-left py-2 px-1">Scanner / Strategie</th>
+                                        <th className="text-left py-2 px-1">Richtung</th>
+                                        <th className="text-left py-2 px-1">Horizont / Regime</th>
+                                        <th className="text-left py-2 px-1">Revision / Fill-Nachweis</th>
+                                        <th className="text-right py-2 px-1">Entschieden</th>
+                                        <th className="text-right py-2 px-1">Hit-Rate</th>
+                                        <th className="text-right py-2 px-1">Ø Managed-R</th>
+                                        <th className="text-right py-2 px-1">Σ Managed-R</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {segments.map((s, idx) => (
+                                        <tr key={`${s.scanner}-${s.strategy}-${s.direction}-${s.horizon}-${s.market_regime}-${s.code_revision}-${s.fill_evidence_mode}-${idx}`} className="border-b border-gray-100">
+                                            <td className="py-2 px-1 text-gray-900"><div className="font-medium">{s.strategy || 'unknown'}</div><div className="text-[10px] text-gray-400">{s.scanner || 'unknown'}</div></td>
+                                            <td className="py-2 px-1">
+                                                <span className={`text-xs px-2 py-0.5 rounded font-semibold ${s.direction === 'SHORT' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>{s.direction || 'LONG'}</span>
+                                            </td>
+                                            <td className="py-2 px-1 text-xs text-gray-500">
+                                                <div>{s.horizon || 'unspecified'}</div>
+                                                <div>{s.market_regime || 'UNKNOWN'}</div>
+                                            </td>
+                                            <td className="py-2 px-1 text-xs text-gray-500">
+                                                <div>{s.code_revision || 'legacy_unknown'}</div>
+                                                <div>{s.fill_evidence_mode || 'legacy_unclassified'}</div>
+                                            </td>
+                                            <td className="py-2 px-1 text-right">{s.managed_be_decided_signals ?? s.decided_signals ?? 0}</td>
+                                            <td className="py-2 px-1 text-right">
+                                                {fmtPct(s.managed_be_win_rate_pct ?? s.win_rate_pct)}
+                                                {s.managed_be_win_rate_wilson_95 && <div className="text-[10px] text-gray-400">KI {Number(s.managed_be_win_rate_wilson_95.lower_pct).toFixed(0)}–{Number(s.managed_be_win_rate_wilson_95.upper_pct).toFixed(0)}%{s.managed_be_sample_reliable === false ? ' · klein' : ''}</div>}
+                                            </td>
+                                            <td className={`py-2 px-1 text-right ${rTone(s.avg_r_managed_50_50_be)}`}>{fmtR(s.avg_r_managed_50_50_be)}</td>
+                                            <td className={`py-2 px-1 text-right font-semibold ${rTone(s.sum_r_managed_50_50_be)}`}>{fmtR(s.sum_r_managed_50_50_be)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
 
                     {/* Letzte Signale */}
                     <div className="card border border-gray-200 p-6 rounded-lg">
@@ -7027,7 +7122,7 @@ function SignalPerformanceTab() {
 
             {!forbidden && (
                 <div className="text-xs text-gray-400">
-                    Auswertung: First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto stündlicher Spot-Check. Ø R 50/50 = R des empfohlenen 50/50-Managements (50% bei TP1 realisiert, Rest läuft bis TP2/Stop). Ø R BE = live gemessenes R mit Einstand-Regel (Stop auf Einstand ab +1R, seit 30.07.) — kein Backtest. KI = Wilson-95%-Konfidenzintervall; Quoten erst ab 30 entschiedenen Signalen belastbar.
+                    Auswertung: Standard ist die vollständig beobachtete Versandkohorte. First-Touch konservativ (Stop vor Ziel), TP1 = halbe Position. Crypto wird aus vollständigen chronologischen Intervallen ausgewertet. Ø R 50/50 = R des 50/50-Managements. Ø R BE nutzt nur kausal beobachtete Einstands-Exits nach zugestellter Stop-Anweisung; unbelegte Verläufe werden als unresolved ausgewiesen und sperren die Freigabe — kein Backtest und keine modellierte 0R-Annahme. KI = Wilson-95%-Konfidenzintervall; Quoten erst ab 30 entschiedenen Signalen je Scanner/Strategie/Richtung/Horizont/Regime/Revision/Fill-Nachweis belastbar.
                 </div>
             )}
         </div>
@@ -8891,8 +8986,8 @@ function StrategieGuideTab() {
         'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
         'Bear Flag': 'Das Gegenstück zur Bull Flag — nach einem starken Abverkauf konsolidiert die Aktie in einer engen Range. Oft ein Zeichen, dass der Abwärtstrend weitergehen wird. Nützlich für Short-Setups.',
         'Breakout Long': 'Findet Aktien, die gerade nach oben ausbrechen und ihren Tagesgewinn halten. Der Kurs schließt nahe dem Tageshoch — ein Zeichen, dass die Käufer die Kontrolle haben. Kann auch Multi-Day-Runner erkennen, die über mehrere Tage steigen.',
-        'Turtle Breakout': 'Die legendäre Turtle Trading Strategie von Richard Dennis (1983). Ein reines Trend-Following System: Wenn der Kurs das 20-Tage-Hoch durchbricht, wird Long eingegangen. Der Stop-Loss liegt 2× ATR (Average True Range) unter dem Einstieg und wird als Trailing-Stop nachgezogen. Exit wenn der Kurs unter das 10-Tage-Tief fällt. Einfach, mechanisch und profitabel in Trendmärkten. Dennis bewies damit, dass Trading erlernbar ist — seine "Turtles" (Anfänger) verdienten über $100M.',
-        'Penny Rockets': 'Sucht günstige Aktien im Low-Price-Bereich, die plötzlich explodieren. Nur liquide Aktien werden angezeigt (Mindest-Handelsvolumen), um illiquide Fallen zu vermeiden. Hochriskant, aber potentiell sehr profitabel.',
+        'Turtle Breakout': 'Trend-Following nach dem Turtle-Regelwerk: Ein 20-Tage-Hoch dient als möglicher Long-Trigger, der Stop liegt ATR-basiert unter dem Einstieg und wird regelbasiert nachgezogen. Der Scanner bildet das historische Regelwerk ab; seine Ergebnisse müssen in der aktuellen Versandkohorte separat kalibriert werden.',
+        'Penny Rockets': 'Sucht starke Bewegungen bei Aktien im Low-Price-Bereich. Mindestvolumen und Liquiditätsfilter reduzieren, beseitigen aber nicht, Ausführungs-, Spread- und Manipulationsrisiken. Das Setup bleibt hochriskant.',
         'Dip Buy': 'Findet qualitativ hochwertige Aktien im Rücksetzer, die NICHT in Panik verkauft werden. Wenn eine gute Aktie moderat fällt, aber das Handelsvolumen normal bleibt, ist das oft eine Kaufgelegenheit — kein Crash.',
         'Reversal Hunter': 'Sucht nach Wendepunkten: Aktien, die gestern stark gefallen sind und heute wieder Käufer anziehen. Der Scanner unterscheidet zwischen echten Reversals (im Abwärtstrend) und normalen Pullback-Bounces (im Aufwärtstrend).',
         'Early Momentum': 'Erkennt Aktien mit einem starken Tagesstart, die ihre Gewinne halten. Wenn der Kurs am Tageshoch oder nahe dran schließt, deutet das auf anhaltendes Momentum hin. Ideal für Intraday-Trader.',
@@ -8932,16 +9027,16 @@ function StrategieGuideTab() {
         // === FUTURES ===
         'Futures Momentum ': 'Erkennt Futures-Kontrakte mit starker Tagesbewegung. In den Futures-Märkten zählen schon kleinere Bewegungen, da oft mit hohem Hebel gehandelt wird.',
         'Futures Breakdown ': 'Starker Abverkauf bei Futures — potenzielle Short-Chance. Futures-Breakdowns können sich schnell beschleunigen durch Margin Calls.',
-        'Futures Reversal ': 'Trendumkehr bei Futures: Nach einer schwachen Session dreht der Markt nach oben. Reversal-Trades in Futures sind besonders bei Rohstoffen profitabel.',
+        'Futures Reversal ': 'Trendumkehr bei Futures: Nach einer schwachen Session dreht der Markt nach oben. Der Scanner markiert diese Struktur; Rohstoff-Futures bleiben besonders volatil und hebelabhängig.',
         'Globex Gap ': 'Der Globex ist der elektronische Futures-Markt, der auch über Nacht läuft. Dieser Scanner findet Gaps zwischen dem US-Schlusskurs und der aktuellen Overnight-Session. Besonders relevant für Index-Futures (ES, NQ).',
         'London Open Momentum 🇬🇧': 'Erkennt Momentum bei Eröffnung der Londoner Börse um 08:00 UTC. Der Londoner Markt bringt frische Liquidität und oft neue Trendrichtung. Besonders relevant für Gold, Öl und europäische Indizes.',
-        'NY Open Breakout ': 'Momentum bei US-Börsenöffnung — die liquideste Phase des Tages. Hier entstehen die größten Moves. Besonders profitabel für Index-Futures und Energie-Futures.',
-        'High Volatility ': 'Findet Futures mit überdurchschnittlicher Tagesbewegung. Hohe Volatilität bedeutet größere Chancen (und Risiken) — ideal für aktive Daytrader.',
+        'NY Open Breakout ': 'Beobachtet Momentum zur US-Börseneröffnung, einer typischerweise liquiden und volatilen Marktphase. Index- und Energie-Futures können dort schnelle Bewegungen und entsprechend hohe Ausführungsrisiken zeigen.',
+        'High Volatility ': 'Findet Futures mit überdurchschnittlicher Tagesbewegung. Hohe Volatilität vergrößert sowohl mögliche Bewegungen als auch Verlust-, Gap- und Slippage-Risiken.',
         'Low Volatility Squeeze ': 'Extrem enge Range bei Futures — die Volatilität ist zusammengepresst wie eine Feder. Historisch folgt auf solche Phasen fast immer ein großer Ausbruch.',
         'VIX Spike Alert ': 'Erkennt starke Anstiege im VIX (Angst-Index). Wenn der VIX sprunghaft steigt, absichern sich große Spieler gegen einen Crash. Kann sowohl Warnsignal als auch Contrarian-Buy-Signal sein.',
         // === FOREX ===
         'Forex Momentum ': 'Erkennt Währungspaare mit starker Pip-Bewegung. Im Forex-Markt zählen schon kleine Bewegungen, da mit großem Hebel gehandelt wird.',
-        'Forex Reversal ': 'Trendumkehr bei Währungspaaren: Nach einem starken Vortag dreht die Richtung. Forex-Reversals an Schlüsselniveaus sind eine der profitabelsten Strategien.',
+        'Forex Reversal ': 'Trendumkehr bei Währungspaaren: Nach einem starken Vortag dreht die Richtung. Der Scanner markiert Reversal-Strukturen an Schlüsselniveaus, ohne daraus einen Performance-Nachweis abzuleiten.',
         'Pip Hunter ': 'Zeigt die größten Pip-Bewegungen des Tages. Nützlich um die aktivsten Paare zu finden und dort nach Setups zu suchen.',
         'Tokyo Session 🇯🇵': 'Bewegungen während der Tokyo/Asien Session (00:00-09:00 UTC). Oft ruhiger, aber JPY-Paare (USDJPY, EURJPY) können hier sehr aktiv sein. Ideal für Trader in asiatischen Zeitzonen.',
         'London Session 🇬🇧': 'Die London-Session (08:00-17:00 UTC) hat die höchste Liquidität weltweit. EUR und GBP-Paare sind besonders aktiv. Die besten Breakout-Setups entstehen in der ersten Stunde.',

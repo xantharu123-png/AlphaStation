@@ -329,15 +329,14 @@ def test_n_bg_stale_cache_blocks_mails(monkeypatch, tmp_path):
     assert sent == [], "N: Mail aus 3h altem Cache — Frische-Gate wirkungslos"
 
 
-def test_n_bg_fresh_cache_still_mails(monkeypatch, tmp_path):
-    """Positivkontrolle: frischer Cache (timestamp=jetzt) mailt weiterhin."""
+def test_n_bg_fresh_cache_never_bypasses_api_mail_owner(monkeypatch, tmp_path):
+    """Auch ein frischer BG-Cache darf keinen unsicheren Entry-Wire senden."""
     sent = _bg_setup(monkeypatch, tmp_path, BI_LONG_CACHE, {
         "results": [_bi_row("GOOD")],
         "timestamp": time.time(),
     })
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    assert "GOOD" in sent[0]["body"]
+    assert sent == []
 
 
 def test_n_load_cache_file_enforces_max_age(tmp_path):
@@ -408,8 +407,8 @@ def test_h2_t10_row_not_binary_gated_and_no_warning():
     assert "Binäres Event" not in api._format_alert_plan_html(row)
 
 
-def test_h2_bg_mail_blocks_t2_and_mails_t10(monkeypatch, tmp_path):
-    """bg-Paritaet end-to-end: T-2-Row wird unterdrueckt, T-10-Row gemailt."""
+def test_h2_bg_biotech_entries_are_api_owned(monkeypatch, tmp_path):
+    """Biotech-Entry-Mails duerfen den API-Revalidator nicht umgehen."""
     sent = _bg_setup(monkeypatch, tmp_path, BIOTECH_CACHE, {
         "results": [
             _biotech_row("TMI2", Bio_Risk_Flags=["near_binary_event"],
@@ -419,11 +418,7 @@ def test_h2_bg_mail_blocks_t2_and_mails_t10(monkeypatch, tmp_path):
         "timestamp": time.time(),
     })
     bg_service._check_and_alert_scan_results("biotech", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    body = sent[0]["body"]
-    assert "TPLU" in body
-    assert "TMI2" not in body, "H-2: Binary-Row (T-2) im Mail-Body!"
-    assert "Binäres Event" not in body, "H-2: T-10-Mail darf keine Binary-Warnung tragen"
+    assert sent == []
 
 
 # ── M-4: Synthetik-Level ehrlich klassifizieren ─────────────────────────────
@@ -446,17 +441,15 @@ def test_m4_normalize_levels_synthetic_flag():
     assert levels_native["native"] is True
 
 
-def test_m4_synthetic_biotech_row_mailable_and_labeled(monkeypatch, tmp_path):
-    """Synthetic-Row bleibt mailbar (bewusste Biotech-Ausnahme) UND traegt das
-    Struktur-Level-Label in Mail/Plan-HTML; native Row bleibt label-frei."""
+def test_m4_synthetic_biotech_bg_row_cannot_bypass_api_owner(monkeypatch, tmp_path):
+    """Auch die Biotech-Ausnahme wird ausschliesslich im API-Pfad versandt."""
     sent = _bg_setup(monkeypatch, tmp_path, BIOTECH_CACHE, {
         "results": [_biotech_row("SYNT", Trade_Setup_Synthetic=True,
                                  Trade_Setup_Source="biotech_daily_structure")],
         "timestamp": time.time(),
     })
     bg_service._check_and_alert_scan_results("biotech", {"POLYGON_KEY": ""})
-    assert len(sent) == 1, "M-4: synthetische Biotech-Level muessen mailbar bleiben"
-    assert "Struktur-Level" in sent[0]["body"], "M-4: M1-Label fehlt im Mail-Body"
+    assert sent == []
 
     # Label-Quelle ist das Flag, nicht nur der Source-Prefix (api + bg):
     flag_only = _biotech_row("SYNT", Trade_Setup_Synthetic=True)

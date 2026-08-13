@@ -190,15 +190,23 @@ def test_shadow_summary_aggregates(tracker):
     d0 = _db_rows("SELECT created_at FROM signals WHERE ticker = 'SH1'")[0]["created_at"][:10]
     from datetime import date, timedelta
     day = date.fromisoformat(d0)
+    sessions = []
+    cursor = day
+    while len(sessions) < 2:
+        cursor += timedelta(days=1)
+        if st._is_us_equity_session(cursor):
+            sessions.append(cursor)
 
     def fetcher(ticker, since_iso_date):
         if ticker != "SH1":
             return []
         return [
-            {"date": (day + timedelta(days=1)).isoformat(),
-             "open": 100.0, "high": 106.0, "low": 99.0, "close": 105.0},
-            {"date": (day + timedelta(days=2)).isoformat(),
-             "open": 106.0, "high": 111.0, "low": 104.0, "close": 110.5},
+            {"date": sessions[0].isoformat(),
+             "open": 100.0, "high": 106.0, "low": 99.0, "close": 105.0,
+             "interval_complete": True},
+            {"date": sessions[1].isoformat(),
+             "open": 106.0, "high": 111.0, "low": 104.0, "close": 110.5,
+             "interval_complete": True},
         ]
 
     result = tracker.evaluate_open_signals(stock_daily_fetcher=fetcher)
@@ -233,14 +241,18 @@ def test_shadow_transitions_and_be_carry_mail_class(tracker):
     d0 = _db_rows("SELECT created_at FROM signals WHERE ticker = 'SHW'")[0]["created_at"][:10]
     from datetime import date, timedelta
     day = date.fromisoformat(d0)
+    cursor = day + timedelta(days=1)
+    while not st._is_us_equity_session(cursor):
+        cursor += timedelta(days=1)
 
     def fetcher(ticker, since_iso_date):
         # Ein Tag: Open am Entry -> Fill 100, High 106 = MFE +1.2R + TP1-Touch,
         # Low 99.5 ueber dem Stop — Signal bleibt OPEN (kein terminaler Exit,
         # damit die BE-Aktivierung nicht konservativ unterdrueckt wird).
         return [
-            {"date": (day + timedelta(days=1)).isoformat(),
-             "open": 100.0, "high": 106.0, "low": 99.5, "close": 105.5},
+            {"date": cursor.isoformat(),
+             "open": 100.0, "high": 106.0, "low": 99.5, "close": 105.5,
+             "interval_complete": True},
         ]
 
     result = tracker.evaluate_open_signals(stock_daily_fetcher=fetcher)
@@ -258,11 +270,25 @@ def test_update_mail_skips_shadow_transitions(tmp_path, monkeypatch):
                         lambda *args, **kwargs: sent.append(args) or True)
     monkeypatch.setattr(bg_service, "_signal_origin_was_mailed",
                         lambda *args, **kwargs: True)
+    recipient = "followup@example.com"
+    recipient_key = bg_service._recipient_delivery_key(recipient)
+    monkeypatch.setattr(
+        bg_service,
+        "_followup_recipient_profiles",
+        lambda _secrets: [{"email": recipient, "position_update_scope": "all",
+                           "personal_positions": []}],
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_current_followup_recipient_emails",
+        lambda _event, _cache: {recipient},
+    )
     transitions = [
         {"id": 1, "ticker": "SHW", "scanner": "stock_strategy",
          "mail_class": "shadow", "new_status": "STOP_HIT", "r_realized": -1.0},
         {"id": 2, "ticker": "REAL", "scanner": "stock_strategy",
-         "mail_class": "trade", "new_status": "STOP_HIT", "r_realized": -1.0},
+         "mail_class": "trade", "new_status": "STOP_HIT", "r_realized": -1.0,
+         "delivery_recipient_keys": [recipient_key]},
     ]
     assert bg_service._send_signal_update_mail(transitions, None) is True
     assert len(sent) == 1
@@ -292,11 +318,26 @@ def test_be_mail_skips_shadow_activations(tmp_path, monkeypatch):
                         lambda *args, **kwargs: sent.append(args) or True)
     monkeypatch.setattr(bg_service, "_signal_origin_was_mailed",
                         lambda *args, **kwargs: True)
+    recipient = "followup@example.com"
+    recipient_key = bg_service._recipient_delivery_key(recipient)
+    monkeypatch.setattr(
+        bg_service,
+        "_followup_recipient_profiles",
+        lambda _secrets: [{"email": recipient, "position_update_scope": "all",
+                           "personal_positions": []}],
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_current_followup_recipient_emails",
+        lambda _event, _cache: {recipient},
+    )
+    monkeypatch.setattr(bg_service, "mark_be_alerts_sent", lambda ids: len(list(ids)))
     activations = [
         {"id": 1, "ticker": "SHW", "scanner": "stock_strategy",
          "mail_class": "shadow", "entry": 100.0, "mfe": 1.2},
         {"id": 2, "ticker": "REAL", "scanner": "stock_strategy",
-         "mail_class": "trade", "entry": 100.0, "mfe": 1.2},
+         "mail_class": "trade", "entry": 100.0, "mfe": 1.2,
+         "delivery_recipient_keys": [recipient_key]},
     ]
     assert bg_service._send_be_alert_mail(activations, None) is True
     assert len(sent) == 1
@@ -364,6 +405,11 @@ def _pipeline_stubs(monkeypatch, tmp_path, classified):
                         lambda *args, **kwargs: ({"GATED", "BASE", "FINE"}, "unit"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason",
                         lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
     api._EMAIL_COOLDOWN.clear()
 
@@ -375,8 +421,33 @@ def _pipeline_stubs(monkeypatch, tmp_path, classified):
 
 def test_pipeline_logs_shadow_for_timing_gated_rows(tmp_path, monkeypatch, tracker):
     sent_mails = []
-    monkeypatch.setattr(api, "_send_email_alert",
-                        lambda *args, **kwargs: sent_mails.append(args) or True)
+
+    def fake_send(*args, **kwargs):
+        sent_mails.append(args)
+        tracking_rows = list(kwargs.get("tracking_rows") or [])
+        tracking_scanner = kwargs.get("tracking_scanner") or ""
+        mail_channel = kwargs.get("mail_channel") or ""
+        intent_key = tracker.build_alert_delivery_intent_key(
+            tracking_scanner,
+            tracking_rows,
+            channel="email",
+            mail_channel=mail_channel,
+        )
+        prepared = tracker.prepare_alert_delivery_intent(
+            tracking_scanner,
+            tracking_rows,
+            intent_key,
+            channel="email",
+            mail_channel=mail_channel,
+        )
+        assert prepared["prepared"] is True
+        assert tracker.finalize_alert_delivery(
+            intent_key, ["a" * 64]
+        )["activated"] is True
+        api._set_last_delivery_recipients(["operator@example.com"])
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", fake_send)
     monkeypatch.setattr(api, "_record_email_event", lambda *args, **kwargs: None)
     _pipeline_stubs(monkeypatch, tmp_path, {
         "GATED": {

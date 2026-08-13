@@ -63,12 +63,15 @@ def _record_recorder(monkeypatch):
     """Recorder fuer den Kontrakt-Hook record_alert_signals (api-Global)."""
     calls = []
 
-    def _recorder(scanner_name, rows, mail_class="trade", channel="email"):
+    def _recorder(
+        scanner_name, rows, mail_class="trade", channel="email", **kwargs
+    ):
         calls.append({
             "scanner": scanner_name,
             "rows": rows,
             "mail_class": mail_class,
             "channel": channel,
+            "delivery_recipient_keys": kwargs.get("delivery_recipient_keys"),
         })
         return len(rows)
 
@@ -143,16 +146,24 @@ def _early_mover_row(**overrides):
 
 def test_bi_alert_send_success_records_signals(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"PFE"}, "unit"))
-    monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: True)
-    calls = _record_recorder(monkeypatch)
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
+    deliveries = []
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: deliveries.append(kwargs) or True,
+    )
 
     api._check_and_alert("biotech", str(_biotech_cache(tmp_path)))
 
-    assert len(calls) == 1
-    assert calls[0]["scanner"] == "biotech"
-    assert calls[0]["mail_class"] == "trade"
-    assert calls[0]["channel"] == "email"
-    rows = calls[0]["rows"]
+    assert len(deliveries) == 1
+    assert deliveries[0]["tracking_scanner"] == "biotech"
+    assert deliveries[0]["mail_class"] == "trade"
+    rows = deliveries[0]["tracking_rows"]
     assert len(rows) == 1
     assert rows[0]["ticker"] == "PFE"
     # Rows muessen die Entry/Stop/TP-Felder tragen (Tracker extrahiert tolerant)
@@ -184,9 +195,8 @@ def test_early_mover_digest_records_only_trade_rows(monkeypatch):
     )
     monkeypatch.setattr(
         api, "_send_email_alert",
-        lambda subject, body, **kwargs: sent.append(kwargs.get("mail_class")) or True,
+        lambda subject, body, **kwargs: sent.append(kwargs) or True,
     )
-    calls = _record_recorder(monkeypatch)
     payload = {"coins": [
         _early_mover_row(Symbol="TRADENOW"),
         _early_mover_row(
@@ -200,14 +210,15 @@ def test_early_mover_digest_records_only_trade_rows(monkeypatch):
     api._send_early_mover_long_alerts(payload)
 
     # Trade-Digest UND Watch-Mail gingen raus ...
-    assert set(sent) == {"trade", "watch"}
+    assert {item.get("mail_class") for item in sent} == {"trade", "watch"}
     # ... aber record genau 1x und nur mit den 🚨-Trade-Rows
-    assert len(calls) == 1
-    assert calls[0]["scanner"] == "early_movers"
-    symbols = [r.get("symbol") for r in calls[0]["rows"]]
+    tracked = [item for item in sent if item.get("tracking_scanner")]
+    assert len(tracked) == 1
+    assert tracked[0]["tracking_scanner"] == "early_movers"
+    symbols = [r.get("symbol") for r in tracked[0]["tracking_rows"]]
     assert symbols == ["TRADENOW"]
     assert not any(
-        r.get("symbol") == "RETESTZONE" for call in calls for r in call["rows"]
+        r.get("symbol") == "RETESTZONE" for r in tracked[0]["tracking_rows"]
     )
 
 
@@ -236,6 +247,16 @@ def test_early_mover_watch_mail_alone_records_nothing(monkeypatch):
 # ── 3) Telegram-Spiegel in _send_email_alert ──
 
 
+def test_safe_telegram_formatter_returns_formatted_body(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "format_alert_rows_for_telegram",
+        lambda rows: f"formatted:{len(rows)}",
+    )
+
+    assert api._safe_format_telegram_rows([{"ticker": "AAA"}]) == "formatted:1"
+
+
 class _FakeSMTP:
     """FakeSMTP-Muster aus test_mail_class_api.py."""
 
@@ -245,7 +266,7 @@ class _FakeSMTP:
     def ehlo(self):
         pass
 
-    def starttls(self):
+    def starttls(self, context=None):
         pass
 
     def login(self, user, password):
@@ -265,6 +286,7 @@ def _setup_real_send(monkeypatch):
         "GMAIL_APP_PASSWORD": "pw",
         "ALERT_EMAIL": "op@x.com",
         "ALERT_OPERATOR_WATCH_OPTIN": "1",
+        "SMTP_PORT": "587",
     })
     monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
 
@@ -344,6 +366,113 @@ def test_telegram_mirror_skips_on_smtp_failure(monkeypatch):
     assert tg_calls == []
 
 
+def test_smtp_acceptance_is_never_retried_when_quit_fails(monkeypatch):
+    calls = {"sendmail": 0, "ssl": 0}
+
+    class _AcceptedThenQuitFails(_FakeSMTP):
+        def sendmail(self, sender, recipients, message):
+            calls["sendmail"] += 1
+            return {}
+
+        def quit(self):
+            raise OSError("connection dropped after DATA acceptance")
+
+    def _ssl_must_not_run(*args, **kwargs):
+        calls["ssl"] += 1
+        raise AssertionError("must not resend after DATA acceptance")
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _AcceptedThenQuitFails)
+    monkeypatch.setattr(api.smtplib, "SMTP_SSL", _ssl_must_not_run)
+    monkeypatch.setattr(api, "_SECRETS", {
+        "GMAIL_USER": "op@x.com",
+        "GMAIL_APP_PASSWORD": "pw",
+        "ALERT_EMAIL": "op@x.com",
+    })
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+
+    ok = api._send_email_alert(
+        "One irreversible delivery",
+        "<p>x</p>",
+        bypass_startup_cooldown=True,
+        mail_class="trade",
+    )
+
+    assert ok is True
+    assert calls == {"sendmail": 1, "ssl": 0}
+
+
+def test_unknown_data_outcome_is_not_retried_or_queued(monkeypatch):
+    calls = {"sendmail": 0, "ssl": 0, "enqueue": 0, "quarantine": 0}
+
+    class _UnknownOutcome(_FakeSMTP):
+        def sendmail(self, sender, recipients, message):
+            calls["sendmail"] += 1
+            raise ConnectionResetError("outcome unknown after DATA")
+
+    def _ssl_must_not_run(*args, **kwargs):
+        calls["ssl"] += 1
+        raise AssertionError("must not resend unknown DATA outcome")
+
+    class _Outbox:
+        @staticmethod
+        def enqueue(*args, **kwargs):
+            calls["enqueue"] += 1
+            return 1
+
+        @staticmethod
+        def quarantine(*args, **kwargs):
+            calls["quarantine"] += 1
+            return 1
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _UnknownOutcome)
+    monkeypatch.setattr(api.smtplib, "SMTP_SSL", _ssl_must_not_run)
+    monkeypatch.setattr(api, "_mail_outbox", _Outbox())
+    monkeypatch.setattr(api, "_SECRETS", {
+        "GMAIL_USER": "op@x.com",
+        "GMAIL_APP_PASSWORD": "pw",
+        "ALERT_EMAIL": "op@x.com",
+    })
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+
+    ok = api._send_email_alert(
+        "Unknown outcome",
+        "<p>x</p>",
+        bypass_startup_cooldown=True,
+        mail_class="info",
+    )
+
+    assert ok is False
+    assert api._last_delivery_outcome() == "unknown"
+    assert calls == {"sendmail": 1, "ssl": 0, "enqueue": 0, "quarantine": 1}
+
+
+def test_partial_refusal_retries_only_refused_recipient(monkeypatch):
+    calls = []
+
+    class _PartialSMTP(_FakeSMTP):
+        def sendmail(self, sender, recipients, message):
+            calls.append(tuple(recipients))
+            if len(calls) == 1:
+                return {"b@example.com": (450, b"temporary")}
+            return {}
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _PartialSMTP)
+    monkeypatch.setattr(api.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(api, "_SECRETS", {
+        "GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "op@x.com",
+    })
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+
+    assert api._send_email_alert(
+        "Partial", "<p>x</p>", bypass_startup_cooldown=True,
+        mail_class="trade", recipient_emails=["a@example.com", "b@example.com"],
+    )
+
+    assert calls == [("a@example.com", "b@example.com"), ("b@example.com",)]
+    assert len(api._take_last_delivery_recipients()) == 2
+    assert api._last_delivery_outcome() == "accepted"
+
+
 # ── 4) /api/signal-performance (Admin-Gate, Struktur, 503 ohne Modul) ──
 
 
@@ -358,7 +487,12 @@ def test_signal_performance_endpoint_returns_summary_for_admin(monkeypatch):
     monkeypatch.setattr(api, "_require_admin", lambda authorization: ({"email": "admin@x.com"}, "admin@x.com"))
     monkeypatch.setattr(
         api, "load_performance_summary",
-        lambda days=90: {"days": days, "signals": 5, "hit_rate_tp1": 0.6},
+        lambda days=90, mature_only=True: {
+            "days": days,
+            "signals": 5,
+            "hit_rate_tp1": 0.6,
+            "mature_only": mature_only,
+        },
     )
 
     result = api.api_signal_performance(days=30, authorization="Bearer admin-token")
@@ -366,6 +500,7 @@ def test_signal_performance_endpoint_returns_summary_for_admin(monkeypatch):
     assert result["days"] == 30
     assert result["signals"] == 5
     assert result["hit_rate_tp1"] == 0.6
+    assert result["mature_only"] is True
 
 
 def test_signal_performance_endpoint_503_without_module(monkeypatch):

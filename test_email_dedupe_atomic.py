@@ -3,6 +3,9 @@ from pathlib import Path
 import threading
 
 from modules.email_dedupe import (
+    email_delivery_claim,
+    email_delivery_mark,
+    email_delivery_release,
     email_dedupe_active,
     email_dedupe_claim,
     email_dedupe_mark,
@@ -62,13 +65,35 @@ def test_failed_sender_can_release_only_its_own_claim(tmp_path):
     assert not email_dedupe_active(path, "signal", 3600, now=1001.0)
 
 
+def test_delivery_claim_uses_short_lease_and_only_mark_starts_sent_ttl(tmp_path):
+    path = str(tmp_path / "dedupe.json")
+    assert email_delivery_claim(path, "signal", 8 * 3600, claim_ttl_seconds=120, now=1000.0)
+    assert not email_delivery_claim(path, "signal", 8 * 3600, claim_ttl_seconds=120, now=1100.0)
+    assert not email_dedupe_active(path, "signal", 8 * 3600, now=1100.0)
+
+    # A crashed sender may be retried after the short lease, not after eight hours.
+    assert email_delivery_claim(path, "signal", 8 * 3600, claim_ttl_seconds=120, now=1121.0)
+    email_delivery_mark(path, "signal", now=1122.0)
+    assert email_dedupe_active(path, "signal", 8 * 3600, now=1123.0)
+    assert not email_delivery_claim(path, "signal", 8 * 3600, claim_ttl_seconds=120, now=1123.0)
+
+
+def test_delivery_release_never_deletes_a_sent_marker(tmp_path):
+    path = str(tmp_path / "dedupe.json")
+    assert email_delivery_claim(path, "signal", 3600, now=1000.0)
+    email_delivery_mark(path, "signal", now=1001.0)
+    assert not email_delivery_release(path, "signal", claimed_at=1000.0)
+    assert email_dedupe_active(path, "signal", 3600, now=1002.0)
+
+
 def test_api_and_background_service_share_atomic_dedupe_helpers():
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
     bg_source = (ROOT / "bg_service.py").read_text(encoding="utf-8")
     for source in (api_source, bg_source):
         assert "from modules.email_dedupe import" in source
-        assert "_shared_email_dedupe_claim" in source
-        assert "_shared_email_dedupe_mark" in source
+        assert "_shared_email_delivery_claim" in source
+        assert "_shared_email_delivery_mark" in source
+        assert "claim_ttl_seconds=900" in source
     assert "_email_dedupe_release(dedupe_key, claimed_at=now)" in api_source
 
 
@@ -99,5 +124,7 @@ def test_new_listing_invalidation_mail_uses_atomic_claim_and_rollback():
         "def _alert_nls_invalidations",
         "def _alert_nls_signals",
     )
-    assert "_email_dedupe_claim(invalidation_key" in invalidation
-    assert "_email_dedupe_release(invalidation_key, claimed_at=now)" in invalidation
+    assert "_email_delivery_claim(" in invalidation
+    assert "invalidation_key, _NLS_INVALIDATION_DEDUPE_SEC" in invalidation
+    assert "_email_delivery_release(invalidation_key, claimed_at=now)" in invalidation
+    assert "_email_delivery_release_or_quarantine(" in invalidation

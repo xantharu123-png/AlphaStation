@@ -155,6 +155,121 @@ def test_email_pipeline_summary_separates_send_skip_and_error(monkeypatch):
     assert summary["last_event"]["reason"] == "connection_failed"
 
 
+def test_public_email_pipeline_summary_redacts_subject_reason_and_recipient(monkeypatch):
+    monkeypatch.setattr(api, "_EMAIL_SEND_LOG", [])
+    recipient = "secret-subscriber@example.com"
+    api._record_email_event(
+        "Private ticker signal",
+        "error",
+        "{'%s': (550, b'No such user')}" % recipient,
+    )
+
+    summary = api._email_pipeline_summary(public=True)
+    serialized = json.dumps(summary)
+
+    assert summary["last_event"] == {
+        "timestamp": summary["last_event"]["timestamp"],
+        "status": "error",
+        "has_reason": True,
+    }
+    assert recipient not in serialized
+    assert "Private ticker signal" not in serialized
+
+
+def test_public_system_health_redacts_scan_and_outbox_errors(monkeypatch):
+    secret = "apiKey=TOPSECRET subscriber=alice@example.com"
+    scan_key = "unit_public_redaction"
+    monkeypatch.setitem(
+        api._scan_status,
+        scan_key,
+        {"running": False, "last_error": secret, "interval_min": 5},
+    )
+    monkeypatch.setattr(
+        api,
+        "_mail_outbox",
+        type("Outbox", (), {"stats": staticmethod(lambda: {
+            "available": True,
+            "pending": 1,
+            "delivering": 2,
+            "uncertain": 3,
+            "last_error": secret,
+        })})(),
+    )
+
+    try:
+        payload = api._build_system_health()
+    finally:
+        api._scan_status.pop(scan_key, None)
+
+    serialized = json.dumps(payload)
+    assert secret not in serialized
+    assert "alice@example.com" not in serialized
+    assert payload["scans"][scan_key]["has_scan_error"] is True
+    assert payload["email_pipeline"]["outbox"]["has_error"] is True
+    assert payload["email_pipeline"]["outbox"]["delivering"] == 2
+    assert payload["email_pipeline"]["outbox"]["uncertain"] == 3
+    assert any(
+        "3 Mail(s)" in warning and "unklaren SMTP-DATA-Ausgang" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_system_health_merges_cross_db_acceptance_fallback_without_intent_leak(
+    monkeypatch,
+):
+    secret_intent = "intent:CANARY-secret-ticker"
+
+    class _FallbackOutbox:
+        @staticmethod
+        def stats():
+            return {
+                "enabled": True,
+                "available": True,
+                "pending": 0,
+                "tracker_acceptance_available": True,
+                "tracker_acceptance_pending_count": 1,
+                "tracker_acceptance_oldest_at": 1_800_000_000.0,
+            }
+
+        @staticmethod
+        def load_tracker_acceptance_pending():
+            return [{
+                "intent_key": secret_intent,
+                "accepted_at": 1_800_000_000.0,
+            }]
+
+    monkeypatch.setattr(api, "_mail_outbox", _FallbackOutbox())
+    monkeypatch.setattr(
+        api,
+        "load_delivery_acceptance_health",
+        lambda: {
+            "status": "ok",
+            "tracker_pending": False,
+            "pending_count": 0,
+            "reconciled_count": 0,
+            "oldest_pending_at": None,
+            "last_error": None,
+        },
+    )
+    monkeypatch.setattr(api, "load_pending_accepted_deliveries", lambda: [])
+
+    payload = api._build_system_health()
+    acceptance = payload["email_pipeline"]["tracker_acceptance"]
+    serialized = json.dumps(payload)
+
+    assert acceptance["status"] == "degraded"
+    assert acceptance["pending_count"] == 1
+    assert acceptance["tracker_journal_pending_count"] == 0
+    assert acceptance["fallback_journal_pending_count"] == 1
+    assert acceptance["fallback_journal_available"] is True
+    assert acceptance["oldest_pending_at"].startswith("2027-")
+    assert secret_intent not in serialized
+    assert any(
+        "1 angenommene Trade-Mail(s)" in warning
+        for warning in payload["warnings"]
+    )
+
+
 def test_scheduled_scan_without_fresh_cache_is_a_failure(tmp_path, monkeypatch):
     scan_key = "unit_missing_cache_publish"
     cache_path = tmp_path / "scan.json"

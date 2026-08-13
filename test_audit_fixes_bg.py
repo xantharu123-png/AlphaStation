@@ -165,8 +165,8 @@ def test_h7_scanner_und_bg_implementierung_identisch():
 def test_h9_default_scan_set_ohne_api_overlap():
     """Default: bg übernimmt NUR die schweren Nicht-Überlappenden."""
     active, skipped = bg_service._resolve_bg_scan_set(env_value="")
-    assert active == {"bi_long", "bi_short", "biotech"}
-    assert skipped == {"crash_monitor", "btc_divergence", "bear_scan", "strategies", "orb", "new_listing"}
+    assert active == set()
+    assert skipped == bg_service.BG_ALL_SCANS
     assert "new_listing" in skipped  # NLS läuft default im api.py-Scheduler
 
 
@@ -185,6 +185,11 @@ def test_h9_env_override_bestimmt_scans():
 
 def test_h9_env_override_ignoriert_unbekannte_scans():
     active, _ = bg_service._resolve_bg_scan_set(env_value="bi_long,quatsch_scan")
+    assert active == set()
+
+    active, _ = bg_service._resolve_bg_scan_set(
+        env_value="bi_long,quatsch_scan", allow_api_overlap=True
+    )
     assert active == {"bi_long"}
 
 

@@ -11,6 +11,22 @@ from pathlib import Path
 import bg_service
 
 
+def test_bg_stock_trade_cache_mailer_is_fail_closed(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        bg_service,
+        "_send_email_alert",
+        lambda *args, **kwargs: sent.append((args, kwargs)) or True,
+    )
+
+    result = bg_service._check_and_alert_scan_results(
+        "bi_long", {"POLYGON_KEY": "unused"}
+    )
+
+    assert result is False
+    assert sent == []
+
+
 def _write_bi_cache(path, rows):
     with path.open("w", encoding="utf-8") as f:
         json.dump({"results": rows, "cached_at": time.time()}, f)
@@ -110,16 +126,14 @@ def test_q3_estimated_levels_are_blocked(monkeypatch, tmp_path):
 
 
 def test_q3_clean_row_is_mailed_exactly_once(monkeypatch, tmp_path):
-    """Positivkontrolle: sauberes, frisches Setup geht als trade-Mail raus."""
+    """Auch ein sauberer Cache-Setup bleibt ohne finale Quote/Pfad blockiert."""
     sent = _setup(monkeypatch, tmp_path, [_base_row("GOOD")])
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    assert "GOOD" in sent[0]["body"]
-    assert sent[0]["mail_class"] == "trade"
+    assert sent == []
 
 
 def test_swing_owner_mail_does_not_require_intraday_5m_state(monkeypatch, tmp_path):
-    """BI/Biotech owner scans are swing scans unless intraday is explicit."""
+    """Swing-Cache bleibt ohne finale Quote/Pfad-Revalidation fail-closed."""
     row = _base_row("SWNG")
     row.pop("latest_bar_change_pct")
     row.pop("latest_bar_close_pos")
@@ -127,9 +141,7 @@ def test_swing_owner_mail_does_not_require_intraday_5m_state(monkeypatch, tmp_pa
 
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
 
-    assert len(sent) == 1
-    assert "SWNG" in sent[0]["body"]
-    assert "SWING_SETUP" in sent[0]["body"]
+    assert sent == []
 
 
 def test_swing_owner_blocks_unreclaimed_4h_rejection(monkeypatch, tmp_path):
@@ -239,7 +251,7 @@ def test_active_crash_is_not_blocked_by_regular_short_no_chase_rule():
 
 
 def test_q3_mixed_rows_only_clean_one_in_body(monkeypatch, tmp_path):
-    """Kern der Beschwerde: gemischte Liste => NUR die handelbare Row im Body."""
+    """Gemischte Cacheliste erzeugt ohne finale Quote/Pfad keine Trade-Mail."""
     sent = _setup(
         monkeypatch,
         tmp_path,
@@ -251,11 +263,7 @@ def test_q3_mixed_rows_only_clean_one_in_body(monkeypatch, tmp_path):
         ],
     )
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    body = sent[0]["body"]
-    assert "GOOD" in body
-    for bad in ("CHSE", "LRVL", "BRCH"):
-        assert bad not in body, f"Nicht handelbare Row {bad} im Mail-Body!"
+    assert sent == []
 
 
 # ── B2: geteiltes persistentes Dedupe (api-Key-Format), nur nach Erfolg ────
@@ -272,9 +280,10 @@ def test_b2_api_dedupe_mark_blocks_bg_mail(monkeypatch, tmp_path):
 def test_b2_successful_send_writes_shared_dedupe_mark(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path, [_base_row("GOOD")])
     bg_service._check_and_alert_scan_results("bi_long", {"POLYGON_KEY": ""})
-    assert len(sent) == 1
-    marks = json.loads(Path(bg_service._EMAIL_DEDUPE_FILE).read_text())
-    assert "bi_long_GOOD" in marks
+    assert sent == []
+    dedupe_file = Path(bg_service._EMAIL_DEDUPE_FILE)
+    marks = json.loads(dedupe_file.read_text()) if dedupe_file.exists() else {}
+    assert "bi_long_GOOD" not in marks
 
 
 def test_b2_failed_send_sets_no_cooldown_or_mark(monkeypatch, tmp_path):
@@ -305,7 +314,14 @@ def test_b5_invalidation_mail_sent_once_for_previously_mailed_signal(monkeypatch
     monkeypatch.setattr(
         bg_service,
         "_send_email_alert",
-        lambda s, b, sec, mail_class="trade": sent.append({"subject": s, "mail_class": mail_class}) or True,
+        lambda s, b, sec, mail_class="trade", **kwargs: sent.append(
+            {
+                "subject": s,
+                "mail_class": mail_class,
+                "outbox_dedupe_keys": kwargs.get("outbox_dedupe_keys"),
+            }
+        )
+        or True,
     )
     # Erst-Mail-Mark vorhanden (Signal wurde gemailt)
     Path(bg_service._EMAIL_DEDUPE_FILE).write_text(json.dumps({"new_listing_TSTUSDT": time.time()}))
@@ -323,6 +339,7 @@ def test_b5_invalidation_mail_sent_once_for_previously_mailed_signal(monkeypatch
     bg_service._alert_nls_invalidations(results, {})
     assert len(sent) == 1
     assert sent[0]["mail_class"] == "info"
+    assert sent[0]["outbox_dedupe_keys"] == ["new_listing_invalidated_TSTUSDT"]
     # Zweiter Lauf: dedupet, keine weitere Mail
     bg_service._alert_nls_invalidations(results, {})
     assert len(sent) == 1

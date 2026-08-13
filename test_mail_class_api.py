@@ -39,6 +39,11 @@ def _isolate_email_state(monkeypatch, tmp_path):
         "_revalidate_early_mover_mail_candidate",
         lambda candidate, now_ts=None: {"ok": True, "candidate": candidate},
     )
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
 
 
 def _early_mover_row(**overrides):
@@ -163,7 +168,9 @@ def test_q1_fresh_long_trigger_row_goes_to_trade_mail(monkeypatch):
     watch_mails = [item for item in sent if item[2].get("mail_class") == "watch"]
     assert len(trade_mails) == 1
     assert "TRADENOW" in trade_mails[0][1]
-    assert "Crypto Early Mover LONG Digest" in trade_mails[0][0]
+    assert "Crypto Early Mover LONG: TRADENOW" in trade_mails[0][0]
+    assert len(trade_mails[0][2]["tracking_rows"]) == 1
+    assert len(trade_mails[0][2]["delivery_dedupe_keys"]) == 1
     assert watch_mails == []
 
 
@@ -436,6 +443,9 @@ def test_h2_send_email_alert_records_prefixed_subject(monkeypatch):
     events = []
     monkeypatch.setattr(api, "_record_email_event", lambda subject, status, reason=None: events.append((subject, status, reason)))
     monkeypatch.setattr(api, "_SECRETS", {})  # kein Gmail -> skipped, aber Subject ist schon gepraefixt
+    # Dieser Unit-Test darf niemals die persistente lokale/produktive Outbox
+    # beruehren, auch wenn der Versandspfad spaeter umgeordnet wird.
+    monkeypatch.setattr(api, "_mail_outbox", None)
 
     ok = api._send_email_alert("Crypto Retest-Zonen (1 Kandidaten)", "<p>x</p>", bypass_startup_cooldown=True, mail_class="watch")
 
@@ -493,7 +503,7 @@ def test_h3_send_email_alert_passes_mail_class_and_operator_watch_is_opt_in(monk
         def ehlo(self):
             pass
 
-        def starttls(self):
+        def starttls(self, context=None):
             pass
 
         def login(self, user, password):
@@ -533,7 +543,7 @@ def test_h3_operator_can_explicitly_opt_in_to_watch_mail(monkeypatch):
         def ehlo(self):
             pass
 
-        def starttls(self):
+        def starttls(self, context=None):
             pass
 
         def login(self, user, password):
@@ -727,7 +737,7 @@ def test_mail_channel_filters_operator_and_passes_channel_to_recipients(monkeypa
         def ehlo(self):
             pass
 
-        def starttls(self):
+        def starttls(self, context=None):
             pass
 
         def login(self, user, password):
@@ -776,7 +786,7 @@ def test_mail_channel_empty_keeps_operator_unfiltered(monkeypatch):
         def ehlo(self):
             pass
 
-        def starttls(self):
+        def starttls(self, context=None):
             pass
 
         def login(self, user, password):

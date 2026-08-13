@@ -105,8 +105,10 @@ def test_summary_reports_managed_and_wilson(tmp_path, monkeypatch):
     assert recorded == 1
     conn = sqlite3.connect(db)
     conn.execute(
-        "UPDATE signals SET status=?, r_realized=?, tp1_hit_at=?, entry_fill_price=?, closed_at=?",
-        (st.STATUS_TP2, 2.0, "2026-07-20", 100.0, "2026-07-22T00:00:00+00:00"),
+        "UPDATE signals SET status=?, r_realized=?, tp1_hit_at=?, "
+        "entry_filled_at=?, entry_fill_price=?, closed_at=?",
+        (st.STATUS_TP2, 2.0, "2026-07-20", "2026-07-20", 100.0,
+         "2026-07-22T00:00:00+00:00"),
     )
     conn.commit()
     conn.close()

@@ -14,12 +14,15 @@ tmp_*.html
 .codex_tmp_html_checks/
 .pytest_tmp/
 .pytest_tmp_local/
+.pytest_*/
 .codex_pytest_*/
+output/playwright/
+.playwright-cli/
 tmp/
 tmp_mail_*.json
 tmp_mail_*.csv
 tmp_polygon_mail_bt/
-data_cache/auth/
+data_cache/
 data_cache/nls_cache_*.json
 data_cache/*.log
 data_cache/signal_tracker.sqlite*

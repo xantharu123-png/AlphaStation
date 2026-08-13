@@ -218,3 +218,76 @@ def email_dedupe_release(
         dedupe.pop(str(key), None)
         _write_unlocked(path, dedupe)
     return True
+
+
+_DELIVERY_CLAIM_PREFIX = "__delivery_claim__:"
+
+
+def _delivery_claim_key(key: str) -> str:
+    return f"{_DELIVERY_CLAIM_PREFIX}{str(key)}"
+
+
+def email_delivery_claim(
+    path: str,
+    key: str,
+    sent_ttl_seconds: int,
+    *,
+    claim_ttl_seconds: int = 120,
+    now: Optional[float] = None,
+) -> bool:
+    """Atomically acquire a short send lease without marking delivery sent.
+
+    A previous implementation wrote the final dedupe timestamp while merely
+    claiming a candidate.  A process crash between claim and SMTP therefore
+    suppressed the signal for the complete (often eight-hour) delivery TTL.
+    The lease and the durable sent marker deliberately use separate keys.
+    """
+    timestamp = _timestamp(now)
+    sent_key = str(key)
+    claim_key = _delivery_claim_key(sent_key)
+    sent_ttl = max(0, int(sent_ttl_seconds))
+    claim_ttl = max(1, int(claim_ttl_seconds))
+    with _locked_store(path):
+        dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
+        sent_at = dedupe.get(sent_key)
+        if sent_at is not None and timestamp - sent_at < sent_ttl:
+            return False
+        claimed_at = dedupe.get(claim_key)
+        if claimed_at is not None and timestamp - claimed_at < claim_ttl:
+            return False
+        dedupe[claim_key] = timestamp
+        _write_unlocked(path, dedupe)
+    return True
+
+
+def email_delivery_mark(path: str, key: str, now: Optional[float] = None) -> float:
+    """Persist a successful delivery and atomically clear its short lease."""
+    timestamp = _timestamp(now)
+    sent_key = str(key)
+    with _locked_store(path):
+        dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
+        dedupe[sent_key] = timestamp
+        dedupe.pop(_delivery_claim_key(sent_key), None)
+        _write_unlocked(path, dedupe)
+    return timestamp
+
+
+def email_delivery_release(
+    path: str,
+    key: str,
+    claimed_at: Optional[float] = None,
+) -> bool:
+    """Release only the caller-owned short send lease, never a sent marker."""
+    expected = None if claimed_at is None else float(claimed_at)
+    timestamp = time.time() if expected is None else expected
+    claim_key = _delivery_claim_key(str(key))
+    with _locked_store(path):
+        dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
+        current = dedupe.get(claim_key)
+        if current is None:
+            return False
+        if expected is not None and current != expected:
+            return False
+        dedupe.pop(claim_key, None)
+        _write_unlocked(path, dedupe)
+    return True

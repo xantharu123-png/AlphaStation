@@ -26,21 +26,46 @@ import time
 import re
 import statistics
 import smtplib
+import ssl
 import threading
 import html
 import uuid
+import hashlib
 import tempfile  # AUDIT H-10: atomare Cache-Writes
 import traceback
 import ipaddress
 import subprocess
 from copy import deepcopy
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import make_msgid
 from urllib.parse import urlparse
+
+
+def _sanitized_exception_text(exc: BaseException) -> str:
+    """Return a log-safe exception summary without provider credentials."""
+    return redact_sensitive_query_values(f"{type(exc).__name__}: {exc}")
+
+
+def _print_sanitized_traceback() -> None:
+    """Print the active traceback only after credential query-value redaction."""
+    try:
+        print(redact_sensitive_query_values(traceback.format_exc()))
+    except Exception:
+        print("[Error] traceback unavailable")
+
+
+def _raise_internal_api_error(exc: BaseException, code: str) -> None:
+    """Log provider detail safely while returning a stable client error code."""
+    try:
+        print(f"[API] {code}: {_sanitized_exception_text(exc)}")
+    except Exception:
+        pass
+    raise HTTPException(status_code=500, detail={"error": str(code)})
 
 from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -108,6 +133,9 @@ from modules.stock_execution import (
     stock_swing_4h_short_execution_state,
 )
 from modules.email_dedupe import (
+    email_delivery_claim as _shared_email_delivery_claim,
+    email_delivery_mark as _shared_email_delivery_mark,
+    email_delivery_release as _shared_email_delivery_release,
     email_dedupe_active as _shared_email_dedupe_active,
     email_dedupe_claim as _shared_email_dedupe_claim,
     email_dedupe_mark as _shared_email_dedupe_mark,
@@ -122,9 +150,13 @@ except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
     def _log_watchdog_event(*_args, **_kwargs):
         return None
 try:
-    from modules.smart_money_radar import build_radar as _smart_money_build_radar
+    from modules.smart_money_radar import (
+        _public_radar_payload as _sanitize_smart_money_payload,
+        build_radar as _smart_money_build_radar,
+    )
 except Exception:  # pragma: no cover - Radar-Ausfall darf API nie stoppen
     _smart_money_build_radar = None
+    _sanitize_smart_money_payload = None
 try:
     from modules.mailtime import mail_timestamp_dual as _mail_timestamp_dual
 except Exception:  # pragma: no cover - Zeitstempel-Ausfall darf Mails nie stoppen
@@ -163,18 +195,38 @@ from modules.penny_stock_scanner import (
 # Evaluierung offener Signale: bg_service stündlich — KEIN Scheduler in api.py.
 try:
     from modules.signal_tracker import (
+        build_alert_delivery_intent_key,
+        build_calibration_cell_identity,
+        cancel_alert_delivery_intent,
+        finalize_alert_delivery,
+        journal_alert_delivery_acceptance,
+        load_delivery_acceptance_health,
+        load_pending_accepted_deliveries,
+        mark_alert_delivery_attempted,
+        prepare_alert_delivery_intent,
         record_alert_signals,
         load_performance_summary,
         load_breaker_recovery_summary,
         get_signal_count,
         has_open_equivalent_signal,
+        validate_fill_quality,
     )
 except ImportError as _sig_track_err:
+    build_alert_delivery_intent_key = None
+    build_calibration_cell_identity = None
+    cancel_alert_delivery_intent = None
+    finalize_alert_delivery = None
+    journal_alert_delivery_acceptance = None
+    load_delivery_acceptance_health = None
+    load_pending_accepted_deliveries = None
+    mark_alert_delivery_attempted = None
+    prepare_alert_delivery_intent = None
     record_alert_signals = None
     load_performance_summary = None
     load_breaker_recovery_summary = None
     get_signal_count = None
     has_open_equivalent_signal = None
+    validate_fill_quality = None
     print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
 
 try:
@@ -793,7 +845,8 @@ def _is_orb_common_stock_candidate(ticker: str) -> tuple[bool, str]:
         exclusion_reason = _reference_asset_exclusion_reason(asset_type, name, market)
         result = (False, exclusion_reason) if exclusion_reason else (True, asset_type or "reference ok")
     except Exception as e:
-        result = (False, f"reference error: {e}")
+        print(f"[ORB] reference error {tk}: {_sanitized_exception_text(e)}")
+        result = (False, "reference_unavailable")
 
     _ORB_REFERENCE_CACHE[tk] = result
     return result
@@ -1163,7 +1216,8 @@ def _fetch_orb_atr_pct(ticker: str, as_of_et: datetime, fallback_pct: float, per
         _ORB_ATR_CACHE[cache_key] = atr_pct
         return atr_pct, f"wilder_atr{periods}"
     except Exception as e:
-        return fallback, f"prev_day_range_error:{e}"
+        print(f"[ORB] ATR provider error for {tk}: {_sanitized_exception_text(e)}")
+        return fallback, "prev_day_range_error"
 
 
 def _orb_volume_score(
@@ -1435,6 +1489,7 @@ _EMAIL_STARTUP_TIME = time.time()  # V2.6b: Startup-Zeitpunkt für Cooldown nach
 _EMAIL_STARTUP_DELAY = 300  # 5 Min nach Restart keine Mails (Cache-Daten = alt)
 _EMAIL_SEND_LOG: List[Dict[str, Any]] = []
 _EMAIL_SEND_LOG_LOCK = threading.Lock()
+_EMAIL_DELIVERY_CONTEXT = threading.local()
 _ALERT_TOP_GRADES = {"S", "A", "A+"}
 _ALERT_MIN_SCORE = 80
 _ALERT_RVOL_GUARD_SCANNERS = {"bi_long", "bi_short", "biotech", "strategy_scan", "stock_strategy"}
@@ -1456,6 +1511,25 @@ _ALERT_MIN_PRIMARY_TP_RR = 1.5
 _ALERT_MIN_TP_GAP_R = 0.50
 _ALERT_MIN_TP_GAP_PCT = 0.006
 _ALERT_MAX_RUNNER_TO_TP1_RATIO = 3.5
+# Finaler Aktien-Sweep-Guard: Der Strategy-Scan kann deutlich laenger als ein
+# einzelner Quote-Zyklus laufen. Unmittelbar vor Mail + Tracker braucht deshalb
+# jede Row einen erneut beobachteten, ausfuehrbaren Bid/Ask sowie den
+# nachvollziehbaren 1m-Marktpfad seit der urspruenglichen Scan-Beobachtung.
+# Quote-Frische ist absichtlich strenger als der 5-Minuten-Evidenzvertrag des
+# Trackers; der laengere Lookback erlaubt dem mehrstufigen Auto-Sweep trotzdem,
+# die komplette Zwischenstrecke konservativ zu pruefen.
+_STOCK_FINAL_QUOTE_MAX_AGE_SECONDS = 90.0
+_STOCK_FINAL_REVALIDATION_MAX_LOOKBACK_SECONDS = 12 * 3600.0
+_STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS = 5.0
+_STOCK_FINAL_REGULAR_MAX_SPREAD_PCT = 2.0
+_STOCK_FINAL_PRICE_SOURCE = "polygon_snapshot_revalidated"
+_STOCK_QUOTE_CAPABILITY_LOCK = threading.Lock()
+_STOCK_QUOTE_CAPABILITY: Dict[str, Any] = {
+    "status": "unverified",
+    "checked_at": None,
+    "quote_age_seconds": None,
+    "reason": "no_runtime_quote_probe_yet",
+}
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
     "strategy_scan", "turtle", "crypto_strategy", "early_movers", "new_listing",
@@ -1469,6 +1543,8 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 # faelschlich handelbare Anzeige), nicht in den Plan-Guard.
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS) | {"btc_divergenz"}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
+_NEW_LISTING_FINAL_MAX_SPREAD_BPS = 120.0
+_NEW_LISTING_FINAL_MIN_DEPTH_50BPS_USD = 10_000.0
 _NEW_LISTING_WATCH_MIN_SCORE = 70
 _NEW_LISTING_WATCH_MIN_PUMP_PCT = 15.0
 _NEW_LISTING_WATCH_MIN_RR = 1.0
@@ -1530,9 +1606,23 @@ _EARLY_MOVER_MAX_SPREAD_BPS = 20.0
 _EARLY_MOVER_MIN_DEPTH_10BPS_USD = 5_000
 _EARLY_MOVER_MIN_DEPTH_25BPS_USD = 25_000
 _EARLY_MOVER_MIN_DEPTH_50BPS_USD = 50_000
+_CRYPTO_FINAL_QUOTE_MAX_AGE_SECONDS = 10.0
+_CRYPTO_FINAL_PATH_TIMEFRAME = "1m"
+_CRYPTO_FINAL_PATH_INTERVAL_SECONDS = 60
+_CRYPTO_FINAL_PATH_MAX_BARS = 1000
 _TRADE_REMINDERS_FILE = "/tmp/alphastation_trade_reminders.json"
 _TRADE_REMINDER_CHECK_SEC = 60
 _TRADE_REMINDER_MAX_HOURS = 24
+_STOCK_REMINDER_TRIGGER_TIMEFRAME = "5m"
+# Polygon timestamps identify the candle open. A reminder check may lag one
+# scheduler interval, while the stock final-quote contract already tolerates
+# up to 90 seconds. The newest *closed* 5m candle must therefore be no older
+# than the bounded shared operational allowance; missing timestamps fail
+# closed in `_evaluate_stock_reminder`.
+_STOCK_REMINDER_MAX_CANDLE_CLOSE_AGE_SECONDS = max(
+    float(_TRADE_REMINDER_CHECK_SEC),
+    float(_STOCK_FINAL_QUOTE_MAX_AGE_SECONDS),
+)
 _TRADE_REMINDER_LOCK = threading.Lock()
 _trade_reminder_running = False
 _BEARISH_STOCK_ALERT_DEDUPE_SEC = 8 * 3600
@@ -1983,9 +2073,9 @@ def _email_alert_status() -> Dict[str, Any]:
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
         "optional_keys": ["ALERT_EMAIL"],
         "config_sources_checked": [
-            str(Path.home() / ".streamlit" / "secrets.toml"),
-            str(Path(__file__).parent / ".streamlit" / "secrets.toml"),
-            str(Path(__file__).parent / ".env"),
+            "user Streamlit secrets",
+            "application Streamlit secrets",
+            "application environment file",
             "process environment",
         ],
     }
@@ -2004,7 +2094,126 @@ def _record_email_event(subject: str, status: str, reason: str = "") -> None:
             del _EMAIL_SEND_LOG[:-50]
 
 
-def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
+def _public_email_event(event: Any) -> Optional[Dict[str, Any]]:
+    """Return non-sensitive process telemetry for the non-admin health route."""
+    if not isinstance(event, dict):
+        return None
+    return {
+        "timestamp": event.get("timestamp"),
+        "status": str(event.get("status") or "unknown")[:40],
+        "has_reason": bool(event.get("reason")),
+    }
+
+
+def _public_outbox_status(status: Any) -> Dict[str, Any]:
+    """Expose counters only; transport errors may contain addresses or secrets."""
+    raw = status if isinstance(status, dict) else {}
+    safe: Dict[str, Any] = {}
+    for key in (
+        "enabled",
+        "available",
+        "pending",
+        "sending",
+        "delivering",
+        "uncertain",
+        "sent",
+        "expired",
+        "dead",
+        "queued",
+        "oldest_pending_age_seconds",
+        "tracker_acceptance_pending_count",
+        "tracker_acceptance_oldest_at",
+        "tracker_acceptance_available",
+    ):
+        if key in raw:
+            safe[key] = raw.get(key)
+    safe["has_error"] = bool(raw.get("error") or raw.get("last_error"))
+    return safe
+
+
+def _public_email_alert_status(status: Any) -> Dict[str, Any]:
+    """Allowlist the public health fields; paths/provider errors stay private."""
+    raw = status if isinstance(status, dict) else {}
+    keys = (
+        "configured",
+        "sender_configured",
+        "app_password_configured",
+        "recipient_configured",
+        "recipient_count",
+        "global_recipient_count",
+        "subscriber_recipient_count",
+        "send_to_subscribers",
+        "default_trade_horizon",
+        "crypto_armed_watch_mails_enabled",
+        "new_listing_dump_watch_mails_enabled",
+        "startup_cooldown_remaining_seconds",
+        "cooldown_entries",
+        "min_alert_score",
+    )
+    safe = {key: raw.get(key) for key in keys if key in raw}
+    safe["outbox"] = _public_outbox_status(raw.get("outbox"))
+    return safe
+
+
+def _public_tracker_acceptance_status(status: Any) -> Dict[str, Any]:
+    """Expose delivery-coherence counters without DB paths or raw errors."""
+    raw = status if isinstance(status, dict) else {}
+    return {
+        "status": str(raw.get("status") or "unavailable")[:24],
+        "available": str(raw.get("status") or "") != "error",
+        "tracker_pending": bool(raw.get("tracker_pending")),
+        "pending_count": int(raw.get("pending_count") or 0),
+        "reconciled_count": int(raw.get("reconciled_count") or 0),
+        "legacy_open_cohort_unknown_count": int(
+            raw.get("legacy_open_cohort_unknown_count") or 0
+        ),
+        "legacy_cohort_check_available": bool(
+            raw.get("legacy_cohort_check_available", True)
+        ),
+        "oldest_pending_at": raw.get("oldest_pending_at"),
+        "tracker_journal_pending_count": int(
+            raw.get("tracker_journal_pending_count") or 0
+        ),
+        "fallback_journal_pending_count": int(
+            raw.get("fallback_journal_pending_count") or 0
+        ),
+        "fallback_journal_available": bool(
+            raw.get("fallback_journal_available", False)
+        ),
+        "has_error": bool(raw.get("last_error")),
+    }
+
+
+def _public_scan_health(status: Any) -> Dict[str, Any]:
+    """Strip exception strings and filesystem details from public telemetry."""
+    raw = status if isinstance(status, dict) else {}
+    safe: Dict[str, Any] = {}
+    for key in (
+        "running",
+        "last_run",
+        "last_attempt_at",
+        "next_run",
+        "interval_min",
+        "cache_exists",
+        "cache_age_seconds",
+        "cache_stale",
+        "cache_health",
+        "cache_data_health",
+        "runtime_health",
+        "runtime_seconds",
+        "timeout_minutes",
+        "timeout_exceeded",
+    ):
+        if key in raw:
+            safe[key] = raw.get(key)
+    safe["has_scan_error"] = bool(raw.get("scan_error"))
+    safe["has_cache_error"] = bool(raw.get("cache_error"))
+    return safe
+
+
+def _email_pipeline_summary(
+    window_seconds: int = 24 * 3600, *, public: bool = False
+) -> Dict[str, Any]:
     """Summarize recent mail decisions without exposing recipients or secrets."""
     now_utc = datetime.now(timezone.utc)
     with _EMAIL_SEND_LOG_LOCK:
@@ -2047,6 +2256,111 @@ def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
             outbox_status = _mail_outbox.stats()
         except Exception as exc:
             outbox_status["error"] = str(exc)
+    tracker_acceptance = {
+        "status": "error",
+        "tracker_pending": True,
+        "pending_count": 0,
+        "last_error": "module unavailable",
+    }
+    if callable(load_delivery_acceptance_health):
+        try:
+            tracker_acceptance = load_delivery_acceptance_health()
+        except Exception as exc:
+            tracker_acceptance["last_error"] = type(exc).__name__
+    tracker_pending_count = int(tracker_acceptance.get("pending_count") or 0)
+    tracker_acceptance["tracker_journal_pending_count"] = tracker_pending_count
+
+    # A successful SMTP DATA command can be journaled in mail_outbox when the
+    # tracker DB is temporarily unavailable. Merge both durable registries so
+    # operator health never appears green while such an accepted entry awaits
+    # activation. Intent keys are used only in-process for exact de-duplication
+    # and never enter the public response.
+    tracker_intents = set()
+    tracker_loader_ok = False
+    if callable(load_pending_accepted_deliveries):
+        try:
+            tracker_rows = load_pending_accepted_deliveries()
+            tracker_loader_ok = isinstance(tracker_rows, list)
+            tracker_intents = {
+                str(row.get("intent_key") or "").strip()
+                for row in (tracker_rows or [])
+                if isinstance(row, dict) and str(row.get("intent_key") or "").strip()
+            }
+        except Exception:
+            tracker_loader_ok = False
+
+    fallback_count = int(
+        outbox_status.get("tracker_acceptance_pending_count") or 0
+    )
+    fallback_oldest = outbox_status.get("tracker_acceptance_oldest_at")
+    fallback_available = outbox_status.get("tracker_acceptance_available")
+    fallback_intents = set()
+    fallback_loader = getattr(
+        _mail_outbox, "load_tracker_acceptance_pending", None
+    )
+    if callable(fallback_loader):
+        try:
+            fallback_rows = fallback_loader()
+            fallback_available = isinstance(fallback_rows, list)
+            if fallback_available:
+                fallback_count = len(fallback_rows)
+                fallback_intents = {
+                    str(row.get("intent_key") or "").strip()
+                    for row in (fallback_rows or [])
+                    if isinstance(row, dict)
+                    and str(row.get("intent_key") or "").strip()
+                }
+        except Exception:
+            fallback_available = False
+    elif fallback_available is None:
+        # Compatibility with test doubles/older modules that predate the
+        # fallback journal. Do not turn unrelated health fixtures critical.
+        fallback_available = True
+
+    if tracker_loader_ok and fallback_available:
+        known_tracker_count = len(tracker_intents)
+        unkeyed_tracker_count = max(0, tracker_pending_count - known_tracker_count)
+        combined_pending_count = (
+            len(tracker_intents | fallback_intents) + unkeyed_tracker_count
+        )
+    else:
+        combined_pending_count = tracker_pending_count + fallback_count
+
+    tracker_acceptance["fallback_journal_pending_count"] = fallback_count
+    tracker_acceptance["fallback_journal_available"] = bool(fallback_available)
+    tracker_acceptance["pending_count"] = combined_pending_count
+    tracker_acceptance["tracker_pending"] = bool(combined_pending_count)
+    if combined_pending_count and tracker_acceptance.get("status") == "ok":
+        tracker_acceptance["status"] = "degraded"
+    if fallback_available is False:
+        tracker_acceptance["status"] = "error"
+        tracker_acceptance["tracker_pending"] = True
+        tracker_acceptance["last_error"] = (
+            tracker_acceptance.get("last_error")
+            or "cross_db_acceptance_journal_unavailable"
+        )
+
+    def _health_timestamp_seconds(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    tracker_oldest = tracker_acceptance.get("oldest_pending_at")
+    tracker_oldest_seconds = _health_timestamp_seconds(tracker_oldest)
+    fallback_oldest_seconds = _health_timestamp_seconds(fallback_oldest)
+    if fallback_oldest_seconds is not None and (
+        tracker_oldest_seconds is None
+        or fallback_oldest_seconds < tracker_oldest_seconds
+    ):
+        tracker_acceptance["oldest_pending_at"] = datetime.fromtimestamp(
+            fallback_oldest_seconds, tz=timezone.utc
+        ).isoformat()
     return {
         "window_seconds": window_seconds,
         "events_recorded_since_start": len(events),
@@ -2055,8 +2369,9 @@ def _email_pipeline_summary(window_seconds: int = 24 * 3600) -> Dict[str, Any]:
         "skipped": counts.get("skipped", 0),
         "errors": counts.get("error", 0),
         "queued_since_start": counts.get("outbox_queued", 0),
-        "outbox": outbox_status,
-        "last_event": last_event,
+        "outbox": _public_outbox_status(outbox_status) if public else outbox_status,
+        "tracker_acceptance": _public_tracker_acceptance_status(tracker_acceptance),
+        "last_event": _public_email_event(last_event) if public else last_event,
         "last_sent_at": last_sent.get("timestamp") if last_sent else None,
         "note": (
             "Process events plus persistent retry outbox. "
@@ -2302,15 +2617,31 @@ def _mark_bearish_stock_alert(ticker: str, now: Optional[float] = None) -> None:
 
 def _email_dedupe_mark(key: str, now: Optional[float] = None) -> None:
     try:
-        _shared_email_dedupe_mark(_EMAIL_DEDUPE_FILE, key, now=now)
+        _shared_email_delivery_mark(_EMAIL_DEDUPE_FILE, key, now=now)
     except Exception as exc:
         print(f"[Alert] Dedupe-Markierung konnte nicht gespeichert werden: {exc}")
 
 
 def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None) -> bool:
-    """Return True only once per key+TTL, even after process restarts."""
+    """Acquire a short send lease while respecting the full sent TTL."""
     try:
-        return _shared_email_dedupe_claim(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+        if (
+            _mail_outbox is not None
+            and hasattr(_mail_outbox, "has_uncertain_delivery_key")
+            and _mail_outbox.has_uncertain_delivery_key(str(key))
+        ):
+            print(f"[Alert] Dedupe fail-closed: ungeklaerte SMTP-Zustellung fuer {key}")
+            return False
+        return _shared_email_delivery_claim(
+            _EMAIL_DEDUPE_FILE,
+            key,
+            ttl_seconds,
+            # Ten candidates may each perform snapshot + path checks before
+            # SMTP. The lease still stays far below the former eight-hour
+            # cooldown while safely covering bounded provider latency.
+            claim_ttl_seconds=900,
+            now=now,
+        )
     except Exception as exc:
         # Fail closed: a broken dedupe store must not create a mail storm.
         print(f"[Alert] Dedupe-Claim konnte nicht gespeichert werden: {exc}")
@@ -2319,7 +2650,7 @@ def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None)
 
 def _email_dedupe_release(key: str, claimed_at: Optional[float] = None) -> bool:
     try:
-        return _shared_email_dedupe_release(_EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at)
+        return _shared_email_delivery_release(_EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at)
     except Exception as exc:
         print(f"[Alert] Dedupe-Claim konnte nicht freigegeben werden: {exc}")
         return False
@@ -2651,10 +2982,62 @@ def _early_mover_mail_trigger_age_seconds(row: Dict[str, Any], now: Optional[flo
 
 
 def _early_mover_alert_key(row: Dict[str, Any], ticker: Optional[str] = None) -> str:
-    symbol = (ticker or _extract_alert_ticker(row)).upper()
-    action = str(row.get("trade_action", row.get("entry_status", "long")) or "long").lower()
-    action = re.sub(r"[^a-z0-9_]+", "_", action).strip("_") or "long"
-    return f"early_movers_{symbol}_{action}" if symbol else ""
+    # Early Movers used to dedupe only by symbol/action.  Distinct plan
+    # geometry on the same coin is a distinct economic setup; use the same
+    # stable identity contract as every other actionable scanner.
+    return _alert_signal_identity_key("early_movers", row, ticker)
+
+
+def _alert_signal_identity_key(
+    scanner_name: str,
+    row: Dict[str, Any],
+    ticker: Optional[str] = None,
+) -> str:
+    """Return a stable economic-signal key instead of a ticker-only key.
+
+    Scanner, strategy, direction, horizon and plan geometry are part of the
+    identity required by the project contract.  Volatile live-price fields are
+    deliberately excluded when explicit plan levels exist, so a final quote
+    refresh cannot create a second signal identity for the same setup.
+    """
+    symbol = str(ticker or _extract_alert_ticker(row) or "").strip().upper()
+    if not symbol:
+        return ""
+
+    def _identity_number(value: Any) -> str:
+        parsed = _alert_float(value, None)
+        return "" if parsed is None else format(float(parsed), ".10g")
+
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    strategy = _alert_get_any(
+        row,
+        "strategy", "Strategy", "Strategie", "pattern", "pattern_type",
+        default=scanner_name,
+    )
+    explicit_reference = _alert_get_any(
+        row,
+        "setup_key", "signal_id", "signal_ref", "stable_ref", "plan_id",
+        default=setup.get("setup_key") or setup.get("signal_id") or "",
+    )
+    payload = {
+        "market": str(_alert_get_any(row, "market_type", "asset_type", default="") or "").strip().lower(),
+        "ticker": symbol,
+        "scanner": str(scanner_name or "").strip().lower(),
+        "strategy": str(strategy or scanner_name or "").strip().lower(),
+        "direction": str(_infer_alert_direction(row) or "UNKNOWN").upper(),
+        "horizon": _normalize_trade_horizon_value(
+            _alert_get_any(row, "trade_horizon", "_alert_horizon", default=_DEFAULT_TRADE_HORIZON)
+        ),
+        "timeframe": str(_alert_get_any(row, "timeframe", "Timeframe", default="") or "").strip().lower(),
+        "entry": _identity_number(_first_trade_level(row, ("entry", "Entry", "main_entry", "Preis"))),
+        "stop": _identity_number(_first_trade_level(row, ("stop", "Stop", "stop_loss", "StopLoss"))),
+        "tp1": _identity_number(_first_trade_level(row, ("tp1", "TP1", "take_profit_1"))),
+        "tp2": _identity_number(_first_trade_level(row, ("tp2", "TP2", "take_profit_2"))),
+        "reference": str(explicit_reference or "").strip().lower(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:20]
+    return f"{str(scanner_name or '').strip().lower()}_{symbol}_{digest}"
 
 
 def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
@@ -3420,7 +3803,8 @@ def _early_mover_orderbook_liquidity(contract: str, exchange: str) -> Dict[str, 
     try:
         book = fetch_orderbook_for(str(contract), exchange, depth=50)
     except Exception as exc:
-        return {"ok": False, "reason": "orderbook_fetch_failed", "detail": str(exc)[:120], "reasons": ["orderbook_fetch_failed"]}
+        print(f"[Early Mover] orderbook fetch failed: {_sanitized_exception_text(exc)}")
+        return {"ok": False, "reason": "orderbook_fetch_failed", "reasons": ["orderbook_fetch_failed"]}
 
     metrics = _book_liquidity_metrics(book)
     if not metrics.get("ok"):
@@ -4054,7 +4438,8 @@ def _score_early_mover_trigger_bars(row: Dict[str, Any], bars: List[Dict[str, An
             "volume_dryup": volume_dryup,
         }
     except Exception as exc:
-        return {"ok": False, "reason": "trigger_parse_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
+        print(f"[Early Mover] trigger parse failed: {_sanitized_exception_text(exc)}")
+        return {"ok": False, "reason": "trigger_parse_failed", "timeframe": timeframe, "execution_score": 0}
 
 
 def _early_mover_htf_armed_context(row: Dict[str, Any], bars: List[Dict[str, Any]], timeframe: str = "4h") -> Dict[str, Any]:
@@ -4256,10 +4641,13 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
                     htf_bars = fetch_candles_for(str(contract), exchange, timeframe="4h", count=48)
                     execution_context = _early_mover_htf_execution_context(row, htf_bars, "4h")
                 except Exception as htf_exc:
+                    print(
+                        "[Early Mover] HTF execution context failed: "
+                        f"{_sanitized_exception_text(htf_exc)}"
+                    )
                     execution_context = {
                         "ok": False,
                         "reason": "htf_execution_context_fetch_failed",
-                        "detail": str(htf_exc)[:120],
                         "timeframe": "4h",
                     }
                 scored["htf_execution_context"] = execution_context
@@ -4272,10 +4660,13 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
                     htf_bars = fetch_candles_for(str(contract), exchange, timeframe="4h", count=48)
                     htf_context = _early_mover_htf_armed_context(row, htf_bars, "4h")
                 except Exception as htf_exc:
+                    print(
+                        "[Early Mover] HTF armed context failed: "
+                        f"{_sanitized_exception_text(htf_exc)}"
+                    )
                     htf_context = {
                         "armed_ok": False,
                         "reason": "htf_context_fetch_failed",
-                        "detail": str(htf_exc)[:120],
                         "timeframe": "4h",
                     }
                 scored["htf_context"] = htf_context
@@ -4286,7 +4677,8 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
                     reasons.extend(htf_context.get("reasons") or [htf_context.get("reason")])
                     scored["pre_breakout_reasons"] = list(dict.fromkeys([r for r in reasons if r]))
         except Exception as exc:
-            scored = {"ok": False, "reason": "trigger_fetch_failed", "detail": str(exc)[:120], "timeframe": timeframe, "execution_score": 0}
+            print(f"[Early Mover] trigger fetch failed: {_sanitized_exception_text(exc)}")
+            scored = {"ok": False, "reason": "trigger_fetch_failed", "timeframe": timeframe, "execution_score": 0}
         scored.update({"symbol": symbol, "contract": contract, "exchange": exchange})
         results.append(scored)
         if scored.get("ok"):
@@ -5214,7 +5606,7 @@ def _fetch_recent_stock_5m_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
                 cleaned.append(cleaned_bar)
         return _completed_candles_only(cleaned, "5m")[-limit:]
     except Exception as exc:
-        print(f"[Reminder] stock bars error {ticker}: {exc}")
+        print(f"[Reminder] stock bars error {ticker}: {_sanitized_exception_text(exc)}")
         return []
 
 
@@ -5260,7 +5652,10 @@ def _fetch_recent_stock_4h_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
             _STOCK_SWING_EXECUTION_CACHE[symbol] = {"timestamp": now, "bars": aggregated}
         return aggregated[-limit:]
     except Exception as exc:
-        print(f"[Alert] stock 4H execution bars error {symbol}: {exc}")
+        print(
+            f"[Alert] stock 4H execution bars error {symbol}: "
+            f"{_sanitized_exception_text(exc)}"
+        )
         return []
 
 
@@ -5500,18 +5895,44 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     )
     if not ticker or entry is None:
         return {"triggered": False, "reason": "missing_stock_entry"}
+    if stop is not None:
+        risk = (stop - entry) if direction == "SHORT" else (entry - stop)
+        if risk <= 0:
+            return {"triggered": False, "reason": "invalid_stock_stop_geometry"}
+    else:
+        risk = max(entry * 0.02, 0.01)
+
     bars = _fetch_recent_stock_5m_bars(ticker)
     if len(bars) < 4:
         return {"triggered": False, "reason": "not_enough_stock_5m_bars"}
     last = bars[-1]
     created_epoch = _reminder_created_epoch(reminder)
     last_bar_epoch = _candle_epoch_seconds(last)
+    candle_seconds = _timeframe_seconds(_STOCK_REMINDER_TRIGGER_TIMEFRAME)
+    if last_bar_epoch is None or candle_seconds is None:
+        return {"triggered": False, "reason": "stock_5m_candle_timestamp_missing"}
+    last_bar_closed_epoch = last_bar_epoch + candle_seconds
     if (
         created_epoch is not None
-        and last_bar_epoch is not None
-        and last_bar_epoch + 300 <= created_epoch
+        and last_bar_closed_epoch <= created_epoch
     ):
         return {"triggered": False, "reason": "waiting_for_new_5m_candle"}
+
+    now_epoch = _reminder_now()
+    if last_bar_closed_epoch > now_epoch + 2.0:
+        return {"triggered": False, "reason": "stock_5m_candle_not_closed"}
+    candle_close_age_seconds = max(0.0, now_epoch - last_bar_closed_epoch)
+    if candle_close_age_seconds > _STOCK_REMINDER_MAX_CANDLE_CLOSE_AGE_SECONDS:
+        return {"triggered": False, "reason": "stale_stock_5m_candle"}
+
+    if _stock_quote_session_at(last_bar_epoch) != "US_REGULAR":
+        return {"triggered": False, "reason": "stock_5m_candle_session_not_executable"}
+    current_session = _stock_trade_email_status(
+        datetime.fromtimestamp(now_epoch, tz=timezone.utc)
+    )
+    if not current_session.get("allowed"):
+        return {"triggered": False, "reason": "stock_reminder_session_not_executable"}
+
     prev = bars[-8:-1] if len(bars) >= 9 else bars[:-1]
     last_close = last["close"]
     last_open = last["open"]
@@ -5521,12 +5942,6 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     median_vol = _median_float([b.get("volume", 0) for b in prev], max(last.get("volume", 1), 1))
     vol_ratio = last.get("volume", 0) / max(median_vol, 1)
     close_pos = (last_close - last_low) / max(last_high - last_low, 1e-9)
-    if stop is not None:
-        risk = (stop - entry) if direction == "SHORT" else (entry - stop)
-        if risk <= 0:
-            return {"triggered": False, "reason": "invalid_stock_stop_geometry"}
-    else:
-        risk = max(entry * 0.02, 0.01)
     distance_r = abs(last_close - entry) / max(risk, 1e-9)
 
     if direction == "SHORT":
@@ -5585,6 +6000,9 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
             "triggered": True,
             "reason": reminder_reason,
             "last_close": round(last_close, 6),
+            "price_evidence": "closed_5m_candle",
+            "candle_timeframe": _STOCK_REMINDER_TRIGGER_TIMEFRAME,
+            "candle_closed_at": _reminder_iso(last_bar_closed_epoch),
             "distance_to_entry_r": round(distance_r, 2),
             "volume_ratio": round(vol_ratio, 2),
             "entry": entry,
@@ -5661,17 +6079,43 @@ def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> 
     tp2 = _format_alert_price(result.get("tp2") or row.get("tp2") or setup.get("tp2"))
     price = _format_alert_price(result.get("last_close"))
     rr = result.get("live_rr") or row.get("live_rr_ratio") or setup.get("live_rr") or setup.get("rr_ratio")
+    is_stock_candle = (
+        str(reminder.get("asset_type") or "").strip().lower() == "stock"
+        or str(result.get("price_evidence") or "").strip().lower() == "closed_5m_candle"
+    )
+    if is_stock_candle:
+        heading = f"Reminder: {ticker} 5m-Trigger bestaetigt"
+        price_label = "Letzter abgeschlossener 5m-Schluss"
+        candle_closed_at = html.escape(
+            str(result.get("candle_closed_at") or "nicht verifiziert")
+        )
+        observation_row = (
+            "<tr><td>Kerzenschluss / Beobachtung (UTC, ISO 8601)</td>"
+            f"<td><b>{candle_closed_at}</b></td></tr>"
+        )
+        evidence_note = (
+            "<p style=\"font-size:12px;color:#64748b\">"
+            "Der angezeigte 5m-Schluss ist kein Live-Bid/Ask und keine "
+            "Ausfuehrungsgarantie.</p>"
+        )
+    else:
+        heading = f"Reminder: {ticker} Trigger ist da"
+        price_label = "Preis jetzt"
+        observation_row = ""
+        evidence_note = ""
     return f"""
     <html><body style="font-family:Arial,sans-serif;color:#111827">
-    <h2 style="color:#059669">Reminder: {ticker} Trigger ist da</h2>
+    <h2 style="color:#059669">{heading}</h2>
     <p><b>Grund:</b> {reason}</p>
     <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;background:#f8fafc">
-      <tr><td>Preis jetzt</td><td><b>{price}</b></td></tr>
+      <tr><td>{price_label}</td><td><b>{price}</b></td></tr>
+      {observation_row}
       <tr><td>Entry</td><td><b>{entry}</b></td></tr>
       <tr><td>Stop</td><td><b style="color:#dc2626">{stop}</b></td></tr>
       <tr><td>TP1 / TP2</td><td><b style="color:#059669">{tp1} / {tp2}</b></td></tr>
       <tr><td>Live R:R</td><td><b>{rr if rr is not None else '-'}</b></td></tr>
     </table>
+    {evidence_note}
     <p style="font-size:12px;color:#64748b">Reminder wurde automatisch deaktiviert. Bitte Chart und Spread vor dem Entry kurz pruefen.</p>
     </body></html>
     """
@@ -5682,7 +6126,12 @@ def _deliver_trade_reminder_email(
     result: Dict[str, Any],
     now: Optional[float] = None,
 ) -> bool:
-    """Deliver a triggered reminder once, with bounded retries on SMTP failure."""
+    """Deliver a triggered reminder once, with bounded *definite* retries.
+
+    Once SMTP DATA may have been accepted, an automatic retry could create a
+    duplicate reminder.  Such outcomes stay terminally uncertain in the
+    durable reminder record until an operator reconciles them manually.
+    """
     now = float(now if now is not None else _reminder_now())
     channel = str(reminder.get("channel", "email_browser") or "email_browser").lower()
     if "email" not in channel:
@@ -5691,6 +6140,13 @@ def _deliver_trade_reminder_email(
     if reminder.get("email_sent_at"):
         reminder["email_delivery_status"] = "sent"
         return True
+    if str(reminder.get("email_delivery_status") or "").lower() in {
+        "uncertain",
+        "uncertain_manual_reconciliation",
+    }:
+        reminder["email_delivery_manual_reconciliation_required"] = True
+        reminder.pop("next_email_attempt_at", None)
+        return False
 
     owner_email = str(reminder.get("owner_email") or "").strip().lower()
     users = (_load_users() or {}).get("users", {}) if HAS_AUTH else {}
@@ -5720,14 +6176,39 @@ def _deliver_trade_reminder_email(
         tp2=result.get("tp2"),
     )]
     reason_label = str(result.get("reason") or "Trigger bereit").replace("_", " ").strip()
+    # Real transport code always sets a more specific outcome.  Initialising
+    # here also keeps simple test doubles/backward integrations classified as
+    # a definite pre-DATA failure instead of inheriting thread-local state
+    # from a previous delivery.
+    _set_last_delivery_outcome("not_attempted")
+    reminder_dedupe_key = str(reminder.get("id") or "").strip()
+    if not reminder_dedupe_key:
+        reminder_dedupe_key = hashlib.sha256(
+            (
+                f"personal-reminder|{owner_email}|"
+                f"{str(reminder.get('ticker') or '').upper()}|"
+                f"{str(reminder.get('created_at') or '')}"
+            ).encode("utf-8")
+        ).hexdigest()
     sent = _send_email_alert(
         f"Reminder: {reminder.get('ticker', '').upper()} {reason_label}",
         _format_reminder_email(reminder, result),
         bypass_startup_cooldown=True,
-        trade_horizon="swing",
+        trade_horizon=(
+            str(row.get("trade_horizon") or "intraday").strip().lower()
+            if str(reminder.get("asset_type") or "crypto").lower() == "crypto"
+            else str(row.get("trade_horizon") or "swing").strip().lower()
+        ),
         mail_class="trade",
         recipient_emails=[alert_email],
         telegram_text=_safe_format_telegram_rows(signal_rows),
+        mail_channel=(
+            "crypto"
+            if str(reminder.get("asset_type") or "crypto").lower() == "crypto"
+            else "stocks_swing"
+        ),
+        tracking_scope="personal",
+        delivery_dedupe_keys=[f"personal-reminder:{reminder_dedupe_key}"],
     )
     attempts += 1
     reminder["email_attempts"] = attempts
@@ -5737,8 +6218,27 @@ def _deliver_trade_reminder_email(
         reminder["email_delivery_status"] = "sent"
         reminder.pop("next_email_attempt_at", None)
         reminder.pop("email_delivery_reason", None)
-        _safe_record_alert_signals("trade_reminder", signal_rows)
+        # User-created reminders are personal notifications, not product
+        # scanner recommendations.  Mixing them into the global calibrated
+        # performance cohort would contaminate scanner statistics and route
+        # crypto reminders through the stock evaluator.
+        reminder["tracking_scope"] = "personal_reminder_only"
         return True
+
+    delivery_outcome = _last_delivery_outcome()
+    if delivery_outcome in {
+        "unknown",
+        "partial_unknown",
+        "accepted_unjournaled",
+        "partial_unknown_unjournaled",
+    }:
+        reminder["email_delivery_status"] = "uncertain_manual_reconciliation"
+        reminder["email_delivery_reason"] = "smtp_data_outcome_unknown"
+        reminder["email_delivery_outcome"] = delivery_outcome
+        reminder["email_delivery_uncertain_at"] = _reminder_iso(now)
+        reminder["email_delivery_manual_reconciliation_required"] = True
+        reminder.pop("next_email_attempt_at", None)
+        return False
 
     if attempts >= 5:
         reminder["email_delivery_status"] = "failed"
@@ -5972,52 +6472,379 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
     return bool(sent)
 
 
+def _crypto_market_timestamp_seconds(value: Any) -> Optional[float]:
+    """Normalize a provider/ISO timestamp without inventing receipt time."""
+    if value in (None, ""):
+        return None
+    return _candle_epoch_seconds({"timestamp": value})
+
+
+def _crypto_trade_observation_timestamp(candidate: Dict[str, Any]) -> Optional[float]:
+    """Return the market observation that produced the original setup price."""
+    for key in (
+        "scan_price_observed_at",
+        "Scan_Price_Observed_At",
+        "source_price_observed_at",
+        "trigger_checked_at",
+        "signal_observed_at",
+    ):
+        parsed = _crypto_market_timestamp_seconds(candidate.get(key))
+        if parsed is not None:
+            return parsed
+    trigger = candidate.get("trigger")
+    if isinstance(trigger, dict):
+        parsed = _crypto_market_timestamp_seconds(trigger.get("checked_at"))
+        if parsed is not None:
+            return parsed
+    trigger = candidate.get("intraday_trigger")
+    if isinstance(trigger, dict):
+        parsed = _crypto_market_timestamp_seconds(trigger.get("checked_at"))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _fetch_crypto_orderbook_any(
+    contract: str,
+    venue: str,
+    *,
+    depth: int = 50,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the exact venue book; Bybit is not covered by the NLS helper."""
+    venue_key = _normalize_crypto_exchange(venue)
+    if venue_key in {"bybit", "bybit_linear"}:
+        symbol = str(contract or "").upper().replace("_", "").replace("-", "")
+        response = req.get(
+            "https://api.bybit.com/v5/market/orderbook",
+            params={"category": "linear", "symbol": symbol, "limit": min(max(depth, 1), 200)},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        if int(payload.get("retCode", -1)) != 0:
+            return None
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        return {
+            "bids": result.get("b") or [],
+            "asks": result.get("a") or [],
+            "market_timestamp": payload.get("time") or result.get("ts"),
+        }
+    if not HAS_NEW_LISTING_SCANNER:
+        return None
+    return fetch_orderbook_for(str(contract), venue_key, depth=depth)
+
+
+def _fetch_crypto_executable_quote(
+    contract: str,
+    venue: str,
+    direction: str,
+) -> Dict[str, Any]:
+    """Fetch a direct top-of-book quote and timestamp it after receipt."""
+    received_started_at = time.time()
+    try:
+        book = _fetch_crypto_orderbook_any(contract, venue, depth=50)
+    except Exception as exc:
+        print(f"[Crypto final gate] orderbook fetch failed: {_sanitized_exception_text(exc)}")
+        return {"ok": False, "reason": "final_executable_quote_fetch_failed"}
+    received_at = time.time()
+    receipt_latency = max(0.0, received_at - received_started_at)
+    if receipt_latency > _CRYPTO_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return {"ok": False, "reason": "final_executable_quote_stale"}
+    metrics = _book_liquidity_metrics(book)
+    if not metrics.get("ok"):
+        return {
+            "ok": False,
+            "reason": str(metrics.get("reason") or "final_executable_quote_missing"),
+        }
+    side = "SHORT" if str(direction or "").upper() == "SHORT" else "LONG"
+    price_mode = "bid" if side == "SHORT" else "ask"
+    executable_price = _alert_float(metrics.get(price_mode))
+    if executable_price is None or executable_price <= 0:
+        return {"ok": False, "reason": "final_executable_price_missing"}
+    market_timestamp = _crypto_market_timestamp_seconds((book or {}).get("market_timestamp"))
+    if market_timestamp is not None:
+        market_age = received_at - market_timestamp
+        if market_age < -2.0 or market_age > _CRYPTO_FINAL_QUOTE_MAX_AGE_SECONDS:
+            return {"ok": False, "reason": "final_executable_quote_stale"}
+    venue_key = _normalize_crypto_exchange(venue)
+    return {
+        "ok": True,
+        "price": executable_price,
+        "bid": metrics.get("bid"),
+        "ask": metrics.get("ask"),
+        "spread_bps": metrics.get("spread_bps"),
+        "depth_10bps_min_usd": metrics.get("depth_10bps_min_usd"),
+        "depth_25bps_min_usd": metrics.get("depth_25bps_min_usd"),
+        "depth_50bps_min_usd": metrics.get("depth_50bps_min_usd"),
+        "observed_ts": received_at,
+        "observed_at": datetime.fromtimestamp(received_at, tz=timezone.utc).isoformat(),
+        "market_timestamp": market_timestamp,
+        "receipt_latency_seconds": round(receipt_latency, 3),
+        "observed_time_basis": (
+            "provider_market_timestamp_and_receipt"
+            if market_timestamp is not None
+            else "receipt_after_direct_orderbook_fetch"
+        ),
+        "source": f"{venue_key}:{str(contract).upper()}:live_orderbook_top",
+        "price_mode": price_mode,
+        "price_session": "CRYPTO_24_7",
+    }
+
+
+def _crypto_trade_path_evidence(
+    candidate: Dict[str, Any],
+    *,
+    contract: str,
+    venue: str,
+    direction: str,
+    observation_ts: float,
+    quote_ts: float,
+    bars: Iterable[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Verify continuous 1m OHLC coverage and any stop/TP1 touch.
+
+    A barrier touch invalidates the setup regardless of its within-candle
+    ordering, so no synthetic OHLC ordering is needed.  The first overlapping
+    minute is conservative: if a touch cannot be placed before or after the
+    original observation, the entry is blocked rather than guessed valid.
+    """
+    interval = _CRYPTO_FINAL_PATH_INTERVAL_SECONDS
+    ordered: List[Dict[str, float]] = []
+    for raw in bars or []:
+        if not isinstance(raw, dict):
+            return {"ok": False, "reason": "final_market_path_malformed"}
+        bar_ts = _candle_epoch_seconds(raw)
+        open_ = _alert_float(raw.get("open", raw.get("o")))
+        high = _alert_float(raw.get("high", raw.get("h")))
+        low = _alert_float(raw.get("low", raw.get("l")))
+        close = _alert_float(raw.get("close", raw.get("c")))
+        if (
+            bar_ts is None
+            or any(value is None or value <= 0 for value in (open_, high, low, close))
+            or high < max(open_, close)
+            or low > min(open_, close)
+        ):
+            return {"ok": False, "reason": "final_market_path_malformed"}
+        if bar_ts <= quote_ts and bar_ts + interval >= observation_ts:
+            ordered.append({
+                "timestamp": float(bar_ts),
+                "open": float(open_),
+                "high": float(high),
+                "low": float(low),
+                "close": float(close),
+            })
+    ordered.sort(key=lambda item: item["timestamp"])
+    if not ordered:
+        return {"ok": False, "reason": "final_market_path_missing"}
+    timestamps = [item["timestamp"] for item in ordered]
+    if len(set(timestamps)) != len(timestamps):
+        return {"ok": False, "reason": "final_market_path_duplicate_timestamp"}
+    if not (
+        ordered[0]["timestamp"] <= observation_ts + 2.0
+        and ordered[0]["timestamp"] + interval >= observation_ts - 2.0
+    ):
+        return {"ok": False, "reason": "final_market_path_start_gap"}
+    if not (
+        ordered[-1]["timestamp"] <= quote_ts + 2.0
+        and ordered[-1]["timestamp"] + interval >= quote_ts - 2.0
+    ):
+        return {"ok": False, "reason": "final_market_path_end_gap"}
+    for left, right in zip(ordered, ordered[1:]):
+        delta = right["timestamp"] - left["timestamp"]
+        if delta < interval - 2.0 or delta > interval + 2.0:
+            return {"ok": False, "reason": "final_market_path_internal_gap"}
+
+    stop = _alert_float(candidate.get("stop", candidate.get("stop_loss")))
+    tp1 = _alert_float(candidate.get("tp1"))
+    if stop is None or tp1 is None or stop <= 0 or tp1 <= 0:
+        return {"ok": False, "reason": "final_trade_levels_missing"}
+    side = "SHORT" if str(direction or "").upper() == "SHORT" else "LONG"
+    if side == "SHORT":
+        if any(item["high"] >= stop for item in ordered):
+            return {"ok": False, "reason": "final_stop_touched_since_scan"}
+        if any(item["low"] <= tp1 for item in ordered):
+            return {"ok": False, "reason": "final_tp1_touched_since_scan"}
+    else:
+        if any(item["low"] <= stop for item in ordered):
+            return {"ok": False, "reason": "final_stop_touched_since_scan"}
+        if any(item["high"] >= tp1 for item in ordered):
+            return {"ok": False, "reason": "final_tp1_touched_since_scan"}
+    return {
+        "ok": True,
+        "bar_count": len(ordered),
+        "first_timestamp": ordered[0]["timestamp"],
+        "last_timestamp": ordered[-1]["timestamp"],
+        "source": f"{_normalize_crypto_exchange(venue)}:{str(contract).upper()}:{_CRYPTO_FINAL_PATH_TIMEFRAME}_ohlc",
+    }
+
+
+def _revalidate_crypto_trade_mail_candidate(
+    candidate: Dict[str, Any],
+    *,
+    direction: str,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Final causal gate shared by actionable crypto entry mail paths."""
+    item = dict(candidate or {})
+    venue = _normalize_crypto_exchange(item.get("venue") or item.get("exchange"))
+    contract = str(
+        item.get("contract_symbol") or item.get("contract") or item.get("symbol") or ""
+    ).upper().strip()
+    if not venue or not contract:
+        return {"ok": False, "reason": "final_exact_contract_missing"}
+    observation_ts = _crypto_trade_observation_timestamp(item)
+    observation_source = str(
+        item.get("scan_price_source")
+        or item.get("source_price_source")
+        or item.get("trigger_price_source")
+        or ""
+    ).strip()
+    decision_now = float(now_ts if now_ts is not None else time.time())
+    if observation_ts is None:
+        return {"ok": False, "reason": "final_source_observation_timestamp_missing"}
+    if not observation_source:
+        return {"ok": False, "reason": "final_source_observation_source_missing"}
+    if observation_ts > decision_now + 2.0:
+        return {"ok": False, "reason": "final_source_observation_in_future"}
+    # Quote first, then fetch a path explicitly watermarked by that quote's
+    # receipt time.  Fetching the path first would leave an unobserved window
+    # in which stop/TP1 could be touched and retraced before the final quote.
+    quote = _fetch_crypto_executable_quote(contract, venue, direction)
+    if not quote.get("ok"):
+        return {"ok": False, "reason": str(quote.get("reason") or "final_executable_quote_missing")}
+    quote_ts = _crypto_market_timestamp_seconds(quote.get("observed_ts"))
+    if quote_ts is None:
+        return {"ok": False, "reason": "final_executable_quote_timestamp_missing"}
+    if observation_ts > quote_ts + 2.0:
+        return {"ok": False, "reason": "final_quote_precedes_source_observation"}
+    elapsed_seconds = max(0.0, quote_ts - observation_ts)
+    required_bars = int(math.ceil(elapsed_seconds / _CRYPTO_FINAL_PATH_INTERVAL_SECONDS)) + 3
+    if required_bars > _CRYPTO_FINAL_PATH_MAX_BARS:
+        return {"ok": False, "reason": "final_market_path_lookback_too_long"}
+    try:
+        bars = _fetch_exchange_candles_any(
+            contract,
+            venue,
+            timeframe=_CRYPTO_FINAL_PATH_TIMEFRAME,
+            count=max(3, required_bars),
+        )
+    except Exception as exc:
+        print(f"[Crypto final gate] path fetch failed: {_sanitized_exception_text(exc)}")
+        return {"ok": False, "reason": "final_market_path_fetch_failed"}
+
+    validation_now = float(now_ts if now_ts is not None else time.time())
+    quote_age = validation_now - quote_ts
+    if quote_age < -2.0 or quote_age > _CRYPTO_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return {"ok": False, "reason": "final_executable_quote_stale"}
+
+    path = _crypto_trade_path_evidence(
+        item,
+        contract=contract,
+        venue=venue,
+        direction=direction,
+        observation_ts=observation_ts,
+        quote_ts=quote_ts,
+        bars=bars or [],
+    )
+    if not path.get("ok"):
+        return {"ok": False, "reason": str(path.get("reason") or "final_market_path_invalid")}
+
+    current = _alert_float(quote.get("price"))
+    stop = _alert_float(item.get("stop", item.get("stop_loss")))
+    tp1 = _alert_float(item.get("tp1"))
+    tp2 = _alert_float(item.get("tp2"))
+    if any(value is None or value <= 0 for value in (current, stop, tp1, tp2)):
+        return {"ok": False, "reason": "final_trade_levels_missing"}
+    side = "SHORT" if str(direction or "").upper() == "SHORT" else "LONG"
+    if side == "SHORT":
+        if current >= stop:
+            return {"ok": False, "reason": "final_stop_already_breached"}
+        if current <= tp1:
+            return {"ok": False, "reason": "final_tp1_already_reached"}
+        if not (tp2 < tp1 < current < stop):
+            return {"ok": False, "reason": "final_level_geometry_invalid"}
+    else:
+        if current <= stop:
+            return {"ok": False, "reason": "final_stop_already_breached"}
+        if current >= tp1:
+            return {"ok": False, "reason": "final_tp1_already_reached"}
+        if not (stop < current < tp1 < tp2):
+            return {"ok": False, "reason": "final_level_geometry_invalid"}
+
+    item.update({
+        "price": current,
+        "current_price": current,
+        "price_observed_at": quote.get("observed_at"),
+        "price_source": quote.get("source"),
+        "price_mode": quote.get("price_mode"),
+        "price_session": quote.get("price_session"),
+        "quote_evidence_verified": True,
+        # A pre-delivery quote proves executability, not a recipient fill.
+        "fill_evidence_verified": False,
+        "final_quote_source": quote.get("source"),
+        "final_quote_age_seconds": round(max(0.0, quote_age), 3),
+        "final_quote_time_basis": quote.get("observed_time_basis"),
+        "final_quote_bid": quote.get("bid"),
+        "final_quote_ask": quote.get("ask"),
+        "final_quote_spread_bps": quote.get("spread_bps"),
+        "final_quote_depth_10bps_min_usd": quote.get("depth_10bps_min_usd"),
+        "final_quote_depth_25bps_min_usd": quote.get("depth_25bps_min_usd"),
+        "final_quote_depth_50bps_min_usd": quote.get("depth_50bps_min_usd"),
+        "final_market_path_source": path.get("source"),
+        "source_price_source": observation_source,
+        "final_market_path_from": datetime.fromtimestamp(observation_ts, tz=timezone.utc).isoformat(),
+        "final_market_path_to": quote.get("observed_at"),
+        "final_market_path_bar_count": path.get("bar_count"),
+        "venue": venue,
+        "contract_symbol": contract,
+    })
+    return {"ok": True, "candidate": item}
+
+
 def _revalidate_early_mover_mail_candidate(
     candidate: Dict[str, Any],
     now_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Fail closed unless the exact execution contract still supports the plan."""
+    """Fail closed unless the exact long contract still supports the plan."""
     item = dict(candidate or {})
-    venue = str(item.get("venue") or item.get("exchange") or "").lower().strip()
-    contract = str(item.get("contract_symbol") or "").upper().strip()
-    if not venue or not contract:
-        return {"ok": False, "reason": "final_exact_contract_missing"}
-
-    try:
-        bars = _fetch_exchange_candles_any(contract, venue, timeframe="5m", count=24)
-    except Exception:
-        bars = []
-    completed = _completed_candles_only(bars or [], "5m", now_ts=now_ts)
-    if len(completed) < 2:
-        return {"ok": False, "reason": "final_5m_data_missing"}
-    freshness = _crypto_candle_freshness(
-        completed,
-        "5m",
-        now_ts=now_ts,
-        max_age_bars=2,
-    )
-    if not freshness.get("known") or not freshness.get("fresh"):
-        return {"ok": False, "reason": "final_5m_data_stale"}
-
-    current = _alert_float(completed[-1].get("close"))
     prior_price = _alert_float(item.get("price"))
     entry = _alert_float(item.get("entry"))
     stop = _alert_float(item.get("stop"))
     tp1 = _alert_float(item.get("tp1"))
     tp2 = _alert_float(item.get("tp2"))
-    if any(value is None for value in (current, entry, stop, tp1, tp2)):
+    if any(value is None for value in (prior_price, entry, stop, tp1, tp2)):
         return {"ok": False, "reason": "final_trade_levels_missing"}
-    if current <= 0 or prior_price is None or prior_price <= 0:
+    if prior_price <= 0:
         return {"ok": False, "reason": "final_price_invalid"}
+
+    validation = _revalidate_crypto_trade_mail_candidate(
+        item,
+        direction="LONG",
+        now_ts=now_ts,
+    )
+    if not validation.get("ok"):
+        return validation
+    item = validation["candidate"]
+    current = _alert_float(item.get("price"))
+    if current is None or current <= 0:
+        return {"ok": False, "reason": "final_executable_price_missing"}
     price_gap_pct = abs(current - prior_price) / prior_price * 100.0
     if price_gap_pct > 12.0:
         return {"ok": False, "reason": "final_contract_price_mismatch"}
-    if not (stop < current < tp1 < tp2):
-        if current >= tp1:
-            return {"ok": False, "reason": "final_tp1_already_reached"}
-        if current <= stop:
-            return {"ok": False, "reason": "final_stop_already_breached"}
-        return {"ok": False, "reason": "final_level_geometry_invalid"}
+
+    spread_bps = _alert_float(item.get("final_quote_spread_bps"))
+    depth_10 = _alert_float(item.get("final_quote_depth_10bps_min_usd"))
+    depth_25 = _alert_float(item.get("final_quote_depth_25bps_min_usd"))
+    depth_50 = _alert_float(item.get("final_quote_depth_50bps_min_usd"))
+    if spread_bps is None or spread_bps > _EARLY_MOVER_MAX_SPREAD_BPS:
+        return {"ok": False, "reason": "final_execution_spread_too_wide"}
+    if depth_10 is None or depth_10 < _EARLY_MOVER_MIN_DEPTH_10BPS_USD:
+        return {"ok": False, "reason": "final_execution_depth_10bps_too_thin"}
+    if depth_25 is None or depth_25 < _EARLY_MOVER_MIN_DEPTH_25BPS_USD:
+        return {"ok": False, "reason": "final_execution_depth_25bps_too_thin"}
+    if depth_50 is None or depth_50 < _EARLY_MOVER_MIN_DEPTH_50BPS_USD:
+        return {"ok": False, "reason": "final_execution_depth_50bps_too_thin"}
 
     plan_risk = entry - stop
     live_risk = current - stop
@@ -6036,11 +6863,11 @@ def _revalidate_early_mover_mail_candidate(
         return {"ok": False, "reason": "final_retest_distance_too_far"}
 
     item.update({
-        "price": current,
+        "planned_entry": entry,
+        "entry": current,
+        "setup_key": item.get("key"),
         "live_rr": round(live_rr, 3),
         "distance_r": round(distance_r, 3),
-        "final_quote_source": f"{venue}:{contract}:5m_close",
-        "final_quote_age_seconds": freshness.get("age_seconds"),
         "final_quote_price_gap_pct": round(price_gap_pct, 3),
     })
     return {"ok": True, "candidate": item}
@@ -6055,7 +6882,8 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     suppressed: Dict[str, int] = {}
     seen_keys = set()
 
-    for row in _flatten_early_mover_rows(payload):
+    for source_row in _flatten_early_mover_rows(payload):
+        row = dict(source_row)
         trigger_check: Dict[str, Any] = {
             "ok": False,
             "reason": "swing_structure_plan",
@@ -6063,7 +6891,6 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "execution_score": row.get("entry_score"),
         }
         if swing_mode:
-            row = dict(row)
             row["_alert_horizon"] = "swing"
             row.setdefault("signal_label", "Crypto Swing-Setup: Struktur/Entry-Zone passt, kein 5m-Zwang.")
             row.setdefault("signal_quality", "swing_setup")
@@ -6075,6 +6902,22 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
                 continue
             _apply_early_mover_signal_state(row, trigger_check)
 
+        identity_venue = (
+            row.get("PerpChartExchange")
+            or row.get("BestExchange")
+            or row.get("Exchange")
+            or ""
+        )
+        identity_contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol") or ""
+        if identity_venue and identity_contract:
+            row.setdefault(
+                "stable_ref",
+                f"{_normalize_crypto_exchange(identity_venue)}:{str(identity_contract).upper()}",
+            )
+        row.setdefault(
+            "timeframe",
+            row.get("execution_timeframe") or trigger_check.get("timeframe") or "swing",
+        )
         state = _classify_alert_candidate("early_movers", row, now)
         if not state["alertable_now"]:
             # AUDIT Q-1: Rows, die NUR wegen Wait/Retest/Frische warten muessen
@@ -6084,7 +6927,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
                 seen_keys.add(state["cooldown_key"])
                 watch_setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
                 watch_rows.append({
-                    "key": state["cooldown_key"],
+                    "key": f"{state['cooldown_key']}__watch",
                     "symbol": state["ticker"],
                     "name": row.get("Name", row.get("name", "")),
                     "grade": state["grade"],
@@ -6106,21 +6949,39 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
-        key = state["cooldown_key"]
-        if key in seen_keys:
+        identity_key = state["cooldown_key"]
+        if identity_key in seen_keys:
             continue
-        seen_keys.add(key)
+        seen_keys.add(identity_key)
+        key = f"{identity_key}__trade"
         setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
         btc_context = row.get("btc_context", setup.get("btc_context", {}))
         if not isinstance(btc_context, dict):
             btc_context = {}
+        row_trigger = row.get("intraday_trigger") if isinstance(row.get("intraday_trigger"), dict) else {}
+        source_observed_at = row.get("scan_price_observed_at") or row.get("source_price_observed_at")
+        source_price = row.get("Price", state["price"])
+        source_price_name = row.get("scan_price_source") or "coingecko:current_price"
+        if not source_observed_at:
+            # Legacy rows may still carry a timestamped exchange trigger.  It
+            # is usable only together with that trigger's own last_close;
+            # never timestamp the older CoinGecko scalar with a later check.
+            trigger_evidence = (
+                row_trigger
+                if row_trigger.get("checked_at") and row_trigger.get("last_close") is not None
+                else trigger_check
+            )
+            if trigger_evidence.get("checked_at") and trigger_evidence.get("last_close") is not None:
+                source_observed_at = trigger_evidence.get("checked_at")
+                source_price = trigger_evidence.get("last_close")
+                source_price_name = "exchange_trigger:last_close"
         candidates.append({
             "key": key,
             "symbol": state["ticker"],
             "name": row.get("Name", row.get("name", "")),
             "grade": state["grade"],
             "score": state["score"],
-            "price": row.get("Price", state["price"]),
+            "price": source_price,
             "action": row.get("trade_action", setup.get("trade_action", "")),
             "entry": row.get("entry", setup.get("entry")),
             "stop": row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop")))),
@@ -6139,25 +7000,13 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "horizon": "SWING" if swing_mode else "INTRADAY",
             "coin_id": row.get("ID", row.get("coin_id")),
             "venue": row.get(
-                "PerpChartExchange",
-                row.get("BestExchange", row.get("Exchange", "")),
-            ),
-            "contract_symbol": row.get(
-                "PerpChartSymbol",
-                row.get("PerpMatchSymbol"),
-            ),
+                "PerpChartExchange"
+            ) or row.get("BestExchange") or row.get("Exchange", ""),
+            "contract_symbol": row.get("PerpChartSymbol") or row.get("PerpMatchSymbol"),
+            "scan_price_observed_at": source_observed_at,
+            "scan_price_source": source_price_name,
             "direction": "long",
         })
-
-    revalidated_candidates = []
-    for candidate in candidates:
-        validation = _revalidate_early_mover_mail_candidate(candidate, now_ts=now)
-        if not validation.get("ok"):
-            reason = str(validation.get("reason") or "final_revalidation_failed")
-            suppressed[reason] = suppressed.get(reason, 0) + 1
-            continue
-        revalidated_candidates.append(validation["candidate"])
-    candidates = revalidated_candidates
 
     candidates, equivalent_count = _filter_open_equivalent_trade_rows(
         "early_movers",
@@ -6173,16 +7022,6 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
         _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
         return False
-    digest_remaining = _email_dedupe_remaining(_EARLY_MOVER_DIGEST_KEY, _EARLY_MOVER_DIGEST_DEDUPE_SEC, now)
-    if digest_remaining > 0:
-        _record_email_event(
-            "Crypto Early Mover LONG Alert",
-            "skipped",
-            f"digest_cooldown_active:{digest_remaining}s candidates={len(candidates)}",
-        )
-        _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
-        return False
-
     def _fmt_num(value, suffix="", decimals=1, default="-"):
         number = _alert_float(value)
         if number is None:
@@ -6198,68 +7037,102 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
     candidates = sorted(candidates, key=_candidate_rank, reverse=True)
     email_rows = candidates[:_EARLY_MOVER_MAX_EMAIL_ROWS]
 
-    rows = ""
-    for item in email_rows:
+    sent_any = False
+    for pending_item in email_rows:
+        claim_time = time.time()
+        dedupe_key = str(pending_item.get("key") or "")
+        if not dedupe_key or not _email_dedupe_claim(
+            dedupe_key,
+            _alert_dedupe_ttl_seconds("early_movers"),
+            now=claim_time,
+        ):
+            suppressed["row_claimed_by_parallel_sender"] = (
+                suppressed.get("row_claimed_by_parallel_sender", 0) + 1
+            )
+            continue
+        try:
+            validation = _revalidate_early_mover_mail_candidate(pending_item)
+        except Exception as exc:
+            _email_dedupe_release(dedupe_key, claimed_at=claim_time)
+            suppressed["final_revalidation_exception"] = (
+                suppressed.get("final_revalidation_exception", 0) + 1
+            )
+            print(
+                "[Early Mover] final revalidation failed: "
+                f"{_sanitized_exception_text(exc)}"
+            )
+            continue
+        if not validation.get("ok"):
+            _email_dedupe_release(dedupe_key, claimed_at=claim_time)
+            reason = str(validation.get("reason") or "final_revalidation_failed")
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
+        item = validation["candidate"]
         symbol = html.escape(str(item["symbol"]))
-        name = html.escape(str(item["name"] or ""))
-        action = html.escape(str(item["action"] or "LONG"))
-        exchange = html.escape(str(item["exchange"] or ""))
+        name = html.escape(str(item.get("name") or ""))
+        action = html.escape(str(item.get("action") or "LONG"))
+        exchange = html.escape(str(item.get("exchange") or ""))
         trigger = item.get("trigger", {}) if isinstance(item.get("trigger"), dict) else {}
-        trigger_text = html.escape("Swing-Struktur" if item.get("horizon") == "SWING" else str(trigger.get("reason", "execution_trigger")))
+        trigger_text = html.escape(
+            "Swing-Struktur"
+            if item.get("horizon") == "SWING"
+            else str(trigger.get("reason", "execution_trigger"))
+        )
         exec_score = _fmt_num(item.get("execution_score"), "/100", 0)
         exec_tf = html.escape(str(item.get("execution_timeframe") or trigger.get("timeframe") or "swing"))
         volume_ratio = _fmt_num(trigger.get("volume_ratio"), "x", 2)
-        rows += (
+        single_row = (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text}{"" if item.get("horizon") == "SWING" else f" ({volume_ratio}, EQ {exec_score})"}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}<br><span style="color:#64748b">Live {html.escape(str(item.get("price_mode") or "ask"))}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">TP1 {_format_alert_price(item["tp1"])}<br>TP2 {_format_alert_price(item["tp2"])}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_fmt_num(item["live_rr"], "R", 2)}<br><span style="color:#777">Dist {_fmt_num(item["distance_r"], "R", 2)}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">24h {_fmt_num(item["change24"], "%")}<br>V/MCap {_fmt_num(item["vol_mcap"], "%")}<br>BTC {_fmt_num(item["btc_24h"], "%")} / Alpha {_fmt_num(item["alpha_24h"], "%")}</td></tr>'
         )
-
-    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
-    <h2 style="color:#059669">Crypto Early Mover LONG Digest</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | Top {len(email_rows)} von {len(candidates)} Crypto-Swing Long/Retest Setup(s)</p>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-    <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
-    <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
-    <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">Entry/Stop</th>
-    <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
-    <th style="padding:8px;text-align:left">Kontext</th></tr>
-    {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Digest-Cooldown: {_EARLY_MOVER_DIGEST_DEDUPE_SEC // 3600}h. Swing-Default: Nur Score >= {_ALERT_MIN_SCORE}, Grade S/A/A+, Live R:R >= {_EARLY_MOVER_MIN_ALERT_RR}, kein BTC-Gegenwind, kein No-Chase, keine Partial-Daten, unverpasster TP1 und saubere Strukturziele. Intraday-5m ist optionaler separater Modus, nicht Pflicht fuer diese Swing-Mail.</p>
-    </body></html>'''
-    if not _email_dedupe_claim(
-        _EARLY_MOVER_DIGEST_KEY,
-        _EARLY_MOVER_DIGEST_DEDUPE_SEC,
-        now=now,
-    ):
+        single_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
+        <h2 style="color:#059669">Crypto Early Mover LONG</h2>
+        <p style="color:#666">{_mail_timestamp_dual()} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
+        <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
+        <th style="padding:8px;text-align:left">Preis</th><th style="padding:8px;text-align:left">Entry/Stop</th>
+        <th style="padding:8px;text-align:left">TP1/TP2</th><th style="padding:8px;text-align:left">Live R</th>
+        <th style="padding:8px;text-align:left">Kontext</th></tr>{single_row}</table>
+        <p style="color:#999;font-size:12px;margin-top:20px">Ein Wire und ein Tracker-Intent nur fuer dieses Setup. Die Quote ist der ausfuehrbare Ask; sie ist kein behaupteter Fill.</p>
+        </body></html>'''
+        try:
+            sent = _send_email_alert(
+                f"Crypto Early Mover LONG: {item['symbol']}",
+                single_body,
+                trade_horizon="swing",
+                mail_class="trade",
+                telegram_text=_safe_format_telegram_rows([item]),
+                mail_channel="crypto",
+                tracking_scanner="early_movers",
+                tracking_rows=[item],
+                delivery_dedupe_keys=[dedupe_key],
+            )
+        except Exception:
+            _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
+            raise
+        if sent:
+            sent_any = True
+            sent_at = time.time()
+            _EMAIL_COOLDOWN[dedupe_key] = sent_at
+            _email_dedupe_mark(dedupe_key, now=sent_at)
+        else:
+            _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
+        # Signal-Tracking: nur die tatsaechlich gemailten 🚨-Rows (Watch-Mail loggt nicht).
+    _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
+    if not sent_any and suppressed:
         _record_email_event(
             "Crypto Early Mover LONG Alert",
             "skipped",
-            f"digest_claimed_by_parallel_sender:candidates={len(candidates)}",
+            f"no_finally_executable_setups:{suppressed}",
         )
-        _send_early_mover_watch_alerts(watch_rows, now=now)
-        return False
-    try:
-        sent = _send_email_alert(f"Crypto Early Mover LONG Digest: {len(email_rows)}/{len(candidates)} Setup(s)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_rows), mail_channel="crypto")  # AUDIT H-3 / H-2
-    except Exception:
-        _email_dedupe_release(_EARLY_MOVER_DIGEST_KEY, claimed_at=now)
-        raise
-    if sent:
-        _email_dedupe_mark(_EARLY_MOVER_DIGEST_KEY, now=now)
-        for item in email_rows:
-            _EMAIL_COOLDOWN[item["key"]] = now
-            _email_dedupe_mark(item["key"], now=now)
-        # Signal-Tracking: nur die tatsaechlich gemailten 🚨-Rows (Watch-Mail loggt nicht).
-        _safe_record_alert_signals("early_movers", email_rows)
-    else:
-        _email_dedupe_release(_EARLY_MOVER_DIGEST_KEY, claimed_at=now)
-    _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
-    return bool(sent)
+    return sent_any
 
 
 def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
@@ -6720,10 +7593,27 @@ def _business_quality_payload_fresh(quality: Any) -> bool:
         fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
         if fetched.tzinfo is None:
             fetched = fetched.replace(tzinfo=timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)).total_seconds()
+        age_seconds = (
+            datetime.now(timezone.utc) - fetched.astimezone(timezone.utc)
+        ).total_seconds()
     except (TypeError, ValueError):
         return False
     return -300 <= age_seconds <= _BUSINESS_QUALITY_ROW_TTL_SECONDS
+
+
+def _email_dedupe_release_after_send(
+    key: str,
+    claimed_at: Optional[float] = None,
+) -> bool:
+    """Release a claim only when SMTP definitely did not accept DATA."""
+    if _last_delivery_outcome() in {
+        "unknown",
+        "partial_unknown",
+        "accepted_unjournaled",
+        "partial_unknown_unjournaled",
+    }:
+        return False
+    return _email_dedupe_release(key, claimed_at=claimed_at)
 
 
 def _stock_business_quality_context(row: Dict[str, Any]) -> bool:
@@ -6800,6 +7690,7 @@ def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
             industry=industry,
         )
     except Exception as exc:  # Fundamentals must never break a technical scan.
+        print(f"[Business Quality] {ticker}: {_sanitized_exception_text(exc)}")
         quality = {
             "status": "error",
             "score": None,
@@ -6819,7 +7710,7 @@ def _ensure_stock_business_quality(row: Dict[str, Any]) -> Dict[str, Any]:
             "backtest_eligible": False,
             "model_version": BUSINESS_QUALITY_MODEL_VERSION,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "error": str(exc)[:180],
+            "error": "business_quality_unavailable",
         }
 
     row["Business_Quality"] = quality
@@ -7901,7 +8792,11 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         ):
             reasons.append("intraday_unconfirmed_pattern")
 
-    cooldown_key = _early_mover_alert_key(row, ticker) if scanner_name == "early_movers" else (f"{scanner_name}_{ticker}" if ticker else "")
+    cooldown_key = (
+        _early_mover_alert_key(row, ticker)
+        if scanner_name == "early_movers"
+        else _alert_signal_identity_key(scanner_name, row, ticker)
+    )
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
     cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
     cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
@@ -7978,7 +8873,8 @@ def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: O
     if not levels.get("valid") or levels.get("estimated"):
         reasons.append("premarket_missing_trade_levels")
 
-    cooldown_key = f"{scanner_name}_{ticker}_pm" if ticker else ""
+    identity_key = _alert_signal_identity_key(scanner_name, row, ticker)
+    cooldown_key = f"{identity_key}__premarket" if identity_key else ""
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
     cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
     cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
@@ -8437,7 +9333,41 @@ def _safe_format_telegram_rows(rows) -> str:
         return ""
 
 
-def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade", channel: str = "email") -> None:
+def _recipient_delivery_key(email: Any) -> Optional[str]:
+    normalized = str(email or "").strip().lower()
+    if "@" not in normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _set_last_delivery_recipients(recipients: Iterable[str]) -> None:
+    _EMAIL_DELIVERY_CONTEXT.recipient_keys = tuple(sorted({
+        key for key in (_recipient_delivery_key(value) for value in recipients) if key
+    }))
+
+
+def _set_last_delivery_outcome(value: str) -> None:
+    _EMAIL_DELIVERY_CONTEXT.outcome = str(value or "unknown").strip().lower()
+
+
+def _last_delivery_outcome() -> str:
+    return str(getattr(_EMAIL_DELIVERY_CONTEXT, "outcome", "unknown") or "unknown")
+
+
+def _take_last_delivery_recipients() -> Tuple[str, ...]:
+    keys = tuple(getattr(_EMAIL_DELIVERY_CONTEXT, "recipient_keys", ()) or ())
+    _EMAIL_DELIVERY_CONTEXT.recipient_keys = ()
+    return keys
+
+
+def _safe_record_alert_signals(
+    scanner_name: str,
+    rows,
+    mail_class: str = "trade",
+    channel: str = "email",
+    *,
+    delivery_recipient_keys: Optional[Iterable[str]] = None,
+) -> None:
     """Signal-Tracking nach erfolgreichem Trade-Mail-Versand (defensiv).
 
     Kontrakt: record_alert_signals wirft nie, dedupet intern und loggt nur
@@ -8450,6 +9380,36 @@ def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade
     """
     if not record_alert_signals or not rows:
         return
+    delivery_required = str(mail_class or "").strip().lower() in {"trade", "swing_trade"}
+    if delivery_recipient_keys is None:
+        recipient_keys = _take_last_delivery_recipients() if delivery_required else ()
+    else:
+        recipient_keys = tuple(sorted({
+            str(value).strip().lower()
+            for value in delivery_recipient_keys
+            if str(value).strip()
+        }))
+    normalized_rows = []
+    scanner_key = str(scanner_name or "").strip().lower()
+    default_horizon = (
+        "intraday"
+        if scanner_key in {"orb", "penny_stocks", "volume_spikes"}
+        else "swing"
+    )
+    for raw_row in rows or []:
+        if not isinstance(raw_row, dict):
+            normalized_rows.append(raw_row)
+            continue
+        row = dict(raw_row)
+        row.setdefault("trade_horizon", default_horizon)
+        row.setdefault("market_regime", "UNKNOWN")
+        normalized_rows.append(row)
+    if delivery_required and not recipient_keys:
+        print(
+            f"[Alert] Signal-Tracking fail-closed: keine bestaetigte Empfaenger-Kohorte "
+            f"fuer {scanner_name}"
+        )
+        return
     try:
         rates_ctx = None
         try:
@@ -8459,9 +9419,18 @@ def _safe_record_alert_signals(scanner_name: str, rows, mail_class: str = "trade
         except Exception:
             rates_ctx = None
         try:
-            record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel, rates_context=rates_ctx)
-        except TypeError:
-            record_alert_signals(scanner_name, rows, mail_class=mail_class, channel=channel)
+            record_alert_signals(
+                scanner_name, normalized_rows, mail_class=mail_class, channel=channel,
+                rates_context=rates_ctx,
+                delivery_recipient_keys=recipient_keys,
+            )
+        except TypeError as exc:
+            if delivery_required:
+                # Rolling back to an older signature would silently discard the
+                # accepted-recipient cohort and recreate untraceable trade rows.
+                print(f"[Alert] Signal-Tracking fail-closed (Empfaengervertrag): {exc}")
+                return
+            record_alert_signals(scanner_name, normalized_rows, mail_class=mail_class, channel=channel)
     except Exception as exc:
         print(f"[Alert] Signal-Tracking Fehler (ignoriert): {exc}")
 
@@ -8502,6 +9471,136 @@ def _filter_open_equivalent_trade_rows(
     return filtered, skipped
 
 
+def _resolve_email_alert_recipients(
+    *,
+    recipient_emails: Optional[Iterable[str]] = None,
+    trade_horizon: str = "swing",
+    mail_class: str = "trade",
+    mail_channel: str = "",
+) -> List[str]:
+    """Resolve the exact opt-in recipient set without sending or exposing it."""
+    gmail_user = _SECRETS.get("GMAIL_USER", "")
+    alert_to = _SECRETS.get("ALERT_EMAIL", gmail_user)
+    operator_watch_optin = str(
+        _SECRETS.get(
+            "ALERT_OPERATOR_WATCH_OPTIN",
+            os.environ.get("ALERT_OPERATOR_WATCH_OPTIN", "0"),
+        )
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if recipient_emails is not None:
+        recipients = [
+            str(addr).strip().lower()
+            for addr in recipient_emails
+            if str(addr).strip()
+        ]
+    else:
+        operator_recipients = [
+            addr.strip().lower()
+            for addr in str(alert_to).split(",")
+            if addr.strip()
+        ]
+        if mail_channel and HAS_AUTH:
+            operator_recipients = [
+                addr
+                for addr in operator_recipients
+                if mail_channel_enabled(addr, mail_channel)
+            ]
+        recipients = (
+            operator_recipients
+            if str(mail_class or "").strip().lower() != "watch" or operator_watch_optin
+            else []
+        )
+        if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
+            try:
+                recipients.extend(
+                    get_email_alert_recipients(
+                        trade_horizon=trade_horizon,
+                        mail_class=mail_class,
+                        mail_channel=mail_channel,
+                    )
+                )
+            except Exception as exc:
+                try:
+                    print(
+                        "[Alert] Subscriber recipient resolution failed: "
+                        f"{type(exc).__name__}"
+                    )
+                except Exception:
+                    pass
+    return sorted({addr for addr in recipients if "@" in addr})
+
+
+def _quarantine_unknown_email_delivery(
+    subject: str,
+    body_html: str,
+    recipients: Iterable[str],
+    *,
+    mail_class: str,
+    telegram_text: str,
+    delivery_dedupe_keys: Optional[Iterable[str]],
+    error: str,
+    recipient_scoped: bool = False,
+) -> Any:
+    """Require a durable receipt for every unknown SMTP DATA outcome."""
+    if _mail_outbox is None:
+        return None
+    clean_recipients = sorted({
+        str(value).strip().lower()
+        for value in recipients or []
+        if "@" in str(value)
+    })
+    base_keys = sorted({
+        str(value).strip()
+        for value in (delivery_dedupe_keys or [])
+        if str(value).strip()
+    })
+    if not base_keys:
+        base_keys = [
+            hashlib.sha256(
+                f"api:{str(mail_class).lower()}:{subject}:{address}".encode("utf-8")
+            ).hexdigest()
+            for address in clean_recipients
+        ]
+    scoped_keys = sorted({
+        hashlib.sha256(f"{key}|recipient|{address}".encode("utf-8")).hexdigest()
+        for key in base_keys
+        for address in clean_recipients
+    })
+    quarantine_keys = scoped_keys if recipient_scoped else sorted({*base_keys, *scoped_keys})
+    receipt = None
+    quarantine_fn = getattr(_mail_outbox, "quarantine", None)
+    if callable(quarantine_fn):
+        try:
+            receipt = quarantine_fn(
+                subject,
+                body_html,
+                clean_recipients,
+                mail_class=mail_class,
+                telegram_text=telegram_text or "",
+                delivery_dedupe_keys=quarantine_keys,
+                error=error,
+            )
+        except Exception:
+            receipt = None
+    if receipt is None:
+        fallback_fn = getattr(
+            _mail_outbox, "register_uncertain_delivery_keys", None
+        )
+        if callable(fallback_fn):
+            try:
+                receipt = fallback_fn(
+                    quarantine_keys,
+                    subject=subject,
+                    body_html=body_html,
+                    recipients=clean_recipients,
+                    mail_class=mail_class,
+                    error=error,
+                )
+            except Exception:
+                receipt = None
+    return receipt
+
+
 def _send_email_alert(
     subject,
     body_html,
@@ -8511,8 +9610,14 @@ def _send_email_alert(
     mail_class: str = "trade",
     telegram_text: str = "",
     mail_channel: str = "",
+    tracking_scanner: str = "",
+    tracking_rows: Optional[Iterable[Dict[str, Any]]] = None,
+    tracking_scope: str = "",
+    delivery_dedupe_keys: Optional[Iterable[str]] = None,
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    _set_last_delivery_recipients(())
+    _set_last_delivery_outcome("not_attempted")
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
     subject = _apply_mail_class_subject(subject, mail_class, trade_horizon=trade_horizon)
     if _email_has_blocked_etf_content(subject, body_html):
@@ -8531,103 +9636,429 @@ def _send_email_alert(
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
         _record_email_event(subject, "skipped", "missing_gmail_config")
         return False
-    operator_watch_optin = str(
-        _SECRETS.get(
-            "ALERT_OPERATOR_WATCH_OPTIN",
-            os.environ.get("ALERT_OPERATOR_WATCH_OPTIN", "0"),
-        )
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    if recipient_emails is not None:
-        recipients = [addr.strip().lower() for addr in recipient_emails if str(addr).strip()]
-    else:
-        operator_recipients = [addr.strip().lower() for addr in str(alert_to).split(",") if addr.strip()]
-        if mail_channel and HAS_AUTH:
-            # AUDIT 2026-07-28: Kanal-Opt-out gilt auch fuer die Betreiber-Mailbox,
-            # sofern die Adresse ein User-Konto mit abgeschaltetem Kanal hat.
-            operator_recipients = [
-                addr for addr in operator_recipients
-                if mail_channel_enabled(addr, mail_channel)
-            ]
-        recipients = operator_recipients if mail_class != "watch" or operator_watch_optin else []
-    if recipient_emails is None and ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
-        try:
-            # Watch-Mails gehen nur an explizit angemeldete Empfaenger. Das gilt
-            # auch fuer den Betreiber-Fallback, damit Watchlists nie ungefragt
-            # den Trade-Posteingang fluten.
-            recipients.extend(get_email_alert_recipients(trade_horizon=trade_horizon, mail_class=mail_class, mail_channel=mail_channel))
-        except Exception as exc:
-            print(f"[Alert] Subscriber recipients skipped: {exc}")
-    recipients = sorted(set(addr for addr in recipients if "@" in addr))
+    recipients = _resolve_email_alert_recipients(
+        recipient_emails=recipient_emails,
+        trade_horizon=trade_horizon,
+        mail_class=mail_class,
+        mail_channel=mail_channel,
+    )
     if not recipients:
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         _record_email_event(subject, "skipped", "missing_recipient")
         return False
+    tracking_rows_list = [
+        dict(row) for row in (tracking_rows or []) if isinstance(row, dict)
+    ]
+    intent_key = ""
+    if tracking_scanner or tracking_rows_list:
+        if (
+            not tracking_scanner
+            or not tracking_rows_list
+            or build_alert_delivery_intent_key is None
+            or cancel_alert_delivery_intent is None
+            or prepare_alert_delivery_intent is None
+            or mark_alert_delivery_attempted is None
+            or journal_alert_delivery_acceptance is None
+            or finalize_alert_delivery is None
+            or _mail_outbox is None
+            or not callable(
+                getattr(_mail_outbox, "record_tracker_acceptance_pending", None)
+            )
+        ):
+            _record_email_event(subject, "skipped", "tracker_delivery_contract_unavailable")
+            return False
+        intent_key = build_alert_delivery_intent_key(
+            tracking_scanner,
+            tracking_rows_list,
+            channel="email",
+            mail_channel=mail_channel,
+        )
+        prepared = prepare_alert_delivery_intent(
+            tracking_scanner,
+            tracking_rows_list,
+            intent_key,
+            channel="email",
+            mail_channel=mail_channel,
+        )
+        if not prepared.get("send_allowed"):
+            reason = str(prepared.get("intent_state") or "not_prepared").lower()
+            _record_email_event(subject, "skipped", f"tracker_delivery_intent_{reason}")
+            return False
+        signal_ids = [int(value) for value in prepared.get("signal_ids") or []]
+        if signal_ids:
+            body_html = (
+                f"{body_html}<p style='font-size:11px;color:#64748b'>"
+                f"Signal-ID: {html.escape(', '.join(str(value) for value in signal_ids))}</p>"
+            )
     branded_body_html = _brand_email_html(subject, body_html)
-    for attempt in range(3):
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"Alpha Station Alert <{gmail_user}>"
+    # Never disclose subscriber addresses to other recipients.
+    msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
+    msg["Subject"] = subject
+    # The same wire message (and Message-ID) is reused when only definitively
+    # refused recipients are retried. Confirmed recipients are never retried.
+    msg["Message-ID"] = make_msgid()
+    plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
+    msg.attach(MIMEText(plain, "plain", "utf-8"))
+    msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
+    wire_message = msg.as_string()
+
+    # Cross-process compare-and-set immediately before the external side
+    # effect. Only the worker that changed every PREPARED row to ATTEMPTED may
+    # issue SMTP DATA; replays and concurrent schedulers fail closed.
+    if intent_key:
+        attempt_claim = mark_alert_delivery_attempted(
+            intent_key,
+            attempted_at=time.time(),
+        )
+        if not (
+            attempt_claim.get("claimed_this_call") is True
+            and attempt_claim.get("send_allowed") is True
+        ):
+            _record_email_event(
+                subject,
+                "skipped",
+                "tracker_delivery_attempt_not_owned",
+            )
+            return False
+
+    accepted_recipients: List[str] = []
+    first_accepted_at: Optional[float] = None
+    tracker_acceptance_durable = False
+    refused: Dict[str, Any] = {}
+    last_error: Optional[BaseException] = None
+    # Once sendmail() was called, delivery may already have happened even when
+    # the connection drops. Never retry an unknown DATA outcome: duplicates are
+    # worse than a fail-closed, explicitly untracked signal.
+    delivery_outcome_unknown = False
+
+    def _transient_refused_addresses(values: Dict[str, Any]) -> List[str]:
+        transient: List[str] = []
+        for address, detail in (values or {}).items():
+            try:
+                code = int(detail[0] if isinstance(detail, (tuple, list)) else detail)
+            except (TypeError, ValueError, IndexError):
+                code = 0
+            if not code or 400 <= code < 500:
+                transient.append(str(address).strip().lower())
+        return transient
+
+    def _close_smtp_quietly(server: Any) -> None:
+        if server is None:
+            return
         try:
-            msg = MIMEMultipart("alternative")
-            msg["From"] = f"Alpha Station Alert <{gmail_user}>"
-            # Never disclose subscriber addresses to other recipients.
-            msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
-            msg["Subject"] = subject
-            plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
-            msg.attach(MIMEText(plain, "plain", "utf-8"))
-            msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
-            # Try port 587 (STARTTLS) first, fallback to 465 (SSL)
+            server.quit()
+        except Exception:
+            try:
+                server.close()
+            except Exception:
+                pass
+
+    pending_recipients = list(recipients)
+    for attempt in range(3):
+        server = None
+        sendmail_called = False
+        try:
+            tls_context = ssl.create_default_context()
             try:
                 server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
                 server.ehlo()
-                server.starttls()
+                server.starttls(context=tls_context)
                 server.ehlo()
                 server.login(gmail_user, gmail_pass)
-                server.sendmail(gmail_user, recipients, msg.as_string())
-                server.quit()
             except Exception:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
-                    server.login(gmail_user, gmail_pass)
-                    server.sendmail(gmail_user, recipients, msg.as_string())
-            print(f"[Alert] Email gesendet: {subject}")
-            _record_email_event(subject, "sent")
-            # Telegram-Spiegel NUR fuer handelbare Alerts (trade/swing_trade).
-            # Kontrakt: send_telegram_alert wirft nie; zusaetzlich defensiv,
-            # damit der Mail-Erfolg nie am Telegram-Hook haengt.
-            if str(mail_class or "").strip().lower() in {"trade", "swing_trade"} and is_telegram_configured and send_telegram_alert:
+                _close_smtp_quietly(server)
+                server = smtplib.SMTP_SSL(
+                    "smtp.gmail.com", 465, timeout=10, context=tls_context
+                )
+                server.login(gmail_user, gmail_pass)
+
+            sendmail_called = True
+            try:
+                attempt_refused = server.sendmail(
+                    gmail_user, pending_recipients, wire_message
+                ) or {}
+            except smtplib.SMTPRecipientsRefused as exc:
+                # All recipients were rejected during RCPT; DATA was not
+                # accepted, so retrying only transient addresses is safe.
+                attempt_refused = dict(getattr(exc, "recipients", {}) or {})
+                refused.update(attempt_refused)
+                last_error = exc
+                pending_recipients = _transient_refused_addresses(attempt_refused)
+                if pending_recipients and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                break
+            except Exception as exc:
+                last_error = exc
+                delivery_outcome_unknown = True
+                break
+
+            refused.update(attempt_refused)
+            refused_keys = {
+                str(value).strip().lower() for value in attempt_refused
+            }
+            accepted_this_attempt = [
+                address for address in pending_recipients
+                if str(address).strip().lower() not in refused_keys
+            ]
+            if accepted_this_attempt and first_accepted_at is None:
+                first_accepted_at = time.time()
+            if accepted_this_attempt and intent_key:
+                attempt_accepted_at = time.time()
+                attempt_keys = [
+                    key for key in (
+                        _recipient_delivery_key(value)
+                        for value in accepted_this_attempt
+                    ) if key
+                ]
                 try:
-                    if is_telegram_configured():
-                        send_telegram_alert(subject, telegram_text or "")
-                except Exception as _tg_exc:
-                    print(f"[Alert] Telegram-Hook Fehler (ignoriert): {_tg_exc}")
-            return True
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"[Alert] Email FEHLER nach 3 Versuchen: {e}")
-                _record_email_event(subject, "error", str(e))
-                # Der Outbox-Worker liefert mit Backoff nach; die TTL verhindert
-                # dabei zu spaete Zustellungen zeitkritischer Trading-Signale.
-                if _mail_outbox is not None:
-                    try:
-                        _ob_id = _mail_outbox.enqueue(
+                    attempt_journal = journal_alert_delivery_acceptance(
+                        intent_key,
+                        attempt_keys,
+                        accepted_at=attempt_accepted_at,
+                    )
+                except Exception as journal_exc:
+                    attempt_journal = {
+                        "durable_acceptance": False,
+                        "error": type(journal_exc).__name__,
+                    }
+                if attempt_journal.get("durable_acceptance"):
+                    tracker_acceptance_durable = True
+                    journal_time = _stock_market_timestamp_seconds(
+                        attempt_journal.get("accepted_at")
+                    )
+                    if journal_time is not None:
+                        first_accepted_at = (
+                            journal_time
+                            if first_accepted_at is None
+                            else min(first_accepted_at, journal_time)
+                        )
+                else:
+                    # Independent journal fallback. SMTP has already accepted
+                    # DATA, so the send intent must remain ATTEMPTED and must
+                    # never be replayed merely because the tracker DB failed.
+                    fallback_receipt = _mail_outbox.record_tracker_acceptance_pending(
+                        intent_key,
+                        attempt_keys,
+                        accepted_at=attempt_accepted_at,
+                    )
+                    if fallback_receipt is None:
+                        _quarantine_unknown_email_delivery(
                             subject,
                             branded_body_html,
-                            recipients,
+                            accepted_this_attempt,
                             mail_class=mail_class,
                             telegram_text=telegram_text or "",
+                            delivery_dedupe_keys=delivery_dedupe_keys,
+                            error="accepted_tracker_journal_unavailable",
+                            recipient_scoped=True,
                         )
-                        if _ob_id:
-                            print(
-                                f"[Alert] Mail in Outbox eingereiht "
-                                f"(id={_ob_id}): {subject}"
-                            )
-                            _record_email_event(
-                                subject,
-                                "outbox_queued",
-                                f"id={_ob_id}",
-                            )
-                    except Exception as _ob_exc:
-                        print(f"[Alert] Outbox-Enqueue Fehler (ignoriert): {_ob_exc}")
+            accepted_recipients.extend(accepted_this_attempt)
+            pending_recipients = _transient_refused_addresses(attempt_refused)
+            if intent_key and accepted_this_attempt and pending_recipients:
+                # A tracker row has one causal delivery timestamp. Retrying a
+                # later recipient would merge two different executable starts
+                # and could send that recipient a TP/stop update for a move
+                # that happened before their entry mail. Keep only the cohort
+                # accepted by this DATA command; refused recipients may receive
+                # a newly generated, freshly revalidated signal later.
+                break
+            if pending_recipients and attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            if not accepted_recipients and attempt_refused:
+                last_error = smtplib.SMTPRecipientsRefused(attempt_refused)
+            break
+        except Exception as exc:
+            last_error = exc
+            if sendmail_called:
+                delivery_outcome_unknown = True
+                break
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        finally:
+            # QUIT/context cleanup happens outside the delivery decision. A
+            # cleanup error must never trigger fallback or another DATA command.
+            _close_smtp_quietly(server)
+
+    if accepted_recipients:
+        accepted_recipients = sorted(set(accepted_recipients))
+        _set_last_delivery_recipients(accepted_recipients)
+        unresolved_count = len(set(recipients) - set(accepted_recipients))
+        outcome = (
+            "partial_unknown" if delivery_outcome_unknown
+            else "partial" if unresolved_count
+            else "accepted"
+        )
+        _set_last_delivery_outcome(outcome)
+        _record_email_event(subject, "sent" if not unresolved_count else "partial")
+        if intent_key:
+            accepted_keys = [
+                key for key in (
+                    _recipient_delivery_key(value) for value in accepted_recipients
+                ) if key
+            ]
+            accepted_at = first_accepted_at or time.time()
+            journal_receipt = _mail_outbox.record_tracker_acceptance_pending(
+                intent_key,
+                accepted_keys,
+                accepted_at=accepted_at,
+            )
+            if journal_receipt is None and not tracker_acceptance_durable:
+                # SMTP already accepted DATA. Without a durable cross-DB
+                # receipt, returning success would silently lose the cohort;
+                # releasing the send claim would risk a duplicate instead.
+                _quarantine_unknown_email_delivery(
+                    subject,
+                    branded_body_html,
+                    accepted_recipients,
+                    mail_class=mail_class,
+                    telegram_text=telegram_text or "",
+                    delivery_dedupe_keys=delivery_dedupe_keys,
+                    error="tracker_acceptance_journal_unavailable",
+                )
+                _set_last_delivery_outcome("accepted_unjournaled")
+                _record_email_event(
+                    subject,
+                    "tracker_pending",
+                    "accepted_mail_journal_unavailable",
+                )
                 return False
+            finalized: Dict[str, Any] = {}
+            for finalize_attempt in range(3):
+                try:
+                    finalized = finalize_alert_delivery(
+                        intent_key,
+                        accepted_keys,
+                        accepted_at=accepted_at,
+                    )
+                except Exception as finalize_exc:
+                    finalized = {"accepted": False, "error": type(finalize_exc).__name__}
+                if finalized.get("accepted"):
+                    break
+                if finalize_attempt < 2:
+                    time.sleep(0.05 * (finalize_attempt + 1))
+            if not finalized.get("accepted"):
+                _record_email_event(
+                    subject,
+                    "tracker_pending",
+                    f"accepted_mail_tracker_finalize_failed:{intent_key[:40]}",
+                )
+            elif finalized.get("activated"):
+                marker = getattr(
+                    _mail_outbox, "mark_tracker_acceptance_done", None
+                )
+                if callable(marker) and not marker(intent_key):
+                    _record_email_event(
+                        subject,
+                        "tracker_pending",
+                        f"accepted_mail_journal_ack_failed:{intent_key[:40]}",
+                    )
+        if delivery_outcome_unknown and _mail_outbox is not None:
+            unresolved_recipients = sorted(
+                set(recipients) - set(accepted_recipients)
+            )
+            if unresolved_recipients:
+                quarantine_receipt = _quarantine_unknown_email_delivery(
+                    subject,
+                    branded_body_html,
+                    unresolved_recipients,
+                    mail_class=mail_class,
+                    telegram_text=telegram_text or "",
+                    delivery_dedupe_keys=delivery_dedupe_keys,
+                    error="partial_delivery_outcome_unknown",
+                    recipient_scoped=True,
+                )
+                if quarantine_receipt is None:
+                    _set_last_delivery_outcome("partial_unknown_unjournaled")
+                    _record_email_event(
+                        subject,
+                        "tracker_pending",
+                        "partial_unknown_quarantine_unavailable",
+                    )
+                    return False
+        try:
+            print(
+                f"[Alert] Email sent ({len(accepted_recipients)}/{len(recipients)} recipient(s))"
+            )
+        except Exception:
+            pass
+        # Telegram mirror only for actionable alerts; it cannot undo email.
+        if str(mail_class or "").strip().lower() in {"trade", "swing_trade"} and is_telegram_configured and send_telegram_alert:
+            try:
+                if is_telegram_configured():
+                    send_telegram_alert(subject, telegram_text or "")
+            except Exception as _tg_exc:
+                try:
+                    print(f"[Alert] Telegram hook failed (ignored): {type(_tg_exc).__name__}")
+                except Exception:
+                    pass
+        return True
+
+    error_kind = type(last_error).__name__ if last_error is not None else "SMTPDeliveryFailed"
+    _set_last_delivery_outcome(
+        "unknown" if delivery_outcome_unknown else "refused" if refused else "failed"
+    )
+    try:
+        print(f"[Alert] Email delivery failed: {error_kind}")
+    except Exception:
+        pass
+    _record_email_event(
+        subject,
+        "error",
+        f"{error_kind}:{'outcome_unknown' if delivery_outcome_unknown else 'not_delivered'}",
+    )
+    if intent_key and not delivery_outcome_unknown:
+        try:
+            cancel_alert_delivery_intent(
+                intent_key,
+                delivery_definitively_not_accepted=True,
+            )
+        except Exception as cancel_exc:
+            _record_email_event(
+                subject,
+                "tracker_pending",
+                f"definite_failure_intent_cancel_failed:{type(cancel_exc).__name__}",
+            )
+    if delivery_outcome_unknown and _mail_outbox is not None:
+        quarantine_receipt = _quarantine_unknown_email_delivery(
+            subject,
+            branded_body_html,
+            recipients,
+            mail_class=mail_class,
+            telegram_text=telegram_text or "",
+            delivery_dedupe_keys=delivery_dedupe_keys,
+            error=f"{error_kind}:delivery_outcome_unknown",
+        )
+        if quarantine_receipt is None:
+            print("[Alert] Unknown delivery could not be durably quarantined")
+    # Never queue an unknown DATA outcome: it may already be in the mailbox.
+    # Entry/swing mails are always time-sensitive and are never delayed.
+    if (
+        not delivery_outcome_unknown
+        and _mail_outbox is not None
+        and str(mail_class or "").strip().lower() not in {"trade", "swing_trade"}
+    ):
+        try:
+            _ob_id = _mail_outbox.enqueue(
+                subject,
+                branded_body_html,
+                recipients,
+                mail_class=mail_class,
+                telegram_text=telegram_text or "",
+            )
+            if _ob_id:
+                _record_email_event(subject, "outbox_queued", f"id={_ob_id}")
+        except Exception as _ob_exc:
+            try:
+                print(f"[Alert] Outbox enqueue failed (ignored): {type(_ob_exc).__name__}")
+            except Exception:
+                pass
+    elif str(mail_class or "").strip().lower() in {"trade", "swing_trade"}:
+        _record_email_event(subject, "outbox_skipped", "time_sensitive_entry_mail")
+    return False
 
 
 def _cluster_warning_html(rows) -> str:
@@ -8683,7 +10114,7 @@ def _cluster_warning_html(rows) -> str:
             f'padding:10px;color:#b91c1c;font-size:13px;font-weight:bold">{lines}</p>'
         )
     except Exception as cluster_err:
-        print(f"[Cluster Warning] build error: {cluster_err}")
+        print(f"[Cluster Warning] build error: {_sanitized_exception_text(cluster_err)}")
         return ""
 
 
@@ -8748,7 +10179,7 @@ def _check_and_alert(scanner_name, cache_file):
                 grade = "B"  # Downgrade — kein Alert
             if grade not in _alert_grades:
                 continue
-            ck = f"{scanner_name}_{ticker}"
+            ck = str(state.get("cooldown_key") or "")
             ck_ttl = _alert_dedupe_ttl_seconds(scanner_name)
             if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < ck_ttl:
                 continue
@@ -8798,6 +10229,54 @@ def _check_and_alert(scanner_name, cache_file):
         alerts = claimed_alerts
         if not alerts:
             return
+        if scanner_name in _STOCK_ALERT_SCANNERS:
+            if len(alerts) > 1:
+                for deferred in alerts[1:]:
+                    _email_dedupe_release(
+                        deferred["cooldown_key"], claimed_at=now
+                    )
+                _record_email_event(
+                    f"{scanner_name} Stock Alert",
+                    "suppressed",
+                    f"mail_adjacent_single_candidate:{len(alerts) - 1}_deferred",
+                )
+                alerts = alerts[:1]
+                claimed_alerts = alerts
+            revalidated_alerts: List[Dict[str, Any]] = []
+            revalidation_reasons: Dict[str, int] = {}
+            for alert in alerts:
+                anchored = _conservative_regular_session_anchor(
+                    dict(alert.get("source_row") or {}), now_ts=time.time()
+                )
+                validation = _revalidate_stock_strategy_mail_candidate(
+                    anchored,
+                    now_ts=time.time(),
+                    price_session="US_REGULAR",
+                    scanner_name=scanner_name,
+                )
+                if not validation.get("ok"):
+                    reason = str(
+                        validation.get("reason") or "final_stock_revalidation_failed"
+                    )
+                    revalidation_reasons[reason] = revalidation_reasons.get(reason, 0) + 1
+                    _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                    continue
+                candidate = dict(validation.get("candidate") or {})
+                updated_alert = dict(alert)
+                updated_alert["source_row"] = candidate
+                updated_alert["price"] = _extract_alert_price(candidate)
+                updated_alert["trade_plan_html"] = _format_alert_plan_html(candidate)
+                revalidated_alerts.append(updated_alert)
+            alerts = revalidated_alerts
+            claimed_alerts = revalidated_alerts
+            if revalidation_reasons:
+                _record_email_event(
+                    f"{scanner_name} Stock Alert",
+                    "skipped" if not alerts else "suppressed",
+                    f"final_stock_revalidation:{revalidation_reasons}",
+                )
+            if not alerts:
+                return
         labels = {"bi_long": "BI Scanner LONG", "bi_short": "BI Scanner SHORT",
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
         label = labels.get(scanner_name, scanner_name)
@@ -8834,7 +10313,17 @@ def _check_and_alert(scanner_name, cache_file):
         </body></html>'''
         print(f"[Alert] {scanner_name}: Sende Alert für {n} Treffer: {[a['ticker'] for a in alerts]}")
         _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"]) for a in alerts]
-        sent = _send_email_alert(subject, body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=scanner_mail_channel(scanner_name))  # AUDIT H-3 / H-2 (BI/Biotech/Bear Top-Setups)
+        sent = _send_email_alert(
+            subject,
+            body,
+            trade_horizon="swing",
+            mail_class="trade",
+            telegram_text=_safe_format_telegram_rows(_signal_rows),
+            mail_channel=scanner_mail_channel(scanner_name),
+            tracking_scanner=scanner_name,
+            tracking_rows=_signal_rows,
+            delivery_dedupe_keys=[alert["cooldown_key"] for alert in alerts],
+        )
         if sent:
             mail_sent = True
             for alert in alerts:
@@ -8842,16 +10331,16 @@ def _check_and_alert(scanner_name, cache_file):
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
                 if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS:
                     _mark_bearish_stock_alert(alert["ticker"], now=now)
-            _safe_record_alert_signals(scanner_name, _signal_rows)
         else:
             for alert in claimed_alerts:
-                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                _email_dedupe_release_after_send(alert["cooldown_key"], claimed_at=now)
     except Exception as e:
         if not mail_sent:
             for alert in claimed_alerts:
                 _email_dedupe_release(alert.get("cooldown_key", ""), claimed_at=now)
         import traceback
-        print(f"[Alert] Check-Fehler {scanner_name}: {e}\n{traceback.format_exc()}")
+        print(f"[Alert] Check-Fehler {scanner_name}: {_sanitized_exception_text(e)}")
+        _print_sanitized_traceback()
 
 
 def _daily_bar_date_str(bar: Dict[str, Any]) -> str:
@@ -8930,11 +10419,591 @@ def _shadow_trackable_reasons(
     return None
 
 
+def _stock_market_timestamp_seconds(value: Any) -> Optional[float]:
+    """Normalize Polygon/ISO timestamps to UTC epoch seconds."""
+    if value in (None, ""):
+        return None
+    try:
+        if isinstance(value, str) and not value.replace(".", "", 1).isdigit():
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = parsed.astimezone(timezone.utc).timestamp()
+        else:
+            timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return None
+    if timestamp > 1_000_000_000_000_000:
+        timestamp /= 1_000_000_000.0
+    elif timestamp > 10_000_000_000:
+        timestamp /= 1000.0
+    return timestamp if math.isfinite(timestamp) and timestamp > 0 else None
+
+
+def _stock_market_timestamp_from(
+    payload: Any,
+    keys: Tuple[str, ...],
+) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        timestamp = _stock_market_timestamp_seconds(payload.get(key))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _stock_market_timestamp_iso(timestamp: float) -> str:
+    return (
+        datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+    )
+
+
+def _stock_quote_session_at(timestamp: float) -> str:
+    """Classify the quote's own US-equity session, not the later receipt time."""
+    from zoneinfo import ZoneInfo
+
+    quote_et = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).astimezone(
+        ZoneInfo("America/New_York")
+    )
+    exchange_fn = globals().get("_us_exchange_calendar")
+    trading_day_fn = globals().get("_is_exchange_trading_day")
+    segments_fn = globals().get("_exchange_segments_for_day")
+    exchange = exchange_fn() if callable(exchange_fn) else None
+    if exchange is not None and callable(trading_day_fn):
+        if not trading_day_fn(exchange, quote_et.date()):
+            return "CLOSED"
+    elif quote_et.weekday() >= 5:
+        return "CLOSED"
+    seconds = quote_et.hour * 3600 + quote_et.minute * 60 + quote_et.second
+    regular_open = 9 * 3600 + 30 * 60
+    regular_close = 16 * 3600
+    if exchange is not None and callable(segments_fn):
+        segments = segments_fn(exchange, quote_et.date().isoformat())
+        if not segments:
+            return "CLOSED"
+        try:
+            open_hour, open_minute = [int(part) for part in segments[0][0].split(":")]
+            close_hour, close_minute = [int(part) for part in segments[-1][1].split(":")]
+            regular_open = open_hour * 3600 + open_minute * 60
+            regular_close = close_hour * 3600 + close_minute * 60
+        except (TypeError, ValueError, IndexError):
+            return "CLOSED"
+    if 4 * 3600 <= seconds < regular_open:
+        return "PREMARKET"
+    if regular_open <= seconds < regular_close:
+        return "US_REGULAR"
+    if regular_close <= seconds < 20 * 3600:
+        return "POSTMARKET"
+    return "CLOSED"
+
+
+def _stock_session_family(value: Any) -> str:
+    normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if "PREMARKET" in normalized or normalized in {"PRE", "PRE_MARKET"}:
+        return "PREMARKET"
+    if normalized in {"US_REGULAR", "REGULAR", "OPEN", "MARKET_OPEN"}:
+        return "US_REGULAR"
+    if normalized in {"POSTMARKET", "POST_MARKET", "AFTER_HOURS", "AFTERHOURS"}:
+        return "POSTMARKET"
+    return "CLOSED" if normalized == "CLOSED" else "UNKNOWN"
+
+
+def _conservative_regular_session_anchor(
+    row: Dict[str, Any], *, now_ts: Optional[float] = None
+) -> Dict[str, Any]:
+    """Attach a conservative path anchor for legacy stock scanner rows.
+
+    Older BI/Biotech/Bear caches do not persist the exact quote timestamp that
+    created a plan. For those rows, the only safe automatic choice is the
+    current US session open: any stop/TP1 touch since then blocks the mail. This
+    can reject a valid late-created setup, but never fabricates an untouched
+    execution path.
+    """
+    item = dict(row or {})
+    existing_ts = _stock_market_timestamp_seconds(
+        item.get("scan_price_observed_at") or item.get("Scan_Price_Observed_At")
+    )
+    existing_source = str(
+        item.get("scan_price_source") or item.get("Scan_Price_Source") or ""
+    ).strip()
+    if existing_ts is not None and "polygon" in existing_source.lower():
+        return item
+    try:
+        from zoneinfo import ZoneInfo
+
+        current = datetime.fromtimestamp(
+            float(now_ts if now_ts is not None else time.time()), tz=timezone.utc
+        )
+        timezone_et = ZoneInfo("America/New_York")
+        current_et = current.astimezone(timezone_et)
+        exchange = _us_exchange_calendar()
+        if exchange is None or not _is_exchange_trading_day(exchange, current_et.date()):
+            return item
+        segments = _exchange_segments_for_day(exchange, current_et.date().isoformat())
+        if not segments:
+            return item
+        open_hour, open_minute = [int(part) for part in segments[0][0].split(":")]
+        session_open = current_et.replace(
+            hour=open_hour, minute=open_minute, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+        if session_open > current:
+            return item
+        item["scan_price_observed_at"] = session_open.isoformat()
+        item["scan_price_source"] = "polygon_snapshot_conservative_session_open"
+        item["scan_anchor_mode"] = "conservative_regular_session_open"
+    except Exception:
+        return item
+    return item
+
+
+def _fetch_stock_revalidation_market_path(
+    ticker: str,
+    observed_ts: float,
+    *,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Load Polygon 1m highs/lows since the scan observation.
+
+    The first overlapping minute is intentionally included. If a stop/TP1
+    touch happened before the exact observation inside that same OHLC minute,
+    its ordering is unknowable; the caller therefore blocks conservatively.
+    """
+    symbol = str(ticker or "").upper().strip()
+    now_value = float(now_ts if now_ts is not None else time.time())
+    if not symbol:
+        return {"ok": False, "reason": "final_ticker_missing"}
+    if not POLYGON_KEY:
+        return {"ok": False, "reason": "final_polygon_key_missing"}
+    try:
+        from zoneinfo import ZoneInfo
+
+        timezone_et = ZoneInfo("America/New_York")
+        start_date = datetime.fromtimestamp(observed_ts, timezone.utc).astimezone(timezone_et).date().isoformat()
+        end_date = datetime.fromtimestamp(now_value, timezone.utc).astimezone(timezone_et).date().isoformat()
+        response = rate_limited_get(
+            f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_date}/{end_date}",
+            params={
+                "apiKey": POLYGON_KEY,
+                "adjusted": "true",
+                "sort": "asc",
+                "limit": 5000,
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        print(
+            f"[Alert] final stock market path error {symbol}: "
+            f"{redact_sensitive_query_values(exc)}"
+        )
+        return {"ok": False, "reason": "final_market_path_fetch_error"}
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "reason": f"final_market_path_http_{response.status_code}",
+        }
+    try:
+        payload = response.json()
+    except Exception:
+        return {"ok": False, "reason": "final_market_path_payload_invalid"}
+    raw_bars = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(raw_bars, list):
+        return {"ok": False, "reason": "final_market_path_payload_invalid"}
+
+    bars: List[Dict[str, Any]] = []
+    previous_bar_ts: Optional[float] = None
+    for raw in raw_bars:
+        if not isinstance(raw, dict):
+            return {"ok": False, "reason": "final_market_path_bar_invalid"}
+        bar_ts = _stock_market_timestamp_from(raw, ("t", "timestamp", "time"))
+        if bar_ts is None:
+            return {"ok": False, "reason": "final_market_path_timestamp_missing"}
+        # Polygon timestamps are minute starts. Keep the overlapping minute to
+        # avoid inventing an intraminute order around the scan observation.
+        if bar_ts + 60.0 < observed_ts or bar_ts > now_value + 60.0:
+            continue
+        if previous_bar_ts is not None and bar_ts <= previous_bar_ts:
+            return {"ok": False, "reason": "final_market_path_order_invalid"}
+        if previous_bar_ts is not None and bar_ts - previous_bar_ts > 61.0:
+            # Polygon emits one-minute bars at minute starts.  A missing
+            # internal minute leaves stop/TP ordering unobservable and must
+            # never be bridged by interpolation.
+            return {"ok": False, "reason": "final_market_path_internal_gap"}
+        high = _alert_float(raw.get("h", raw.get("high")), None)
+        low = _alert_float(raw.get("l", raw.get("low")), None)
+        if high is None or low is None or high <= 0 or low <= 0 or high < low:
+            return {"ok": False, "reason": "final_market_path_ohlc_invalid"}
+        bars.append({"timestamp": bar_ts, "high": high, "low": low})
+        previous_bar_ts = bar_ts
+    if not bars:
+        return {"ok": False, "reason": "final_market_path_missing"}
+    return {
+        "ok": True,
+        "bars": bars,
+        "source": "polygon_1m_aggs",
+        "first_timestamp": bars[0]["timestamp"],
+        "last_timestamp": bars[-1]["timestamp"],
+    }
+
+
+def _fetch_stock_revalidation_snapshot(
+    ticker: str,
+    *,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fetch one final executable Polygon bid/ask with an explicit quote time."""
+    symbol = str(ticker or "").upper().strip()
+    requested_now = float(now_ts if now_ts is not None else time.time())
+
+    def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+        reason = str(result.get("reason") or "")
+        status = "verified_realtime_quote" if result.get("ok") else "blocked"
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            _STOCK_QUOTE_CAPABILITY.update({
+                "status": status,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "quote_age_seconds": result.get("age_seconds"),
+                "reason": reason or None,
+            })
+        return result
+
+    if not symbol:
+        return _finish({"ok": False, "reason": "final_ticker_missing"})
+    if not POLYGON_KEY:
+        return _finish({"ok": False, "reason": "final_polygon_key_missing"})
+    try:
+        response = rate_limited_get(
+            f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}",
+            params={"apiKey": POLYGON_KEY},
+            timeout=8,
+        )
+    except Exception as exc:
+        print(
+            f"[Alert] final stock snapshot error {symbol}: "
+            f"{redact_sensitive_query_values(exc)}"
+        )
+        return _finish({"ok": False, "reason": "final_snapshot_fetch_error"})
+    if response.status_code != 200:
+        return _finish({"ok": False, "reason": f"final_snapshot_http_{response.status_code}"})
+    try:
+        payload = response.json()
+    except Exception:
+        return _finish({"ok": False, "reason": "final_snapshot_payload_invalid"})
+    raw = payload.get("ticker") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return _finish({"ok": False, "reason": "final_snapshot_payload_invalid"})
+    quote = raw.get("lastQuote") if isinstance(raw.get("lastQuote"), dict) else {}
+    bid = _alert_float(
+        quote.get("p", quote.get("bid_price", quote.get("bid"))),
+        None,
+    )
+    ask = _alert_float(
+        quote.get("P", quote.get("ask_price", quote.get("ask"))),
+        None,
+    )
+    observed_ts = _stock_market_timestamp_from(
+        quote,
+        ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
+    )
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+        return _finish({"ok": False, "reason": "final_quote_invalid"})
+    if observed_ts is None:
+        return _finish({"ok": False, "reason": "final_quote_timestamp_missing"})
+    # Network time belongs to the request, not to the quote. Compare Polygon's
+    # timestamp with the actual receipt clock so a quote produced while the
+    # preceding path request was in flight is not mislabeled as "future".
+    receipt_now = max(requested_now, time.time())
+    if observed_ts > receipt_now + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return _finish({"ok": False, "reason": "final_quote_timestamp_in_future"})
+    age_seconds = max(0.0, receipt_now - observed_ts)
+    if age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return _finish({"ok": False, "reason": "final_quote_stale"})
+    return _finish({
+        "ok": True,
+        "bid": bid,
+        "ask": ask,
+        "observed_ts": observed_ts,
+        "receipt_ts": receipt_now,
+        "age_seconds": round(age_seconds, 3),
+        "source": _STOCK_FINAL_PRICE_SOURCE,
+    })
+
+
+def _revalidate_stock_strategy_mail_candidate(
+    row: Dict[str, Any],
+    *,
+    now_ts: Optional[float] = None,
+    price_session: str = "",
+    scanner_name: str = "stock_strategy",
+) -> Dict[str, Any]:
+    """Fail closed unless the stock setup is still executable at mail time.
+
+    This is the causal bridge between a potentially long strategy sweep and
+    the tracker.  The final quote is still observed before SMTP acceptance,
+    so it may validate and price the mail but must not be misrepresented as a
+    recipient-executable fill.  The tracker waits for a complete post-alert
+    interval before establishing the entry.
+    """
+    item = dict(row or {})
+    for key in (
+        "fill_evidence_verified",
+        "price_observed_at",
+        "price_source",
+        "price_session",
+        "price_mode",
+    ):
+        item.pop(key, None)
+    now_value = float(now_ts if now_ts is not None else time.time())
+    ticker = _extract_alert_ticker(item)
+    if not ticker:
+        return {"ok": False, "reason": "final_ticker_missing"}
+
+    levels = _alert_trade_levels(item)
+    if not levels.get("valid"):
+        return {"ok": False, "reason": "final_trade_levels_invalid"}
+    direction = str(levels.get("direction") or _infer_alert_direction(item)).upper()
+    if direction not in ("LONG", "SHORT"):
+        return {"ok": False, "reason": "final_direction_missing"}
+    stop = _alert_float(levels.get("stop"), None)
+    tp1 = _alert_float(levels.get("tp1"), None)
+    tp2 = _alert_float(levels.get("tp2"), None)
+    if any(value is None for value in (stop, tp1, tp2)):
+        return {"ok": False, "reason": "final_trade_levels_missing"}
+
+    scan_source = str(
+        item.get("scan_price_source") or item.get("Scan_Price_Source") or ""
+    ).strip().lower()
+    scan_observed_ts = _stock_market_timestamp_seconds(
+        item.get("scan_price_observed_at") or item.get("Scan_Price_Observed_At")
+    )
+    scan_source_executable = (
+        "polygon" in scan_source
+        and (
+            "snapshot" in scan_source
+            or "completed_5m" in scan_source
+            or "completed_1m" in scan_source
+        )
+    )
+    if not scan_source_executable:
+        return {"ok": False, "reason": "final_scan_price_source_missing"}
+    if scan_observed_ts is None:
+        return {"ok": False, "reason": "final_scan_observation_missing"}
+    if scan_observed_ts > now_value + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return {"ok": False, "reason": "final_scan_observation_in_future"}
+    scan_age_seconds = max(0.0, now_value - scan_observed_ts)
+    if scan_age_seconds > _STOCK_FINAL_REVALIDATION_MAX_LOOKBACK_SECONDS:
+        return {"ok": False, "reason": "final_scan_observation_stale"}
+
+    snapshot = _fetch_stock_revalidation_snapshot(ticker, now_ts=now_value)
+    if not snapshot.get("ok"):
+        return {
+            "ok": False,
+            "reason": str(snapshot.get("reason") or "final_snapshot_unavailable"),
+        }
+    quote_ts = _stock_market_timestamp_seconds(snapshot.get("observed_ts"))
+    if quote_ts is None or quote_ts < scan_observed_ts:
+        return {"ok": False, "reason": "final_quote_before_scan_observation"}
+    # The path is fetched *after* the quote and watermarked by that quote's own
+    # exchange timestamp. This closes the path-then-quote TOCTOU window.
+    path_started_monotonic = time.monotonic()
+    path = _fetch_stock_revalidation_market_path(
+        ticker,
+        scan_observed_ts,
+        now_ts=quote_ts,
+    )
+    path_elapsed_seconds = max(0.0, time.monotonic() - path_started_monotonic)
+    if not path.get("ok"):
+        return {
+            "ok": False,
+            "reason": str(path.get("reason") or "final_market_path_unavailable"),
+        }
+    snapshot_receipt_ts = _stock_market_timestamp_seconds(
+        snapshot.get("receipt_ts")
+    )
+    # Advance the receipt watermark by the actual path-I/O duration.  A
+    # monotonic clock avoids mixing synthetic/replayed market timestamps with
+    # the host wall clock while still closing the quote-then-path TOCTOU gap.
+    receipt_base_ts = (
+        snapshot_receipt_ts if snapshot_receipt_ts is not None else now_value
+    )
+    post_path_receipt_ts = receipt_base_ts + path_elapsed_seconds
+    if quote_ts > post_path_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return {"ok": False, "reason": "final_quote_timestamp_in_future_after_path"}
+    final_quote_age_seconds = max(0.0, post_path_receipt_ts - quote_ts)
+    if final_quote_age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return {"ok": False, "reason": "final_quote_stale_after_path"}
+    first_path_ts = _stock_market_timestamp_seconds(path.get("first_timestamp"))
+    last_path_ts = _stock_market_timestamp_seconds(path.get("last_timestamp"))
+    if first_path_ts is None or last_path_ts is None:
+        return {"ok": False, "reason": "final_market_path_bounds_missing"}
+    # Polygon labels one-minute aggregates with the minute start.  The first
+    # aggregate must overlap the scan instant; otherwise an early stop/TP touch
+    # could be hidden by a truncated response.  At the other edge we permit a
+    # short no-trade gap, but never accept a materially stale/truncated path.
+    if first_path_ts > scan_observed_ts or first_path_ts + 60.0 < scan_observed_ts:
+        return {"ok": False, "reason": "final_market_path_start_gap"}
+    if last_path_ts > quote_ts:
+        return {"ok": False, "reason": "final_quote_older_than_market_path"}
+    # Polygon labels a 1m aggregate by its start. The quote must lie inside the
+    # final returned aggregate; any gap after its end is unobserved and blocks.
+    if quote_ts >= last_path_ts + 60.0:
+        return {"ok": False, "reason": "final_market_path_end_gap"}
+
+    stop_touched = False
+    tp1_touched = False
+    for bar in path.get("bars") or []:
+        high = _alert_float(bar.get("high"), None)
+        low = _alert_float(bar.get("low"), None)
+        if high is None or low is None:
+            return {"ok": False, "reason": "final_market_path_ohlc_invalid"}
+        if direction == "LONG":
+            stop_touched = stop_touched or low <= stop
+            tp1_touched = tp1_touched or high >= tp1
+        else:
+            stop_touched = stop_touched or high >= stop
+            tp1_touched = tp1_touched or low <= tp1
+    if stop_touched and tp1_touched:
+        return {"ok": False, "reason": "final_stop_and_tp1_touched_since_scan"}
+    if stop_touched:
+        return {"ok": False, "reason": "final_stop_touched_since_scan"}
+    if tp1_touched:
+        return {"ok": False, "reason": "final_tp1_touched_since_scan"}
+
+    price_mode = "ask" if direction == "LONG" else "bid"
+    current = _alert_float(snapshot.get(price_mode), None)
+    if current is None or current <= 0:
+        return {"ok": False, "reason": "final_executable_price_missing"}
+    bid = _alert_float(snapshot.get("bid"), None)
+    ask = _alert_float(snapshot.get("ask"), None)
+    if bid is None or ask is None or bid <= 0 or ask < bid:
+        return {"ok": False, "reason": "final_quote_invalid"}
+    midpoint = (bid + ask) / 2.0
+    spread_pct = ((ask - bid) / midpoint * 100.0) if midpoint > 0 else None
+    session = _stock_session_family(price_session)
+    quote_session = _stock_quote_session_at(quote_ts)
+    receipt_session = _stock_quote_session_at(post_path_receipt_ts)
+    if session not in {"US_REGULAR", "PREMARKET"}:
+        return {"ok": False, "reason": "final_price_session_not_executable"}
+    if receipt_session != session:
+        return {"ok": False, "reason": "final_receipt_session_mismatch"}
+    if quote_session != session:
+        return {"ok": False, "reason": "final_quote_session_mismatch"}
+    max_spread_pct = (
+        _PREMARKET_MAX_SPREAD_PCT
+        if "PREMARKET" in session
+        else _STOCK_FINAL_REGULAR_MAX_SPREAD_PCT
+    )
+    if spread_pct is None or spread_pct > max_spread_pct:
+        return {"ok": False, "reason": "final_quote_spread_too_wide"}
+    if direction == "LONG":
+        if current <= stop:
+            return {"ok": False, "reason": "final_stop_already_breached"}
+        if current >= tp1:
+            return {"ok": False, "reason": "final_tp1_already_reached"}
+    else:
+        if current >= stop:
+            return {"ok": False, "reason": "final_stop_already_breached"}
+        if current <= tp1:
+            return {"ok": False, "reason": "final_tp1_already_reached"}
+
+    live_geometry = trade_geometry(current, stop, tp1, tp2, direction)
+    if not live_geometry.get("valid"):
+        return {"ok": False, "reason": "final_live_trade_geometry_invalid"}
+    live_quality = _alert_trade_plan_quality(live_geometry)
+    if live_quality.get("issues"):
+        return {"ok": False, "reason": "final_live_trade_plan_quality_failed"}
+    planned_entry = _alert_float(levels.get("entry"), None)
+    if planned_entry is None or validate_fill_quality is None:
+        return {"ok": False, "reason": "final_fill_quality_contract_unavailable"}
+    fill_quality = validate_fill_quality(
+        str(scanner_name or "stock_strategy"),
+        planned_entry,
+        current,
+        stop,
+        tp1,
+        tp2,
+        direction,
+    )
+    if not fill_quality.get("valid"):
+        return {
+            "ok": False,
+            "reason": "final_" + str(fill_quality.get("reason") or "fill_quality_failed"),
+        }
+
+    # The returned candidate must still be executable after every local path
+    # and geometry check, not merely at the first instruction after I/O.
+    return_receipt_ts = receipt_base_ts + max(
+        0.0, time.monotonic() - path_started_monotonic
+    )
+    if quote_ts > return_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return {"ok": False, "reason": "final_quote_timestamp_in_future_at_return"}
+    final_quote_age_seconds = max(0.0, return_receipt_ts - quote_ts)
+    if final_quote_age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return {"ok": False, "reason": "final_quote_stale_at_return"}
+    if _stock_quote_session_at(return_receipt_ts) != session:
+        return {"ok": False, "reason": "final_receipt_session_mismatch_at_return"}
+    post_path_receipt_ts = return_receipt_ts
+
+    observed_at = _stock_market_timestamp_iso(quote_ts)
+    current_price = round(float(current), 8)
+    previous_close = _alert_float(
+        _alert_get_any(item, "Prev_Close", "prev_close", default=None),
+        None,
+    )
+    item.update({
+        "Preis": current_price,
+        "Price": current_price,
+        "price": current_price,
+        "current_price": current_price,
+        "fill_evidence_verified": False,
+        "quote_evidence_verified": True,
+        "fill_evidence_timing": "pre_delivery_quote",
+        "price_observed_at": observed_at,
+        "price_source": _STOCK_FINAL_PRICE_SOURCE,
+        "price_session": session,
+        "price_mode": price_mode,
+        "spread_pct": round(spread_pct, 4),
+        "final_quote_age_seconds": round(final_quote_age_seconds, 3),
+        "final_quote_bid": snapshot.get("bid"),
+        "final_quote_ask": snapshot.get("ask"),
+        "final_quote_spread_pct": round(spread_pct, 4),
+        "final_market_path_source": path.get("source"),
+        "final_market_path_from": _stock_market_timestamp_iso(scan_observed_ts),
+        "final_market_path_bars": len(path.get("bars") or []),
+        "live_rr": live_quality.get("effective_rr"),
+        "live_rr_tp1": live_quality.get("rr_tp1"),
+        "live_rr_tp2": live_quality.get("rr_tp2"),
+    })
+    if previous_close is not None and previous_close > 0:
+        change_pct = (current_price - previous_close) / previous_close * 100.0
+        item["Change_Pct"] = round(change_pct, 4)
+        item["change_pct"] = round(change_pct, 4)
+    setup = dict(item.get("trade_setup") or {})
+    if setup:
+        setup.update({
+            "live_price": current_price,
+            "live_price_observed_at": observed_at,
+            "live_price_source": _STOCK_FINAL_PRICE_SOURCE,
+            "live_rr": live_quality.get("effective_rr"),
+            "live_rr_tp1": live_quality.get("rr_tp1"),
+            "live_rr_tp2": live_quality.get("rr_tp2"),
+        })
+        item["trade_setup"] = setup
+    return {"ok": True, "candidate": item}
+
+
 def _regime_mail_decision(
     scanner_key: str,
     market_type: str,
     premarket_mail_mode: bool,
     now_utc,
+    *,
+    calibration_row: Optional[Dict[str, Any]] = None,
+    calibration_cell: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Regime-Filter (AUDIT 2026-08-01, F-14): kombinierte Mail-Entscheidung.
 
@@ -8960,16 +11029,106 @@ def _regime_mail_decision(
         )
         breaker_enabled = str(os.environ.get("REGIME_BREAKER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
         context = None
-        if market_enabled:
+        # Even with the exogenous market gate disabled, stock calibration needs
+        # the real market-context regime.  Combined GREEN/YELLOW/RED decisions
+        # are never a substitute for this dimension.
+        if market_type == "stocks":
             try:
                 context = _get_market_context_snapshot()
             except Exception as exc:
                 print(f"[Regime-Filter] Market-Context nicht ladbar (fail-open): {exc}")
                 market_enabled = False
+
+        requested_cell = dict(calibration_cell or {})
+        if not requested_cell and isinstance(calibration_row, dict):
+            try:
+                from modules.signal_tracker import build_calibration_cell_identity
+
+                def _explicit_value(row, aliases):
+                    for key in aliases:
+                        value = row.get(key)
+                        if value is not None and str(value).strip():
+                            return value
+                    return None
+
+                nested_setup = (
+                    calibration_row.get("trade_setup")
+                    if isinstance(calibration_row.get("trade_setup"), dict)
+                    else {}
+                )
+                explicit_direction = _explicit_value(
+                    calibration_row,
+                    (
+                        "Signal_Direction", "BI_Direction", "direction",
+                        "Direction", "_direction", "side", "trade_action",
+                    ),
+                )
+                if explicit_direction is None:
+                    explicit_direction = _explicit_value(
+                        nested_setup, ("direction", "Direction", "side")
+                    )
+                explicit_horizon = _explicit_value(
+                    calibration_row,
+                    (
+                        "trade_horizon", "TradeHorizon", "holding_period",
+                        "HoldingPeriod", "_alert_horizon", "alert_horizon",
+                    ),
+                )
+                explicit_row_regime = _explicit_value(
+                    calibration_row,
+                    (
+                        "market_regime", "MarketRegime", "regime_state",
+                        "RegimeState", "btc_regime", "BTCRegime",
+                    ),
+                )
+                exogenous_regime = (
+                    (context or {}).get("regime")
+                    if market_type == "stocks"
+                    else explicit_row_regime
+                )
+                requested_cell = build_calibration_cell_identity(
+                    scanner_key,
+                    calibration_row,
+                    market_regime=exogenous_regime,
+                ) or {}
+                direction_token = str(explicit_direction or "").strip().upper()
+                normalized_direction = {
+                    "BUY": "LONG",
+                    "SELL": "SHORT",
+                }.get(direction_token, direction_token)
+                requested_cell["dimension_sources"] = {
+                    "direction": "row_explicit" if direction_token in {
+                        "LONG", "SHORT", "BUY", "SELL",
+                    } else "inferred_or_missing",
+                    "horizon": "row_explicit" if explicit_horizon is not None else "inferred_or_missing",
+                    "market_regime": (
+                        "market_context"
+                        if market_type == "stocks" and exogenous_regime is not None
+                        else "row_explicit" if explicit_row_regime is not None
+                        else "inferred_or_missing"
+                    ),
+                }
+                requested_cell["trip_release_eligible"] = bool(
+                    normalized_direction in {"LONG", "SHORT"}
+                    and explicit_horizon is not None
+                    and exogenous_regime is not None
+                    and str(requested_cell.get("direction") or "").upper()
+                    == normalized_direction
+                )
+                requested_cell["trip_release_eligible"] = (
+                    requested_cell["trip_release_eligible"]
+                    and _rf.calibration_cell_eligible(requested_cell)
+                )
+            except Exception as exc:
+                print(
+                    "[Regime-Filter] Kalibrierzelle nicht baubar "
+                    f"(Breaker fail-open): {exc}"
+                )
+                requested_cell = {}
         summary = None
         if breaker_enabled:
             if load_performance_summary is None:
-                breaker_enabled = False
+                summary = None
             else:
                 try:
                     # Breaker nur aus voll beobachteten Kohorten und demselben
@@ -8981,17 +11140,25 @@ def _regime_mail_decision(
         state = _rf.load_state()
         breakers = dict(state.get("breakers") or {})
         recovery_metrics = None
-        state_entry = breakers.get(scanner_key) or {}
+        requested_cell_id = str(requested_cell.get("cell_id") or "").strip()
+        state_entry = breakers.get(requested_cell_id) or {}
         tripped_at = state_entry.get("tripped_at")
         if (
             breaker_enabled
             and tripped_at
             and load_breaker_recovery_summary is not None
+            and _rf.calibration_cell_eligible({
+                **state_entry,
+                "trip_release_eligible": True,
+            })
         ):
             try:
                 recovery_metrics = load_breaker_recovery_summary(
                     scanner_key,
                     tripped_at,
+                    direction=state_entry.get("direction"),
+                    horizon=state_entry.get("horizon"),
+                    market_regime=state_entry.get("market_regime"),
                 )
             except Exception as exc:
                 print(
@@ -9004,21 +11171,34 @@ def _regime_mail_decision(
             summary=summary,
             state=breakers,
             recovery_metrics=recovery_metrics,
+            calibration_cell=requested_cell,
             now=now_utc,
             market_gate_enabled=market_enabled,
             breaker_enabled=breaker_enabled,
         )
-        # Breaker-State persistieren, wenn geaendert (Trip/Release)
+        # Persist Trip/Release as one locked read/merge/write operation.  The
+        # decision was computed from a snapshot, but another scanner cell may
+        # have committed meanwhile; never overwrite that newer state.
         new_entry = decision.get("new_state_entry")
-        if (breakers.get(scanner_key) or None) != new_entry:
-            if new_entry:
-                breakers[scanner_key] = new_entry
-            else:
-                breakers.pop(scanner_key, None)
-            if not _rf.save_state({"breakers": breakers}):
+        state_key = decision.get("state_key")
+        if decision.get("breaker_evaluated") is True and state_key:
+            def _merge_breaker_state(current_state):
+                next_state = dict(current_state or {})
+                current_breakers = dict(next_state.get("breakers") or {})
+                if new_entry:
+                    current_breakers[state_key] = dict(new_entry)
+                else:
+                    current_breakers.pop(state_key, None)
+                next_state["breakers"] = current_breakers
+                return next_state
+
+            if not _rf.update_state(_merge_breaker_state):
                 print("[Regime-Filter] State-File nicht schreibbar (Trip nicht persistent)")
         if decision.get("state") == "GREEN":
-            return None
+            # GREEN still is measurement context. The caller treats only
+            # YELLOW/RED as gates, but the tracker must not collapse ordinary
+            # trades into UNKNOWN regime cells.
+            return {**decision, "banner": "", "reason_tag": ""}
         print(f"[Regime-Filter] {decision['state']}/{decision.get('layer')} fuer {scanner_key}: {decision.get('reason')}")
         return decision
     except Exception as exc:
@@ -9196,23 +11376,403 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         )
         return
 
+    # Finaler Aktien-Evidenzvertrag: Der Sweep kann viele Minuten laufen. Erst
+    # nach dem atomaren Dedupe-Claim, aber noch VOR Regime, Mail-Bau und Tracker,
+    # wird jede Row gegen einen frischen ausfuehrbaren Polygon-Bid/Ask und den
+    # vollstaendigen 1m-Pfad seit ihrem Scan-Snapshot revalidiert. Ablehnung gibt
+    # den Claim frei; ein spaeterer, wirklich valider Lauf darf wieder senden.
+    def _alert_with_revalidated_candidate(alert, validation):
+        revalidated_row = dict(validation.get("candidate") or {})
+        refreshed = dict(alert)
+        refreshed["source_row"] = revalidated_row
+        refreshed["price"] = _extract_alert_price(revalidated_row)
+        refreshed["change_pct"] = _alert_float(
+            _alert_get_any(
+                revalidated_row,
+                "change_pct",
+                "Change_Pct",
+                default=refreshed.get("change_pct"),
+            ),
+            0,
+        ) or 0
+        refreshed["trade_plan_html"] = _format_alert_plan_html(revalidated_row)
+        return refreshed
+
+    if market_type == "stocks":
+        revalidated_alerts: List[Dict[str, Any]] = []
+        revalidation_suppressed: Dict[str, int] = {}
+        for alert in email_alerts:
+            source_row = dict(alert.get("source_row") or {})
+            try:
+                validation = _revalidate_stock_strategy_mail_candidate(
+                    source_row,
+                    # Never freeze the receipt clock across a sequential API
+                    # sweep: provider timestamps must be compared with the
+                    # instant at which this candidate is actually validated.
+                    now_ts=time.time(),
+                    price_session=(
+                        "PREMARKET"
+                        if premarket_mail_mode
+                        else str(market_status.get("session") or "UNKNOWN")
+                    ),
+                )
+            except Exception as exc:
+                print(
+                    "[Alert] final stock revalidation failed closed for "
+                    f"{_extract_alert_ticker(source_row)}: "
+                    f"{redact_sensitive_query_values(exc)}"
+                )
+                validation = {
+                    "ok": False,
+                    "reason": "final_stock_revalidation_exception",
+                }
+            if not validation.get("ok"):
+                reason = str(validation.get("reason") or "final_stock_revalidation_failed")
+                revalidation_suppressed[reason] = revalidation_suppressed.get(reason, 0) + 1
+                suppressed[reason] = suppressed.get(reason, 0) + 1
+                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                continue
+            revalidated_alerts.append(
+                _alert_with_revalidated_candidate(alert, validation)
+            )
+        email_alerts = revalidated_alerts
+        if revalidation_suppressed:
+            _record_email_event(
+                f"Aktien Strategie Alert - {strategy_name}",
+                "skipped" if not email_alerts else "suppressed",
+                f"final_stock_revalidation:{revalidation_suppressed}",
+            )
+        if not email_alerts:
+            return
+
     # Regime-Filter (AUDIT 2026-08-01, F-14): Markt-Gate + Eigen-Performance-
     # Breaker. ROT degradiert die Mail zu watch (Banner statt SWING-Praefix,
     # Setups laufen als Shadow-Messung weiter), GELB verschaerft die Auswahl.
-    _regime = _regime_mail_decision(scanner_key, market_type, premarket_mail_mode, send_time_utc)
+    # Evaluate every row independently. RISK_OFF/PANIC is a LONG gate; an
+    # explicit valid SHORT cell remains controlled by its own breaker.
+    for _alert in email_alerts:
+        _alert["_regime_decision"] = _regime_mail_decision(
+            scanner_key,
+            market_type,
+            premarket_mail_mode,
+            send_time_utc,
+            calibration_row=dict(_alert.get("source_row") or {}),
+        )
+
+    # Keep the complete final batch only as exposure/cluster context while the
+    # actual deliveries below remain separate WATCH/actionable single-wires.
+    _cluster_context_alerts = list(email_alerts)
+
+    def _alert_exogenous_market_regime(alert):
+        decision = alert.get("_regime_decision") or {}
+        cell = decision.get("calibration_cell") or {}
+        market = decision.get("market") or {}
+        source = alert.get("source_row") or {}
+        value = (
+            cell.get("market_regime")
+            or market.get("regime")
+            or _alert_get_any(
+                source,
+                "market_regime", "MarketRegime", "regime_state",
+                "RegimeState", "btc_regime", "BTCRegime",
+                default=None,
+            )
+        )
+        token = str(value or "UNKNOWN").strip().upper() or "UNKNOWN"
+        # Gate colors are decisions, not exogenous regimes.  Never persist
+        # them into performance cells, even for ineligible/legacy rows.
+        if token in {"GREEN", "YELLOW", "RED", "GATE_DISABLED"}:
+            return "UNKNOWN"
+        return token
+
+    _market_red_decision = next(
+        (
+            alert.get("_regime_decision")
+            for alert in email_alerts
+            if (alert.get("_regime_decision") or {}).get("state") == "RED"
+            and (alert.get("_regime_decision") or {}).get("layer") == "market"
+        ),
+        None,
+    )
+    _market_yellow_decision = next(
+        (
+            alert.get("_regime_decision")
+            for alert in email_alerts
+            if (alert.get("_regime_decision") or {}).get("state") == "YELLOW"
+            and (alert.get("_regime_decision") or {}).get("layer") == "market"
+        ),
+        None,
+    )
+    _regime = _market_red_decision or _market_yellow_decision
     _regime_banner = ""
     _regime_shadow_tag = ""
     _regime_score_floor = None
-    if _regime:
 
-        def _regime_shadow_rows(alert_list, reason_tag):
-            return [
-                dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"],
-                     score=a["score"], price=a["price"],
-                     strategy=a.get("strategy", strategy_name),
-                     block_reasons=reason_tag)
-                for a in alert_list
+    def _regime_shadow_rows(alert_list, reason_tag):
+        return [
+            dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"],
+                 score=a["score"], price=a["price"],
+                 strategy=a.get("strategy", strategy_name),
+                 market_regime=_alert_exogenous_market_regime(a),
+                 block_reasons=reason_tag)
+            for a in alert_list
+        ]
+
+    # A market RED decision is directional and therefore row-local. Move only
+    # the affected LONG/unknown rows onto WATCH identities, record their shadow
+    # evidence, and leave an explicit valid SHORT row's trade lease untouched.
+    _market_red_alerts = [
+        alert
+        for alert in email_alerts
+        if (alert.get("_regime_decision") or {}).get("state") == "RED"
+        and (alert.get("_regime_decision") or {}).get("layer") == "market"
+    ]
+    if _market_red_alerts:
+        _market_reason_tag = str(
+            (_market_red_decision or {}).get("reason_tag")
+            or "market_regime_red"
+        )
+        _safe_record_alert_signals(
+            scanner_key,
+            _regime_shadow_rows(_market_red_alerts, _market_reason_tag),
+            mail_class="shadow",
+            channel="shadow",
+        )
+        _market_watch_alerts = []
+        for _alert in _market_red_alerts:
+            _trade_key = str(_alert.get("cooldown_key") or "")
+            if _trade_key:
+                _email_dedupe_release(_trade_key, claimed_at=now)
+            _watch_key = f"{_trade_key}__watch" if _trade_key else ""
+            if _watch_key and _email_dedupe_claim(
+                _watch_key,
+                _alert_dedupe_ttl_seconds(scanner_key),
+                now=now,
+            ):
+                _watch_alert = dict(_alert)
+                _watch_alert["cooldown_key"] = _watch_key
+                _market_watch_alerts.append(_watch_alert)
+
+        if _market_watch_alerts:
+            _watch_rows_html = "".join(
+                "<tr>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(a['ticker']))}</b></td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('strategy') or strategy_name))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('grade') or '-'))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('score') or '-'))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{a.get('trade_plan_html') or ''}</td>"
+                "</tr>"
+                for a in _market_watch_alerts
+            )
+            _watch_cluster_hint = (
+                _cluster_warning_html(_cluster_context_alerts)
+                if market_type == "stocks"
+                else ""
+            )
+            _watch_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+            <h2 style="color:#991b1b">Markt-Regime - nur Beobachtung</h2>
+            <p style="color:#666">{_mail_timestamp_dual()} | Long-Risikogate</p>
+            {(_market_red_decision or {}).get("banner") or ""}
+            {_watch_cluster_hint}
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="background:#fef2f2"><th>Ticker</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Plan</th></tr>
+            {_watch_rows_html}</table></body></html>'''
+            try:
+                _watch_sent = _send_email_alert(
+                    f"Markt-Regime: {len(_market_watch_alerts)} Setup(s) - {strategy_name}",
+                    _watch_body,
+                    trade_horizon="swing",
+                    mail_class="watch",
+                    mail_channel=(
+                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                    ),
+                    delivery_dedupe_keys=[
+                        alert["cooldown_key"] for alert in _market_watch_alerts
+                    ],
+                )
+            except Exception:
+                for _alert in _market_watch_alerts:
+                    _email_dedupe_release(
+                        _alert["cooldown_key"], claimed_at=now
+                    )
+                # Sending aborts the function, so every unaffected trade claim
+                # that has not been attempted must also be released.
+                for _pending in email_alerts:
+                    _pending_key = str(_pending.get("cooldown_key") or "")
+                    if _pending_key:
+                        _email_dedupe_release(_pending_key, claimed_at=now)
+                raise
+            if _watch_sent:
+                for _alert in _market_watch_alerts:
+                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = now
+                    _email_dedupe_mark(_alert["cooldown_key"], now=now)
+            else:
+                for _alert in _market_watch_alerts:
+                    _email_dedupe_release_after_send(
+                        _alert["cooldown_key"], claimed_at=now
+                    )
+        else:
+            _record_email_event(
+                f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+                "skipped",
+                "watch_signal_identity_cooldown",
+            )
+
+        _market_red_ids = {id(alert) for alert in _market_red_alerts}
+        email_alerts = [
+            alert for alert in email_alerts if id(alert) not in _market_red_ids
+        ]
+
+    # A market RED row has already been handled above. Recompute the only
+    # remaining batch-wide market modifier from the still-actionable rows.
+    _market_red_decision = None
+    _market_yellow_decision = next(
+        (
+            alert.get("_regime_decision")
+            for alert in email_alerts
+            if (alert.get("_regime_decision") or {}).get("state") == "YELLOW"
+            and (alert.get("_regime_decision") or {}).get("layer") == "market"
+        ),
+        None,
+    )
+    _regime = _market_yellow_decision
+    if not email_alerts:
+        return
+
+    # Breaker RED is cell-local.  Send each affected cell as its own watch
+    # group and leave all other cells in the actionable trade mail below.
+    if _market_red_decision is None:
+        _breaker_groups: Dict[str, Dict[str, Any]] = {}
+        for _alert in email_alerts:
+            _decision = _alert.get("_regime_decision") or {}
+            if _decision.get("state") != "RED" or _decision.get("layer") != "breaker":
+                continue
+            _cell = _decision.get("calibration_cell") or {}
+            _group_key = str(
+                _decision.get("state_key")
+                or _cell.get("cell_id")
+                or "ineligible_breaker_state"
+            )
+            _group = _breaker_groups.setdefault(
+                _group_key,
+                {"decision": _decision, "alerts": []},
+            )
+            _group["alerts"].append(_alert)
+
+        _breaker_alert_ids = {
+            id(alert)
+            for group in _breaker_groups.values()
+            for alert in group["alerts"]
+        }
+        for _cell_key, _group in _breaker_groups.items():
+            _decision = _group["decision"]
+            _group_alerts = list(_group["alerts"])
+            _reason_tag = str(
+                _decision.get("reason_tag") or "regime_cooldown"
+            )
+            _safe_record_alert_signals(
+                scanner_key,
+                _regime_shadow_rows(_group_alerts, _reason_tag),
+                mail_class="shadow",
+                channel="shadow",
+            )
+
+            _watch_alerts = []
+            for _alert in _group_alerts:
+                _trade_key = str(_alert.get("cooldown_key") or "")
+                if _trade_key:
+                    _email_dedupe_release(_trade_key, claimed_at=now)
+                _watch_key = f"{_trade_key}__watch" if _trade_key else ""
+                if _watch_key and _email_dedupe_claim(
+                    _watch_key,
+                    _alert_dedupe_ttl_seconds(scanner_key),
+                    now=now,
+                ):
+                    _watch_alert = dict(_alert)
+                    _watch_alert["cooldown_key"] = _watch_key
+                    _watch_alerts.append(_watch_alert)
+            if not _watch_alerts:
+                continue
+
+            _watch_cap = int(
+                _decision.get("watch_cap_seconds") or 20 * 3600
+            )
+            _cell_digest = hashlib.sha256(
+                str(_cell_key).encode("utf-8")
+            ).hexdigest()[:20]
+            _watch_cap_key = f"regime_cooldown_watch_{_cell_digest}"
+            if not _email_dedupe_claim(_watch_cap_key, _watch_cap, now=now):
+                for _alert in _watch_alerts:
+                    _email_dedupe_release(
+                        _alert["cooldown_key"], claimed_at=now
+                    )
+                _record_email_event(
+                    f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
+                    "skipped",
+                    f"regime_cooldown_watch_cell_cap:{_cell_digest}",
+                )
+                continue
+
+            _watch_rows_html = "".join(
+                "<tr>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(a['ticker']))}</b></td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('strategy') or strategy_name))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('grade') or '-'))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('score') or '-'))}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{a.get('trade_plan_html') or ''}</td>"
+                "</tr>"
+                for a in _watch_alerts
+            )
+            _watch_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+            <h2 style="color:#991b1b">Performance-Cooldown - nur Beobachtung</h2>
+            <p style="color:#666">{_mail_timestamp_dual()} | Exakte Kalibrierzelle {html.escape(str(_cell_key))}</p>
+            {_decision.get("banner") or ""}
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="background:#fef2f2"><th>Ticker</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Plan</th></tr>
+            {_watch_rows_html}</table></body></html>'''
+            try:
+                _watch_sent = _send_email_alert(
+                    f"Performance-Cooldown: {len(_watch_alerts)} Setup(s) - {strategy_name}",
+                    _watch_body,
+                    trade_horizon="swing",
+                    mail_class="watch",
+                    mail_channel=(
+                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                    ),
+                    delivery_dedupe_keys=[
+                        alert["cooldown_key"] for alert in _watch_alerts
+                    ],
+                )
+            except Exception:
+                for _alert in _watch_alerts:
+                    _email_dedupe_release(
+                        _alert["cooldown_key"], claimed_at=now
+                    )
+                _email_dedupe_release(_watch_cap_key, claimed_at=now)
+                raise
+            if _watch_sent:
+                for _alert in _watch_alerts:
+                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = now
+                    _email_dedupe_mark(_alert["cooldown_key"], now=now)
+                _email_dedupe_mark(_watch_cap_key, now=now)
+            else:
+                for _alert in _watch_alerts:
+                    _email_dedupe_release_after_send(
+                        _alert["cooldown_key"], claimed_at=now
+                    )
+                _email_dedupe_release_after_send(
+                    _watch_cap_key, claimed_at=now
+                )
+
+        if _breaker_alert_ids:
+            email_alerts = [
+                alert for alert in email_alerts
+                if id(alert) not in _breaker_alert_ids
             ]
+            if not email_alerts:
+                return
+
+    if _regime:
 
         _regime_banner = _regime.get("banner") or ""
         if _regime.get("state") == "YELLOW":
@@ -9237,29 +11797,6 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
                 return
             _regime_score_floor = _boosted
-        elif _regime.get("state") == "RED":
-            _regime_shadow_tag = str(_regime.get("reason_tag") or "market_regime_red")
-            # Shadow-Messung sofort — unabhaengig davon, ob die Watch-Mail
-            # (Kanal-Einstellung/SMTP) tatsaechlich rausgeht (Gegenprobe!).
-            _safe_record_alert_signals(
-                scanner_key,
-                _regime_shadow_rows(email_alerts, _regime_shadow_tag),
-                mail_class="shadow", channel="shadow",
-            )
-            if _regime.get("layer") == "breaker":
-                _watch_key = f"regime_cooldown_watch_{scanner_key}"
-                _watch_cap = int(_regime.get("watch_cap_seconds") or 20 * 3600)
-                if _email_dedupe_remaining(_watch_key, _watch_cap, now) > 0:
-                    for a in email_alerts:
-                        _email_dedupe_release(a["cooldown_key"], claimed_at=now)
-                    _record_email_event(
-                        f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
-                        "skipped",
-                        "regime_cooldown_watch_daily_cap",
-                    )
-                    return
-                _email_dedupe_claim(_watch_key, _watch_cap, now=now)
-
     # A ticker can qualify in multiple scanners at the same time.  Do not mail
     # the same open economic trade twice merely because its strategy label
     # differs.  RED-regime watch mails remain useful context and are not trade
@@ -9294,6 +11831,174 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 f"open_equivalent_trade:{equivalent_count}",
             )
             return
+
+    # Live stock rows are deliberately delivered one message at a time.  The
+    # earlier validation protects the regime/dedupe pipeline; this second,
+    # mail-adjacent validation closes the TOCTOU window created by validating a
+    # whole batch before SMTP.  No provider/network work for another row can
+    # occur between this row's final quote/path receipt and its send attempt.
+    if (
+        market_type == "stocks"
+        and not _regime_shadow_tag
+    ):
+        # Compute cross-row exposure context once from the final candidate set.
+        # It is informational and contains no mutable quote, so it can be
+        # copied into every row's mail without reopening the TOCTOU window.
+        batch_cluster_hint = _cluster_warning_html(_cluster_context_alerts)
+        label = "Aktien Pre-Market Radar" if premarket_mail_mode else "Aktien Strategie Swing"
+        score_floor = _PREMARKET_MIN_SCORE if premarket_mail_mode else (
+            _regime_score_floor or _ALERT_MIN_SCORE
+        )
+        horizon_note = (
+            "PRE-MARKET-FRUEHWARNUNG: duenne Liquiditaet, weite Spreads. "
+            "KEIN Market-Einstieg; nur Limit-Orders und kleine Positionsgroesse."
+            if premarket_mail_mode
+            else "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind "
+            "Struktur-Level; nicht als Intraday-Scalp interpretieren."
+        )
+        sent_any = False
+        pending_claims = {
+            str(alert.get("cooldown_key") or "")
+            for alert in email_alerts
+            if str(alert.get("cooldown_key") or "")
+        }
+        for pending_alert in list(email_alerts):
+            source_row = dict(pending_alert.get("source_row") or {})
+            try:
+                validation = _revalidate_stock_strategy_mail_candidate(
+                    source_row,
+                    now_ts=time.time(),
+                    price_session=(
+                        "PREMARKET"
+                        if premarket_mail_mode
+                        else str(market_status.get("session") or "UNKNOWN")
+                    ),
+                )
+            except Exception as exc:
+                print(
+                    "[Alert] mail-adjacent stock revalidation failed closed for "
+                    f"{_extract_alert_ticker(source_row)}: "
+                    f"{redact_sensitive_query_values(exc)}"
+                )
+                validation = {
+                    "ok": False,
+                    "reason": "mail_adjacent_stock_revalidation_exception",
+                }
+            if not validation.get("ok"):
+                reason = str(
+                    validation.get("reason")
+                    or "mail_adjacent_stock_revalidation_failed"
+                )
+                _email_dedupe_release(
+                    pending_alert["cooldown_key"], claimed_at=now
+                )
+                pending_claims.discard(str(pending_alert["cooldown_key"]))
+                _record_email_event(
+                    f"Aktien Strategie Alert - {strategy_name}",
+                    "skipped",
+                    f"mail_adjacent_stock_revalidation:{reason}",
+                )
+                continue
+
+            alert = _alert_with_revalidated_candidate(
+                pending_alert, validation
+            )
+            src = alert.get("source_row") or {}
+            identity_cell = _format_stock_identity_html(alert["ticker"], src)
+            gap_pct = _alert_float(
+                _alert_get_any(src, "Gap_Pct", "gap_pct"), None
+            )
+            gap_suffix = (
+                f'<br><span style="color:#64748b;font-size:11px">Gap {gap_pct:+.1f}% '
+                "(Open vs. Vortagesschluss)</span>"
+                if gap_pct is not None and abs(gap_pct) >= 1.0
+                else ""
+            )
+            rvol_cell = (
+                f'PM ${alert["pm_dollar_vol"] / 1_000_000:.1f}M'
+                if alert.get("premarket") and alert.get("pm_dollar_vol")
+                else f'{alert["rvol"]:.1f}x'
+            )
+            timing_label = html.escape(
+                _format_alert_timing_label(alert.get("entry_quality"), market_type)
+            )
+            row_html = (
+                f'<tr><td style="padding:8px;border-bottom:1px solid #eee">{identity_cell}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert.get("strategy") or strategy_name))}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert.get("grade") or "-"))}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert.get("score") or "-"))}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(alert["price"])}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{alert["change_pct"]:+.1f}%{gap_suffix}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{rvol_cell}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{alert["trade_plan_html"]}</td>'
+                f'<td style="padding:8px;border-bottom:1px solid #eee">{timing_label}</td></tr>'
+            )
+            cluster_hint = batch_cluster_hint
+            body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+            <h2 style="color:#1a73e8">{label} Alert - {html.escape(str(strategy_name))}</h2>
+            <p style="color:#666">{_mail_timestamp_dual()} | Top {len(email_alerts)} von {total_alerts}; Einzelversand 1 Setup ab Score {score_floor}</p>
+            <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
+            {_regime_banner}{cluster_hint}
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <tr style="background:#f5f5f5"><th>Ticker / Unternehmen</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Preis</th><th>Change</th><th>RVOL</th><th>Entry / Stop / TP</th><th>Timing</th></tr>
+            {row_html}</table>
+            <p style="color:#999;font-size:12px;margin-top:20px">Intraday-Trigger sind optional und gehoeren in den separaten Intraday-Modus, nicht in diese Swing-Mail.</p>
+            <p style="color:#999;font-size:12px;margin-top:20px">Finaler ausfuehrbarer Bid/Ask und Marktpfad wurden unmittelbar vor diesem Einzelversand erneut validiert.</p>
+            </body></html>'''
+            signal_row = dict(
+                src,
+                ticker=alert["ticker"],
+                grade=alert["grade"],
+                score=alert["score"],
+                price=alert["price"],
+                strategy=alert.get("strategy", strategy_name),
+                market_regime=_alert_exogenous_market_regime(alert),
+            )
+            try:
+                sent = _send_email_alert(
+                    f"{label}: Top {len(email_alerts)} von {total_alerts} "
+                    f"(Einzelversand {alert['ticker']}) - {strategy_name}",
+                    body,
+                    trade_horizon="swing",
+                    mail_class=("watch" if _regime_shadow_tag else "swing_trade"),
+                    telegram_text=_safe_format_telegram_rows([signal_row]),
+                    mail_channel=(
+                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                    ),
+                    tracking_scanner=("" if _regime_shadow_tag else scanner_key),
+                    tracking_rows=(None if _regime_shadow_tag else [signal_row]),
+                    tracking_scope=("watch" if _regime_shadow_tag else "entry"),
+                    delivery_dedupe_keys=[alert["cooldown_key"]],
+                )
+            except Exception:
+                _email_dedupe_release(
+                    alert["cooldown_key"], claimed_at=now
+                )
+                pending_claims.discard(str(alert["cooldown_key"]))
+                for unattempted_key in sorted(pending_claims):
+                    if unattempted_key != str(alert["cooldown_key"]):
+                        _email_dedupe_release(
+                            unattempted_key, claimed_at=now
+                        )
+                pending_claims.clear()
+                raise
+            if sent:
+                sent_any = True
+                _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
+                _email_dedupe_mark(alert["cooldown_key"], now=now)
+                pending_claims.discard(str(alert["cooldown_key"]))
+            else:
+                _email_dedupe_release_after_send(
+                    alert["cooldown_key"], claimed_at=now
+                )
+                pending_claims.discard(str(alert["cooldown_key"]))
+        if not sent_any:
+            _record_email_event(
+                f"Aktien Strategie Alert - {strategy_name}",
+                "skipped",
+                "no_mail_adjacent_revalidated_rows",
+            )
+        return
 
     rows = ""
     for a in email_alerts:
@@ -9388,9 +12093,31 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Nur Score >= {_score_floor_shown}, Grade S/A/A+ und Alert-Gates; 8h Cooldown pro Ticker. {trigger_note}</p>
     </body></html>'''
-    _signal_rows = [dict(a.get("source_row") or {}, ticker=a["ticker"], grade=a["grade"], score=a["score"], price=a["price"], strategy=a.get("strategy", strategy_name)) for a in email_alerts]
+    _signal_rows = [
+        dict(
+            a.get("source_row") or {},
+            ticker=a["ticker"],
+            grade=a["grade"],
+            score=a["score"],
+            price=a["price"],
+            strategy=a.get("strategy", strategy_name),
+            market_regime=_alert_exogenous_market_regime(a),
+        )
+        for a in email_alerts
+    ]
     try:
-        sent = _send_email_alert(f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}", body, trade_horizon="swing", mail_class=("watch" if _regime_shadow_tag else "swing_trade"), telegram_text=_safe_format_telegram_rows(_signal_rows), mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"))  # AUDIT H-3 / H-2 (Strategie-Sweep); K-2b: sichtbarer SWING-Betreff, Signal-Tracking bleibt unten trade; 2026-07-29: PM-Radar eigener Kanal; 2026-08-01 F-14: ROT => watch-Klasse (👁 WATCH, kein Telegram-Mirror, Tracking shadow statt trade)
+        sent = _send_email_alert(
+            f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}",
+            body,
+            trade_horizon="swing",
+            mail_class=("watch" if _regime_shadow_tag else "swing_trade"),
+            telegram_text=_safe_format_telegram_rows(_signal_rows),
+            mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"),
+            tracking_scanner=("" if _regime_shadow_tag else scanner_key),
+            tracking_rows=(None if _regime_shadow_tag else _signal_rows),
+            tracking_scope=("watch" if _regime_shadow_tag else "entry"),
+            delivery_dedupe_keys=[alert["cooldown_key"] for alert in email_alerts],
+        )
     except Exception:
         for alert in email_alerts:
             _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
@@ -9402,11 +12129,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 _email_dedupe_mark(alert["cooldown_key"], now=now)
         # F-14: Bei ROT ist die Shadow-Messung bereits erfolgt (send-unabhaengig)
         # — trade-Tracking entfaellt hier bewusst (watch ist kein Trade-Signal).
-        if not _regime_shadow_tag:
-            _safe_record_alert_signals(scanner_key, _signal_rows)
     else:
         for alert in email_alerts:
-            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+            _email_dedupe_release_after_send(alert["cooldown_key"], claimed_at=now)
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -9653,6 +12378,73 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     return bool(sent)
 
 
+def _revalidate_new_listing_mail_candidate(
+    alert: Dict[str, Any],
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Apply the shared causal gate to one New-Listing SHORT setup."""
+    item = dict(alert or {})
+    source_row = dict(item.get("source_row") or {})
+    candidate = {
+        **source_row,
+        "symbol": source_row.get("symbol") or item.get("contract_symbol") or item.get("symbol"),
+        "contract_symbol": (
+            source_row.get("contract_symbol")
+            or source_row.get("symbol")
+            or item.get("contract_symbol")
+            or item.get("symbol")
+        ),
+        "venue": source_row.get("venue") or source_row.get("exchange") or item.get("exchange"),
+        "direction": "SHORT",
+        "entry": item.get("entry"),
+        "stop": item.get("stop"),
+        "tp1": item.get("tp1"),
+        "tp2": item.get("tp2"),
+        "price": source_row.get("price") or item.get("entry"),
+    }
+    validation = _revalidate_crypto_trade_mail_candidate(
+        candidate,
+        direction="SHORT",
+        now_ts=now_ts,
+    )
+    if not validation.get("ok"):
+        return validation
+    validated = validation["candidate"]
+    spread_bps = _alert_float(validated.get("final_quote_spread_bps"))
+    depth_50 = _alert_float(validated.get("final_quote_depth_50bps_min_usd"))
+    if spread_bps is None or spread_bps > _NEW_LISTING_FINAL_MAX_SPREAD_BPS:
+        return {"ok": False, "reason": "final_execution_spread_too_wide"}
+    if depth_50 is None or depth_50 < _NEW_LISTING_FINAL_MIN_DEPTH_50BPS_USD:
+        return {"ok": False, "reason": "final_execution_depth_too_thin"}
+    current = _alert_float(validated.get("price"))
+    stop = _alert_float(validated.get("stop"))
+    tp1 = _alert_float(validated.get("tp1"))
+    tp2 = _alert_float(validated.get("tp2"))
+    if any(value is None for value in (current, stop, tp1, tp2)):
+        return {"ok": False, "reason": "final_trade_levels_missing"}
+    live_risk = stop - current
+    if live_risk <= 0:
+        return {"ok": False, "reason": "final_risk_invalid"}
+    live_rr = (0.5 * (current - tp1) + 0.5 * (current - tp2)) / live_risk
+    if live_rr < _NEW_LISTING_MIN_ALERT_RR:
+        return {"ok": False, "reason": "final_live_rr_too_low"}
+    planned_entry = item.get("entry")
+    validated.update({
+        "planned_entry": planned_entry,
+        "entry": current,
+        "rr_effective": round(live_rr, 3),
+        "strategy": item.get("setup") or source_row.get("setup_type") or "new_listing_dump",
+        "setup_key": item.get("cooldown_key"),
+    })
+    item.update({
+        "planned_entry": planned_entry,
+        "entry": current,
+        "rr": round(live_rr, 3),
+        "source_row": validated,
+    })
+    return {"ok": True, "candidate": item}
+
+
 def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     """Mail S/A active Pump-&-Dump short signals from the FastAPI pipeline."""
     signals = payload.get("signals", []) if isinstance(payload, dict) else []
@@ -9672,7 +12464,28 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     for entry in signals:
         if not isinstance(entry, dict):
             continue
+        entry = dict(entry)
         sig = entry.get("signal", {}) or {}
+        if isinstance(sig, dict):
+            entry.setdefault("direction", "short")
+            entry.setdefault("strategy", sig.get("setup_type") or "new_listing_dump")
+            entry.setdefault("_alert_horizon", "swing")
+            entry.setdefault("entry", sig.get("entry"))
+            entry.setdefault("stop", sig.get("stop_loss", sig.get("stop")))
+            entry.setdefault("tp1", sig.get("tp1"))
+            entry.setdefault("tp2", sig.get("tp2"))
+            entry.setdefault(
+                "timeframe",
+                (sig.get("pump_data") or {}).get("micro_timeframe", "5m")
+                if isinstance(sig.get("pump_data"), dict)
+                else "5m",
+            )
+            if entry.get("exchange") and (entry.get("symbol") or sig.get("symbol")):
+                entry.setdefault(
+                    "stable_ref",
+                    f"{_normalize_crypto_exchange(entry.get('exchange'))}:"
+                    f"{str(entry.get('symbol') or sig.get('symbol')).upper()}",
+                )
         fields = _extract_new_listing_signal_fields(entry)
         state = _classify_alert_candidate("new_listing", entry, now)
         if not state.get("alertable_now"):
@@ -9680,7 +12493,8 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         symbol = _display_crypto_contract_symbol(entry.get("symbol") or sig.get("symbol") or "")
-        cooldown_key = state.get("cooldown_key") or f"new_listing_{symbol}"
+        signal_identity_key = state.get("cooldown_key") or f"new_listing_{symbol}"
+        cooldown_key = f"{signal_identity_key}__trade"
         pump = sig.get("pump_data", {}) if isinstance(sig.get("pump_data", {}), dict) else {}
         alerts.append({
             "symbol": symbol,
@@ -9702,11 +12516,27 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "btc_context": pump.get("btc_short_context", sig.get("btc_short_context", "")),
             "cooldown_key": cooldown_key,
             "direction": "short",
+            "contract_symbol": entry.get("symbol") or sig.get("symbol") or "",
             "source_row": {
                 **sig,
                 "symbol": entry.get("symbol") or sig.get("symbol") or "",
                 "ticker": symbol,
                 "exchange": entry.get("exchange", ""),
+                "venue": entry.get("exchange", ""),
+                "contract_symbol": entry.get("symbol") or sig.get("symbol") or "",
+                "price": (
+                    pump.get("micro_current_price")
+                    or pump.get("current_price")
+                    or sig.get("entry")
+                ),
+                "scan_price_observed_at": (
+                    pump.get("micro_candle_closed_at")
+                ),
+                "scan_price_source": (
+                    f"{entry.get('exchange', '')}:closed_5m_micro"
+                    if pump.get("micro_candle_closed_at")
+                    else ""
+                ),
                 "direction": "short",
             },
         })
@@ -9727,63 +12557,95 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         )
         return
 
-    email_alerts = [
-        alert for alert in alerts[:10]
-        if _email_dedupe_claim(
-            alert["cooldown_key"],
+    sent_any = False
+    claimed_any = False
+    for pending_alert in alerts[:10]:
+        claim_time = time.time()
+        dedupe_key = str(pending_alert.get("cooldown_key") or "")
+        if not dedupe_key or not _email_dedupe_claim(
+            dedupe_key,
             _alert_dedupe_ttl_seconds("new_listing"),
-            now=now,
+            now=claim_time,
+        ):
+            suppressed["row_claimed_by_parallel_sender"] = (
+                suppressed.get("row_claimed_by_parallel_sender", 0) + 1
+            )
+            continue
+        claimed_any = True
+        try:
+            validation = _revalidate_new_listing_mail_candidate(pending_alert)
+        except Exception as exc:
+            _email_dedupe_release(dedupe_key, claimed_at=claim_time)
+            suppressed["final_revalidation_exception"] = (
+                suppressed.get("final_revalidation_exception", 0) + 1
+            )
+            print(
+                "[New Listing] final revalidation failed: "
+                f"{_sanitized_exception_text(exc)}"
+            )
+            continue
+        if not validation.get("ok"):
+            _email_dedupe_release(dedupe_key, claimed_at=claim_time)
+            reason = str(validation.get("reason") or "final_revalidation_failed")
+            suppressed[reason] = suppressed.get(reason, 0) + 1
+            continue
+        alert = validation["candidate"]
+        row = (
+            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{html.escape(str(alert["symbol"]))}</b></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert["exchange"]))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert["grade"]))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert["setup"] or alert["timing"]))}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(alert["entry"])}<br><span style="color:#64748b">Live bid</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(alert["stop"])}<br><span style="color:#999;font-size:11px">{html.escape(str(alert["stop_model"]))}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(alert["tp1"])} / {_format_alert_price(alert["tp2"])}</td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{alert["rr"]}R<br><span style="color:#999;font-size:11px">Micro {alert["micro_score"]}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {_fmt_pct(alert["btc_change"])}<br>Coin {_fmt_pct(alert["coin_change"])}<br>Div {_fmt_pct(alert["btc_divergence"])}</td></tr>'
         )
-    ]
-    if not email_alerts:
+        body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
+        <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
+        <p style="color:#666">{_mail_timestamp_dual()} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
+        <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
+        <th style="padding:8px;text-align:left">Timing</th><th style="padding:8px;text-align:left">Entry</th>
+        <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
+        <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC</th></tr>{row}</table>
+        <p style="color:#999;font-size:12px;margin-top:20px">Ein Wire und ein Tracker-Intent nur fuer dieses Setup. Die Quote ist der ausfuehrbare Bid; sie ist kein behaupteter Fill.</p>
+        </body></html>'''
+        try:
+            sent = _send_email_alert(
+                f"Pump & Dump SHORT: {alert['symbol']}",
+                body,
+                trade_horizon="swing",
+                mail_class="trade",
+                telegram_text=_safe_format_telegram_rows([alert]),
+                mail_channel="new_listing",
+                tracking_scanner="new_listing",
+                tracking_rows=[alert["source_row"]],
+                delivery_dedupe_keys=[dedupe_key],
+            )
+        except Exception:
+            _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
+            raise
+        if sent:
+            sent_any = True
+            sent_at = time.time()
+            _EMAIL_COOLDOWN[dedupe_key] = sent_at
+            _email_dedupe_mark(dedupe_key, now=sent_at)
+        else:
+            _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
+    if not claimed_any:
         _record_email_event(
             "Pump & Dump SHORT Alert",
             "skipped",
             "all_short_rows_claimed_by_parallel_sender",
         )
-        return
-
-    rows = ""
-    for a in email_alerts:
-        rows += (
-            f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{a["symbol"]}</b></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["exchange"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["grade"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["setup"] or a["timing"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["entry"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["stop"]}<br><span style="color:#999;font-size:11px">{a["stop_model"]}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">${a["tp1"]} / ${a["tp2"]}</td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rr"]}R<br><span style="color:#999;font-size:11px">Micro {a["micro_score"]}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">BTC {_fmt_pct(a["btc_change"])}<br>Coin {_fmt_pct(a["coin_change"])}<br>Div {_fmt_pct(a["btc_divergence"])}</td></tr>'
+    elif not sent_any:
+        _record_email_event(
+            "Pump & Dump SHORT Alert",
+            "skipped",
+            f"no_finally_executable_setups:{suppressed}",
         )
-    body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
-    <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | {len(email_alerts)} aktive S/A Signale ab Score {_ALERT_MIN_SCORE}</p>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-    <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
-    <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
-    <th style="padding:8px;text-align:left">Timing</th><th style="padding:8px;text-align:left">Entry</th>
-    <th style="padding:8px;text-align:left">Stop</th><th style="padding:8px;text-align:left">TP1/TP2</th>
-    <th style="padding:8px;text-align:left">R</th><th style="padding:8px;text-align:left">BTC</th></tr>
-    {rows}</table>
-    <p style="color:#999;font-size:12px;margin-top:20px">Nur echte New-Listing-Dump JETZT-SHORTEN Signale: Score >= {_ALERT_MIN_SCORE}, New-Listing-Quelle + gueltiges Listing-Alter, Timing-Quality >=4, Safety OK, erster Crack/Rejection bestaetigt, kein Pump-Continuation-Risk, TP-Zonen nicht verpasst, R:R >= {_NEW_LISTING_MIN_ALERT_RR}; Active-Pumps bleiben Beobachtung ohne Trade-Mail; 8h Cooldown pro Coin.</p>
-    </body></html>'''
-    try:
-        sent = _send_email_alert(f"Pump & Dump: {len(email_alerts)} SHORT Top-Signal(e)", body, trade_horizon="swing", mail_class="trade", telegram_text=_safe_format_telegram_rows(email_alerts), mail_channel="new_listing")  # AUDIT H-3 / H-2
-    except Exception:
-        for alert in email_alerts:
-            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
-        raise
-    if sent:
-        for alert in email_alerts:
-            _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
-            _email_dedupe_mark(alert["cooldown_key"], now=now)
-        _safe_record_alert_signals(
-            "new_listing", [alert["source_row"] for alert in email_alerts]
-        )
-    else:
-        for alert in email_alerts:
-            _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -12341,7 +15203,7 @@ def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]
         else:
             print(f"[Strategy Scan] full snapshot API error: {full_resp.status_code}")
     except Exception as e:
-        print(f"[Strategy Scan] full snapshot error: {e}")
+        print(f"[Strategy Scan] full snapshot error: {_sanitized_exception_text(e)}")
 
     for endpoint in ("gainers", "losers"):
         try:
@@ -12352,7 +15214,10 @@ def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]
                 continue
             _add_tickers(resp.json().get("tickers", []), endpoint)
         except Exception as e:
-            print(f"[Strategy Scan] {endpoint} error: {e}")
+            print(
+                f"[Strategy Scan] {endpoint} error: "
+                f"{_sanitized_exception_text(e)}"
+            )
 
     print(f"[Strategy Scan] {strategy_name}: Snapshot universe {len(merged)} Ticker")
     return list(merged.values())
@@ -14092,7 +16957,7 @@ def _bi_background_scan_wrapper(direction: str) -> None:
     except Exception as e:
         print(f"BI background scan error ({direction}): {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -14206,7 +17071,7 @@ def _biotech_scan_wrapper() -> None:
     except Exception as e:
         print(f"Biotech background scan error: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -14338,8 +17203,19 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
 
                     prev_close_regular = float(prev.get("c", 0) or 0)
                     day_close = float(day.get("c", 0) or 0)
-                    last_price = float((t.get("lastTrade", {}) or {}).get("p", 0) or 0)
-                    regular_price = day_close or last_price
+                    _last_trade_payload = t.get("lastTrade", {}) or {}
+                    last_price = float(_last_trade_payload.get("p", 0) or 0)
+                    # Tie the causal anchor to the selected live trade whenever
+                    # possible. A newer quote-level `updated` value must not
+                    # silently shorten the path after an older last trade.
+                    _snapshot_observed_ts = _stock_market_timestamp_from(
+                        _last_trade_payload,
+                        ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
+                    )
+                    # Price and timestamp must come from the same executable
+                    # market object. Never timestamp a day.c aggregate with a
+                    # newer lastTrade.t value.
+                    regular_price = last_price
                     use_ext_price = _use_extended_prices and last_price > 0 and day_close > 0
 
                     if use_ext_price:
@@ -14716,6 +17592,15 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Upper_Wick_Pct": _score_meta.get("upper_wick_pct"),
                         "Lower_Wick_Pct": _score_meta.get("lower_wick_pct"),
                         "Signal_Direction": _score_meta.get("direction"),
+                        # Causal anchor for the final pre-mail market-path
+                        # revalidation. A missing timestamp remains missing and
+                        # therefore blocks later; no scan wall-clock is invented.
+                        "scan_price_observed_at": (
+                            _stock_market_timestamp_iso(_snapshot_observed_ts)
+                            if _snapshot_observed_ts is not None
+                            else None
+                        ),
+                        "scan_price_source": "polygon_snapshot_last_trade",
                         "Extended_Hours": use_ext_price,
                         "Regular_Gap_Pct": round(regular_gap_pct, 2),
                         "base_score": _strat_score,
@@ -14835,7 +17720,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         _remove_partial_cache(_strat_cache)
         print(f"[Strategy Scan] Fehler: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -14873,7 +17758,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     except Exception as e:
         print(f"[Strategy Sweep] Fehler: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -15081,7 +17966,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         _remove_partial_cache(_strat_cache)
         print(f"[Crypto Strategy] Fehler: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -15376,7 +18261,7 @@ def _turtle_scan_wrapper() -> None:
     except Exception as e:
         print(f"[Turtle] Scanner Fehler: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -15799,9 +18684,9 @@ def _bear_scan_wrapper() -> None:
                 }
                 print(f"[Bear] Final breakdown_stocks: {len(losers[:30])} (excluded_non_common={_excluded_non_stock}, source={_common_stock_source})")
         except Exception as e:
-            print(f"Breakdown stocks error: {e}")
-            result.setdefault("diagnostics", {})["breakdown_error"] = str(e)
-            raise RuntimeError(f"Breakdown stock scan failed: {e}") from e
+            print(f"Breakdown stocks error: {_sanitized_exception_text(e)}")
+            result.setdefault("diagnostics", {})["breakdown_error"] = "breakdown_scan_failed"
+            raise RuntimeError("Breakdown stock scan failed") from e
 
         # Save the latest scan snapshot, including diagnostics when no stock passes filters.
         result.setdefault("diagnostics", {})["breakdown_count"] = len(result.get("breakdown_stocks", []))
@@ -15978,6 +18863,61 @@ def _bear_scan_wrapper() -> None:
                     f"<td style='padding:4px 8px;text-align:right'>{bd.get('entry_quality','?')}</td>"
                     f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
                 )
+            # Final market-time validation also applies to the separately built
+            # Bear summary. It must never bypass the generic stock-mail gate.
+            if len(_bear_alert_rows) > 1:
+                _record_email_event(
+                    "Bear Scanner Alert",
+                    "suppressed",
+                    f"mail_adjacent_single_candidate:{len(_bear_alert_rows) - 1}_deferred",
+                )
+                _bear_alert_rows = _bear_alert_rows[:1]
+            _revalidated_bear_rows: List[Dict[str, Any]] = []
+            for _bear_row in _bear_alert_rows:
+                _anchored_bear = _conservative_regular_session_anchor(
+                    dict(_bear_row), now_ts=time.time()
+                )
+                _bear_validation = _revalidate_stock_strategy_mail_candidate(
+                    _anchored_bear,
+                    now_ts=time.time(),
+                    price_session="US_REGULAR",
+                    scanner_name="bear",
+                )
+                if _bear_validation.get("ok"):
+                    _revalidated_bear_rows.append(
+                        dict(_bear_validation.get("candidate") or {})
+                    )
+                else:
+                    _record_email_event(
+                        "Bear Scanner Alert",
+                        "skipped",
+                        "final_stock_revalidation:"
+                        + str(
+                            _bear_validation.get("reason")
+                            or "final_stock_revalidation_failed"
+                        ),
+                    )
+            _bear_alert_rows = _revalidated_bear_rows
+            _bear_summary_tickers = [
+                str(row.get("ticker") or row.get("Ticker") or "").upper()
+                for row in _bear_alert_rows
+                if str(row.get("ticker") or row.get("Ticker") or "").strip()
+            ]
+            _bd_rows = []
+            for bd in _bear_alert_rows:
+                _gr = bd.get("grade", "?")
+                _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
+                _bd_rows.append(
+                    f"<tr><td style='padding:4px 8px;font-weight:bold;color:{_gc}'>{_gr}</td>"
+                    f"<td style='padding:4px 8px;font-weight:bold'>{_format_stock_identity_html(bd.get('ticker','?'), bd)}</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>${bd.get('price',0):.2f}</td>"
+                    f"<td style='padding:4px 8px;text-align:right;color:#dc2626'>{bd.get('change_pct',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('rvol',0):.1f}x</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('ma20_dist',0):.1f}%</td>"
+                    f"<td style='padding:4px 8px;text-align:left'>{_format_alert_plan_html(bd)}</td>"
+                    f"<td style='padding:4px 8px;text-align:right'>{bd.get('entry_quality','?')}</td>"
+                    f"<td style='padding:4px 8px;text-align:right;font-weight:bold'>{bd.get('score',0)}</td></tr>"
+                )
             _total_signals = len(_bd_rows)
             if _total_signals > 0 and not _stock_bear_mail_allowed:
                 _record_email_event(
@@ -16025,6 +18965,9 @@ def _bear_scan_wrapper() -> None:
                             mail_class="trade",  # AUDIT H-2
                             telegram_text=_safe_format_telegram_rows(_bear_alert_rows),
                             mail_channel="bear",
+                            tracking_scanner="bear",
+                            tracking_rows=_bear_alert_rows,
+                            delivery_dedupe_keys=[_bear_ck],
                         )
                     except Exception:
                         _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
@@ -16035,9 +18978,8 @@ def _bear_scan_wrapper() -> None:
                         _email_dedupe_mark(_bear_ck)
                         for _ticker in _bear_summary_tickers:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
-                        _safe_record_alert_signals("bear", _bear_alert_rows)
                     else:
-                        _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
+                        _email_dedupe_release_after_send(_bear_ck, claimed_at=_bear_claim_now)
             elif result.get("breakdown_stocks"):
                 _record_email_event(
                     "Bear Scanner Alert",
@@ -16048,9 +18990,8 @@ def _bear_scan_wrapper() -> None:
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
-        print(f"Bear scanner error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Bear scanner error: {_sanitized_exception_text(e)}")
+        _print_sanitized_traceback()
         raise
 
 
@@ -16135,10 +19076,27 @@ def _scan_runtime_state(
     }
 
 
+def _public_scan_error_code(value: Any) -> Optional[str]:
+    """Return a non-sensitive UI error class, never raw exception text."""
+    if not value:
+        return None
+    text_value = str(value)
+    lowered = text_value.lower()
+    if "zeitbudget" in lowered or "timeout" in lowered:
+        return "scan_timeout"
+    if "parallelstart" in lowered:
+        return "scan_already_running"
+    if "fresh cache" in lowered or "readable cache" in lowered:
+        return "scan_cache_publish_failed"
+    if "partial cache" in lowered:
+        return "scan_partial_cache"
+    return "scan_failed"
+
+
 def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, Any]:
     """Expose whether a scanner cache is fresh enough for the UI."""
     cache_path = SCAN_CACHE_MAP.get(scan_name)
-    runtime_error = scan_state.get("last_error")
+    runtime_error = _public_scan_error_code(scan_state.get("last_error"))
     runtime = _scan_runtime_state(scan_name, scan_state)
 
     def _with_runtime(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -16189,13 +19147,14 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
             "scan_error": runtime_error,
         })
     except Exception as exc:
+        print(f"[Health] cache metadata {scan_name}: {_sanitized_exception_text(exc)}")
         return _with_runtime({
             "cache_file": cache_file,
             "cache_exists": True,
             "cache_age_seconds": None,
             "cache_stale": True,
             "cache_health": "error",
-            "cache_error": str(exc),
+            "cache_error": "cache_metadata_unavailable",
         })
 
 
@@ -16559,11 +19518,10 @@ def _run_scan_safe(name, func, timeout_min=None):
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} DONE in {elapsed}s")
         except Exception as e:
-            error_text = f"{type(e).__name__}: {e}"
+            error_text = _sanitized_exception_text(e)
             elapsed = round(time.time() - start_t, 1)
-            print(f"[Scheduler] {name} ERROR after {elapsed}s: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}")
+            _print_sanitized_traceback()
         finally:
             recovery = None
             with _scan_lock:
@@ -16616,31 +19574,22 @@ def _run_scan_safe(name, func, timeout_min=None):
     return True
 
 
-# ── Scan-Ownership (H-9 Folge-Fix): bg_service ist Owner der schweren Stock-Scanner ──
-# bg_service.py BG_DEFAULT_SCAN_SET = {bi_long, bi_short, biotech}
-# (Email-Alerts + feste ET-Zeitfenster laufen dort). Der api-SCHEDULER skippt
-# sie per Default, damit nicht beide Dienste dieselben schweren Polygon-Scans
-# parallel fahren (Doppel-API-Last; Mails waren per geteiltem Dedupe schon
-# sicher). New Listing bleibt bewusst API-owned: der BG-Service war live stale
-# und Crypto-New-Listing-Mails dürfen nicht still an einem zweiten Dienst hängen.
-# Manuelle Scans (POST /api/scan, /api/bi-scan, /api/biotech-scan,
-# /api/new-listing-scan) sind NIE betroffen — nur der Scheduler skippt.
-# ENV API_SCAN_SKIP_BG_OWNED="0" stellt das alte Verhalten wieder her
-# (z.B. wenn tradingbot-bg nicht laeuft).
-_BG_OWNED_SCANNERS = frozenset({"bi_long", "bi_short", "biotech"})
+# ── Scan-Ownership (13.08.2026): Entry-Scanner sind API-owned ───────────────
+# Nur api.py besitzt finale Markt-Revalidierung und Delivery-Intent. Der alte
+# BG-Entry-Mailpfad ist fail-closed; BI Long/Short und Biotech laufen deshalb
+# ebenfalls seriell im API-Scheduler. Der BG-Dienst bleibt Owner fuer
+# Tracker-Evaluation, Folgeupdates und Outbox, nicht fuer neue Entry-Signale.
+_BG_OWNED_SCANNERS = frozenset()
 
 
 def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = None) -> bool:
-    """True, wenn der api-SCHEDULER diesen Scanner ueberspringen soll (pure, testbar).
+    """Der API-Scheduler skippt keinen kanonischen Entry-Scanner.
 
-    Default (API_SCAN_SKIP_BG_OWNED unset oder "1"): die 3 bg-owned Scanner
-    werden geskippt; "0" = altes Verhalten (api scannt mit).
-    Scanner ausserhalb von _BG_OWNED_SCANNERS werden NIE geskippt.
+    Nur api.py besitzt die finale Markt-Revalidierung und den dauerhaften
+    Delivery-Intent. ``env_value`` bleibt als kompatibler Aufrufparameter,
+    kann den unsicheren alten BG-Owner aber nicht reaktivieren.
     """
-    if scanner_name not in _BG_OWNED_SCANNERS:
-        return False
-    raw = env_value if env_value is not None else os.environ.get("API_SCAN_SKIP_BG_OWNED", "1")
-    return _alert_bool(raw, True)
+    return False
 
 
 def _scheduler_loop():
@@ -17185,6 +20134,21 @@ async def serve_smart_money_page():
         return response
     return HTMLResponse(content="<h1>Smart-Money-Radar</h1><p>Seite nicht gefunden</p>",
                         status_code=404)
+
+
+@app.get("/smart_money.js")
+async def serve_smart_money_script():
+    """Serve the CSP-compatible external radar renderer."""
+    script_path = os.path.join(_FRONTEND_DIR, "smart_money.js")
+    if not os.path.exists(script_path):
+        return Response(status_code=404)
+    with open(script_path, "r", encoding="utf-8") as script_file:
+        response = Response(
+            content=script_file.read(),
+            media_type="application/javascript",
+        )
+    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 # ══════════════════════════════════════════════════════════════
@@ -17850,8 +20814,9 @@ async def api_commercial_readiness():
         "bi_long", "bi_short", "biotech", "crash_monitor", "strategies",
         "bear_scan", "btc_divergence", "new_listing", "orb",
     }
-    api_owned_scans = {"crash_monitor", "strategies", "bear_scan", "btc_divergence", "new_listing", "orb"}
-    bg_default_scans = {"bi_long", "bi_short", "biotech"}
+    api_owned_scans = set(bg_all_scans)
+    required_bi_scans = {"bi_long", "bi_short", "biotech"}
+    bg_default_scans = set()
     bg_raw = str(os.environ.get("BG_SCAN_SET", "") or "").strip().lower()
     requested_bg_scans = set()
     if not bg_raw or bg_raw == "default":
@@ -17867,10 +20832,10 @@ async def api_commercial_readiness():
             "BG_SCAN_SET requests API-owned scanners: " + ", ".join(invalid_bg_overlap)
         )
     api_active_bi_scans = {
-        name for name in bg_default_scans if not _api_scheduler_should_skip(name)
+        name for name in required_bi_scans if not _api_scheduler_should_skip(name)
     }
     duplicate_bi_owners = sorted(bg_active_scans & api_active_bi_scans)
-    missing_bi_owners = sorted(bg_default_scans - (bg_active_scans | api_active_bi_scans))
+    missing_bi_owners = sorted(required_bi_scans - (bg_active_scans | api_active_bi_scans))
     if duplicate_bi_owners:
         critical.append(
             "Duplicate API/background ownership for scanners: " + ", ".join(duplicate_bi_owners)
@@ -17975,6 +20940,7 @@ async def api_commercial_readiness():
 @app.get("/api/signal-performance")
 def api_signal_performance(
     days: int = Query(30),
+    mature_only: bool = Query(True),
     authorization: Optional[str] = Header(None),
 ):
     """Hit-Rate/Outcome-Auswertung der versendeten Trade-Signale.
@@ -17985,6 +20951,11 @@ def api_signal_performance(
     Middleware serverseitig, Basic bekommt dort 403 upgrade_required.
     `days` wird auf 1..365 geklemmt (Default 30, UI bietet 7/30/90) —
     Clamp statt Query(ge/le)-422, damit auch direkte Aufrufe sauber sind.
+    `mature_only=true` ist der ehrliche Default fuer voll beobachtete
+    Kohorten; false ist ein expliziter Diagnoseblick auf unreife Signale.
+    Additive Tracker-Segmente (cohort, per_strategy, per_direction,
+    per_code_revision, per_fill_evidence_mode und segments) werden
+    unveraendert an den Client durchgereicht.
     Datenbasis: modules/signal_tracker — record beim Mail-Versand hier in
     api.py, Evaluierung offener Signale laeuft stündlich in bg_service.
     """
@@ -18010,7 +20981,10 @@ def api_signal_performance(
     except (TypeError, ValueError):
         days_clamped = 30  # direkter Funktionsaufruf ohne FastAPI-Parsing
     days_clamped = max(1, min(365, days_clamped))
-    return load_performance_summary(days=days_clamped)
+    return load_performance_summary(
+        days=days_clamped,
+        mature_only=bool(mature_only),
+    )
 
 
 @app.get("/api/auth/plans")
@@ -18256,18 +21230,48 @@ def _build_system_health() -> Dict[str, Any]:
                 **cache,
             }
 
+    with _STOCK_QUOTE_CAPABILITY_LOCK:
+        quote_capability = dict(_STOCK_QUOTE_CAPABILITY)
+    capability_checked_at = quote_capability.get("checked_at")
+    capability_age_seconds: Optional[int] = None
+    if capability_checked_at:
+        try:
+            capability_dt = datetime.fromisoformat(
+                str(capability_checked_at).replace("Z", "+00:00")
+            )
+            if capability_dt.tzinfo is None:
+                capability_dt = capability_dt.replace(tzinfo=timezone.utc)
+            capability_age_seconds = max(
+                0,
+                int((datetime.now(timezone.utc) - capability_dt).total_seconds()),
+            )
+        except (TypeError, ValueError):
+            capability_age_seconds = None
+    quote_capability["age_seconds"] = capability_age_seconds
+    quote_capability_verified = bool(
+        quote_capability.get("status") == "verified_realtime_quote"
+        and capability_age_seconds is not None
+        and capability_age_seconds <= 900
+    )
+
     api_keys = {
         "market_data": bool(POLYGON_KEY),
+        "market_data_trade_quotes": quote_capability_verified,
         "catalyst_data": bool(BPIQ_API_KEY),
         "ai_assistant": bool(ANTHROPIC_API_KEY),
     }
     email_alerts = _email_alert_status()
-    email_pipeline = _email_pipeline_summary()
+    email_pipeline = _email_pipeline_summary(public=True)
 
     warnings = []
     critical = []
     if not api_keys["market_data"]:
         critical.append("Market-Data-Zugang fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
+    elif not quote_capability_verified:
+        warnings.append(
+            "Realtime-Bid/Ask-Faehigkeit ist nicht aktuell verifiziert - "
+            "Aktien-Trade-Mails bleiben bis zu einem frischen Quote-Nachweis gesperrt"
+        )
     if not email_alerts["configured"]:
         warnings.append("Email-Alerts sind nicht konfiguriert - GMAIL_USER/GMAIL_APP_PASSWORD fehlen")
     if not _scheduler_running:
@@ -18285,6 +21289,11 @@ def _build_system_health() -> Dict[str, Any]:
         warnings.append("Mail-Outbox ist nicht verfuegbar - fehlgeschlagene Mails koennen verloren gehen")
     if int(outbox.get("dead") or 0) > 0:
         warnings.append(f"{int(outbox.get('dead') or 0)} Mail(s) sind nach allen Wiederholungen fehlgeschlagen")
+    if int(outbox.get("uncertain") or 0) > 0:
+        warnings.append(
+            f"{int(outbox.get('uncertain') or 0)} Mail(s) haben einen unklaren "
+            "SMTP-DATA-Ausgang und brauchen manuelle Pruefung"
+        )
     oldest_pending_age = int(outbox.get("oldest_pending_age_seconds") or 0)
     queued_count = int(
         outbox.get("queued")
@@ -18293,6 +21302,30 @@ def _build_system_health() -> Dict[str, Any]:
     if queued_count > 0 and oldest_pending_age > 900:
         warnings.append(
             f"{queued_count} Mail(s) warten seit mehr als 15 Minuten auf Versand"
+        )
+    tracker_acceptance = email_pipeline.get("tracker_acceptance") or {}
+    tracker_pending_count = int(tracker_acceptance.get("pending_count") or 0)
+    if not tracker_acceptance.get("available", False):
+        critical.append(
+            "Tracker-Zustelljournal ist nicht verfuegbar - angenommene "
+            "Trade-Mails koennen nicht sicher aktiviert werden"
+        )
+    elif tracker_pending_count > 0:
+        warnings.append(
+            f"{tracker_pending_count} angenommene Trade-Mail(s) warten auf "
+            "Tracker-Aktivierung"
+        )
+    legacy_unknown_count = int(
+        tracker_acceptance.get("legacy_open_cohort_unknown_count") or 0
+    )
+    if legacy_unknown_count > 0:
+        warnings.append(
+            f"{legacy_unknown_count} offene Legacy-Trade(s) haben keine "
+            "nachweisbare Empfaengerkohorte; Follow-ups bleiben fail-closed"
+        )
+    if not tracker_acceptance.get("legacy_cohort_check_available", True):
+        warnings.append(
+            "Offene Legacy-Trade-Kohorten konnten nicht geprueft werden"
         )
 
     overall = "critical" if critical else ("warning" if warnings else "healthy")
@@ -18303,7 +21336,8 @@ def _build_system_health() -> Dict[str, Any]:
         "frontend_bundle": FRONTEND_BUNDLE_REVISION,
         "timestamp": datetime.now().isoformat(),
         "api_keys_configured": api_keys,
-        "email_alerts": email_alerts,
+        "market_data_quote_capability": quote_capability,
+        "email_alerts": _public_email_alert_status(email_alerts),
         "email_pipeline": email_pipeline,
         "scheduler": {
             "running": _scheduler_running,
@@ -18313,7 +21347,10 @@ def _build_system_health() -> Dict[str, Any]:
             "stale_or_missing_scans": stale_or_missing,
             "health_counts": health_counts,
         },
-        "scans": scan_health,
+        "scans": {
+            name: _public_scan_health(status)
+            for name, status in scan_health.items()
+        },
         "calendar": {
             "official_sources": ["Federal Reserve", "BLS", "BEA", "Census", "ISM", "NYSE/Nasdaq", "LSE", "Deutsche Boerse", "JPX", "HKEX"],
             "official_event_families": ["FOMC/FED", "CPI", "NFP", "PPI", "GDP/PCE", "Retail Sales", "Advance Economic Indicators", "ISM PMI"],
@@ -18377,7 +21414,8 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
         try:
             scanners[name] = _build_alert_audit_for_cache(name, path)
         except Exception as exc:
-            scanners[name] = {"scanner": name, "error": str(exc), "cache_file": os.path.basename(path)}
+            print(f"[Email Audit] {name}: {_sanitized_exception_text(exc)}")
+            scanners[name] = {"scanner": name, "error": "audit_unavailable", "cache_file": os.path.basename(path)}
 
     return {
         "status": "ok",
@@ -18666,8 +21704,24 @@ def get_smart_money_radar(refresh: int = 0):
     """
     if _smart_money_build_radar is None:
         return JSONResponse({"sections": {}, "cache": "error",
-                             "error": "Modul nicht verfuegbar"}, status_code=503)
-    return JSONResponse(_smart_money_build_radar(force_refresh=bool(refresh)))
+                             "error": "smart_money_radar_unavailable"}, status_code=503)
+    try:
+        radar = _smart_money_build_radar(force_refresh=bool(refresh))
+        if _sanitize_smart_money_payload is not None:
+            radar = _sanitize_smart_money_payload(radar)
+        return JSONResponse(
+            radar
+        )
+    except Exception as exc:
+        print(
+            "[Smart Money] radar unavailable: "
+            f"{_sanitized_exception_text(exc)}"
+        )
+        return JSONResponse(
+            {"sections": {}, "cache": "error",
+             "error": "smart_money_radar_unavailable"},
+            status_code=503,
+        )
 
 
 @app.get("/api/scan-status")
@@ -19229,7 +22283,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_internal_api_error(e, "ticker_detail_failed")
 
 
 # ── Chart Cache (In-Memory, TTL-basiert) ──
@@ -19483,7 +22537,7 @@ def get_chart_data(
                     result["trendlines"] = trendlines
             except Exception as e:
                 print(f"Trendline error: {e}")
-                import traceback; traceback.print_exc()
+                _print_sanitized_traceback()
 
         # Volume Profile (VRVP)
         if "vrvp" in overlay_list and len(ohlcv) >= 10:
@@ -19600,7 +22654,7 @@ def get_chart_data(
                         patterns_result["chart_patterns"] = chart_pats
                 except Exception as e:
                     print(f"Chart patterns error: {e}")
-                    import traceback; traceback.print_exc()
+                    _print_sanitized_traceback()
 
                 # Pivots: NICHT im Chart anzeigen (nur Noise)
                 # Werden intern von Harmonics genutzt, aber nicht als Marker gerendert
@@ -19680,7 +22734,7 @@ def get_chart_data(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_internal_api_error(e, "chart_data_failed")
 
 
 # ── Crypto Chart Cache ──
@@ -19798,7 +22852,7 @@ def get_crypto_chart(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_internal_api_error(e, "crypto_chart_failed")
 
 
 # ── Exchange-spezifischer Chart-Endpoint (NLS Coins) ──────────────────────────
@@ -19848,7 +22902,7 @@ def _fetch_bybit_candles(symbol: str, timeframe: str = "5m", count: int = 120) -
                 continue
         return bars
     except Exception as exc:
-        print(f"[Bybit candles] {contract} {timeframe}: {exc}")
+        print(f"[Bybit candles] {contract} {timeframe}: {_sanitized_exception_text(exc)}")
         return []
 
 
@@ -19964,7 +23018,7 @@ def get_exchange_chart(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_internal_api_error(e, "exchange_chart_failed")
 
 
 # ── AI-Analyse Cache (30 Min TTL, spart 80-90% der API-Calls) ──
@@ -20240,7 +23294,7 @@ Kurz und praezise, keine langen Erklaerungen."""}],
     except Exception as e:
         # Detail nur serverseitig loggen — Exception-Texte koennen interne
         # Hostnamen/URLs enthalten und gehen nicht an den Client.
-        print(f"[AI] provider unreachable for {ticker}: {type(e).__name__}: {e}")
+        print(f"[AI] provider unreachable for {ticker}: {_sanitized_exception_text(e)}")
         return {
             "ticker": ticker,
             "analysis": _build_ai_provider_fallback_analysis(
@@ -20587,7 +23641,7 @@ def get_scan_results(
     if stale_strategy_cache:
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
 
-    scan_error = scan_state.get("last_error")
+    scan_error = _public_scan_error_code(scan_state.get("last_error"))
     if scan_error:
         warnings.insert(0, f"Letzter Scan fehlgeschlagen: {scan_error}")
 
@@ -20698,7 +23752,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")),
-        scan_error=scan_state.get("last_error"),
+        scan_error=_public_scan_error_code(scan_state.get("last_error")),
         partial=is_partial,
         checked=cache_meta.get("checked"),
         total=cache_meta.get("total"),
@@ -20800,7 +23854,7 @@ def get_biotech_results():
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")),
-        scan_error=scan_state.get("last_error"),
+        scan_error=_public_scan_error_code(scan_state.get("last_error")),
         partial=is_partial,
         checked=cache_meta.get("checked"),
         total=cache_meta.get("total"),
@@ -21815,6 +24869,12 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 "Symbol": symbol, "Name": name, "ID": cid,
                 "Rank": rank,
                 "Price": execution_price, "SpotPrice": price, "MCap": mcap, "Vol24h": vol_24h,
+                # CoinGecko's timestamp belongs to the same current_price
+                # observation.  The final mail gate uses it as the causal
+                # start of the exchange-path proof; receipt/scan time would
+                # incorrectly hide an intervening stop or TP1 touch.
+                "scan_price_observed_at": coin.get("last_updated"),
+                "scan_price_source": "coingecko:current_price",
                 "Change1h": round(change_1h, 2), "Change24h": round(change_24h, 2),
                 "Change7d": round(change_7d, 2), "Change14d": round(change_14d, 2),
                 "Change30d": round(change_30d, 2),
@@ -22722,7 +25782,7 @@ def _early_movers_wrapper() -> None:
     except Exception as e:
         _remove_partial_cache(EARLY_MOVERS_CACHE)
         print(f"[Early Movers] Error: {e}")
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -22824,7 +25884,7 @@ def _ce_http_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: in
             return None
         return response.json()
     except Exception as exc:
-        print(f"[Crypto Explosion] HTTP error {url}: {exc}")
+        print(f"[Crypto Explosion] HTTP error: {_sanitized_exception_text(exc)}")
         return None
 
 
@@ -23019,7 +26079,10 @@ def _fetch_crypto_explosion_universe() -> Tuple[List[Dict[str, Any]], Dict[str, 
         try:
             got = func()
         except Exception as exc:
-            print(f"[Crypto Explosion] {exchange} universe failed: {exc}")
+            print(
+                f"[Crypto Explosion] {exchange} universe failed: "
+                f"{_sanitized_exception_text(exc)}"
+            )
             got = []
         by_exchange[exchange] = len(got)
         rows.extend(got)
@@ -23376,7 +26439,10 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         except Exception as exc:
             key = f"{exchange}_chart_error"
             reason_counts[key] = reason_counts.get(key, 0) + 1
-            print(f"[Crypto Explosion] {exchange}:{contract} error: {exc}")
+            print(
+                f"[Crypto Explosion] {exchange}:{contract} error: "
+                f"{_sanitized_exception_text(exc)}"
+            )
 
     results = sorted(
         results,
@@ -23406,8 +26472,8 @@ def _crypto_explosion_wrapper() -> None:
         save_cache_file(CRYPTO_EXPLOSION_CACHE, rows)
         print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks")
     except Exception as exc:
-        print(f"[Crypto Explosion] Error: {exc}")
-        traceback.print_exc()
+        print(f"[Crypto Explosion] Error: {_sanitized_exception_text(exc)}")
+        _print_sanitized_traceback()
         raise
 
 
@@ -23707,8 +26773,8 @@ def _btc_divergenz_wrapper() -> None:
         # Live-Pfad ist ausschliesslich _build_crypto_btc_divergence_results().
         save_cache_file(BTC_DIVERGENZ_CACHE, _build_crypto_btc_divergence_results())
     except Exception as e:
-        print(f"BTC divergenz error: {e}")
-        traceback.print_exc()
+        print(f"BTC divergenz error: {_sanitized_exception_text(e)}")
+        _print_sanitized_traceback()
         raise
 
 
@@ -23886,7 +26952,10 @@ def _narrative_representatives(tickers: List[str], direction: str, max_items: in
                     "rvol": perf.get("rvol", 0),
                 })
         except Exception as exc:
-            print(f"[Narrative] representative skip {ticker}: {exc}")
+            print(
+                f"[Narrative] representative skip {ticker}: "
+                f"{_sanitized_exception_text(exc)}"
+            )
     reverse = direction == "bull"
     reps.sort(key=lambda item: (float(item.get("change_5d", 0) or 0), float(item.get("change_1d", 0) or 0)), reverse=reverse)
     return reps[:max_items]
@@ -24212,7 +27281,7 @@ def _money_flow_wrapper() -> None:
         _send_narrative_pulse_email(narrative_payload)
     except Exception as e:
         print(f"Money flow error: {e}")
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -24672,7 +27741,7 @@ def _new_listing_wrapper() -> None:
         print(f"[New Listing] Full pipeline processed {len(results)} UI rows")
     except Exception as e:
         print(f"New listing wrapper error: {e}")
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -25010,7 +28079,7 @@ def _crypto_trade_signals_wrapper(refresh_sources: bool = True) -> None:
         print(f"[Crypto Signals] Done: {stats.get('result_count', 0)} rows ({stats.get('long_count', 0)} long / {stats.get('short_count', 0)} short), warnings={warnings}")
     except Exception as exc:
         print(f"[Crypto Signals] Error: {exc}")
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -25474,19 +28543,33 @@ def _penny_fetch_live_spread(ticker: str) -> Optional[Dict[str, Any]]:
             timestamp /= 1_000_000_000.0
         elif timestamp and timestamp > 10_000_000_000:
             timestamp /= 1000.0
-        age_seconds = max(0.0, time.time() - timestamp) if timestamp else None
-        if not bid or not ask or ask < bid or age_seconds is None or age_seconds > 30:
+        received_at = time.time()
+        age_seconds = received_at - timestamp if timestamp else None
+        if (
+            not bid
+            or not ask
+            or ask < bid
+            or age_seconds is None
+            or age_seconds < -30
+            or age_seconds > 30
+        ):
             return None
         midpoint = (bid + ask) / 2.0
         return {
             "bid": bid,
             "ask": ask,
+            "observed_at": _stock_market_timestamp_iso(timestamp),
+            "observed_ts": timestamp,
+            "receipt_ts": received_at,
             "spread_bps": (ask - bid) / midpoint * 10_000.0 if midpoint > 0 else 9_999.0,
             "spread_known": True,
             "quote_age_seconds": round(age_seconds, 1),
         }
     except Exception as exc:
-        print(f"[Penny] quote fallback error {ticker}: {exc}")
+        print(
+            f"[Penny] quote fallback error {ticker}: "
+            f"{_sanitized_exception_text(exc)}"
+        )
         return None
 
 
@@ -25536,6 +28619,88 @@ def _penny_revalidate_buy_candidate(
     if not (0 < stop < live_entry < tp1 < tp2):
         return None, "live_trade_geometry_invalid"
 
+    trigger_bar_ts = _stock_market_timestamp_seconds(
+        intraday.get("trigger_timestamp")
+    )
+    quote_ts = _stock_market_timestamp_seconds(quote.get("observed_ts"))
+    quote_receipt_ts = _stock_market_timestamp_seconds(quote.get("receipt_ts"))
+    if trigger_bar_ts is None or trigger_bar_ts <= 0:
+        return None, "causal_trigger_observation_missing"
+    # The trigger is only observable once its five-minute candle has closed.
+    source_observed_ts = trigger_bar_ts + 300.0
+    if quote_ts is None or quote_ts < source_observed_ts:
+        return None, "final_quote_before_trigger_observation"
+    path_started_monotonic = time.monotonic()
+    market_path = _fetch_stock_revalidation_market_path(
+        symbol,
+        source_observed_ts,
+        now_ts=quote_ts,
+    )
+    path_elapsed_seconds = max(0.0, time.monotonic() - path_started_monotonic)
+    if not market_path.get("ok"):
+        return None, str(
+            market_path.get("reason") or "final_market_path_unavailable"
+        )
+
+    receipt_base_ts = quote_receipt_ts if quote_receipt_ts is not None else now_value
+    post_path_receipt_ts = receipt_base_ts + path_elapsed_seconds
+    if quote_ts > post_path_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return None, "final_quote_timestamp_in_future_after_path"
+    final_quote_age_seconds = max(0.0, post_path_receipt_ts - quote_ts)
+    if final_quote_age_seconds > 30.0:
+        return None, "final_quote_stale_after_path"
+    if _stock_quote_session_at(quote_ts) != "US_REGULAR":
+        return None, "final_quote_session_not_regular"
+    if _stock_quote_session_at(post_path_receipt_ts) != "US_REGULAR":
+        return None, "final_receipt_session_not_regular"
+
+    path_bars = market_path.get("bars") or []
+    first_path_ts = _stock_market_timestamp_seconds(
+        market_path.get("first_timestamp")
+    )
+    last_path_ts = _stock_market_timestamp_seconds(
+        market_path.get("last_timestamp")
+    )
+    if first_path_ts is None or last_path_ts is None or not path_bars:
+        return None, "final_market_path_bounds_missing"
+    if (
+        first_path_ts > source_observed_ts
+        or first_path_ts + 60.0 < source_observed_ts
+    ):
+        return None, "final_market_path_start_gap"
+    if last_path_ts > quote_ts:
+        return None, "final_quote_older_than_market_path"
+    if quote_ts >= last_path_ts + 60.0:
+        return None, "final_market_path_end_gap"
+
+    prior_bar_ts: Optional[float] = None
+    stop_touched = False
+    tp1_touched = False
+    for path_bar in path_bars:
+        if not isinstance(path_bar, dict):
+            return None, "final_market_path_bar_invalid"
+        path_bar_ts = _stock_market_timestamp_seconds(path_bar.get("timestamp"))
+        high = _alert_float(path_bar.get("high"), None)
+        low = _alert_float(path_bar.get("low"), None)
+        if path_bar_ts is None:
+            return None, "final_market_path_timestamp_missing"
+        if prior_bar_ts is not None:
+            if path_bar_ts <= prior_bar_ts:
+                return None, "final_market_path_order_invalid"
+            if path_bar_ts - prior_bar_ts > 61.0:
+                return None, "final_market_path_internal_gap"
+        if high is None or low is None or high < low or low <= 0:
+            return None, "final_market_path_ohlc_invalid"
+        stop_touched = stop_touched or low <= stop
+        tp1_touched = tp1_touched or high >= tp1
+        prior_bar_ts = path_bar_ts
+    if stop_touched and tp1_touched:
+        return None, "final_stop_and_tp1_touched_since_trigger"
+    if stop_touched:
+        return None, "final_stop_touched_since_trigger"
+    if tp1_touched:
+        return None, "final_tp1_touched_since_trigger"
+
     planned_risk = planned_entry - stop
     if planned_entry <= stop or planned_risk <= 0:
         return None, "planned_risk_invalid"
@@ -25583,6 +28748,17 @@ def _penny_revalidate_buy_candidate(
     gross_rr_tp1 = (tp1 - live_entry) / gross_risk
     gross_rr_tp2 = (tp2 - live_entry) / gross_risk
 
+    return_receipt_ts = receipt_base_ts + max(
+        0.0, time.monotonic() - path_started_monotonic
+    )
+    if quote_ts > return_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return None, "final_quote_timestamp_in_future_at_return"
+    final_quote_age_seconds = max(0.0, return_receipt_ts - quote_ts)
+    if final_quote_age_seconds > 30.0:
+        return None, "final_quote_stale_at_return"
+    if _stock_quote_session_at(return_receipt_ts) != "US_REGULAR":
+        return None, "final_receipt_session_not_regular_at_return"
+
     setup.update({
         "entry": live_entry,
         "risk": round(gross_risk, 8),
@@ -25610,7 +28786,24 @@ def _penny_revalidate_buy_candidate(
         "live_entry_price": live_entry,
         "spread_bps": round(spread_bps, 1),
         "spread_known": True,
-        "quote_age_seconds": quote.get("quote_age_seconds"),
+        "quote_age_seconds": round(final_quote_age_seconds, 3),
+        "price_observed_at": _stock_market_timestamp_iso(quote_ts),
+        "price_source": "polygon_live_ask_revalidated",
+        "price_mode": "ask",
+        "price_session": "US_REGULAR",
+        "fill_evidence_verified": False,
+        "quote_evidence_verified": True,
+        "fill_evidence_timing": "pre_delivery_quote",
+        "scan_price_observed_at": _stock_market_timestamp_iso(
+            source_observed_ts
+        ),
+        "scan_price_source": "polygon_completed_5m_penny_trigger",
+        "final_market_path_source": market_path.get("source"),
+        "final_market_path_from": _stock_market_timestamp_iso(
+            source_observed_ts
+        ),
+        "final_market_path_bars": len(path_bars),
+        "final_quote_age_seconds": round(final_quote_age_seconds, 3),
         "trigger_type": intraday.get("trigger_type"),
         "trigger_timestamp": intraday.get("trigger_timestamp"),
         "decision_timestamp": int(now_value),
@@ -25660,7 +28853,10 @@ def _penny_fetch_daily_bars(ticker: str) -> List[Dict[str, Any]]:
                 bars.append(bar)
         return bars
     except Exception as exc:
-        print(f"[Penny] daily bars error {ticker}: {exc}")
+        print(
+            f"[Penny] daily bars error {ticker}: "
+            f"{_sanitized_exception_text(exc)}"
+        )
         return []
 
 
@@ -26217,9 +29413,44 @@ def _penny_trigger_prep_rows(
 def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     if not rows:
         return False
+    # A single actionable setup per wire message keeps the final quote/path
+    # check adjacent to SMTP DATA.  Revalidating a five-row batch serially
+    # would let the first quote age or cross its stop while later rows are
+    # still doing provider I/O.
+    if len(rows) != 1:
+        print("[Penny] buy email fail-closed: exactly one candidate required")
+        return False
     allowed, _ = _stock_trade_email_allowed("penny_stocks")
     if not allowed:
         return False
+    original_row = rows[0]
+    validated_row, validation_reason = _penny_revalidate_buy_candidate(original_row)
+    if not validated_row:
+        original_row["mail_revalidation_reason"] = validation_reason
+        print(
+            f"[Penny] buy email suppressed {str(original_row.get('ticker') or '').upper()}: "
+            f"{validation_reason}"
+        )
+        return False
+    observed_ts = _stock_market_timestamp_seconds(
+        validated_row.get("price_observed_at")
+    )
+    receipt_ts = time.time()
+    if (
+        observed_ts is None
+        or receipt_ts - observed_ts > 30
+        or observed_ts - receipt_ts > 30
+        or _stock_quote_session_at(receipt_ts) != "US_REGULAR"
+        or str(validated_row.get("price_session") or "").upper() != "US_REGULAR"
+        or validated_row.get("quote_evidence_verified") is not True
+    ):
+        original_row["mail_revalidation_reason"] = "final_quote_or_session_stale"
+        return False
+    # Keep the caller's state row identical to the row embedded in the mail
+    # and handed to the delivery-intent tracker.
+    original_row.clear()
+    original_row.update(validated_row)
+    rows = [original_row]
     _load_common_stock_universe(require_names=True)
     rows = [
         _attach_stock_company_name(row, allow_generic_name=True)
@@ -26261,6 +29492,9 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
         mail_channel="stocks_intraday",
+        tracking_scanner="penny_stocks",
+        tracking_rows=[dict(row, trade_horizon="intraday") for row in rows[:5]],
+        delivery_dedupe_keys=[str(row.get("_dedupe_key") or "") for row in rows[:5]],
     )
 
 
@@ -26296,6 +29530,8 @@ def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
         mail_channel="stocks_intraday",
+        tracking_scope="followup",
+        delivery_dedupe_keys=[str(row.get("_dedupe_key") or "") for row in rows[:5]],
     )
 
 
@@ -26345,6 +29581,8 @@ def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
         mail_class="trade",
         telegram_text=_safe_format_telegram_rows(rows[:5]),
         mail_channel="stocks_intraday",
+        tracking_scope="followup",
+        delivery_dedupe_keys=[str(row.get("_dedupe_key") or "") for row in rows[:5]],
     )
 
 
@@ -26988,24 +30226,20 @@ def _penny_stock_scanner_wrapper() -> None:
             row for row in mail_buy_candidates[:5]
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
         ]
-        try:
-            buy_mail_sent = _penny_buy_email(claimed_buy_candidates)
-        except Exception as exc:
-            print(f"[Penny] buy email error: {exc}")
-            buy_mail_sent = False
-            for row in claimed_buy_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-        if buy_mail_sent:
-            _safe_record_alert_signals("penny_stocks", claimed_buy_candidates)
-            for row in claimed_buy_candidates:
+        for row in claimed_buy_candidates:
+            try:
+                buy_mail_sent = _penny_buy_email([row])
+            except Exception as exc:
+                print(f"[Penny] buy email error: {_sanitized_exception_text(exc)}")
+                buy_mail_sent = False
+            if buy_mail_sent:
                 symbol = str(row.get("ticker") or "").upper()
                 state = ticker_state.setdefault(symbol, {})
                 _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
                 state_changed_after_mail = True
-        else:
-            for row in claimed_buy_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+            else:
+                _email_dedupe_release_after_send(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
                 symbol = str(row.get("ticker") or "").upper()
                 state = ticker_state.setdefault(symbol, {})
                 _penny_activate_model_entry_state(state, row, notification_sent=False)
@@ -27020,7 +30254,7 @@ def _penny_stock_scanner_wrapper() -> None:
         try:
             management_mail_sent = _penny_management_email(claimed_management_candidates)
         except Exception as exc:
-            print(f"[Penny] management email error: {exc}")
+            print(f"[Penny] management email error: {_sanitized_exception_text(exc)}")
             management_mail_sent = False
             for row in claimed_management_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
@@ -27051,7 +30285,9 @@ def _penny_stock_scanner_wrapper() -> None:
                 state_changed_after_mail = True
         else:
             for row in claimed_management_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+                _email_dedupe_release_after_send(
+                    str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now
+                )
 
         side_effect_now = time.time()
         claimed_exit_candidates = [
@@ -27061,7 +30297,7 @@ def _penny_stock_scanner_wrapper() -> None:
         try:
             exit_mail_sent = _penny_exit_email(claimed_exit_candidates)
         except Exception as exc:
-            print(f"[Penny] exit email error: {exc}")
+            print(f"[Penny] exit email error: {_sanitized_exception_text(exc)}")
             exit_mail_sent = False
             for row in claimed_exit_candidates:
                 _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
@@ -27087,7 +30323,9 @@ def _penny_stock_scanner_wrapper() -> None:
                 state_changed_after_mail = True
         else:
             for row in claimed_exit_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+                _email_dedupe_release_after_send(
+                    str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now
+                )
                 state = ticker_state.setdefault(str(row.get("ticker") or ""), {})
                 state.pop("pending_exit_notification", None)
                 state.update({
@@ -27107,14 +30345,14 @@ def _penny_stock_scanner_wrapper() -> None:
         )
     except Exception as exc:
         _remove_partial_cache(PENNY_STOCKS_CACHE)
-        diagnostics["error"] = str(exc)
+        diagnostics["error"] = "penny_scanner_failed"
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
-        print(f"[Penny] scanner error: {exc}")
-        traceback.print_exc()
+        print(f"[Penny] scanner error: {_sanitized_exception_text(exc)}")
+        _print_sanitized_traceback()
         # Preserve the original cache timestamp. Re-writing old rows would make
         # stale data look fresh after an upstream/API failure.
         with _scan_lock:
-            _scan_status.setdefault("penny_stocks", {})["last_error"] = str(exc)
+            _scan_status.setdefault("penny_stocks", {})["last_error"] = "penny_scanner_failed"
         raise
     finally:
         with _scan_lock:
@@ -27722,22 +30960,20 @@ def _penny_position_monitor_wrapper() -> None:
                 now=claim_time,
             )
         ]
-        try:
-            buy_mail_sent = _penny_buy_email(claimed_buys)
-        except Exception as exc:
-            print(f"[Penny monitor] buy email error: {exc}")
-            buy_mail_sent = False
-        if buy_mail_sent:
-            _safe_record_alert_signals("penny_stocks", claimed_buys)
-            for row in claimed_buys:
+        for row in claimed_buys:
+            try:
+                buy_mail_sent = _penny_buy_email([row])
+            except Exception as exc:
+                print(f"[Penny monitor] buy email error: {_sanitized_exception_text(exc)}")
+                buy_mail_sent = False
+            if buy_mail_sent:
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
                 _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
                 state_changed_after_mail = True
-        else:
-            for row in claimed_buys:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+            else:
+                _email_dedupe_release_after_send(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
                 _penny_activate_model_entry_state(state, row, notification_sent=False)
@@ -27780,7 +31016,9 @@ def _penny_position_monitor_wrapper() -> None:
                 state_changed_after_mail = True
         else:
             for row in claimed_management:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+                _email_dedupe_release_after_send(
+                    str(row.get("_dedupe_key") or ""), claimed_at=claim_time
+                )
 
         claim_time = time.time()
         claimed_exits = [
@@ -27790,10 +31028,9 @@ def _penny_position_monitor_wrapper() -> None:
         try:
             exit_mail_sent = _penny_exit_email(claimed_exits)
         except Exception as exc:
-            print(f"[Penny monitor] exit email error: {exc}")
+            print(f"[Penny monitor] exit email error: {_sanitized_exception_text(exc)}")
             exit_mail_sent = False
         if exit_mail_sent:
-            _safe_record_alert_signals("penny_stocks", claimed_exits)
             for row in claimed_exits:
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
@@ -27815,7 +31052,9 @@ def _penny_position_monitor_wrapper() -> None:
                 state_changed_after_mail = True
         else:
             for row in claimed_exits:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+                _email_dedupe_release_after_send(
+                    str(row.get("_dedupe_key") or ""), claimed_at=claim_time
+                )
                 symbol = str(row.get("ticker") or "")
                 state = ticker_state.setdefault(symbol, {})
                 state.pop("pending_exit_notification", None)
@@ -27838,12 +31077,12 @@ def _penny_position_monitor_wrapper() -> None:
             f"{diagnostics['exit_now']} exit"
         )
     except Exception as exc:
-        diagnostics["error"] = str(exc)
+        diagnostics["error"] = "penny_position_monitor_failed"
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
-        print(f"[Penny monitor] error: {exc}")
-        traceback.print_exc()
+        print(f"[Penny monitor] error: {_sanitized_exception_text(exc)}")
+        _print_sanitized_traceback()
         with _scan_lock:
-            _scan_status.setdefault("penny_positions", {})["last_error"] = str(exc)
+            _scan_status.setdefault("penny_positions", {})["last_error"] = "penny_position_monitor_failed"
         raise
     finally:
         with _scan_lock:
@@ -27946,8 +31185,12 @@ def get_penny_stock_results(include_watch: bool = False):
     raw_visible_count = len(raw_symbols)
     diagnostics = dict(metadata.get("diagnostics") or {})
     with _scan_lock:
-        current_scan_error = _scan_status.get("penny_stocks", {}).get("last_error")
-        current_monitor_error = _scan_status.get("penny_positions", {}).get("last_error")
+        current_scan_error = _public_scan_error_code(
+            _scan_status.get("penny_stocks", {}).get("last_error")
+        )
+        current_monitor_error = _public_scan_error_code(
+            _scan_status.get("penny_positions", {}).get("last_error")
+        )
     diagnostics.update({
         "signal_max_age_seconds": _PENNY_TRIGGER_MAX_AGE_SECONDS,
         "result_cache_max_age_seconds": _PENNY_RESULT_CACHE_MAX_AGE_SECONDS,
@@ -28178,7 +31421,7 @@ def _volume_spikes_wrapper() -> None:
         save_cache_file(VOLUME_SPIKES_CACHE, spikes[:50])  # Keep top 50
     except Exception as e:
         print(f"Volume spikes error: {e}")
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -28323,7 +31566,10 @@ def _orb_scanner_wrapper() -> None:
                 if today_data_raw:
                     today_data = today_data_raw
         except Exception as e:
-            print(f"[ORB] Snapshot Fehler: {e} — Fallback auf grouped daily")
+            print(
+                f"[ORB] Snapshot Fehler: {_sanitized_exception_text(e)} "
+                "— Fallback auf grouped daily"
+            )
             today_data_raw = fetch_grouped_daily(POLYGON_KEY, today_str)
             if today_data_raw:
                 today_data = today_data_raw
@@ -28964,6 +32210,59 @@ def _orb_scanner_wrapper() -> None:
                 _fresh_alert_breakouts.append(_b)
                 _orb_alert_cooldown_keys.append(_cooldown_key)
         alert_breakouts = _fresh_alert_breakouts
+        if len(alert_breakouts) > 1:
+            for _deferred_key in _orb_alert_cooldown_keys[1:]:
+                _email_dedupe_release(_deferred_key, claimed_at=_alert_now)
+            _record_email_event(
+                "ORB Stock Alert",
+                "suppressed",
+                f"mail_adjacent_single_candidate:{len(alert_breakouts) - 1}_deferred",
+            )
+            alert_breakouts = alert_breakouts[:1]
+            _orb_alert_cooldown_keys = _orb_alert_cooldown_keys[:1]
+        if alert_breakouts:
+            _revalidated_orb: List[Dict[str, Any]] = []
+            _revalidated_orb_keys: List[str] = []
+            for _b, _cooldown_key in zip(
+                alert_breakouts, _orb_alert_cooldown_keys
+            ):
+                _candidate = dict(_b)
+                _bar_ts = _stock_market_timestamp_seconds(
+                    _candidate.get("signal_bar_timestamp")
+                )
+                if _bar_ts is not None:
+                    # ORB rows are explicitly completed 5m bars. Their close
+                    # becomes observable at bar-start + 300 seconds.
+                    _candidate["scan_price_observed_at"] = (
+                        _stock_market_timestamp_iso(_bar_ts + 300.0)
+                    )
+                    _candidate["scan_price_source"] = (
+                        "polygon_completed_5m_orb_bar"
+                    )
+                _validation = _revalidate_stock_strategy_mail_candidate(
+                    _candidate,
+                    now_ts=time.time(),
+                    price_session="US_REGULAR",
+                    scanner_name="orb",
+                )
+                if not _validation.get("ok"):
+                    _email_dedupe_release(_cooldown_key, claimed_at=_alert_now)
+                    _record_email_event(
+                        "ORB Stock Alert",
+                        "skipped",
+                        "final_stock_revalidation:"
+                        + str(
+                            _validation.get("reason")
+                            or "final_stock_revalidation_failed"
+                        ),
+                    )
+                    continue
+                _revalidated_orb.append(
+                    dict(_validation.get("candidate") or {})
+                )
+                _revalidated_orb_keys.append(_cooldown_key)
+            alert_breakouts = _revalidated_orb
+            _orb_alert_cooldown_keys = _revalidated_orb_keys
         if alert_breakouts:
             rows = ""
             for b in alert_breakouts:
@@ -29017,6 +32316,11 @@ def _orb_scanner_wrapper() -> None:
                     mail_class="trade",  # AUDIT H-2
                     telegram_text=_safe_format_telegram_rows(alert_breakouts),
                     mail_channel="stocks_intraday",
+                    tracking_scanner="orb",
+                    tracking_rows=[
+                        dict(row, trade_horizon="intraday") for row in alert_breakouts
+                    ],
+                    delivery_dedupe_keys=_orb_alert_cooldown_keys,
                 )
             except Exception:
                 for _ck in _orb_alert_cooldown_keys:
@@ -29031,15 +32335,14 @@ def _orb_scanner_wrapper() -> None:
                         _EMAIL_COOLDOWN[_ck] = _alert_now
                 for _ck in _orb_alert_cooldown_keys:
                     _email_dedupe_mark(_ck, now=_alert_now)
-                _safe_record_alert_signals("orb", alert_breakouts)
             else:
                 for _ck in _orb_alert_cooldown_keys:
-                    _email_dedupe_release(_ck, claimed_at=_alert_now)
+                    _email_dedupe_release_after_send(_ck, claimed_at=_alert_now)
 
     except Exception as e:
         print(f"[ORB] Fehler: {e}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         raise
 
 
@@ -29243,8 +32546,11 @@ def _crash_monitor_wrapper() -> None:
 
         # VIX via Polygon snapshot + historical for 5d/20d change
         try:
-            vix_url = "https://api.polygon.io/v3/snapshot?ticker.any_of=I:VIX&apiKey=" + POLYGON_KEY
-            vix_resp = rate_limited_get(vix_url, params={})
+            vix_url = "https://api.polygon.io/v3/snapshot"
+            vix_resp = rate_limited_get(
+                vix_url,
+                params={"ticker.any_of": "I:VIX", "apiKey": POLYGON_KEY},
+            )
             if vix_resp.status_code == 200:
                 vix_results = vix_resp.json().get("results", [])
                 if vix_results:
@@ -29269,7 +32575,10 @@ def _crash_monitor_wrapper() -> None:
                                 if len(_vix_bars) >= 21:
                                     vix_20d = round(((vix_price - _vix_bars[20]["c"]) / _vix_bars[20]["c"] * 100), 2)
                         except Exception as _vhist_err:
-                            print(f"[Crash Monitor] VIX history error: {_vhist_err}")
+                            print(
+                                "[Crash Monitor] VIX history error: "
+                                f"{_sanitized_exception_text(_vhist_err)}"
+                            )
                         result["vix"] = {"ticker": "I:VIX", "name": "VIX", "price": round(vix_price, 2),
                                          "change_1d": round(chg, 2), "change_5d": vix_5d, "change_20d": vix_20d}
                         if vix_price >= 30: result["vix"]["level"] = "EXTREME"
@@ -29327,7 +32636,7 @@ def _crash_monitor_wrapper() -> None:
                         else: result["vix"]["level"] = "LOW"
                         print(f"[Crash Monitor] VIX estimated from UVXY volatility: {est_vix} (avg_abs_chg={avg_abs_change:.1f}%)")
         except Exception as e:
-            print(f"[Crash Monitor] VIX fetch error: {e}")
+            print(f"[Crash Monitor] VIX fetch error: {_sanitized_exception_text(e)}")
 
         for sym, name, desc in vix_tickers:
             try:
@@ -29363,7 +32672,10 @@ def _crash_monitor_wrapper() -> None:
                 else:
                     result["indices"].append(entry)
             except Exception as e:
-                print(f"[Warning] Error processing market index: {e}")
+                print(
+                    "[Warning] Error processing market index: "
+                    f"{_sanitized_exception_text(e)}"
+                )
                 continue
 
         # Market breadth — V3.4 FIX: Full Snapshot statt nur Gainers/Losers (die geben nur Top 250)
@@ -29381,7 +32693,10 @@ def _crash_monitor_wrapper() -> None:
                 snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
                 print(f"[Crash Monitor] Full snapshot: status={snap_resp.status_code}")
             except Exception as req_err:
-                print(f"[Crash Monitor] Full snapshot FAILED: {req_err}")
+                print(
+                    "[Crash Monitor] Full snapshot FAILED: "
+                    f"{_sanitized_exception_text(req_err)}"
+                )
                 snap_resp = None
 
             if snap_resp and snap_resp.status_code == 200:
@@ -29445,7 +32760,7 @@ def _crash_monitor_wrapper() -> None:
             }
             print(f"[Crash Monitor] Breadth: {up} up, {down} down, ratio={ratio}, signal={breadth_signal}, excluded={excluded_non_common}, source={common_stock_source}")
         except Exception as e:
-            print(f"[Warning] Market breadth error: {e}")
+            print(f"[Warning] Market breadth error: {_sanitized_exception_text(e)}")
 
         # Calculate fear score
         fear_score, fear_level, fear_details = _calculate_fear_score(
@@ -29460,12 +32775,12 @@ def _crash_monitor_wrapper() -> None:
         save_cache_file(CRASH_MONITOR_CACHE, [result])
         print(f"[Crash Monitor] Done — fear_score={fear_score}, indices={len(result.get('indices',[]))}, vix={result.get('vix',{}).get('price','?')}")
     except Exception as e:
-        print(f"Crash monitor error: {e}")
+        print(f"Crash monitor error: {_sanitized_exception_text(e)}")
         import traceback
-        traceback.print_exc()
+        _print_sanitized_traceback()
         save_cache_file(CRASH_MONITOR_CACHE, [{
             "status": "error",
-            "error": str(e),
+            "error": "crash_monitor_failed",
             "message": "Crash monitor scan failed; stale data must not be treated as a fresh success.",
             "timestamp": datetime.now().isoformat(),
             "vix": {},
@@ -30202,9 +33517,10 @@ def get_economic_calendar():
             "note": "FOMC/FED, CPI, NFP, PPI, GDP/PCE, Retail Sales, Census Advance Economic Indicators and ISM PMI use official 2026 source schedules. Exchange hours/holidays cover NYSE/Nasdaq, LSE, Xetra, Tokyo and Hong Kong for 2026. Earnings and weekly claims remain marked estimates."
         }
     except Exception as e:
+        print(f"[Calendar] build failed: {_sanitized_exception_text(e)}")
         return {
             "status": "error",
-            "message": str(e),
+            "message": "economic_calendar_unavailable",
             "timestamp": datetime.now().isoformat()
         }
 
@@ -30231,7 +33547,8 @@ def _calendar_event_risk_snapshot() -> Dict[str, Any]:
         status = calendar.get("status") if isinstance(calendar, dict) else type(calendar).__name__
         return missing_event_risk(f"Economic calendar returned invalid status: {status}")
     except Exception as exc:
-        return missing_event_risk(str(exc))
+        print(f"[Market Context] calendar error: {_sanitized_exception_text(exc)}")
+        return missing_event_risk("economic_calendar_unavailable")
 
 
 def _load_crash_context_snapshot() -> Dict[str, Any]:
@@ -30264,7 +33581,8 @@ def _fetch_polygon_market_headlines(limit: int = 50) -> tuple[List[Dict[str, Any
         payload = resp.json()
         return payload.get("results", []) or [], None
     except Exception as exc:
-        return [], str(exc)
+        print(f"[Market Context] headline provider error: {_sanitized_exception_text(exc)}")
+        return [], "polygon_news_unavailable"
 
 
 TREASURY_RATES_CACHE = "/tmp/treasury_rates_cache.json"
@@ -30304,7 +33622,8 @@ def _fetch_treasury_rates_block() -> Dict[str, Any]:
             if block.get("status") == "ok":
                 block["stale"] = True
                 return block
-        return build_rates_block(None, fetch_error=str(exc))
+        print(f"[Market Context] rates provider error: {_sanitized_exception_text(exc)}")
+        return build_rates_block(None, fetch_error="treasury_rates_unavailable")
 
 
 def _market_context_wrapper() -> None:
@@ -32064,7 +35383,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         return stats
 
     except Exception as e:
-        return {"error": str(e), "ticker": ticker, "strategy": strategy}
+        print(f"[Backtest] calculation failed: {_sanitized_exception_text(e)}")
+        return {"error": "backtest_calculation_failed", "ticker": ticker, "strategy": strategy}
 
 
 @app.post("/api/run-backtest")
@@ -32088,7 +35408,15 @@ def run_backtest(request: BacktestRequest):
             result = _run_backtest(request.ticker.upper(), request.strategy, request.months)
             _backtest_progress_update(job_id, "running", 0.9, "Einzel-Ticker Kennzahlen werden berechnet...", strategy=request.strategy)
     except Exception as exc:
-        _backtest_progress_update(job_id, "error", 1.0, f"Backtest fehlgeschlagen: {exc}", strategy=request.strategy, error=str(exc))
+        print(f"[Backtest] request failed: {_sanitized_exception_text(exc)}")
+        _backtest_progress_update(
+            job_id,
+            "error",
+            1.0,
+            "Backtest fehlgeschlagen",
+            strategy=request.strategy,
+            error="backtest_failed",
+        )
         raise
 
     # Cache result

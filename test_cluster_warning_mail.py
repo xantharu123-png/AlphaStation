@@ -186,6 +186,11 @@ def _mock_sweep_env(monkeypatch, universe):
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **k: None)
     monkeypatch.setattr(
         api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
+    monkeypatch.setattr(
+        api,
         "_fetch_stock_swing_execution_state",
         lambda *a, **k: {
             "Swing_4H_Execution_Checked": True,
@@ -206,14 +211,14 @@ def test_e2e_sweep_mail_mit_drei_adrs_enthaelt_warnzeile(monkeypatch):
 
     api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
 
-    assert len(sent) == 1
-    body = sent[0][1]
-    assert "Klumpenrisiko: 3 Setups" in body
-    assert "BMA, GGAL, CEPU" in body
-    assert "EINEN Trade behandeln" in body
+    assert len(sent) == 3
+    for _subject, body in sent:
+        assert "Klumpenrisiko: 3 Setups" in body
+        assert "BMA, GGAL, CEPU" in body
+        assert "EINEN Trade behandeln" in body
     # Produktentscheidung: KEINE Unterdrueckung — alle Setups bleiben in der Mail.
     for ticker in ("BMA", "GGAL", "CEPU"):
-        assert f"<b>{ticker}</b>" in body
+        assert sum(f"<b>{ticker}</b>" in body for _, body in sent) == 1
 
 
 def test_e2e_sweep_mail_mit_normaler_row_ohne_warnzeile(monkeypatch):
@@ -227,11 +232,31 @@ def test_e2e_sweep_mail_mit_normaler_row_ohne_warnzeile(monkeypatch):
     assert "Tages-Move" not in sent[0][1]
 
 
+def test_e2e_sweep_single_wires_keep_three_mover_cluster_context(monkeypatch):
+    sent = _mock_sweep_env(monkeypatch, {"AAA", "BBB", "CCC"})
+    _patch_adr_set(monkeypatch, set())
+    rows = [
+        _sweep_row("AAA", change_pct=6.0),
+        _sweep_row("BBB", change_pct=-7.0, idx=1),
+        _sweep_row("CCC", change_pct=8.0, idx=2),
+    ]
+
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
+
+    assert len(sent) == 3
+    assert all("3 Setups mit starkem Tages-Move" in body for _, body in sent)
+
+
 # ── End-to-End: generische Top-Setup-Mail (_check_and_alert, bi/biotech/bear-Pfad) ──
 
 def test_e2e_check_and_alert_adr_cluster_warnzeile(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, body)) or True)
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: {"ok": True, "candidate": dict(row)},
+    )
     monkeypatch.setattr(api, "_stock_trade_email_allowed", lambda *a, **k: (True, "unit"))
     # bi_long wuerde sonst frischen 5m-Intraday-State fetchen => offline halten:
     monkeypatch.setattr(api, "_enrich_stock_alert_5m_state", lambda scanner, row, *a, **k: row)
@@ -258,5 +283,10 @@ def test_e2e_check_and_alert_adr_cluster_warnzeile(monkeypatch, tmp_path):
 
     assert len(sent) == 1
     body = sent[0][1]
-    assert "Klumpenrisiko: 2 Setups" in body
-    assert "TGS, IRS" in body
+    # Actionable stock alerts are intentionally one setup per wire message so
+    # final quote/path evidence remains adjacent to SMTP acceptance. Cluster
+    # analysis is still unit-tested for non-actionable summaries, but must not
+    # force two independently executable trades into a stale batch.
+    assert "Klumpenrisiko: 2 Setups" not in body
+    assert "TGS" in body
+    assert "IRS" not in body
