@@ -425,3 +425,19 @@ Die lokale reale Mail-Outbox enthielt bei Abschluss 0 aktive
 Produktionsserver. Nach Clone/PC-Wechsel muessen Bundle-Hash und Tests erneut
 reproduziert und danach Server-HEAD, API-Revision, Services, Health,
 Quote-Berechtigung und Zustelljournale separat geprueft werden.
+
+### 15.7 Aktueller Git-/Serverblocker
+
+Lokaler Implementierungscommit: `e9cba06`. `origin/main` stand beim letzten
+Abgleich weiterhin auf `9987c7f`, weil auf diesem PC kein GitHub-HTTPS-
+Schreib-Credential, kein `gh`-Login und kein GitHub-SSH-Schluessel vorhanden
+war. Keine Zugangsdaten in Dateien oder Befehlszeilen eintragen; den Zugriff
+ueber den vorgesehenen Credential-Manager bzw. einen autorisierten SSH-Key
+wiederherstellen und danach den Remote-Hash explizit pruefen.
+
+Produktion meldete oeffentlich noch Revision `de4e7cfac0ec` und Bundle
+`c0b3b13a6c86`; die neue Landing-Copy war nicht live. Der Server-SSH-Versuch
+scheiterte mangels uebertragenem privaten Schluessel. Daher wurden bewusst kein
+Pull, kein Repair und kein Neustart versucht. Nach Wiederherstellung der
+Zugaenge gelten weiterhin Backup-, Realtime-Quote-, Legacy-Kohorten-, Health-
+und Vier-Augen-Gates aus 15.4.

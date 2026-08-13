@@ -1615,3 +1615,17 @@ Der Server wurde mit diesem Stand nicht als aktualisiert nachgewiesen. Deshalb
 bleiben Deployment, produktive Realtime-Quote-Berechtigung, Legacy-Kohorten,
 Forward-Performance, IBKR-Paper-Soak und App-Store-/Google-Play-Freigabe eigene
 offene Nachweise.
+
+### 10.8 Git- und Live-Status nach lokaler Abnahme
+
+Der Implementierungscommit ist lokal `e9cba06`. Push nach GitHub war auf dem
+neuen PC nicht moeglich, weil weder HTTPS-Schreib-Credential noch `gh`-Login
+oder SSH-Schluessel vorhanden sind; `origin/main` blieb auf `9987c7f`.
+
+Der oeffentliche Health-Endpunkt antwortete HTTP 200, meldete aber weiterhin
+Revision `de4e7cfac0ec` und Bundle `c0b3b13a6c86`; das Frontend lieferte noch
+die alte Landing-Copy. SSH war mangels autorisiertem privatem Schluessel
+gesperrt. Es erfolgte deshalb weder Deployment noch Produktions-Repair. Vor dem
+Rollout muessen GitHub- und Serverzugang sicher wiederhergestellt, produktive
+Datenbanken gesichert, Quote-Entitlement/Recency belegt und danach derselbe
+Commit in Server-HEAD, API, Bundle, Services und Health nachgewiesen werden.

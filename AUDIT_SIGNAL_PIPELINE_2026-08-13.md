@@ -185,3 +185,24 @@ der Reminder wird spaeter erneut geprueft.
 Diese Endabnahme ist ein lokaler technischer Nachweis. Sie ersetzt weder den
 noch ausstehenden Server-Rollout-/Health-Nachweis noch Realtime-Quote-
 Berechtigung, Forward-Performance, Broker-Paper-Soak oder Store-Freigabe.
+
+## 10. Git- und Produktionsvergleich nach der Endabnahme
+
+Der Implementierungsstand wurde lokal als Commit **`e9cba06`** erstellt. Der
+GitHub-Push ist auf diesem PC nicht erfolgt: der HTTPS-Remote besitzt kein
+hinterlegtes Schreib-Credential, kein GitHub-CLI-Login und keinen SSH-Schluessel.
+Der Remote-Branch blieb beim letzten read-only Abgleich auf **`9987c7f`**.
+
+Die oeffentliche Produktions-API antwortete am 13.08.2026 um ca. 21:24 MESZ mit
+HTTP 200, meldete jedoch weiterhin Revision **`de4e7cfac0ec`** und
+Frontend-Bundle **`c0b3b13a6c86`**. Das oeffentliche Frontend auf Port 3000
+enthielt die alte Landing-Copy und nicht den lokal verifizierten Bundle-Stand.
+Der read-only SSH-Versuch scheiterte mit `Permission denied
+(publickey,password)`, weil auf dem neuen PC kein autorisierter privater
+Server-Schluessel vorhanden ist.
+
+Damit ist positiv belegt, dass dieser Fixstand **nicht produktiv** ist. Es wurde
+kein Deployment, kein Produktions-Repair und kein Service-Neustart versucht.
+Das Health-Feld `market_data: true` beweist nur vorhandene Konfiguration und
+nicht die fuer den neuen Versandvertrag erforderliche Realtime-Quote-
+Berechtigung oder <=90-Sekunden-Recency.
