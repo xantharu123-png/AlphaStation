@@ -1,7 +1,125 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 APP_DIR="${APP_DIR:-/home/tradingbot/app}"
+TRUSTED_HOME="${TRUSTED_HOME:-/home/tradingbot}"
+TRUST_STAT_BIN="${TRUST_STAT_BIN:-/usr/bin/stat}"
+TRUST_FIND_BIN="${TRUST_FIND_BIN:-/usr/bin/find}"
+TRUST_READLINK_BIN="${TRUST_READLINK_BIN:-/usr/bin/readlink}"
+
+source_trust_fail() {
+  echo "[deploy] Source trust check failed: $*" >&2
+  return 1
+}
+
+validate_root_controlled_path() {
+  local path="$1" owner mode metadata
+  if [ ! -e "$path" ] || [ -L "$path" ]; then
+    source_trust_fail "missing or symlink path $path"
+    return 1
+  fi
+  metadata="$("$TRUST_STAT_BIN" -c '%u %a' -- "$path" 2>/dev/null || true)"
+  read -r owner mode <<< "$metadata"
+  if [ "$owner" != "0" ] || [[ ! "$mode" =~ ^[0-7]+$ ]] \
+    || (( (8#$mode & 8#22) != 0 )); then
+    source_trust_fail "$path must be root-owned and not group/world-writable"
+    return 1
+  fi
+}
+
+validate_root_controlled_chain() {
+  local current="$1" parent
+  case "$current" in
+    /*|[A-Za-z]:/*) ;;
+    *) source_trust_fail "path must be absolute: $current"; return 1 ;;
+  esac
+  while :; do
+    validate_root_controlled_path "$current" || return 1
+    case "$current" in
+      /|[A-Za-z]:/) return 0 ;;
+    esac
+    parent="${current%/*}"
+    [ -n "$parent" ] || parent="/"
+    [[ "$parent" =~ ^[A-Za-z]:$ ]] && parent="$parent/"
+    if [ "$parent" = "$current" ]; then
+      source_trust_fail "cannot resolve parent of $current"
+      return 1
+    fi
+    current="$parent"
+  done
+}
+
+validate_source_symlinks() {
+  local symlink_list link target
+  if ! symlink_list="$("$TRUST_FIND_BIN" "$APP_DIR" -xdev \
+    \( -path "$APP_DIR/data_cache" -o -path "$APP_DIR/data_cache/*" \) -prune -o \
+    -type l -print 2>/dev/null)"; then
+    source_trust_fail "symlinks cannot be inspected"
+    return 1
+  fi
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    if [[ "$link" != "$APP_DIR/venv/"* ]]; then
+      source_trust_fail "source symlink is not allowed: $link"
+      return 1
+    fi
+    target="$("$TRUST_READLINK_BIN" -f -- "$link" 2>/dev/null || true)"
+    case "$target" in
+      "$APP_DIR/venv/"*|/usr/bin/*|/usr/local/bin/*|/lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) ;;
+      *) source_trust_fail "unsafe symlink target ${target:-missing}"; return 1 ;;
+    esac
+    validate_root_controlled_chain "$target" || return 1
+  done <<< "$symlink_list"
+}
+
+verify_source_trust() {
+  local path unsafe_path
+  if [ "$APP_DIR" != "$TRUSTED_HOME/app" ]; then
+    source_trust_fail "APP_DIR must be $TRUSTED_HOME/app"
+    return 1
+  fi
+  validate_root_controlled_chain "$TRUSTED_HOME" || return 1
+  for path in \
+    "$APP_DIR" \
+    "$APP_DIR/deploy" \
+    "$APP_DIR/deploy/auto_update.sh" \
+    "$APP_DIR/deploy/safe_deploy.sh" \
+    "$APP_DIR/.git" \
+    "$APP_DIR/venv"; do
+    validate_root_controlled_path "$path" || return 1
+  done
+  if ! unsafe_path="$("$TRUST_FIND_BIN" "$APP_DIR" -xdev \
+    \( -path "$APP_DIR/data_cache" -o -path "$APP_DIR/data_cache/*" \) -prune -o \
+    \( -type f -o -type d \) \( ! -uid 0 -o -perm /022 \) \
+    -print -quit 2>/dev/null)"; then
+    source_trust_fail "source tree cannot be inspected"
+    return 1
+  fi
+  if [ -n "$unsafe_path" ]; then
+    source_trust_fail "unsafe entry $unsafe_path"
+    return 1
+  fi
+  validate_source_symlinks || return 1
+}
+
+verify_source_trust
+echo "[deploy] Source trust check passed."
+if [ "${1:-}" = "--trust-check-only" ]; then
+  exit 0
+fi
+
+DEPLOY_TMP_DIR="$(mktemp -d /tmp/alpha-safe-deploy-runtime.XXXXXX)"
+chmod 0700 "$DEPLOY_TMP_DIR"
+preflight_dir=""
+cleanup_deploy_workspace() {
+  case "$DEPLOY_TMP_DIR" in
+    /tmp/alpha-safe-deploy-runtime.*) rm -rf -- "$DEPLOY_TMP_DIR" ;;
+    *) echo "[deploy] Refusing unsafe workspace cleanup path: $DEPLOY_TMP_DIR" >&2 ;;
+  esac
+}
+trap cleanup_deploy_workspace EXIT
+
 BRANCH="${BRANCH:-main}"
 EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 COMMERCIAL_DEPLOY="${COMMERCIAL_DEPLOY:-auto}"
@@ -98,8 +216,8 @@ ensure_runtime_dependencies() {
   installed_hash="$(cat "$req_hash_file" 2>/dev/null || true)"
   if [ "$INSTALL_DEPS" = "always" ] || [ "$INSTALL_DEPS" = "1" ] || [ "$req_hash" != "$installed_hash" ]; then
     echo "[deploy] Installing/updating Python dependencies in the hardened service venv..."
-    "$PYTHON" -m pip install --disable-pip-version-check --upgrade pip >/tmp/tradingbot-pip-upgrade.log
-    "$PYTHON" -m pip install --disable-pip-version-check -r requirements.txt >/tmp/tradingbot-pip-install.log
+    "$PYTHON" -m pip install --disable-pip-version-check --upgrade pip >"$DEPLOY_TMP_DIR/pip-upgrade.log"
+    "$PYTHON" -m pip install --disable-pip-version-check -r requirements.txt >"$DEPLOY_TMP_DIR/pip-install.log"
     printf '%s\n' "$req_hash" > "$req_hash_file"
   else
     echo "[deploy] Python dependencies already match requirements.txt."
@@ -114,7 +232,9 @@ run_source_checks() {
   (
     cd "$check_dir"
     PYTHON="$check_python"
-    bash -n deploy/safe_deploy.sh deploy/install.sh deploy/verify_commercial_edge.sh
+    bash -n deploy/safe_deploy.sh deploy/install.sh deploy/install_auto_update.sh \
+      deploy/auto_update.sh deploy/health_check.sh deploy/runtime_state_guard.sh \
+      deploy/verify_commercial_edge.sh
     "$PYTHON" -m compileall -q api.py bg_service.py modules
     "$PYTHON" scripts/verify_frontend_bundle.py
 
@@ -216,7 +336,7 @@ verify_commercial_edge() {
 
 verify_frontend_delivery() {
   local served_dir served_index served_bundle served_boot public_app_url public_host public_port
-  served_dir="$(mktemp -d /tmp/alphastation-served-frontend.XXXXXX)"
+  served_dir="$(mktemp -d "$DEPLOY_TMP_DIR/served-frontend.XXXXXX")"
   served_index="$served_dir/index.html"
   served_bundle="$served_dir/app.bundle.js"
   served_boot="$served_dir/boot.js"
@@ -313,26 +433,15 @@ restart_service_bounded() {
 }
 
 prepare_runtime_state() {
-  if ! id tradingbot >/dev/null 2>&1; then
-    echo "[deploy] Required service account 'tradingbot' does not exist. Run deploy/install.sh first."
-    return 1
+  runtime_services_quiesced=1
+  if APP_DIR="$APP_DIR" SERVICE_USER=tradingbot \
+    RUNTIME_WORK_DIR="$DEPLOY_TMP_DIR" \
+    /bin/bash "$APP_DIR/deploy/runtime_state_guard.sh"; then
+    runtime_state_ready=1
+    return 0
   fi
-
-  install -d -m 0750 -o tradingbot -g tradingbot "$APP_DIR/data_cache"
-  install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/auth"
-  install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"
-
-  # Old root-run services may have created mutable state as root. Only runtime
-  # data is migrated; source code and deployment files remain root-controlled.
-  chown -R tradingbot:tradingbot "$APP_DIR/data_cache"
-
-  # Preserve user-created reminders and cross-process mail dedupe state during
-  # the one-time migration from the global /tmp into PrivateTmp/BindPaths.
-  for state_file in alphastation_trade_reminders.json alphastation_email_dedupe.json; do
-    if [ -f "/tmp/$state_file" ] && [ ! -f "$APP_DIR/data_cache/runtime/$state_file" ]; then
-      install -m 0600 -o tradingbot -g tradingbot "/tmp/$state_file" "$APP_DIR/data_cache/runtime/$state_file"
-    fi
-  done
+  echo "[deploy] Runtime state validation failed; services remain fail-closed."
+  return 1
 }
 
 # A newly created app venv must be complete before target preflight and before
@@ -350,6 +459,8 @@ fi
 
 deployment_changed=0
 rollback_in_progress=0
+runtime_services_quiesced=0
+runtime_state_ready=0
 
 rollback_deployment() {
   if [ "$deployment_changed" != "1" ] || [ "$rollback_in_progress" = "1" ]; then
@@ -364,20 +475,27 @@ rollback_deployment() {
   rollback_status=$?
   if [ "$rollback_status" -eq 0 ] && [ -f requirements.txt ]; then
     "$PYTHON" -m pip install --disable-pip-version-check -r requirements.txt \
-      >/tmp/tradingbot-pip-rollback.log
+      >"$DEPLOY_TMP_DIR/pip-rollback.log"
     rollback_status=$?
     if [ "$rollback_status" -eq 0 ]; then
       sha256sum requirements.txt | awk '{print $1}' > "$VENV_DIR/.requirements.sha256"
     fi
   fi
-  if [ "$rollback_status" -eq 0 ]; then
+  if [ "$rollback_status" -eq 0 ] \
+    && { [ "$runtime_services_quiesced" != "1" ] || [ "$runtime_state_ready" = "1" ]; }; then
     sync_service_units
     rollback_status=$?
   fi
-  if [ "$rollback_status" -eq 0 ]; then
+  if [ "$rollback_status" -eq 0 ] \
+    && { [ "$runtime_services_quiesced" != "1" ] || [ "$runtime_state_ready" = "1" ]; }; then
     for service in $SERVICES; do
       restart_service_bounded "$service" || rollback_status=$?
     done
+  fi
+
+  if [ "$runtime_services_quiesced" = "1" ] && [ "$runtime_state_ready" != "1" ]; then
+    echo "[deploy] Runtime tree is unsafe; rollback restored code but services stay stopped."
+    rollback_status=1
   fi
 
   if [ "$rollback_status" -eq 0 ]; then
@@ -388,12 +506,12 @@ rollback_deployment() {
 
   if [ "$rollback_status" -eq 0 ]; then
     for _ in $(seq 1 20); do
-      if curl -fsS "http://127.0.0.1:8000/api/health" >/tmp/tradingbot-rollback-health.json \
-        && verify_runtime_revision /tmp/tradingbot-rollback-health.json "$rollback_rev" "$rollback_bundle" \
+      if curl -fsS "http://127.0.0.1:8000/api/health" >"$DEPLOY_TMP_DIR/rollback-health.json" \
+        && verify_runtime_revision "$DEPLOY_TMP_DIR/rollback-health.json" "$rollback_rev" "$rollback_bundle" \
         && verify_frontend_delivery \
         && verify_commercial_edge; then
         echo "[deploy] Rollback health OK; previous revision restored."
-        cat /tmp/tradingbot-rollback-health.json
+        cat "$DEPLOY_TMP_DIR/rollback-health.json"
         set -e
         return 0
       fi
@@ -415,9 +533,18 @@ handle_deploy_error() {
   trap - ERR
   if [ "$deployment_changed" = "1" ]; then
     rollback_deployment || true
+  elif [ "$runtime_services_quiesced" = "1" ] && [ "$runtime_state_ready" = "1" ]; then
+    echo "[deploy] Restoring quiesced services after pre-change deployment failure."
+    for service in $SERVICES; do
+      restart_service_bounded "$service" || true
+    done
+  elif [ "$runtime_services_quiesced" = "1" ]; then
+    echo "[deploy] Services remain stopped because runtime state was not validated." >&2
   fi
   exit "$rc"
 }
+
+trap handle_deploy_error ERR
 
 git fetch origin "$BRANCH"
 new_rev_full="$(git rev-parse "origin/$BRANCH")"
@@ -440,14 +567,11 @@ fi
 if [ "$old_rev" = "$new_rev" ]; then
   echo "[deploy] Already up to date."
 else
-  preflight_dir="$(mktemp -d /tmp/alphastation-preflight.XXXXXX)"
+  preflight_dir="$(mktemp -d "$DEPLOY_TMP_DIR/preflight.XXXXXX")"
   cleanup_preflight() {
-    case "$preflight_dir" in
-      /tmp/alphastation-preflight.*) rm -rf -- "$preflight_dir" ;;
-      *) echo "[deploy] Refusing unsafe preflight cleanup path: $preflight_dir" ;;
-    esac
+    [ -z "$preflight_dir" ] || rm -rf -- "$preflight_dir"
+    preflight_dir=""
   }
-  trap cleanup_preflight EXIT
   echo "[deploy] Exporting target revision for preflight..."
   git archive "origin/$BRANCH" | tar -x -C "$preflight_dir"
   preflight_python="$PYTHON"
@@ -455,12 +579,11 @@ else
     echo "[deploy] Target dependencies changed; creating an isolated preflight venv..."
     python3 -m venv "$preflight_dir/.venv"
     preflight_python="$preflight_dir/.venv/bin/python"
-    "$preflight_python" -m pip install --disable-pip-version-check --upgrade pip >/tmp/tradingbot-preflight-pip-upgrade.log
-    "$preflight_python" -m pip install --disable-pip-version-check -r "$preflight_dir/requirements.txt" >/tmp/tradingbot-preflight-pip-install.log
+    "$preflight_python" -m pip install --disable-pip-version-check --upgrade pip >"$DEPLOY_TMP_DIR/preflight-pip-upgrade.log"
+    "$preflight_python" -m pip install --disable-pip-version-check -r "$preflight_dir/requirements.txt" >"$DEPLOY_TMP_DIR/preflight-pip-install.log"
   fi
   run_source_checks "$preflight_dir" "Target revision" "$preflight_python"
   cleanup_preflight
-  trap - EXIT
 
   if [ "$(git rev-parse HEAD)" != "$old_rev_full" ]; then
     echo "[deploy] Local revision changed during preflight; refusing deploy."
@@ -469,7 +592,6 @@ else
   git pull --ff-only origin "$BRANCH"
   if [ "$(git rev-parse HEAD)" != "$old_rev_full" ]; then
     deployment_changed=1
-    trap handle_deploy_error ERR
   fi
 fi
 
@@ -501,33 +623,34 @@ echo "[deploy] Restarting services: $SERVICES"
 for service in $SERVICES; do
   restart_service_bounded "$service"
 done
+runtime_services_quiesced=0
 
 echo "[deploy] Waiting for API health..."
 for _ in $(seq 1 20); do
-  if curl -fsS "$HEALTH_URL" >/tmp/tradingbot-health.json; then
-    if grep -Eq '"status"[[:space:]]*:[[:space:]]*"(critical|blocked)"' /tmp/tradingbot-health.json; then
+  if curl -fsS "$HEALTH_URL" >"$DEPLOY_TMP_DIR/health.json"; then
+    if grep -Eq '"status"[[:space:]]*:[[:space:]]*"(critical|blocked)"' "$DEPLOY_TMP_DIR/health.json"; then
       echo "[deploy] API returned blocking health/readiness:"
-      cat /tmp/tradingbot-health.json
+      cat "$DEPLOY_TMP_DIR/health.json"
       false
     fi
-    if [ "$COMMERCIAL_DEPLOY" = "1" ] && ! grep -q '"commercial_ready"[[:space:]]*:[[:space:]]*true' /tmp/tradingbot-health.json; then
+    if [ "$COMMERCIAL_DEPLOY" = "1" ] && ! grep -q '"commercial_ready"[[:space:]]*:[[:space:]]*true' "$DEPLOY_TMP_DIR/health.json"; then
       echo "[deploy] Commercial readiness failed:"
-      cat /tmp/tradingbot-health.json
+      cat "$DEPLOY_TMP_DIR/health.json"
       false
     fi
-    if ! curl -fsS "http://127.0.0.1:8000/api/health" >/tmp/tradingbot-build-health.json; then
+    if ! curl -fsS "http://127.0.0.1:8000/api/health" >"$DEPLOY_TMP_DIR/build-health.json"; then
       sleep 2
       continue
     fi
-    if ! verify_runtime_revision /tmp/tradingbot-build-health.json "$active_rev" "$active_bundle"; then
+    if ! verify_runtime_revision "$DEPLOY_TMP_DIR/build-health.json" "$active_rev" "$active_bundle"; then
       echo "[deploy] API is reachable but still serves a different build; waiting..."
       sleep 2
       continue
     fi
     echo "[deploy] Health OK"
-    cat /tmp/tradingbot-health.json
+    cat "$DEPLOY_TMP_DIR/health.json"
     if [ "$HEALTH_URL" != "http://127.0.0.1:8000/api/health" ]; then
-      cat /tmp/tradingbot-build-health.json
+      cat "$DEPLOY_TMP_DIR/build-health.json"
     fi
     verify_frontend_delivery
     verify_commercial_edge

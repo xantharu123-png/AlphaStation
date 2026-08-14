@@ -39,29 +39,50 @@ ssh root@DEINE_SERVER_IP
 
 **Option A — Git (empfohlen):**
 ```bash
-# Auf dem Server:
+# Auf dem Server als root (oder den ganzen Block mit sudo /bin/bash ausfuehren):
+sudo /bin/bash <<'ALPHA_SOURCE'
+set -Eeuo pipefail
+umask 077
+origin_url='https://github.com/xantharu123-png/AlphaStation.git'
+bootstrap_dir=$(mktemp -d /root/alpha-station-source.XXXXXX)
+cleanup() {
+  case "$bootstrap_dir" in
+    /root/alpha-station-source.*) rm -rf -- "$bootstrap_dir" ;;
+    *) echo "Unerwarteter Bootstrap-Pfad: $bootstrap_dir" >&2; exit 1 ;;
+  esac
+}
+trap cleanup EXIT
+
 apt install -y git
-cd /tmp
-git clone https://github.com/DEIN_USERNAME/TradingBot.git
-cp -r TradingBot/* /home/tradingbot/app/ 2>/dev/null || mkdir -p /home/tradingbot/app && cp -r TradingBot/* /home/tradingbot/app/
+git clone --branch main --single-branch "$origin_url" "$bootstrap_dir/source"
+test "$(git -C "$bootstrap_dir/source" remote get-url origin)" = "$origin_url"
+test -z "$(git -C "$bootstrap_dir/source" status --porcelain=v1)"
+install -d -m 0755 -o root -g root /home/tradingbot/app
+cp -a "$bootstrap_dir/source/." /home/tradingbot/app/
+ALPHA_SOURCE
 ```
 
 **Option B — SCP (von deinem PC):**
 ```bash
-# Von deinem PC aus:
-scp -r ./TradingBot/* root@DEINE_SERVER_IP:/tmp/tradingbot-upload/
-# Dann auf dem Server:
+# Von deinem PC aus in ein nur fuer root zugaengliches Ziel:
+scp -r ./TradingBot/. root@DEINE_SERVER_IP:/root/alpha-station-upload/
+# Dann auf dem Server als root:
 ssh root@DEINE_SERVER_IP
-mkdir -p /home/tradingbot/app
-cp -r /tmp/tradingbot-upload/* /home/tradingbot/app/
+install -d -m 0755 -o root -g root /home/tradingbot/app
+cp -a /root/alpha-station-upload/. /home/tradingbot/app/
+rm -rf -- /root/alpha-station-upload
 ```
+
+Option B ist nur fuer einen bewusst geprueften lokalen Quellbaum gedacht. Fuer
+eine bestehende oder moeglicherweise manipulierte Server-Installation gilt
+stattdessen zwingend der Quarantaene-/Fresh-Clone-Ablauf in
+`deploy/SERVER_WARTUNG.md`.
 
 ## Schritt 4: Install-Script starten
 
 ```bash
 cd /home/tradingbot/app/deploy
-chmod +x install.sh
-./install.sh
+sudo /bin/bash install.sh
 ```
 
 Das Script:
@@ -69,6 +90,15 @@ Das Script:
 - Erstellt User "tradingbot"
 - Legt `/home/tradingbot/app/.env` aus `.env.production.example` an (Platzhalter ersetzen!)
 - Richtet die systemd-Units `tradingbot-api` + `tradingbot-bg` ein (Auto-Start bei Reboot)
+- Richtet bei einem Git-Checkout den idempotenten Root-Cron unter
+  `/etc/cron.d/alpha-station-auto-update` ein, installiert den root-kontrollierten
+  Launcher `/usr/local/sbin/alpha-station-auto-update` und prueft den Git-Zugriff
+  ohne Deploy
+- Haelt Home, Checkout, `.git` und `venv` root-kontrolliert; nur
+  `/home/tradingbot/app/data_cache` bleibt fuer die Dienste schreibbar
+- Stellt gemeinsames `/tmp`/Library-HOME persistent ueber das systemd-
+  `StateDirectory=alpha-station-runtime` unter dem root-kontrollierten
+  `/var/lib`-Parent bereit
 - Migriert Alt-Installationen: deaktiviert die alte Streamlit-Unit `tradingbot`
 - Konfiguriert nginx: TLS via certbot, statisches Frontend, `/api/`-Proxy auf Port 8000
 
@@ -87,6 +117,9 @@ journalctl -u tradingbot-bg -f     # Background Scanner
 
 # Health-Check lokal (uvicorn lauscht nur auf localhost)
 curl -s http://127.0.0.1:8000/api/health
+# Der volle Check bindet diese API-Revision und frontend_bundle-ID exakt an
+# den aktiven Checkout und das versionierte Frontend-Bundle:
+bash /home/tradingbot/app/deploy/health_check.sh
 
 # Im Browser öffnen (nginx liefert das statische Frontend aus)
 # https://DEINE-DOMAIN
@@ -106,10 +139,41 @@ journalctl -u tradingbot-api --since "1 hour ago"
 cd /home/tradingbot/app && bash deploy/safe_deploy.sh
 # Frontend-Änderungen sind damit sofort live (statisch, kein Service-Restart nötig).
 
+# Auto-Update einmalig einrichten/reparieren (idempotent, kein Deploy beim Probe-Lauf):
+cd /home/tradingbot/app
+sudo /bin/bash deploy/install_auto_update.sh
+bash deploy/health_check.sh --auto-update-only
+
 # Secrets ändern
 nano /home/tradingbot/app/.env
 sudo systemctl restart tradingbot-api tradingbot-bg
 ```
+
+Der verwaltete Cron-Vertrag lautet exakt:
+
+```cron
+*/10 * * * * root /bin/bash /usr/local/sbin/alpha-station-auto-update >> /var/log/alpha_autoupdate.log 2>&1
+```
+
+Cron fuehrt damit keinen service-schreibbaren Checkout-Pfad als root aus. Der
+Installer akzeptiert nur eine root-eigene, nicht gruppen-/welt-schreibbare
+Pfadkette und kopiert den versionierten Updater als root:root 0755 in das
+root-kontrollierte Launcher-Verzeichnis. Der explizite `/bin/bash`-Aufruf ist
+zusaetzlich unabhaengig vom Execute-Bit; im Git-Checkout bleibt das Skript als
+ausfuehrbar versioniert. Vor jedem Git-Zugriff prueft der Launcher Home,
+Quellbaum, `.git`, `venv`, erlaubte Symlink-Ziele und deren kritische
+Parent-Pfade fail-closed. Git vertraut dem Checkout nur fuer den jeweiligen
+Befehl; die globale Git-Konfiguration des Servers wird nicht veraendert.
+
+Nach einem erfolgreich verifizierten Deploy wird der Launcher atomar auf die
+neuen Bytes synchronisiert. Bei Rollback oder fehlgeschlagenem Deploy bleibt
+der bisherige Launcher erhalten. Der Healthcheck meldet einen Byte-Unterschied
+zwischen Launcher und versioniertem Updater rot.
+
+Ein bereits zurueckgebliebener Altserver kann den neuen Installer nicht vor dem
+ersten Pull aufrufen. Fuer diesen einmaligen Bootstrap den revisionsgebundenen
+Recovery-Ablauf aus `SERVER_WARTUNG.md` verwenden; ein normaler weiterer Push
+repariert einen nicht laufenden Cron nicht von selbst.
 
 ## SSL/TLS (HTTPS) — Pflicht für den kommerziellen Betrieb
 

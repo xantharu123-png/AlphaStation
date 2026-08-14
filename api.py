@@ -689,10 +689,18 @@ def _detect_build_revision() -> str:
     configured = str(os.environ.get("APP_REVISION") or os.environ.get("GIT_COMMIT") or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{12,40}", configured):
         return configured[:12]
+    checkout = Path(__file__).resolve().parent
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=12", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
+            [
+                "git",
+                "-c",
+                f"safe.directory={checkout}",
+                "rev-parse",
+                "--short=12",
+                "HEAD",
+            ],
+            cwd=checkout,
             capture_output=True,
             text=True,
             timeout=2,

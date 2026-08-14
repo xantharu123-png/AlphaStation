@@ -508,6 +508,7 @@ def test_strategy_revalidation_rejection_releases_claim_and_records_reason(monke
         "_fetch_stock_revalidation_market_path",
         lambda *a, **k: {"ok": False, "reason": "final_market_path_missing"},
     )
+    monkeypatch.setattr(api.time, "time", lambda: NOW)
     api._EMAIL_COOLDOWN.clear()
 
     api._send_strategy_scan_alerts("Momentum Breakout Long", [_row()], "stocks")

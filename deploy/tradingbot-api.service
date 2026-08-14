@@ -21,6 +21,8 @@ WorkingDirectory=/home/tradingbot/app
 EnvironmentFile=-/home/tradingbot/app/.env
 Environment="PATH=/home/tradingbot/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="API_BIND_HOST=127.0.0.1"
+Environment="HOME=/var/lib/alpha-station-runtime"
+Environment="XDG_CACHE_HOME=/var/lib/alpha-station-runtime/cache"
 
 # Nur an localhost binden — TLS-Terminierung und Frontend-Auslieferung macht nginx.
 ExecStart=/home/tradingbot/app/venv/bin/uvicorn api:app --host ${API_BIND_HOST} --port 8000
@@ -40,17 +42,20 @@ LimitNOFILE=65536
 
 # ── Hardening ──
 NoNewPrivileges=true
-# /usr, /boot, /etc read-only. Das App-Verzeichnis bleibt beschreibbar
-# (Auth-DB + data_cache/ liegen dort); explizit freigegeben, damit ein
-# spaeterer Wechsel auf ProtectSystem=strict nichts kaputt macht.
-ProtectSystem=full
-ReadWritePaths=/home/tradingbot/app
+# Der gesamte Host inklusive Quellbaum und venv ist read-only. Ausschliesslich
+# persistenter/runtime Zustand unter data_cache darf der Service schreiben.
+ProtectSystem=strict
+ReadWritePaths=/home/tradingbot/app/data_cache
+# systemd erstellt diesen persistenten Zustand unter dem root-kontrollierten
+# /var/lib-Parent. Der Service kann den Bind-Quellpfad daher nicht austauschen.
+StateDirectory=alpha-station-runtime
+StateDirectoryMode=0700
 # ProtectHome NICHT setzen - die App liegt unter /home/tradingbot/app.
-# Beide Dienste sehen dasselbe dedizierte Runtime-Verzeichnis als /tmp. Damit
-# bleiben die bestehenden Cache-Pfade kompatibel, ohne das globale Server-/tmp
-# mit anderen Prozessen zu teilen.
+# Beide Dienste sehen dasselbe persistente StateDirectory als /tmp. Damit
+# bleiben bestehende Cache-Pfade kompatibel, ohne einen service-austauschbaren
+# Bind-Quellpfad oder das globale Server-/tmp zu verwenden.
 PrivateTmp=true
-BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp
+BindPaths=/var/lib/alpha-station-runtime:/tmp
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

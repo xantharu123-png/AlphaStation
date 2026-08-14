@@ -22,10 +22,10 @@ def test_auto_update_runs_transactional_safe_deploy():
 
     assert "set -Eeuo pipefail" in source
     assert 'EXPECTED_REVISION="$REMOTE"' in source
-    assert 'git show "${REMOTE}:deploy/safe_deploy.sh" > "$TARGET_DEPLOY"' in source
+    assert 'git_app show "${REMOTE}:deploy/safe_deploy.sh" > "$TARGET_DEPLOY"' in source
     assert 'bash "$TARGET_DEPLOY"' in source
     assert "trap cleanup_target_deploy EXIT" in source
-    assert 'git fetch fehlgeschlagen (Netz?) — Deployment nicht gestartet' in source
+    assert 'report error fetch "origin/main nicht abrufbar; Deployment nicht gestartet"' in source
     assert source.count("exit 1") >= 3
     assert "systemctl restart tradingbot-api tradingbot-bg" not in source
     assert "git pull --ff-only origin main" not in source

@@ -764,10 +764,12 @@ def _read_process_code_revision() -> str:
         configured = str(os.environ.get(env_key) or "").strip().lower()
         if re.fullmatch(r"[0-9a-f]{12,40}", configured):
             return configured[:12]
+    repo_root = Path(_REPO_ROOT).resolve()
+    safe_directory = f"safe.directory={repo_root}"
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=12", "HEAD"],
-            cwd=str(_REPO_ROOT),
+            ["git", "-c", safe_directory, "rev-parse", "--short=12", "HEAD"],
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=2,
@@ -779,8 +781,15 @@ def _read_process_code_revision() -> str:
             # worktree.  Otherwise signals produced by uncommitted code would
             # be silently mixed into the clean commit's performance cohort.
             status = subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=no"],
-                cwd=str(_REPO_ROOT),
+                [
+                    "git",
+                    "-c",
+                    safe_directory,
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ],
+                cwd=str(repo_root),
                 capture_output=True,
                 text=True,
                 timeout=2,

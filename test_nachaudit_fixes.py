@@ -223,9 +223,11 @@ def test_tracker_crypto_fetcher_blockt_stale_cache(monkeypatch, tmp_path):
 
     # Kein Zeitfeld -> Fallback auf Datei-mtime (frisch geschrieben) -> Preis
     cache_file.write_text(json.dumps({"coins": coins}))
-    # Windows may retain the previous timestamp for rapid rewrites in the same
-    # filesystem tick.  Make the freshness evidence explicit for this branch.
-    os.utime(cache_file, None)
+    # Keep the mtime explicitly in the recent past.  Some Windows filesystems
+    # can round an immediate ``os.utime(..., None)`` a fraction into the future;
+    # production correctly rejects such a non-causal timestamp.
+    fresh_mtime = time.time() - 1.0
+    os.utime(cache_file, (fresh_mtime, fresh_mtime))
     _assert_fresh_fallback()
 
 

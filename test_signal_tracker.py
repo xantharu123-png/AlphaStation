@@ -844,18 +844,20 @@ def test_missing_same_day_stock_interval_does_not_advance_failure_state(tracker)
     assert after["eval_fail_count"] == before["eval_fail_count"] == 0
 
 
-def test_incomplete_alert_day_backfill_blocks_next_day_daily_outcome(tracker):
+def test_incomplete_alert_day_backfill_blocks_next_day_daily_outcome(
+    tracker, monkeypatch
+):
+    alert_at = datetime(2026, 8, 11, 14, 0, tzinfo=timezone.utc)
+    next_session_after_close = datetime(2026, 8, 12, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: alert_at)
     row = _base_row(
         Ticker="BACKFILL",
         Preis=99.0,
         fill_evidence_verified=False,
+        price_observed_at=alert_at.isoformat(),
     )
     assert tracker.record_alert_signals("stock_strategy", [row]) == 1
     before = _signal("BACKFILL")
-    created_at = datetime.fromisoformat(before["created_at"])
-    next_day = created_at + timedelta(days=1)
-    while next_day.astimezone(tracker.ZoneInfo("America/New_York")).date() == created_at.astimezone(tracker.ZoneInfo("America/New_York")).date():
-        next_day += timedelta(hours=1)
     daily_calls = []
 
     def incomplete_backfill(_ticker, **_kwargs):
@@ -875,7 +877,7 @@ def test_incomplete_alert_day_backfill_blocks_next_day_daily_outcome(tracker):
     result = tracker.evaluate_open_signals(
         stock_daily_fetcher=daily_fetcher,
         stock_intraday_fetcher=incomplete_backfill,
-        now=next_day,
+        now=next_session_after_close,
     )
 
     after = _signal("BACKFILL")
@@ -888,13 +890,20 @@ def test_incomplete_alert_day_backfill_blocks_next_day_daily_outcome(tracker):
     assert after["r_realized"] is None
 
 
-def test_alert_day_backfill_rejects_completed_prefix_with_missing_tail(tracker):
+def test_alert_day_backfill_rejects_completed_prefix_with_missing_tail(
+    tracker, monkeypatch
+):
+    alert_at = datetime(2026, 8, 11, 14, 0, tzinfo=timezone.utc)
+    next_session_after_close = datetime(2026, 8, 12, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: alert_at)
     row = _base_row(
-        Ticker="BACKGAP", Preis=99.0, fill_evidence_verified=False
+        Ticker="BACKGAP",
+        Preis=99.0,
+        fill_evidence_verified=False,
+        price_observed_at=alert_at.isoformat(),
     )
     assert tracker.record_alert_signals("stock_strategy", [row]) == 1
     created_at = datetime.fromisoformat(_signal("BACKGAP")["created_at"])
-    next_day = created_at + timedelta(days=1)
     daily_calls = []
     first_start = created_at
     first_end = first_start + timedelta(minutes=5)
@@ -922,7 +931,7 @@ def test_alert_day_backfill_rejects_completed_prefix_with_missing_tail(tracker):
     result = tracker.evaluate_open_signals(
         stock_daily_fetcher=lambda *args: daily_calls.append(args) or [],
         stock_intraday_fetcher=truncated_backfill,
-        now=next_day,
+        now=next_session_after_close,
     )
 
     after = _signal("BACKGAP")
@@ -1305,14 +1314,38 @@ def test_empty_daily_history_after_completed_session_is_a_data_failure(
     assert signal["eval_fail_count"] == 1
 
 
+def test_git_revision_fallback_trusts_only_the_exact_checkout(monkeypatch, tmp_path):
+    checkout = (tmp_path / "root-owned checkout").resolve()
+    monkeypatch.setattr(st, "_REPO_ROOT", checkout)
+    monkeypatch.delenv("APP_REVISION", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        if "rev-parse" in args:
+            return SimpleNamespace(returncode=0, stdout="0123456789ab\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(st.subprocess, "run", fake_run)
+
+    assert st._read_process_code_revision() == "0123456789ab"
+    safe_directory = f"safe.directory={checkout}"
+    assert [call[0] for call in calls] == [
+        ["git", "-c", safe_directory, "rev-parse", "--short=12", "HEAD"],
+        ["git", "-c", safe_directory, "status", "--porcelain", "--untracked-files=no"],
+    ]
+    assert [call[1]["cwd"] for call in calls] == [str(checkout), str(checkout)]
+
+
 def test_git_revision_fallback_marks_dirty_tracked_worktree(monkeypatch):
     monkeypatch.delenv("APP_REVISION", raising=False)
     monkeypatch.delenv("GIT_COMMIT", raising=False)
 
     def fake_run(args, **_kwargs):
-        if args[1] == "rev-parse":
+        if "rev-parse" in args:
             return SimpleNamespace(returncode=0, stdout="0123456789ab\n")
-        assert args[1:3] == ["status", "--porcelain"]
+        assert "status" in args
         return SimpleNamespace(returncode=0, stdout=" M modules/signal_tracker.py\n")
 
     monkeypatch.setattr(st.subprocess, "run", fake_run)

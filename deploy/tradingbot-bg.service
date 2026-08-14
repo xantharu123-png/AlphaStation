@@ -17,6 +17,8 @@ WorkingDirectory=/home/tradingbot/app
 # blockiert den systemd-Start nicht; fail-closed-Checks macht die App selbst.
 EnvironmentFile=-/home/tradingbot/app/.env
 Environment="PATH=/home/tradingbot/app/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/var/lib/alpha-station-runtime"
+Environment="XDG_CACHE_HOME=/var/lib/alpha-station-runtime/cache"
 
 ExecStart=/home/tradingbot/app/venv/bin/python3 bg_service.py
 
@@ -35,13 +37,15 @@ LimitNOFILE=65536
 
 # ── Hardening ──
 NoNewPrivileges=true
-ProtectSystem=full
-ReadWritePaths=/home/tradingbot/app
+ProtectSystem=strict
+ReadWritePaths=/home/tradingbot/app/data_cache
+StateDirectory=alpha-station-runtime
+StateDirectoryMode=0700
 # ProtectHome NICHT setzen - die App liegt unter /home/tradingbot/app.
-# Identischer Bind-Mount wie beim API-Dienst: gemeinsamer Scanner-Cache, aber
-# kein Zugriff auf das globale Server-/tmp.
+# Identisches systemd-StateDirectory wie beim API-Dienst: gemeinsamer Cache,
+# root-kontrollierter Parent und kein Zugriff auf das globale Server-/tmp.
 PrivateTmp=true
-BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp
+BindPaths=/var/lib/alpha-station-runtime:/tmp
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

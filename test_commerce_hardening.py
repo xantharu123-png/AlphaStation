@@ -1423,9 +1423,12 @@ def test_production_units_use_unprivileged_hardened_services():
         assert "RestrictNamespaces=true" in unit
         assert "CapabilityBoundingSet=" in unit
         assert "PrivateTmp=true" in unit
-        assert "BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp" in unit
+        assert "StateDirectory=alpha-station-runtime" in unit
+        assert "StateDirectoryMode=0700" in unit
+        assert "BindPaths=/var/lib/alpha-station-runtime:/tmp" in unit
+        assert "BindPaths=/home/tradingbot/app/data_cache/runtime:/tmp" not in unit
         assert "TimeoutStopSec=30" in unit
-    assert 'install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"' in install_script
+    assert 'install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"' not in install_script
     assert not (root / "deploy" / "tradingbot.service").exists()
 
     api_unit = (root / "deploy" / "tradingbot-api.service").read_text(encoding="utf-8")
@@ -1466,14 +1469,16 @@ def test_deploy_preflights_target_before_updating_live_worktree():
     preflight_pos = deploy.index('run_source_checks "$preflight_dir"')
     pull_pos = deploy.index('git pull --ff-only origin "$BRANCH"')
     assert export_pos < preflight_pos < pull_pos
-    assert "mktemp -d /tmp/alphastation-preflight." in deploy
+    assert 'DEPLOY_TMP_DIR="$(mktemp -d /tmp/alpha-safe-deploy-runtime.XXXXXX)"' in deploy
+    assert 'chmod 0700 "$DEPLOY_TMP_DIR"' in deploy
+    assert 'preflight_dir="$(mktemp -d "$DEPLOY_TMP_DIR/preflight.XXXXXX")"' in deploy
     assert "Local revision changed during preflight; refusing deploy." in deploy
-    assert 'install -d -m 0700 -o tradingbot -g tradingbot "$APP_DIR/data_cache/runtime"' in deploy
 
 
 def test_deploy_migrates_legacy_runtime_before_hardened_unit_switch():
     root = Path(__file__).parent
     deploy = (root / "deploy" / "safe_deploy.sh").read_text(encoding="utf-8")
+    runtime_guard = (root / "deploy" / "runtime_state_guard.sh").read_text(encoding="utf-8")
 
     assert 'SERVICE_VENV_DIR="$APP_DIR/venv"' in deploy
     assert 'VENV_DIR="$SERVICE_VENV_DIR"' in deploy
@@ -1481,9 +1486,11 @@ def test_deploy_migrates_legacy_runtime_before_hardened_unit_switch():
     assert "Preparing the hardened runtime" in deploy
     assert "ensure_runtime_dependencies" in deploy
     assert "prepare_runtime_state" in deploy
-    assert 'chown -R tradingbot:tradingbot "$APP_DIR/data_cache"' in deploy
-    assert "alphastation_trade_reminders.json" in deploy
-    assert "alphastation_email_dedupe.json" in deploy
+    assert 'RUNTIME_WORK_DIR="$DEPLOY_TMP_DIR"' in deploy
+    assert '/bin/bash "$APP_DIR/deploy/runtime_state_guard.sh"' in deploy
+    assert 'chown -R tradingbot:tradingbot "$APP_DIR/data_cache"' not in deploy
+    assert '"$RUNTIME_FIND_BIN" "$CACHE_DIR" -xdev -mindepth 1 -print0' in runtime_guard
+    assert '"$RUNTIME_CHOWN_BIN" --no-dereference "$SERVICE_USER:$SERVICE_USER" "$path"' in runtime_guard
 
 
 def test_deploy_rolls_back_code_dependencies_and_units_after_live_failure():
@@ -1493,7 +1500,7 @@ def test_deploy_rolls_back_code_dependencies_and_units_after_live_failure():
     assert "set -Eeuo pipefail" in deploy
     assert "rollback_deployment()" in deploy
     assert 'git reset --hard "$old_rev_full"' in deploy
-    assert "tradingbot-pip-rollback.log" in deploy
+    assert '"$DEPLOY_TMP_DIR/pip-rollback.log"' in deploy
     assert "sync_service_units" in deploy
     assert 'trap handle_deploy_error ERR' in deploy
     assert "Rollback health OK; previous revision restored." in deploy
@@ -1518,7 +1525,7 @@ def test_deploy_binds_api_and_frontend_to_the_exact_target_revision():
     assert 'curl -fsS "http://127.0.0.1:8000/api/health"' in deploy
 
     runtime_check_pos = deploy.index(
-        "verify_runtime_revision /tmp/tradingbot-build-health.json"
+        'verify_runtime_revision "$DEPLOY_TMP_DIR/build-health.json"'
     )
     health_ok_pos = deploy.index('echo "[deploy] Health OK"')
     assert runtime_check_pos < health_ok_pos
@@ -1533,7 +1540,7 @@ def test_deploy_binds_api_and_frontend_to_the_exact_target_revision():
 
     rollback_pos = deploy.index("rollback_deployment()")
     rollback_health_pos = deploy.index(
-        "verify_runtime_revision /tmp/tradingbot-rollback-health.json",
+        'verify_runtime_revision "$DEPLOY_TMP_DIR/rollback-health.json"',
         rollback_pos,
     )
     rollback_success_pos = deploy.index(
@@ -1562,6 +1569,32 @@ def test_build_revision_rejects_ambiguous_short_environment_hash(monkeypatch):
     )
 
     assert api._detect_build_revision() == "unknown"
+
+
+def test_build_revision_git_fallback_trusts_only_the_exact_checkout(monkeypatch, tmp_path):
+    checkout = (tmp_path / "root-owned checkout").resolve()
+    monkeypatch.setattr(api, "__file__", str(checkout / "api.py"))
+    monkeypatch.delenv("APP_REVISION", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="0123456789ab\n")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    assert api._detect_build_revision() == "0123456789ab"
+    assert calls[0][0] == [
+        "git",
+        "-c",
+        f"safe.directory={checkout}",
+        "rev-parse",
+        "--short=12",
+        "HEAD",
+    ]
+    assert calls[0][1]["cwd"] == checkout
+    assert len(calls) == 1
 
 
 def test_deploy_synchronizes_hardened_service_units_before_restart():
