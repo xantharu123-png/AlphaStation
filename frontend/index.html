@@ -703,6 +703,16 @@ function useAuth() {
 }
 
 // ── Login/Register Page ──
+const scrollToLandingSection = (targetId) => {
+    const target = document.getElementById(targetId);
+    if (!target || typeof target.scrollIntoView !== 'function') {
+        console.warn(`[Alpha Station] Landing section not found: ${targetId}`);
+        return false;
+    }
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
+};
+
 function AuthPage({ onLogin, onRegister }) {
     const initialResetToken = new URLSearchParams(window.location.search).get('reset_token') || '';
     const [showAuth, setShowAuth] = useState(!!initialResetToken);
@@ -847,8 +857,8 @@ function AuthPage({ onLogin, onRegister }) {
                     <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.5px' }}>Alpha Station</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <button onClick={() => document.getElementById('features').scrollIntoView({behavior:'smooth'})} style={{ padding: '9px 16px', background: 'none', border: 'none', color: '#94a3b8', fontSize: 14, cursor: 'pointer' }}>Features</button>
-                    <button onClick={() => document.getElementById('pricing').scrollIntoView({behavior:'smooth'})} style={{ padding: '9px 16px', background: 'none', border: 'none', color: '#94a3b8', fontSize: 14, cursor: 'pointer' }}>Pricing</button>
+                    <button onClick={() => scrollToLandingSection('features')} style={{ padding: '9px 16px', background: 'none', border: 'none', color: '#94a3b8', fontSize: 14, cursor: 'pointer' }}>Features</button>
+                    <button onClick={() => scrollToLandingSection('pricing')} style={{ padding: '9px 16px', background: 'none', border: 'none', color: '#94a3b8', fontSize: 14, cursor: 'pointer' }}>Pricing</button>
                     <div style={{ width: 1, height: 20, background: '#334155', margin: '0 8px' }} />
                     <button onClick={() => openAuth(true)} style={{ padding: '9px 22px', background: 'transparent', border: '1px solid #334155', borderRadius: 8, color: '#f1f5f9', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>Login</button>
                     <button onClick={() => openAuth(false)} style={{ padding: '9px 22px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 15px rgba(59,130,246,0.3)' }}>Für $1 testen</button>
@@ -875,7 +885,7 @@ function AuthPage({ onLogin, onRegister }) {
 
                     {/* USP Pills */}
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 36 }}>
-                        {['Long & Short Breakouts live', 'BI Scanner (20+ Indikatoren)', 'Crypto & Whale Tracking', 'Auto-Trader (Elite)', 'Biotech & FDA Tracker', 'After Hours & Crash Monitor'].map((usp, i) => (
+                        {['Long & Short Breakouts live', 'BI Scanner (20+ Indikatoren)', 'Crypto & Whale Tracking', 'Paper Auto-Trader (Elite)', 'Biotech & FDA Tracker', 'After Hours & Crash Monitor'].map((usp, i) => (
                             <span key={i} style={{ padding: '6px 16px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 20, fontSize: 13, color: '#60a5fa', fontWeight: 500 }}>{usp}</span>
                         ))}
                     </div>
@@ -886,7 +896,7 @@ function AuthPage({ onLogin, onRegister }) {
                             onMouseOut={e => { e.target.style.transform='translateY(0)'; e.target.style.boxShadow='0 8px 30px rgba(59,130,246,0.4)'; }}>
                             24h testen — $1
                         </button>
-                        <button onClick={() => document.getElementById('demo-preview').scrollIntoView({behavior:'smooth'})} style={{ padding: '16px 32px', background: 'rgba(255,255,255,0.04)', border: '1px solid #334155', borderRadius: 12, color: '#f1f5f9', fontSize: 17, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <button onClick={() => scrollToLandingSection('demo-preview')} style={{ padding: '16px 32px', background: 'rgba(255,255,255,0.04)', border: '1px solid #334155', borderRadius: 12, color: '#f1f5f9', fontSize: 17, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
 Mehr erfahren ↓
                         </button>
                     </div>
@@ -913,8 +923,8 @@ Mehr erfahren ↓
             </section>
 
             {/* ── Problem / Solution ── */}
-            <section id="demo-preview" data-reveal style={{ padding: '80px 24px', maxWidth: 1100, margin: '0 auto' }} {...{id: 'sec-problem'}}>
-                <div style={revealStyle('sec-problem')}>
+            <section id="demo-preview" data-reveal style={{ padding: '80px 24px', maxWidth: 1100, margin: '0 auto' }}>
+                <div style={revealStyle('demo-preview')}>
                     <div style={{ textAlign: 'center', marginBottom: 56 }}>
                         <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-0.5px' }}>Beobachte Märkte systematisch.</h2>
                         <p style={{ color: '#94a3b8', fontSize: 18, maxWidth: 600, margin: '0 auto' }}>Scanner bündeln technische Daten und Risikohinweise. Die Handelsentscheidung bleibt bei dir.</p>
@@ -950,8 +960,8 @@ Mehr erfahren ↓
             </section>
 
             {/* ── USP Showcase (detailed, scrollable) ── */}
-            <section id="features" data-reveal style={{ padding: '80px 24px 40px' }} {...{id: 'sec-usp'}}>
-                <div style={{...revealStyle('sec-usp'), maxWidth: 1100, margin: '0 auto'}}>
+            <section id="features" data-reveal style={{ padding: '80px 24px 40px' }}>
+                <div style={{...revealStyle('features'), maxWidth: 1100, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 60 }}>
                         <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Dein Analyse-Werkzeug.<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>15+ Scanner in einem Tool.</span></h2>
                         <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner betrachtet einen abgegrenzten Markt-Zustand mit eigener Daten- und Risikologik.</p>
@@ -1201,7 +1211,7 @@ Mehr erfahren ↓
                                                 <div><span style={{ color: '#64748b' }}>Target</span><div style={{ fontWeight: 700, color: '#10b981' }}>${o.tp}</div></div>
                                                 <div><span style={{ color: '#64748b' }}>R:R</span><div style={{ fontWeight: 700, color: '#3b82f6' }}>{o.rr}x</div></div>
                                             </div>
-                                            <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>{o.shares} Shares — Bracket Order via Broker-Anbindung</div>
+                                            <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>{o.shares} Shares — Simulierter Bracket-Order-Plan</div>
                                         </div>
                                     ))}
                                     {/* Stats bar */}
@@ -1217,19 +1227,19 @@ Mehr erfahren ↓
                                     <span style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '1.5px' }}>ELITE</span>
                                     <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 10, background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}>NEU</span>
                                 </div>
-                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Auto-Trader — Vom Signal zum Trade</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 16 }}>Der Auto-Trader verbindet den BI Scanner mit einer Broker-Anbindung. Wenn ein Signal mit hohem Confluence-Score erkannt wird, kann das System Bracket Orders vorbereiten — Entry, Stop-Loss und Take-Profit. Du wählst: Semi Auto (du bestätigst) oder Full Auto (Orders gehen live). Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden — alles konfigurierbar.</p>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Paper Auto-Trader — Vom Signal zum simulierten Trade</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 16 }}>Der Paper Auto-Trader verbindet den BI Scanner mit einer Paper-Broker-Simulation und kann Bracket-Order-Pläne für Entry, Stop-Loss und Take-Profit vorbereiten. Der aktuelle Produktstand arbeitet ausschließlich im Paper-/Simulationsmodus: Paper Review verlangt deine Bestätigung, Paper Auto simuliert den Ablauf. Echte Broker-Orders und Live-Trading sind technisch blockiert. Position Sizing, Max Positionen, Tages-Verlustlimit und Cooldown-Perioden werden ausschließlich als Paper-Parameter konfiguriert.</p>
                                 <div style={{ padding: '14px 18px', borderRadius: 12, background: 'linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02))', border: '1px solid rgba(16,185,129,0.2)', marginBottom: 20 }}>
                                     <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>Strategien vor dem Einsatz prüfen:</div>
-                                    <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', lineHeight: 1.2 }}>Backtests & Live-Healthchecks</div>
+                                    <div style={{ fontSize: 28, fontWeight: 800, color: '#10b981', lineHeight: 1.2 }}>Backtests & Paper-Healthchecks</div>
                                     <div style={{ fontSize: 14, color: '#f1f5f9', fontWeight: 600, marginTop: 4 }}>Keine Blackbox: Score, Risiko und Setup-Regeln bleiben sichtbar.</div>
-                                    <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>Backtests sind historische Simulationen und ersetzen keine Live-Ausführungskontrolle.*</div>
+                                    <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>Backtests sind historische Simulationen, kein Nachweis realer Ausführung und ersetzen keine laufende Paper-Kontrolle.*</div>
                                     <div style={{ fontSize: 10, color: '#475569', marginTop: 6, fontStyle: 'italic' }}>*Backtested Performance. Vergangene Ergebnisse sind keine Garantie für zukünftige Gewinne.</div>
                                 </div>
                                 <div style={{ display: 'flex', gap: 24 }}>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Risk</div><div style={{ fontSize: 12, color: '#64748b' }}>Stops & Limits</div></div>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Broker</div><div style={{ fontSize: 12, color: '#64748b' }}>Integration</div></div>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Semi / Full</div><div style={{ fontSize: 12, color: '#64748b' }}>Auto Modus</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Paper Broker</div><div style={{ fontSize: 12, color: '#64748b' }}>Simulation</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>Review / Auto</div><div style={{ fontSize: 12, color: '#64748b' }}>Paper-Modus</div></div>
                                 </div>
                             </div>
                         </div>
@@ -1362,8 +1372,8 @@ Mehr erfahren ↓
             </section>
 
             {/* ── Pricing ── */}
-            <section id="pricing" data-reveal style={{ padding: '80px 24px' }} {...{id: 'sec-pricing'}}>
-                <div style={{...revealStyle('sec-pricing'), maxWidth: 1060, margin: '0 auto'}}>
+            <section id="pricing" data-reveal style={{ padding: '80px 24px' }}>
+                <div style={{...revealStyle('pricing'), maxWidth: 1060, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 50 }}>
                         <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Wähle deinen Funktionsumfang</h2>
                         <p style={{ color: '#94a3b8', fontSize: 17 }}>Jederzeit kündbar. Starte mit dem $1 Trial.</p>
@@ -1466,10 +1476,10 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Diese AGB gelten für die Nutzung der Plattform "Alpha Station" (nachfolgend "Dienst"), betrieben von {legalEntity} (nachfolgend "Anbieter"). Mit der Registrierung akzeptiert der Nutzer diese AGB.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Leistungsbeschreibung</p>
-                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. BI Scanner mit 20+ Indikatoren), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), technische Trade-Setups (Entry, Stop-Loss, Take-Profit) sowie Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan beinhaltet zusätzlich einen Auto-Trader, der automatisiert oder semi-automatisiert Orders über eine Broker-Anbindung platzieren kann. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. BI Scanner mit 20+ Indikatoren), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), technische Trade-Setups (Entry, Stop-Loss, Take-Profit) sowie Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan enthält derzeit ausschließlich eine Paper-Broker-Simulation. Sie erstellt und simuliert Order-Pläne; echte Broker-Orders und Live-Trading sind technisch blockiert. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Haftungsausschluss & Risikohinweis</p>
-                                    <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren und Kryptowährungen ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Setup-Hinweise sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Dies gilt ausdrücklich auch für den Auto-Trader: Automatisiert oder semi-automatisiert platzierte Orders erfolgen auf alleiniges Risiko des Nutzers. Der Anbieter übernimmt keine Haftung für technische Fehlfunktionen, Verbindungsabbrüche zum Broker, fehlerhafte Orderausführungen, Slippage oder sonstige Verluste, die durch die Nutzung des Auto-Traders entstehen. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
+                                    <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren und Kryptowährungen ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Setup-Hinweise sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Paper-Fills und simulierte Ergebnisse können von einer realen Broker-Ausführung erheblich abweichen; die Funktion übermittelt keine echten Orders. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Registrierung & Account</p>
                                     <p style={{ marginBottom: 12 }}>Für die Nutzung ist eine Registrierung mit gültiger Email-Adresse erforderlich. Der Nutzer ist für die Geheimhaltung seiner Zugangsdaten verantwortlich. Jeder Nutzer darf nur einen Account führen. Der Anbieter behält sich vor, Accounts bei Verstößen gegen diese AGB zu sperren oder zu löschen.</p>
@@ -1489,8 +1499,8 @@ Mehr erfahren ↓
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>9. Nutzungsbeschränkungen</p>
                                     <p style={{ marginBottom: 12 }}>Der Nutzer verpflichtet sich, den Dienst nicht missbräuchlich zu nutzen. Insbesondere ist es untersagt: automatisierte Zugriffe (Bots, Scraping) ohne API-Berechtigung durchzuführen, den Dienst für illegale Zwecke zu verwenden, Sicherheitsmechanismen zu umgehen oder den Account an Dritte weiterzugeben.</p>
 
-                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>10. Auto-Trader</p>
-                                    <p style={{ marginBottom: 12 }}>Der Auto-Trader (verfügbar im Elite-Plan) ermöglicht die automatisierte oder semi-automatisierte Platzierung von Wertpapier-Orders über eine Broker-Anbindung. Der Nutzer ist allein verantwortlich für: die korrekte Konfiguration des Auto-Traders (Position Size, Max Positionen, Stop-Loss Limits), die Sicherstellung einer funktionierenden Broker-Verbindung, die Überwachung offener Positionen und die Einhaltung aller geltenden Handelsregeln und Regulierungen. Der Auto-Trader führt Orders basierend auf algorithmischen Signalen aus. Der Anbieter garantiert weder die Richtigkeit der Signale noch die fehlerfreie Ausführung von Orders. Der Nutzer sollte den Auto-Trader nicht unbeaufsichtigt im Full-Auto-Modus betreiben, sofern er die Risiken nicht vollständig versteht und akzeptiert. Der Anbieter empfiehlt den Semi-Auto-Modus, bei dem Orders zur manuellen Bestätigung vorgelegt werden.</p>
+                                    <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>10. Paper Auto-Trader</p>
+                                    <p style={{ marginBottom: 12 }}>Der Paper Auto-Trader (verfügbar im Elite-Plan) ist derzeit ausschließlich eine Paper-Broker-Simulation. Paper Review erfordert eine Bestätigung, Paper Auto simuliert den Ablauf automatisch. Eine echte Broker-Verbindung, Orderübermittlung und Kontoperformance sind nicht Bestandteil des aktuellen Produkts. Simulierte Signale, Fills und Resultate können von real handelbaren Preisen und Ausführungen abweichen und sind kein Profitabilitätsnachweis.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>11. Kryptowährungen</p>
                                     <p style={{ marginBottom: 12 }}>Alpha Station bietet Scanner und Analysen für Kryptowährungen an (Early Movers, Whale Tracking, Funding Rates, BTC-Divergenz). Kryptowährungen sind hochvolatile, spekulative Anlageinstrumente. Der Kryptowährungsmarkt ist weitgehend unreguliert und unterliegt extremen Preisschwankungen. Der Anbieter übernimmt keine Haftung für Verluste aus Kryptowährungs-Investments. Die bereitgestellten Daten stammen von externen Datenquellen und Börsen und können unvollständig, verzögert oder fehlerhaft sein.</p>
@@ -1514,13 +1524,13 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Verantwortlich für die Datenverarbeitung ist {legalEntity}. Kontakt: siehe Impressum.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Erhobene Daten</p>
-                                    <p style={{ marginBottom: 12 }}>Bei der Nutzung von Alpha Station werden folgende Daten erhoben: Email-Adresse und Name (bei Registrierung), Zahlungsdaten (verarbeitet durch Stripe, nicht auf unseren Servern gespeichert), Nutzungsdaten (aufgerufene Ticker, Scan-Zeitpunkte, Auto-Trader Konfigurationen und Order-Logs), technische Daten (IP-Adresse, Browser-Typ, Zeitstempel).</p>
+                                    <p style={{ marginBottom: 12 }}>Bei der Nutzung von Alpha Station werden folgende Daten erhoben: Email-Adresse und Name (bei Registrierung), Zahlungsdaten (verarbeitet durch Stripe, nicht auf unseren Servern gespeichert), Nutzungsdaten (aufgerufene Ticker, Scan-Zeitpunkte, Paper-Auto-Trader-Konfigurationen und Paper-Order-Logs), technische Daten (IP-Adresse, Browser-Typ, Zeitstempel).</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Zweck der Verarbeitung</p>
                                     <p style={{ marginBottom: 12 }}>Die Daten werden ausschließlich zur Bereitstellung und Verbesserung des Dienstes, zur Abrechnung und Kontoverwaltung sowie für technische Sicherheit und Missbrauchsprävention verwendet.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>4. Drittanbieter</p>
-                                    <p style={{ marginBottom: 12 }}>Wir nutzen externe Dienstleister für Zahlungsabwicklung, Markt-/Chartdaten, Kryptowährungsdaten und optional für Broker-Anbindungen. Diese Dienstleister verarbeiten Daten nur soweit dies für Betrieb, Abrechnung, Datenauslieferung oder eine vom Nutzer aktivierte Funktion erforderlich ist. Je nach Anbieter können Daten in Länder außerhalb der Schweiz/EU übertragen werden.</p>
+                                    <p style={{ marginBottom: 12 }}>Wir nutzen externe Dienstleister für Zahlungsabwicklung, Markt-/Chartdaten, Kryptowährungsdaten und optional für Paper-Broker-Anbindungen. Diese Dienstleister verarbeiten Daten nur soweit dies für Betrieb, Abrechnung, Datenauslieferung oder eine vom Nutzer aktivierte Funktion erforderlich ist. Je nach Anbieter können Daten in Länder außerhalb der Schweiz/EU übertragen werden.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>5. Speicherdauer</p>
                                     <p style={{ marginBottom: 12 }}>Personenbezogene Daten werden solange gespeichert, wie ein aktives Konto besteht. Nach Kontolöschung werden die Daten innerhalb von 30 Tagen gelöscht, sofern keine gesetzlichen Aufbewahrungspflichten bestehen.</p>
@@ -4840,7 +4850,7 @@ function App() {
         { id: 'volume-spikes', label: 'Volume Spikes' },
         { id: 'penny-stocks', label: 'Pennystocks' },
         { id: 'orb', label: 'ORB Scanner' },
-        { id: 'autotrader', label: 'Auto-Trader' },
+        { id: 'autotrader', label: 'Paper Auto-Trader' },
         { id: 'chart-analyse', label: 'Chart & Analyse' },
         { id: 'signal-performance', label: 'Performance' },
         { id: 'admin', label: 'Admin' }
@@ -4889,7 +4899,7 @@ function App() {
                     { id: 'crash-monitor', name: 'Crash Monitor', desc: 'Markt-Risiko Überwachung', svg: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01', color: '#ef4444' },
                     { id: 'money-flow', name: 'Sektoren & Narrative', desc: 'Rotation, bullische/bearische Themen und Mail-Frequenz', svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#0ea5e9' },
                     { id: 'backtest', name: 'Backtest', desc: 'Strategien historisch testen', svg: 'M12 20V10M18 20V4M6 20V16', color: '#8b5cf6' },
-                    { id: 'autotrader', name: 'Auto-Trader', desc: 'Automatisierte Trade-Ausführung', svg: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z', color: '#10b981' },
+                    { id: 'autotrader', name: 'Paper Auto-Trader', desc: 'Automatisierte Paper-Ausführung', svg: 'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z', color: '#10b981' },
                 ]},
             ]
         },
@@ -6852,21 +6862,110 @@ function SignalPerformanceTab() {
     const rTone = (v) => (v ?? 0) > 0 ? 'text-green-600' : (v ?? 0) < 0 ? 'text-red-600' : 'text-gray-600';
     const statusBadge = (sig) => {
         const status = sig.status || 'OPEN';
-        if (status === 'STOP_HIT') return { label: 'STOP', cls: 'bg-red-100 text-red-700' };
+        const progressLabel = sig.tp1_hit_at ? 'TP1 zuvor erreicht' : null;
+        if (status === 'STOP_HIT') return { label: 'STOP', cls: 'bg-red-100 text-red-700', progressLabel };
         if (status === 'TP2_HIT') return { label: 'TP2', cls: 'bg-green-100 text-green-700' };
         if (status === 'TP1_HIT_OPEN') return { label: 'TP1 · OPEN', cls: 'bg-blue-100 text-blue-700' };
-        if (status === 'EXPIRED') return sig.tp1_hit_at
-            ? { label: 'TP1', cls: 'bg-green-100 text-green-700' }
-            : { label: 'EXPIRED', cls: 'bg-gray-100 text-gray-600' };
+        if (status === 'EXPIRED') return { label: 'EXPIRED', cls: 'bg-gray-100 text-gray-600', progressLabel };
         if (status === 'NO_FILL') return { label: 'NO FILL', cls: 'bg-amber-100 text-amber-800' };
         if (status === 'UNTRACKED') return { label: 'UNTRACKED', cls: 'bg-gray-100 text-gray-500' };
         return { label: 'OPEN', cls: 'bg-blue-100 text-blue-700' };
     };
 
+    const modelCellEvidence = (segment) => {
+        const finiteNumber = (value) => (
+            typeof value === 'number' && Number.isFinite(value) ? value : null
+        );
+        const finiteCount = (value) => {
+            const parsed = finiteNumber(value);
+            return parsed !== null && parsed >= 0 ? Math.trunc(parsed) : null;
+        };
+        const finitePct = (value) => {
+            const parsed = finiteNumber(value);
+            return parsed !== null && parsed >= 0 && parsed <= 100 ? parsed : null;
+        };
+        const wilson95 = (value) => {
+            if (!value || typeof value !== 'object') return null;
+            const lower = finitePct(value.lower_pct);
+            const upper = finitePct(value.upper_pct);
+            return lower !== null && upper !== null && lower <= upper
+                ? { lower_pct: lower, upper_pct: upper }
+                : null;
+        };
+        const reliability = (value) => value === true
+            ? true
+            : (value === false ? false : null);
+        const managed = {
+            family: 'managed_be',
+            familyLabel: 'Managed 50/50+BE',
+            resolved: finiteCount(segment?.managed_be_decided_signals),
+            unresolved: finiteCount(segment?.managed_be_unresolved),
+            winRatePct: finitePct(segment?.managed_be_win_rate_pct),
+            winRateWilson95: wilson95(segment?.managed_be_win_rate_wilson_95),
+            avgR: finiteNumber(segment?.avg_r_managed_50_50_be),
+            sumR: finiteNumber(segment?.sum_r_managed_50_50_be),
+            sampleReliable: reliability(segment?.managed_be_sample_reliable),
+        };
+        const be = {
+            family: 'be',
+            familyLabel: 'BE-only',
+            resolved: finiteCount(segment?.be_decided_signals),
+            unresolved: finiteCount(segment?.be_unresolved),
+            winRatePct: finitePct(segment?.be_win_rate_pct),
+            winRateWilson95: wilson95(segment?.be_win_rate_wilson_95),
+            avgR: finiteNumber(segment?.avg_r_be),
+            sumR: finiteNumber(segment?.sum_r_be),
+            sampleReliable: reliability(segment?.be_sample_reliable),
+        };
+        const legacyResolved = finiteCount(segment?.decided_signals);
+        const selected = managed.resolved !== null && managed.unresolved !== null
+            ? managed
+            : (be.resolved !== null && be.unresolved !== null
+                ? be
+                : {
+                    family: 'unresolved',
+                    familyLabel: 'Evidenzfamilie unbekannt',
+                    resolved: legacyResolved ?? 0,
+                    unresolved: null,
+                    winRatePct: null,
+                    winRateWilson95: null,
+                    avgR: null,
+                    sumR: null,
+                    sampleReliable: null,
+                });
+        const metricsComplete = selected.winRatePct !== null
+            && selected.winRateWilson95 !== null
+            && selected.avgR !== null
+            && selected.sumR !== null;
+        const releaseAllowed = selected.unresolved === 0
+            && selected.sampleReliable === true
+            && metricsComplete;
+        const releaseLabel = selected.unresolved === null
+            ? 'Nicht freigegeben - unresolved unbekannt'
+            : (selected.unresolved > 0
+                ? `Nicht freigegeben - ${selected.unresolved} unresolved`
+                : (selected.sampleReliable !== true
+                    ? (selected.sampleReliable === false
+                        ? 'Nicht freigegeben - kleine Stichprobe'
+                        : 'Nicht freigegeben - Reliability unbekannt')
+                    : (!metricsComplete
+                        ? 'Nicht freigegeben - Kennzahlen unvollständig'
+                        : '')));
+        return {
+            ...selected,
+            metricsComplete,
+            releaseAllowed,
+            denominatorLabel: selected.unresolved === null
+                ? `${selected.resolved} resolved / unresolved unbekannt`
+                : `${selected.resolved} resolved / ${selected.unresolved} unresolved`,
+            releaseLabel,
+        };
+    };
+
     const total = perf?.total || {};
     const scanners = Object.entries(perf?.per_scanner || {}).sort((a, b) => (b[1].sum_r ?? 0) - (a[1].sum_r ?? 0));
     const segments = [...(perf?.segments || [])].sort((a, b) =>
-        (b.decided_signals ?? 0) - (a.decided_signals ?? 0)
+        modelCellEvidence(b).resolved - modelCellEvidence(a).resolved
         || String(a.strategy || '').localeCompare(String(b.strategy || ''))
     );
     const cohort = perf?.cohort || {};
@@ -6887,7 +6986,7 @@ function SignalPerformanceTab() {
         { label: 'Summe R', value: fmtR(total.sum_r), cls: rTone(total.sum_r) },
         { label: 'Ø R', value: fmtR(total.avg_r), cls: rTone(total.avg_r) },
         { label: 'Ø R 50/50', value: fmtR(total.avg_r_managed_50_50), cls: rTone(total.avg_r_managed_50_50), hint: '50% bei TP1 raus, Rest läuft' },
-        { label: 'Ø R BE', value: fmtR(total.avg_r_be), cls: rTone(total.avg_r_be), hint: 'Einstand-Regel ab +1R (live)' },
+        { label: 'Ø R BE', value: fmtR(total.avg_r_be), cls: rTone(total.avg_r_be), hint: 'Tracker-Gegenrechnung ab beobachteter MFE >= +1R' },
         { label: 'Offene Positionen', value: String(total.open ?? 0), cls: 'text-blue-600' },
     ];
 
@@ -6969,12 +7068,12 @@ function SignalPerformanceTab() {
                         </div>
                     )}
 
-                    {/* BE-Trigger (30.07.): Live-Wirkung der Einstand-Regel */}
+                    {/* BE-Trigger (30.07.): preiswegabgeleitete Tracker-Gegenrechnung */}
                     {(total.be_activations ?? 0) > 0 && (
                         <div className="card border border-green-200 bg-green-50 text-green-900 px-4 py-3 rounded-lg text-sm">
-                            🛡 <b>Einstand-Regel (seit 30.07. live):</b> {total.be_activations} Signale erreichten +1R und lösten den BE-Prozess aus
-                            {(total.be_saved ?? 0) > 0 && <>, davon wurden <b>{total.be_saved} mit belegtem Einstands-Exit vor einem Verlust bewahrt</b></>}.
-                            {' '}Ø R Ist {fmtR(total.avg_r)} vs. Ø R mit Einstand-Regel <b>{fmtR(total.avg_r_be)}</b>.
+                            🛡 <b>Einstand-Regel (seit 30.07. im Tracker):</b> {total.be_activations} Signale zeigten MFE >= +1R; dadurch wurde der BE-Prozess im Tracker ausgelöst
+                            {(total.be_saved ?? 0) > 0 && <>; die trackerbasierte BE-Gegenrechnung weist bei <b>{total.be_saved}</b> einen nicht-negativen BE-Ausgang statt negativem Level-R aus</>}.
+                            {' '}Ø Level-R Ist {fmtR(total.avg_r)} vs. Ø trackerbasierte BE-Gegenrechnung <b>{fmtR(total.avg_r_be)}</b>. Das ist kein Nachweis einer Broker-Ausführung oder gebuchten Netto-Kontoperformance.
                         </div>
                     )}
 
@@ -7054,14 +7153,16 @@ function SignalPerformanceTab() {
                                         <th className="text-left py-2 px-1">Richtung</th>
                                         <th className="text-left py-2 px-1">Horizont / Regime</th>
                                         <th className="text-left py-2 px-1">Revision / Fill-Nachweis</th>
-                                        <th className="text-right py-2 px-1">Entschieden</th>
+                                        <th className="text-right py-2 px-1">Evidenzfamilie / Stichprobe</th>
                                         <th className="text-right py-2 px-1">Hit-Rate</th>
-                                        <th className="text-right py-2 px-1">Ø Managed-R</th>
-                                        <th className="text-right py-2 px-1">Σ Managed-R</th>
+                                        <th className="text-right py-2 px-1">Ø Modell-R</th>
+                                        <th className="text-right py-2 px-1">Σ Modell-R</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {segments.map((s, idx) => (
+                                    {segments.map((s, idx) => {
+                                        const cellEvidence = modelCellEvidence(s);
+                                        return (
                                         <tr key={`${s.scanner}-${s.strategy}-${s.direction}-${s.horizon}-${s.market_regime}-${s.code_revision}-${s.fill_evidence_mode}-${idx}`} className="border-b border-gray-100">
                                             <td className="py-2 px-1 text-gray-900"><div className="font-medium">{s.strategy || 'unknown'}</div><div className="text-[10px] text-gray-400">{s.scanner || 'unknown'}</div></td>
                                             <td className="py-2 px-1">
@@ -7075,15 +7176,20 @@ function SignalPerformanceTab() {
                                                 <div>{s.code_revision || 'legacy_unknown'}</div>
                                                 <div>{s.fill_evidence_mode || 'legacy_unclassified'}</div>
                                             </td>
-                                            <td className="py-2 px-1 text-right">{s.managed_be_decided_signals ?? s.decided_signals ?? 0}</td>
                                             <td className="py-2 px-1 text-right">
-                                                {fmtPct(s.managed_be_win_rate_pct ?? s.win_rate_pct)}
-                                                {s.managed_be_win_rate_wilson_95 && <div className="text-[10px] text-gray-400">KI {Number(s.managed_be_win_rate_wilson_95.lower_pct).toFixed(0)}–{Number(s.managed_be_win_rate_wilson_95.upper_pct).toFixed(0)}%{s.managed_be_sample_reliable === false ? ' · klein' : ''}</div>}
+                                                <div className="text-[10px] text-gray-500">{cellEvidence.familyLabel}</div>
+                                                <div>{cellEvidence.denominatorLabel}</div>
+                                                {cellEvidence.releaseLabel && <div className="text-[10px] font-semibold text-amber-700">{cellEvidence.releaseLabel}</div>}
                                             </td>
-                                            <td className={`py-2 px-1 text-right ${rTone(s.avg_r_managed_50_50_be)}`}>{fmtR(s.avg_r_managed_50_50_be)}</td>
-                                            <td className={`py-2 px-1 text-right font-semibold ${rTone(s.sum_r_managed_50_50_be)}`}>{fmtR(s.sum_r_managed_50_50_be)}</td>
+                                            <td className="py-2 px-1 text-right">
+                                                {fmtPct(cellEvidence.winRatePct)}
+                                                {cellEvidence.winRateWilson95 && <div className="text-[10px] text-gray-400">KI {Number(cellEvidence.winRateWilson95.lower_pct).toFixed(0)}–{Number(cellEvidence.winRateWilson95.upper_pct).toFixed(0)}%{cellEvidence.sampleReliable !== true ? ' · nicht freigegeben' : ''}</div>}
+                                            </td>
+                                            <td className={`py-2 px-1 text-right ${rTone(cellEvidence.avgR)}`}>{fmtR(cellEvidence.avgR)}</td>
+                                            <td className={`py-2 px-1 text-right font-semibold ${rTone(cellEvidence.sumR)}`}>{fmtR(cellEvidence.sumR)}</td>
                                         </tr>
-                                    ))}
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -7103,6 +7209,7 @@ function SignalPerformanceTab() {
                                         <span className="text-xs text-gray-500 flex-1 min-w-[90px]">{sig.scanner}</span>
                                         <span className={`text-xs px-2 py-0.5 rounded font-medium ${String(sig.direction).toLowerCase() === 'short' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700'}`}>{String(sig.direction || 'long').toUpperCase()}</span>
                                         <span className={`text-xs px-2 py-0.5 rounded font-semibold ${badge.cls}`}>{badge.label}</span>
+                                        {badge.progressLabel && <span className="text-[10px] text-gray-500">{badge.progressLabel}</span>}
                                         <span className={`w-16 text-right font-medium ${rTone(sig.r_realized)}`}>
                                             {sig.r_realized === null || sig.r_realized === undefined ? '—' : fmtR(sig.r_realized)}
                                             {sig.r_managed_50_50 !== null && sig.r_managed_50_50 !== undefined && (
@@ -8749,14 +8856,14 @@ function BacktestTab() {
                         >
                             <div className="flex flex-wrap items-center justify-between gap-3">
                                 <div>
-                                    <div className="text-xs font-bold uppercase tracking-wide opacity-80">Backtest Freigabe</div>
+                                    <div className="text-xs font-bold uppercase tracking-wide opacity-80">Backtest Paper-Evidenz</div>
                                     <div className="text-2xl font-black mt-1">{verdict.label}</div>
                                 </div>
                                 <span
                                     className="px-3 py-1 rounded-full text-xs font-bold"
                                     style={{ background: '#fff', border: `1px solid ${verdictTheme.border}` }}
                                 >
-                                    {verdict.tradable ? 'Live moeglich mit Risk-Limit' : 'Nicht automatisch handeln'}
+                                    {verdict.tradable ? 'Paper-Testkandidat mit Risk-Limit' : 'Nicht für Paper-Auto freigegeben'}
                                 </span>
                             </div>
                             <p className="text-sm font-semibold mt-3">{verdict.summary}</p>

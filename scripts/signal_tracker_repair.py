@@ -90,6 +90,8 @@ INSPECT_FIELDS = (
     "id",
     "created_at",
     "delivery_accepted_at",
+    "public_signal_ref",
+    "origin_evidence",
     "scanner",
     "ticker",
     "strategy",

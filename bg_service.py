@@ -75,7 +75,7 @@ STATUS_FILE = DATA_DIR / "bg_status.json"
 # Modules importieren
 sys.path.insert(0, str(BASE_DIR))
 
-from modules.trade_levels import normalize_alert_trade_levels, trade_plan_quality
+from modules.trade_levels import format_target_reachability_text, normalize_alert_trade_levels, target_reachability, trade_plan_quality
 from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
 from modules.data_fetchers import rate_limited_get, redact_sensitive_query_values
 from modules.stock_execution import (
@@ -150,9 +150,12 @@ try:
         load_pending_accepted_deliveries,
         load_pending_be_activations,
         load_pending_terminal_updates,
+        record_followup_delivery_receipt,
         mark_be_alerts_sent,
         mark_terminal_updates_sent,
         load_performance_summary,
+        is_valid_public_signal_ref,
+        normalize_origin_evidence,
         scanner_verdict,
         shadow_summary,
     )
@@ -164,9 +167,12 @@ except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Paral
     load_pending_accepted_deliveries = None
     load_pending_be_activations = None
     load_pending_terminal_updates = None
+    record_followup_delivery_receipt = None
     mark_be_alerts_sent = None
     mark_terminal_updates_sent = None
     load_performance_summary = None
+    is_valid_public_signal_ref = None
+    normalize_origin_evidence = None
     scanner_verdict = None
     shadow_summary = None
 # Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
@@ -500,6 +506,50 @@ def _alert_trade_levels(row):
     )
 
 
+def _alert_atr_value(row):
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    for container in (setup, row):
+        for key in ("atr", "atr_14", "ATR", "ATR14", "atr14"):
+            value = _safe_float(container.get(key), None)
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _target_reachability_for_alert_row(row, levels):
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    horizon = row.get(
+        "target_reachability_horizon",
+        row.get("trade_horizon", row.get("horizon")),
+    )
+    if horizon in (None, ""):
+        horizon = setup.get(
+            "target_reachability_horizon",
+            setup.get("trade_horizon", setup.get("horizon")),
+        )
+    atr_budgets = row.get(
+        "target_reachability_atr_budgets",
+        row.get("atr_budgets"),
+    )
+    if not isinstance(atr_budgets, dict):
+        atr_budgets = setup.get(
+            "target_reachability_atr_budgets",
+            setup.get("atr_budgets"),
+        )
+    return target_reachability(
+        levels,
+        _alert_atr_value(row),
+        horizon=horizon,
+        atr_budgets=atr_budgets,
+    )
+
+
+def _target_reachability_html(payload):
+    """Wrap the shared plain-text telemetry for the background mail renderer."""
+    text = html.escape(format_target_reachability_text(payload))
+    return f'<br><span style="color:#64748b;font-size:11px">{text}</span>'
+
+
 def _humanize_alert_level_source(value):
     raw = str(value or "").strip()
     if not raw:
@@ -640,6 +690,9 @@ def _format_alert_plan_html(row):
         issue_label = html.escape(", ".join(str(item) for item in quality["issues"][:3]))
         issue_text = f'<br><span style="color:#dc2626;font-size:11px;font-weight:bold">Trade-Plan blockiert: {issue_label}</span>'
     level_source_text = _alert_level_source_line(row)
+    reachability_text = _target_reachability_html(
+        _target_reachability_for_alert_row(row, levels)
+    )
     source_text = (
         '<br><span style="color:#b45309;font-size:11px">Level geschaetzt - native Scanner-Level fehlen/teilweise fehlen</span>'
         if levels.get("estimated") else ""
@@ -662,6 +715,7 @@ def _format_alert_plan_html(row):
         f'{rr_text}'
         f'{issue_text}'
         f'{level_source_text}'
+        f'{reachability_text}'
         f'{source_text}'
         f'{synthetic_text}'
         f'{binary_warning_text}'
@@ -1973,7 +2027,7 @@ def _tracker_crypto_fetcher(
 # "keine Kursdaten" ist ein Datenproblem, kein Positions-Ereignis fuers Abo.
 _SIGNAL_UPDATE_EVENTS = {
     "STOP_HIT": "Stop erreicht",
-    "TP1_HIT_OPEN": "TP1 erreicht — Rest Freiroll Richtung TP2",
+    "TP1_HIT_OPEN": "TP1 erreicht, Position offen",
     "TP2_HIT": "TP2 erreicht",
     "EXPIRED": "Verfallen",
 }
@@ -2175,6 +2229,44 @@ def _followup_event_matches_position(event, position):
 def _followup_recipient_dedupe_key(base_key, email):
     recipient_hash = hashlib.sha256(str(email).strip().lower().encode("utf-8")).hexdigest()[:16]
     return f"{base_key}_recipient_{recipient_hash}"
+
+
+def _followup_event_delivery_key(base_key):
+    """Durable proof that at least one original recipient got the event."""
+    return f"{str(base_key)}_recipient_delivered"
+
+
+def _record_followup_event_receipt(
+    signal_id,
+    *,
+    event_kind,
+    delivery_key,
+    event_status=None,
+    now=None,
+):
+    """Mint/recover a tracker receipt only from a live durable mail marker."""
+    if record_followup_delivery_receipt is None:
+        return None
+    if not _email_dedupe_active(
+        delivery_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
+    ):
+        return None
+    try:
+        marker_at = _load_email_dedupe(now=now).get(str(delivery_key))
+        marker_timestamp = float(marker_at)
+        if not math.isfinite(marker_timestamp) or marker_timestamp <= 0:
+            return None
+        accepted_at = datetime.fromtimestamp(marker_timestamp, tz=timezone.utc)
+        return record_followup_delivery_receipt(
+            signal_id,
+            event_kind=event_kind,
+            event_status=event_status,
+            delivery_evidence_key=delivery_key,
+            accepted_at=accepted_at,
+        )
+    except (TypeError, ValueError, OSError, OverflowError) as exc:
+        log.warning("[SignalTracker] Follow-up-Receipt konnte nicht erzeugt werden: %s", exc)
+        return None
 
 
 def _unknown_delivery_quarantine_keys(
@@ -2525,15 +2617,25 @@ def _dispatch_followup_digest(
             if _email_dedupe_active(
                 recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
             ):
+                _email_delivery_mark(
+                    _followup_event_delivery_key(base_key_from_item(item)),
+                    now=now,
+                )
                 continue
             if not _email_delivery_claim(
                 recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
             ):
                 # Another worker currently owns the short send lease. If it
                 # has not yet produced a sent marker, this batch is incomplete.
-                if not _email_dedupe_active(
+                recipient_delivered = _email_dedupe_active(
                     recipient_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now
-                ):
+                )
+                if recipient_delivered:
+                    _email_delivery_mark(
+                        _followup_event_delivery_key(base_key_from_item(item)),
+                        now=now,
+                    )
+                else:
                     all_complete = False
                 continue
             unsent.append((recipient_key, uncertain_key, item))
@@ -2558,8 +2660,12 @@ def _dispatch_followup_digest(
             accepted = email in set(delivery.get("accepted") or ())
         if accepted:
             any_sent = True
-            for recipient_key, _uncertain_key, _ in unsent:
+            for recipient_key, _uncertain_key, item in unsent:
                 _email_delivery_mark(recipient_key, now=now)
+                _email_delivery_mark(
+                    _followup_event_delivery_key(base_key_from_item(item)),
+                    now=now,
+                )
         elif delivery.get("outcome_unknown"):
             for recipient_key, uncertain_key, _ in unsent:
                 _email_dedupe_mark(uncertain_key, now=now)
@@ -2575,6 +2681,83 @@ def _dispatch_followup_digest(
         for item in pending:
             _email_delivery_mark(base_key_from_item(item), now=now)
     return any_sent, all_complete
+
+
+def _followup_public_signal_ref(event):
+    """Return only a tracker-validated public reference for mail rendering."""
+    candidate = event.get("public_signal_ref") if isinstance(event, dict) else None
+    try:
+        if callable(is_valid_public_signal_ref) and is_valid_public_signal_ref(candidate):
+            return str(candidate)
+    except Exception:
+        pass
+    return None
+
+
+def _followup_origin_evidence(event):
+    """Use the tracker normalizer without mutating raw database evidence."""
+    value = event.get("origin_evidence") if isinstance(event, dict) else None
+    try:
+        if callable(normalize_origin_evidence):
+            return normalize_origin_evidence(value)
+    except Exception:
+        pass
+    return "legacy_origin_unknown"
+
+
+def _followup_accepted_at(event):
+    """Parse accepted origin time without ever exposing an invalid raw value."""
+    raw = event.get("delivery_accepted_at") if isinstance(event, dict) else None
+    if raw in (None, ""):
+        return None
+    try:
+        if isinstance(raw, (int, float)):
+            parsed = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        elif isinstance(raw, datetime):
+            parsed = raw
+        else:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _followup_origin_time(event):
+    """Format a parseable accepted origin time or state the historical gap."""
+    parsed = _followup_accepted_at(event)
+    if parsed is None:
+        return "Ursprung historisch nicht belegt"
+    return _mail_timestamp_dual(parsed)
+
+
+def _followup_evidence_presentation(event):
+    """Render a SMTP evidence tuple atomically, failing closed on corruption."""
+    public_ref = _followup_public_signal_ref(event)
+    origin_evidence = _followup_origin_evidence(event)
+    accepted_at = _followup_accepted_at(event)
+    if origin_evidence == "smtp_acceptance":
+        if public_ref is None or accepted_at is None:
+            return (
+                "historisch nicht belegt",
+                "legacy_origin_unknown",
+                "Ursprung historisch nicht belegt",
+            )
+        return public_ref, origin_evidence, _mail_timestamp_dual(accepted_at)
+    return (
+        public_ref or "historisch nicht belegt",
+        origin_evidence,
+        _followup_origin_time(event),
+    )
+
+
+def _followup_mfe_r(event):
+    value = _safe_float(
+        event.get("mfe", event.get("max_favorable_r")) if isinstance(event, dict) else None,
+        None,
+    )
+    return f"{value:+.2f}R" if value is not None else "nicht belegt"
 
 
 def _build_signal_update_digest(pending):
@@ -2594,16 +2777,19 @@ def _build_signal_update_digest(pending):
         scanner = html.escape(str(tr.get("scanner") or "?"))
         direction = "SHORT" if str(tr.get("direction")) == "SHORT" else "LONG"
         r_realized = tr.get("r_realized")
-        r_text = (
-            f"{float(r_realized):+.2f}R"
-            if isinstance(r_realized, (int, float))
-            else "offen"
-        )
+        if tr.get("new_status") == "TP1_HIT_OPEN":
+            r_text = "offen (nicht final)"
+        elif isinstance(r_realized, (int, float)):
+            r_text = f"{float(r_realized):+.2f}R"
+        else:
+            r_text = "nicht belegt"
         plan = " | ".join(
             f"{label} {_format_alert_price(tr.get(key))}"
             for label, key in (("E", "entry"), ("SL", "stop"), ("TP1", "tp1"), ("TP2", "tp2"))
             if tr.get(key) is not None
         )
+        public_ref, origin_evidence, origin_time = _followup_evidence_presentation(tr)
+        mfe_text = _followup_mfe_r(tr)
         fill = tr.get("entry_fill_price")
         fill_quality = str(tr.get("fill_quality") or "UNAVAILABLE").upper()
         if fill is None:
@@ -2639,10 +2825,12 @@ def _build_signal_update_digest(pending):
                 execution_parts.append(rejection)
             execution = "<br>".join(html.escape(part) for part in execution_parts)
         rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px"><b>Signal-Ref:</b> {html.escape(public_ref)}<br><span style="color:#666">Ursprung: {html.escape(origin_time)}<br>Herkunft: {html.escape(origin_evidence)}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{event}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(event))}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{r_text}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mfe_text}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee;color:#444;font-size:12px">{execution}</td>
             <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{plan}</td>
         </tr>"""
@@ -2653,10 +2841,12 @@ def _build_signal_update_digest(pending):
     <p style="color:#666">{_mail_timestamp_dual()} | {n} Update(s) zu zuvor gemailten Signalen</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Signal-Ref / Ursprung</th>
             <th style="padding:8px;text-align:left">Ticker</th>
             <th style="padding:8px;text-align:left">Scanner</th>
             <th style="padding:8px;text-align:left">Ereignis</th>
-            <th style="padding:8px;text-align:left">R</th>
+            <th style="padding:8px;text-align:left">Level-R (getrackter Planpfad)</th>
+            <th style="padding:8px;text-align:left">MFE-R (Kursfortschritt)</th>
             <th style="padding:8px;text-align:left">Ausfuehrung</th>
             <th style="padding:8px;text-align:left">Plan-Level</th>
         </tr>
@@ -2664,8 +2854,8 @@ def _build_signal_update_digest(pending):
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
         Automatisches Update vom Signal-Tracker (15-Minuten-Evaluierung).<br>
-        'TP1 erreicht' = Teilgewinn-Zone erreicht, Stop der Restposition auf Entry ziehen; Gap- und Slippage-Risiko bleiben bestehen.<br>
-        Kein neues Signal, keine Handelsaufforderung. Einmalig je Ereignis (7-Tage-Dedupe).
+        'TP1 erreicht, Position offen' = TP1-Kurszone erreicht; die Position bleibt offen. Weder Teilverkauf noch Gewinnrealisierung sind brokerbestaetigt. Jede Management-Anpassung ist bedingt; Gap- und Slippage-Risiko bleiben bestehen.<br>
+        Kein neues Signal. Keine neue Entry-Empfehlung; Management-Hinweis zum bestehenden Signal. Einmalig je Ereignis (7-Tage-Dedupe).
     </p>
     </body></html>"""
     return subject, body_html
@@ -2692,7 +2882,7 @@ def _send_signal_update_mail(transitions, secrets):
         return False
     now = time.time()
     pending = []
-    already_complete_ids = []
+    already_complete_receipts = {}
     for tr in transitions:
         if not isinstance(tr, dict):
             continue
@@ -2711,20 +2901,36 @@ def _send_signal_update_mail(transitions, secrets):
             continue
         dedupe_key = f"signal_update_{tr.get('id')}_{new_status}"
         if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
-            # SMTP war bereits vollstaendig abgeschlossen, nur der anschliessende
-            # Tracker-Ack kann vor einem Prozessabbruch gefehlt haben.
+            # The base key proves workflow completion only. Reconstruct a
+            # tracker acknowledgement solely from durable recipient evidence.
             if tr.get("tracker_persisted"):
-                already_complete_ids.append(tr.get("id"))
+                try:
+                    signal_id = int(tr.get("id"))
+                except (TypeError, ValueError):
+                    signal_id = 0
+                delivery_key = _followup_event_delivery_key(dedupe_key)
+                receipt_id = _record_followup_event_receipt(
+                    signal_id,
+                    event_kind="TERMINAL",
+                    event_status=new_status,
+                    delivery_key=delivery_key,
+                    now=now,
+                )
+                if signal_id > 0 and receipt_id:
+                    already_complete_receipts[signal_id] = receipt_id
             continue
         pending.append((dedupe_key, event, tr))
-    if already_complete_ids and mark_terminal_updates_sent is not None:
-        acknowledged = mark_terminal_updates_sent(already_complete_ids)
-        if acknowledged < len(set(already_complete_ids)):
+    if already_complete_receipts and mark_terminal_updates_sent is not None:
+        acknowledged = mark_terminal_updates_sent(
+            already_complete_receipts,
+            delivery_receipt_ids=already_complete_receipts,
+        )
+        if acknowledged < len(already_complete_receipts):
             log.warning(
                 "[SignalTracker] Bereits versendete Terminal-Updates: nur %s/%s "
                 "Tracker-Acks rekonstruiert",
                 acknowledged,
-                len(set(already_complete_ids)),
+                len(already_complete_receipts),
             )
     if not pending:
         return False
@@ -2737,24 +2943,34 @@ def _send_signal_update_mail(transitions, secrets):
         lambda item: item[0],
     )
     if complete:
-        signal_ids = []
-        for _, _, transition in pending:
+        delivery_receipts = {}
+        for dedupe_key, _, transition in pending:
             if not transition.get("tracker_persisted"):
                 continue
             try:
                 signal_id = int(transition.get("id"))
             except (TypeError, ValueError):
                 continue
-            if signal_id > 0 and signal_id not in signal_ids:
-                signal_ids.append(signal_id)
-        if signal_ids and mark_terminal_updates_sent is not None:
-            acknowledged = mark_terminal_updates_sent(signal_ids)
-            if acknowledged < len(signal_ids):
+            receipt_id = _record_followup_event_receipt(
+                signal_id,
+                event_kind="TERMINAL",
+                event_status=transition.get("new_status"),
+                delivery_key=_followup_event_delivery_key(dedupe_key),
+                now=now,
+            )
+            if signal_id > 0 and receipt_id:
+                delivery_receipts[signal_id] = receipt_id
+        if delivery_receipts and mark_terminal_updates_sent is not None:
+            acknowledged = mark_terminal_updates_sent(
+                delivery_receipts,
+                delivery_receipt_ids=delivery_receipts,
+            )
+            if acknowledged < len(delivery_receipts):
                 log.warning(
                     "[SignalTracker] Terminal-Update abgeschlossen, aber nur %s/%s "
                     "Zustellungen dauerhaft bestaetigt",
                     acknowledged,
-                    len(signal_ids),
+                    len(delivery_receipts),
                 )
     tickers = ", ".join(str(tr.get("ticker") or "?") for _, _, tr in pending)
     if sent:
@@ -2896,7 +3112,10 @@ def _reconcile_pending_accepted_deliveries():
 def _build_be_update_digest(pending):
     """Build one breakeven-management digest for selected recipient rows."""
     n = len(pending)
-    subject = f"Stop-Update: {n} Trade(s) auf Einstand sichern (+1R gelaufen)"
+    subject = (
+        f"Stop-Update: {n} Trade(s) auf Einstand sichern "
+        "(MFE >= +1R beobachtet)"
+    )
     rows = ""
     for _, act in pending:
         ticker = html.escape(str(act.get("ticker") or "?"))
@@ -2905,9 +3124,12 @@ def _build_be_update_digest(pending):
         be_level = act.get("entry_fill_price") or act.get("entry")
         mfe = act.get("mfe")
         mfe_text = f"+{float(mfe):.2f}R" if isinstance(mfe, (int, float)) else ">= +1R"
+        public_ref, origin_evidence, origin_time = _followup_evidence_presentation(act)
+        level_r_text = "offen (nicht final)"
         if str(act.get("scanner") or "").lower().startswith("crash"):
             plan = (
-                f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen - "
+                "Bedingter Management-Hinweis: Stop auf Einstand "
+                f"({_format_alert_price(be_level)}) setzen; "
                 "KEIN Teilverkauf: Crash-Position nur absichern."
             )
         else:
@@ -2917,8 +3139,9 @@ def _build_be_update_digest(pending):
                 else "TP1"
             )
             plan = (
-                f"Stop auf Einstand ({_format_alert_price(be_level)}) ziehen. "
-                f"An TP1 ({tp1_text}): 50% verkaufen und den Stop der Restposition auf Einstand ziehen. "
+                "Bedingter Management-Hinweis: Stop auf Einstand "
+                f"({_format_alert_price(be_level)}) ziehen. "
+                f"An TP1 ({tp1_text}): 50% verkaufen nur, wenn dies deinem Management entspricht. "
                 "Gap- und Slippage-Risiko bleiben bestehen."
             )
         levels = " | ".join(
@@ -2927,8 +3150,10 @@ def _build_be_update_digest(pending):
             if act.get(key) is not None
         )
         rows += f"""<tr>
+            <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px"><b>Signal-Ref:</b> {html.escape(public_ref)}<br><span style="color:#666">Ursprung: {html.escape(origin_time)}<br>Herkunft: {html.escape(origin_evidence)}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#999;font-size:11px">{direction}</span></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{scanner}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{level_r_text}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{mfe_text}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee;color:#666;font-size:12px">{levels}</td>
             <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">{plan}</td>
@@ -2937,14 +3162,17 @@ def _build_be_update_digest(pending):
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#0f172a">Stop-Update - Trades auf Einstand sichern</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | {n} Position(en) haben +1R erreicht</p>
-    <p>Diese Trades sind mindestens <b>+1R</b> in deine Richtung gelaufen. Der Stop
-    gehoert jetzt auf den <b>Einstand</b>, damit das urspruengliche Kursrisiko entfaellt.</p>
+    <p style="color:#666">{_mail_timestamp_dual()} | {n} Position(en): MFE >= +1R beobachtet</p>
+    <p>Dies ist historischer Kursfortschritt, kein gebuchter Gewinn. Der Stop
+    auf <b>Einstand</b> reduziert das geplante Preisrisiko; Gap-, Slippage- und
+    Ausfuehrungsrisiken bleiben bestehen.</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#f5f5f5">
+            <th style="padding:8px;text-align:left">Signal-Ref / Ursprung</th>
             <th style="padding:8px;text-align:left">Ticker</th>
             <th style="padding:8px;text-align:left">Scanner</th>
-            <th style="padding:8px;text-align:left">MFE</th>
+            <th style="padding:8px;text-align:left">Level-R (getrackter Planpfad)</th>
+            <th style="padding:8px;text-align:left">MFE-R (Kursfortschritt)</th>
             <th style="padding:8px;text-align:left">Plan-Level</th>
             <th style="padding:8px;text-align:left">Anweisung</th>
         </tr>
@@ -2952,7 +3180,7 @@ def _build_be_update_digest(pending):
     </table>
     <p style="color:#999;font-size:12px;margin-top:20px">
         Automatischer Stop-Update-Hinweis vom Signal-Tracker (MFE &gt;= +1R, einmalig je Signal).<br>
-        Kein neues Signal und keine Handelsaufforderung.
+        Kein neues Signal. Keine neue Entry-Empfehlung; Management-Hinweis zum bestehenden Signal.
     </p>
     </body></html>"""
     return subject, body_html
@@ -2996,10 +3224,25 @@ def _send_be_alert_mail(activations, secrets):
             continue
         dedupe_key = f"signal_be_{act.get('id')}"
         if _email_dedupe_active(dedupe_key, _SIGNAL_UPDATE_DEDUPE_SEC, now=now):
-            # Reconcile old successful file-dedupe state with the new durable
-            # tracker acknowledgement after a rolling deployment.
-            if tracker_persisted and mark_be_alerts_sent is not None:
-                mark_be_alerts_sent([act.get("id")])
+            # The base key means only that this workflow is complete. A
+            # separate event key proves that at least one original personal
+            # recipient was SMTP-accepted (or already durably deduped).
+            delivery_key = _followup_event_delivery_key(dedupe_key)
+            if (
+                tracker_persisted
+                and mark_be_alerts_sent is not None
+            ):
+                receipt_id = _record_followup_event_receipt(
+                    act.get("id"),
+                    event_kind="BE",
+                    delivery_key=delivery_key,
+                    now=now,
+                )
+                if receipt_id:
+                    mark_be_alerts_sent(
+                        [act.get("id")],
+                        delivery_receipt_ids={act.get("id"): receipt_id},
+                    )
             continue
         pending.append((dedupe_key, act))
     if not pending:
@@ -3014,22 +3257,32 @@ def _send_be_alert_mail(activations, secrets):
         enqueue_on_failure=False,
     )
     if complete:
-        signal_ids = []
-        for _, activation in pending:
+        delivery_receipts = {}
+        for dedupe_key, activation in pending:
+            delivery_key = _followup_event_delivery_key(dedupe_key)
             try:
                 signal_id = int(activation.get("id"))
             except (TypeError, ValueError):
                 continue
-            if signal_id > 0 and signal_id not in signal_ids:
-                signal_ids.append(signal_id)
-        if signal_ids and mark_be_alerts_sent is not None:
-            acknowledged = mark_be_alerts_sent(signal_ids)
-            if acknowledged < len(signal_ids):
+            receipt_id = _record_followup_event_receipt(
+                signal_id,
+                event_kind="BE",
+                delivery_key=delivery_key,
+                now=now,
+            )
+            if signal_id > 0 and receipt_id:
+                delivery_receipts[signal_id] = receipt_id
+        if delivery_receipts and mark_be_alerts_sent is not None:
+            acknowledged = mark_be_alerts_sent(
+                delivery_receipts,
+                delivery_receipt_ids=delivery_receipts,
+            )
+            if acknowledged < len(delivery_receipts):
                 log.warning(
                     "[SignalTracker] Stop-Update abgeschlossen, aber nur %s/%s "
                     "Zustellungen dauerhaft bestaetigt",
                     acknowledged,
-                    len(signal_ids),
+                    len(delivery_receipts),
                 )
 
     tickers = ", ".join(str(act.get("ticker") or "?") for _, act in pending)
@@ -3310,6 +3563,100 @@ def _watchdog_report_section(events=None):
     </div>"""
 
 
+def _grade_calibration_report_section(summary):
+    """Render reliable five-dimensional grade cells as information only."""
+    cells = (summary or {}).get("grade_calibration_cells") or []
+    if not isinstance(cells, list):
+        return ""
+    rows = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        n = cell.get("n")
+        unresolved = cell.get("unresolved")
+        dimensions = [
+            str(cell.get(key) or "").strip()
+            for key in ("scanner", "grade", "direction", "horizon", "market_regime")
+        ]
+        if (
+            cell.get("reporting_only") is not True
+            or cell.get("sample_reliable") is not True
+            or not isinstance(n, int)
+            or isinstance(n, bool)
+            or n < 30
+            or not isinstance(unresolved, int)
+            or isinstance(unresolved, bool)
+            or unresolved != 0
+            or not all(dimensions)
+        ):
+            continue
+
+        def _finite(key):
+            value = cell.get(key)
+            return (
+                float(value)
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                else None
+            )
+
+        hit = _finite("hit_rate_pct")
+        avg_r = _finite("avg_r")
+        sum_r = _finite("sum_r")
+        profit_factor = _finite("profit_factor")
+        interval = cell.get("win_rate_wilson_95") or {}
+        lower = interval.get("lower_pct") if isinstance(interval, dict) else None
+        upper = interval.get("upper_pct") if isinstance(interval, dict) else None
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            for value in (hit, avg_r, sum_r, lower, upper)
+        ):
+            continue
+        escaped = [html.escape(value) for value in dimensions]
+        pf_text = f"{profit_factor:.2f}" if profit_factor is not None else "-"
+        rows.append(
+            f"""<tr>
+            <td style="padding:7px;border-bottom:1px solid #eee"><b>{escaped[0]}</b></td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[1]}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[2]}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[3]}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[4]}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{n}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{hit:.1f}%<br><span style="color:#64748b;font-size:10px">KI {float(lower):.1f}–{float(upper):.1f}%</span></td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{avg_r:+.2f}R</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{sum_r:+.2f}R</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{pf_text}</td>
+        </tr>"""
+        )
+    if not rows:
+        return ""
+    return f"""
+    <h3 style="color:#0f172a;font-size:15px">Grade-Kalibrierung (nur Information)</h3>
+    <p style="font-size:12px;color:#64748b;margin-top:0">
+        Nur vollständig beobachtete, Fill-belegte 50/50+BE-Ergebnisse aus
+        SMTP-Akzeptanz oder direkter Post-Send-Erfassung; keine Freigabe- oder
+        Breaker-Entscheidung.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px">
+        <tr style="background:#f5f5f5">
+            <th style="padding:7px;text-align:left">Scanner</th>
+            <th style="padding:7px;text-align:left">Grade</th>
+            <th style="padding:7px;text-align:left">Richtung</th>
+            <th style="padding:7px;text-align:left">Horizont</th>
+            <th style="padding:7px;text-align:left">Regime</th>
+            <th style="padding:7px;text-align:left">n</th>
+            <th style="padding:7px;text-align:left">Trefferquote</th>
+            <th style="padding:7px;text-align:left">Ø R</th>
+            <th style="padding:7px;text-align:left">Σ R</th>
+            <th style="padding:7px;text-align:left">Profit Factor</th>
+        </tr>
+        {''.join(rows)}
+    </table>"""
+
+
 def _build_mature_weekly_report_mail(
     activity_summary,
     performance_summary,
@@ -3357,14 +3704,29 @@ def _build_mature_weekly_report_mail(
     activity_open = _int(activity_total, "open")
     activity_decided = _int(activity_total, "decided_signals")
     mature_signals = _int(perf_total, "signals")
-    mature_decided = _int(perf_total, "managed_be_decided_signals")
+    mature_decided = (
+        _int(perf_total, "managed_be_decided_signals")
+        if "managed_be_decided_signals" in perf_total
+        else _int(perf_total, "decided_signals")
+    )
+    mature_unresolved = _int(perf_total, "managed_be_unresolved")
+    be_decided = (
+        _int(perf_total, "be_decided_signals")
+        if "be_decided_signals" in perf_total
+        else mature_decided
+    )
+    be_unresolved = (
+        _int(perf_total, "be_unresolved")
+        if "be_unresolved" in perf_total
+        else mature_unresolved
+    )
     mature_wins = _int(perf_total, "managed_be_wins")
     mature_losses = _int(perf_total, "managed_be_losses")
     mature_flat = _int(perf_total, "managed_be_breakevens")
     mature_hit = _number(perf_total, "managed_be_win_rate_pct")
     mature_hit_upper = _number(perf_total, "managed_be_win_rate_pct_upper")
     mature_hit_ex_be = _number(perf_total, "managed_be_win_rate_ex_breakeven_pct")
-    mature_sum = _number(perf_total, "sum_r_managed_50_50_be") or 0.0
+    mature_sum = _number(perf_total, "sum_r_managed_50_50_be")
     mature_avg = _number(perf_total, "avg_r_managed_50_50_be")
     mature_sum_upper = _number(perf_total, "sum_r_managed_50_50_be_upper")
     mature_avg_upper = _number(perf_total, "avg_r_managed_50_50_be_upper")
@@ -3377,7 +3739,11 @@ def _build_mature_weekly_report_mail(
     ci_low = ci.get("lower_pct")
     ci_high = ci.get("upper_pct")
     ci_text = ""
-    if isinstance(ci_low, (int, float)) and isinstance(ci_high, (int, float)):
+    if (
+        mature_unresolved == 0
+        and isinstance(ci_low, (int, float))
+        and isinstance(ci_high, (int, float))
+    ):
         ci_text = (
             f" (95%-KI konservativer Pfad: {_pct_text(ci_low, 0)} bis "
             f"{_pct_text(ci_high, 0)})"
@@ -3386,6 +3752,7 @@ def _build_mature_weekly_report_mail(
     uncertainty_note = ""
     if (
         mature_ambiguous > 0
+        and mature_sum is not None
         and mature_sum_upper is not None
         and mature_sum_upper > mature_sum + 1e-9
     ):
@@ -3403,9 +3770,11 @@ def _build_mature_weekly_report_mail(
         )
 
     subject_r = _metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))
+    subject_unresolved = max(mature_unresolved, be_unresolved)
     subject = (
         f"Wochenreport Signal-Tracker: {subject_r} | "
-        f"{mature_decided} reife Signale | 50/50+BE"
+        f"{mature_signals} reife Signale "
+        f"({mature_decided} resolved / {subject_unresolved} unresolved) | 50/50+BE"
     )
 
     alarm_html = ""
@@ -3441,18 +3810,45 @@ def _build_mature_weekly_report_mail(
         entschieden sind.
     </p>"""
 
-    if mature_decided:
+    unresolved_total = max(mature_unresolved, be_unresolved)
+    denominator_html = f"""
+    <p style="font-size:12px;color:#334155;margin:0 0 12px">
+        <b>50/50+BE: {mature_decided} resolved / {mature_unresolved} unresolved</b><br>
+        <b>BE-Gegenrechnung: {be_decided} resolved / {be_unresolved} unresolved</b>
+    </p>"""
+    reliability_html = ""
+    if unresolved_total > 0:
+        reliability_html = f"""
+    <div style="background:#fffbeb;border:1px solid #f59e0b;padding:10px;border-radius:6px;margin:0 0 14px;font-size:12px;color:#78350f">
+        <b>Reliability gesperrt:</b> {unresolved_total} Ergebnis(se) haben keine
+        vollstaendige BE-Evidenz. Quoten und R-Werte beziehen sich nur auf die
+        resolved Teilmenge und duerfen keine Freigabeentscheidung ausloesen.
+    </div>"""
+
+    has_performance_evidence = any(
+        value > 0
+        for value in (
+            mature_decided,
+            mature_unresolved,
+            be_decided,
+            be_unresolved,
+        )
+    )
+    if has_performance_evidence:
         performance_html = f"""
     <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Ausgereifte Signale im 30-Tage-Berichtsfenster</h3>
     <p style="font-size:12px;color:#64748b;margin-top:0">
         Nur Versandkohorten nach Ablauf des vorgesehenen Beobachtungsfensters;
         {excluded} noch unreife Signale wurden ausgeschlossen.
     </p>
+    {denominator_html}
+    {reliability_html}
     {uncertainty_note}
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
         <tr style="background:#eef2ff">
             <th style="padding:8px;text-align:left">Reife Signale</th>
-            <th style="padding:8px;text-align:left">Entschieden</th>
+            <th style="padding:8px;text-align:left">50/50+BE resolved</th>
+            <th style="padding:8px;text-align:left">50/50+BE unresolved</th>
             <th style="padding:8px;text-align:left">W / L / 0R</th>
             <th style="padding:8px;text-align:left">Trefferquote</th>
             <th style="padding:8px;text-align:left">Summe R</th>
@@ -3463,6 +3859,7 @@ def _build_mature_weekly_report_mail(
         <tr>
             <td style="padding:8px;border-bottom:1px solid #eee">{mature_signals}</td>
             <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_decided}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_unresolved}</b></td>
             <td style="padding:8px;border-bottom:1px solid #eee">{mature_wins} / {mature_losses} / {mature_flat}</td>
             <td style="padding:8px;border-bottom:1px solid #eee">
                 {_metric_band(mature_hit, mature_hit_upper, _pct_text)}{ci_text}
@@ -3492,10 +3889,25 @@ def _build_mature_weekly_report_mail(
         reverse=True,
     ):
         bucket = bucket or {}
-        row_decided = _int(bucket, "managed_be_decided_signals")
-        if row_decided <= 0:
+        row_decided = (
+            _int(bucket, "managed_be_decided_signals")
+            if "managed_be_decided_signals" in bucket
+            else _int(bucket, "decided_signals")
+        )
+        row_unresolved = _int(bucket, "managed_be_unresolved")
+        row_be_decided = (
+            _int(bucket, "be_decided_signals")
+            if "be_decided_signals" in bucket
+            else row_decided
+        )
+        row_be_unresolved = (
+            _int(bucket, "be_unresolved")
+            if "be_unresolved" in bucket
+            else row_unresolved
+        )
+        if max(row_decided, row_unresolved, row_be_decided, row_be_unresolved) <= 0:
             continue
-        row_sum = _number(bucket, "sum_r_managed_50_50_be") or 0.0
+        row_sum = _number(bucket, "sum_r_managed_50_50_be")
         row_avg = _number(bucket, "avg_r_managed_50_50_be")
         row_sum_upper = _number(bucket, "sum_r_managed_50_50_be_upper")
         row_ambiguous = _int(bucket, "ambiguous_outcomes")
@@ -3503,7 +3915,12 @@ def _build_mature_weekly_report_mail(
         row_hit_upper = _number(bucket, "managed_be_win_rate_pct_upper")
         row_avg_upper = _number(bucket, "avg_r_managed_50_50_be_upper")
         row_pf = _number(bucket, "profit_factor_managed_be")
-        tint = "#ecfdf5" if row_sum >= 0 else "#fff1f2"
+        if max(row_unresolved, row_be_unresolved) > 0:
+            tint = "#fffbeb"
+        elif row_sum is None:
+            tint = "#f8fafc"
+        else:
+            tint = "#ecfdf5" if row_sum >= 0 else "#fff1f2"
         row_range = _r_text(row_sum, 1)
         if (
             row_ambiguous > 0
@@ -3514,6 +3931,9 @@ def _build_mature_weekly_report_mail(
         scanner_rows += f"""<tr style="background:{tint}">
             <td style="padding:7px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
             <td style="padding:7px;border-bottom:1px solid #eee">{row_decided}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{row_unresolved}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{row_be_decided}</td>
+            <td style="padding:7px;border-bottom:1px solid #eee">{row_be_unresolved}</td>
             <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_hit, row_hit_upper, _pct_text)}</td>
             <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_avg, row_avg_upper, _r_text)}</td>
             <td style="padding:7px;border-bottom:1px solid #eee"><b>{row_range}</b></td>
@@ -3526,7 +3946,10 @@ def _build_mature_weekly_report_mail(
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
         <tr style="background:#f5f5f5">
             <th style="padding:7px;text-align:left">Scanner</th>
-            <th style="padding:7px;text-align:left">Entschieden</th>
+            <th style="padding:7px;text-align:left">50/50+BE resolved</th>
+            <th style="padding:7px;text-align:left">50/50+BE unresolved</th>
+            <th style="padding:7px;text-align:left">BE resolved</th>
+            <th style="padding:7px;text-align:left">BE unresolved</th>
             <th style="padding:7px;text-align:left">Trefferquote</th>
             <th style="padding:7px;text-align:left">Durchschnitt R</th>
             <th style="padding:7px;text-align:left">Summe R</th>
@@ -3535,6 +3958,9 @@ def _build_mature_weekly_report_mail(
         {scanner_rows}
     </table>"""
 
+    grade_calibration_html = _grade_calibration_report_section(
+        performance_summary
+    )
     recent_rows = ""
     for sig in ((activity_summary or {}).get("recent") or [])[:10]:
         if not isinstance(sig, dict):
@@ -3581,23 +4007,29 @@ def _build_mature_weekly_report_mail(
     {activity_html}
     {performance_html}
     {scanner_html}
+    {grade_calibration_html}
     {recent_html}
     <p style="color:#64748b;font-size:12px;margin-top:20px;line-height:1.5">
-        Hauptmodell: 1R Anfangsrisiko, 50% Teilverkauf am TP1, Rest bis
-        TP2/Stop/Expiry und Stop auf Einstand ab +1R. Aktien werden mit
+        Hauptmodell: 1R Anfangsrisiko, 50/50-Plan-Gegenrechnung an TP1, Rest bis
+        TP2/Stop/Expiry und bedingter Stop auf Einstand nach beobachteter MFE
+        &gt;= +1R; dies behauptet weder Teilverkauf noch Broker-Ausfuehrung. Aktien werden mit
         nachfolgenden Tages-OHLC bis zum strategieabhaengigen, beim Versand
         gespeicherten Bar-Horizont ausgewertet; wenn Stop und Ziel am selben Tag
         beruehrt werden, gilt konservativ Stop zuerst und eine separat markierte
-        Obergrenze zeigt nur den anderen noch moeglichen Pfad. Krypto wird aus
-        periodischen Kurs-Snapshots bewertet, nicht aus einer lueckenlosen
-        Tick-Reihenfolge; Beruehrungen zwischen zwei Auswertungen koennen daher
-        fehlen. Trefferquote zaehlt 0R-Einstandsausgaenge im Nenner; die
+        Obergrenze zeigt nur den anderen noch moeglichen Pfad. Krypto- und Intraday-Pfade
+        werden aus vollstaendigen chronologischen 5-Minuten-OHLC-Intervallen im
+        gespeicherten Horizont bewertet. Beruehren Stop und Ziel dieselbe 5-Minuten-
+        Kerze, bleibt nur deren Reihenfolge ohne Tickdaten unbekannt und wird
+        konservativ behandelt. Die BE-Zahlen sind eine tracker- und
+        preiswegabgeleitete BE-Gegenrechnung nach beobachteter MFE und belegter
+        Zustellung; keine Broker-Ausfuehrung. Trefferquote zaehlt 0R-Einstandsausgaenge im Nenner; die
         Break-even-Schwelle beruecksichtigt dieselbe 0R-Quote. Dies ist ein
         Forward-Track-Record, kein Backtest. Die R-Werte beschreiben den
         Kursverlauf vor allgemeinen Brokergebuehren, Kommissionen, Borrow,
         Funding und ueber erkannte Gap-Fills hinausgehender individueller
         Slippage; sie sind keine Netto-Kontoperformance. * Obergrenzen sind
-        keine Erwartungswerte.{small_sample}
+        keine Erwartungswerte. Grade ist Rangklasse, keine Wahrscheinlichkeit.
+        {small_sample}
     </p>
     </body></html>"""
     return subject, body_html
@@ -3654,7 +4086,7 @@ def _build_weekly_report_mail(
         return f"{float(value):+.2f}R" if isinstance(value, (int, float)) else "–"
 
     def _be_r_text(bucket):
-        # BE-Trigger (30.07.): live gemessenes R unter der Einstand-Regel
+        # BE-Trigger (30.07.): trackerbasierte, preiswegabgeleitete Gegenrechnung
         # (fehlt in aelteren Summaries bzw. solange keine BE-Daten existieren)
         value = bucket.get("avg_r_be")
         return f"{float(value):+.2f}R" if isinstance(value, (int, float)) else "–"
@@ -3807,24 +4239,29 @@ def _build_weekly_report_mail(
     be_activations = total.get("be_activations")
     if isinstance(be_activations, int) and be_activations > 0:
         be_saved_n = total.get("be_saved")
-        saved_line = (f", davon <b>{be_saved_n} vor einem Verlust bewahrt</b>"
-                      if isinstance(be_saved_n, int) and be_saved_n > 0 else "")
+        saved_line = (
+            f"; in der trackerbasierten BE-Gegenrechnung weisen <b>{be_saved_n}</b> "
+            "Faelle einen nicht-negativen BE-Ausgang statt negativem Level-R aus"
+            if isinstance(be_saved_n, int) and be_saved_n > 0 else ""
+        )
         be_avg = total.get("avg_r_be")
         compare = ""
         if isinstance(avg_r, (int, float)) and isinstance(be_avg, (int, float)):
-            compare = (f"<br>Ø R Ist {float(avg_r):+.2f}R vs. Ø R mit "
-                       f"Einstand-Regel <b>{float(be_avg):+.2f}R</b>.")
+            compare = (
+                f"<br>Ø Level-R Ist {float(avg_r):+.2f}R vs. Ø trackerbasierte "
+                f"BE-Gegenrechnung <b>{float(be_avg):+.2f}R</b>."
+            )
         be_html = f"""
     <div style="background:#e9f7ef;border:1px solid #10b981;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
-        <b>🛡 Einstand-Regel (seit 30.07. live):</b> {be_activations} Signale
-        dieser Woche waren +1R gelaufen und wurden auf Einstand
-        gesichert{saved_line}.{compare}
+        <b>🛡 Einstand-Regel (seit 30.07. im Tracker):</b> Bei {be_activations} Signalen
+        wurde diese Woche MFE >= +1R beobachtet; der Tracker aktivierte den BE-Prozess.
+        Das allein belegt weder Zustellung noch Ausfuehrung oder realisierten Gewinn{saved_line}.{compare}
     </div>"""
     wd_html = _watchdog_report_section(watchdog_events)
     # Shadow-Messung (AUDIT 2026-07-31): geblockte Signale dieser Woche neben
-    # die gemailten stellen — so wird sichtbar, was die Chase-Gates kosten/
-    # sparen. Erscheint nur, wenn Shadow-Signale existieren; die Zahlen oben
-    # im Report bleiben davon unberuehrt (reine Trade-Statistik).
+    # die gemailten stellen. Das ist nur ein Vergleich modellierter Level-R-
+    # Kohorten, kein Geld-/Kontoperformance-Nachweis. Erscheint nur, wenn
+    # Shadow-Signale existieren; die Zahlen oben bleiben davon unberuehrt.
     shadow_html = ""
     try:
         sh_total = ((shadow or {}).get("total") or {}) if isinstance(shadow, dict) else {}
@@ -3851,12 +4288,15 @@ def _build_weekly_report_mail(
         <b>🕶 Shadow-Messung (Chase-Gates):</b> {sh_n} Signale wurden diese Woche von den
         Swing-Timing-Gates <b>nicht</b> gemailt, laufen aber still im Tracker mit
         ({sh_open} offen, {sh_decided} entschieden).<br>
-        Ø R geblockt: <b>{sh_avg_text}</b> (Treffer {sh_hit_text}) vs. Ø R gemailt:
-        <b>{trade_avg_text}</b> — liegen die geblockten klar darunter, sparen die
-        Gates Geld; klar darueber, kosten sie.{reason_line}{hint}
+        Ø modellierter Level-R geblockt: <b>{sh_avg_text}</b> (Treffer {sh_hit_text})
+        vs. Ø modellierter Level-R gemailt: <b>{trade_avg_text}</b>.
+        Diese Gegenueberstellung beschreibt nur modellierte Level-R-Kohorten;
+        sie belegt weder erspartes noch entgangenes Geld oder Netto-Kontoperformance.
+        {reason_line}{hint}
     </div>"""
     except Exception:
         shadow_html = ""
+    grade_calibration_html = _grade_calibration_report_section(summary)
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
@@ -3866,14 +4306,19 @@ def _build_weekly_report_mail(
     {wd_html}
     {shadow_html}
     {mid_html}
+    {grade_calibration_html}
     <p style="color:#999;font-size:12px;margin-top:20px">
-        Forward-Track-Record: Signale wurden bei Versand fixiert und mit echten
-        Kursen ausgewertet. Mechanik: 1R Risiko, TP1 = halb raus + Stop auf
-        Einstand. Ø R 50/50 = R des empfohlenen 50/50-Managements (50% bei TP1
-        realisiert, Rest laeuft bis TP2/Stop). Ø R BE = live gemessenes R mit
-        Einstand-Regel (Stop auf Einstand ab +1R, seit 30.07.) — kein Backtest.
-        KI = Wilson-95%-Intervall der
-        Trefferquote. Kein Backtest.{sample_hint}
+        Forward-Track-Record: Signale wurden bei Versand fixiert und anhand des
+        beobachteten Kurswegs ausgewertet. Mechanik: 1R Risiko; Ø R 50/50 ist
+        eine Plan-Gegenrechnung mit hypothetischem 50%-Exit an der beobachteten
+        TP1-Zone und Rest bis TP2/Stop, keine Brokerbestaetigung. Ø R BE ist eine
+        tracker- und preiswegabgeleitete BE-Gegenrechnung nach beobachteter MFE
+        >= +1R und belegter Zustellung; keine Broker-Ausfuehrung und keine gebuchte
+        Netto-Kontoperformance. Einstand-Regel (Stop auf Einstand ab +1R-MFE)
+        bezeichnet daher nur dieses Tracker-Modell. Dies ist ein Forward-Tracker,
+        kein historischer Backtest.
+        KI = Wilson-95%-Intervall der Trefferquote. Grade ist Rangklasse, keine Wahrscheinlichkeit.
+        Kein Backtest.{sample_hint}
     </p>
     </body></html>"""
     return subject, body_html

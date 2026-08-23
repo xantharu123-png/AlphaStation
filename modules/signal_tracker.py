@@ -64,6 +64,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import threading
@@ -84,6 +85,8 @@ __all__ = [
     "SIGNAL_DELIVERY_JOURNAL_DB_PATH",
     "CRYPTO_SCANNERS",
     "extract_signal_fields",
+    "is_valid_public_signal_ref",
+    "normalize_origin_evidence",
     "record_alert_signals",
     "prepare_alert_delivery_intent",
     "build_alert_delivery_intent_key",
@@ -98,6 +101,7 @@ __all__ = [
     "has_open_equivalent_signal",
     "evaluate_open_signals",
     "load_pending_be_activations",
+    "record_followup_delivery_receipt",
     "mark_be_alerts_sent",
     "load_pending_terminal_updates",
     "mark_terminal_updates_sent",
@@ -169,6 +173,9 @@ _CAUSAL_BOUNDARY_TOUCH_UNRESOLVED = (
 )
 _CAUSAL_BOUNDARY_TOUCH_UNRESOLVED_AFTER_FILL = (
     "causal_boundary_interval_level_touch_unresolved_after_confirmed_fill"
+)
+_BE_DELIVERY_BOUNDARY_TOUCH_UNRESOLVED = (
+    "causal_boundary_be_touch_unresolved"
 )
 
 # Der Bewertungszeitraum ist Teil des Tradeplans und wird bei Versand
@@ -298,12 +305,14 @@ def _no_fill_cleanup_updates() -> Dict[str, Any]:
         "stop_gap_slippage_pct": None,
         "be_activated_at": None,
         "be_mail_sent_at": None,
+        "be_delivery_evidence_key": None,
         "be_trigger_at": None,
         "be_exit_fill_price": None,
         "be_exit_at": None,
         "be_exit_evidence_mode": None,
         "max_favorable_r": 0.0,
         "max_adverse_r": 0.0,
+        "mae_evidence_mode": None,
     }
 
 
@@ -673,6 +682,7 @@ CREATE TABLE IF NOT EXISTS signals (
     r_realized REAL,
     max_favorable_r REAL NOT NULL DEFAULT 0,
     max_adverse_r REAL NOT NULL DEFAULT 0,
+    mae_evidence_mode TEXT,
     last_eval_at TEXT,
     eval_fail_count INTEGER NOT NULL DEFAULT 0
     ,entry_filled_at TEXT
@@ -694,16 +704,22 @@ CREATE TABLE IF NOT EXISTS signals (
     ,be_exit_at TEXT
     ,be_exit_evidence_mode TEXT
     ,be_trigger_at TEXT
+    ,be_delivery_evidence_key TEXT
+    ,update_mail_sent_at TEXT
+    ,update_delivery_receipt_id TEXT
     ,market_regime TEXT
     ,delivery_recipient_keys_json TEXT
     ,pending_update_status TEXT
     ,pending_update_at TEXT
+    ,pending_update_tp1_hit_this_run INTEGER
     ,delivery_intent_key TEXT
     ,delivery_state TEXT
     ,delivery_prepared_at TEXT
     ,delivery_accepted_at TEXT
     ,mail_channel TEXT
     ,delivery_attempted_at TEXT
+    ,public_signal_ref TEXT
+    ,origin_evidence TEXT
 )
 """
 
@@ -731,12 +747,15 @@ _SCHEMA_MIGRATIONS = {
     "delivery_recipient_keys_json": "TEXT",
     "pending_update_status": "TEXT",
     "pending_update_at": "TEXT",
+    "pending_update_tp1_hit_this_run": "INTEGER",
     "delivery_intent_key": "TEXT",
     "delivery_state": "TEXT",
     "delivery_prepared_at": "TEXT",
     "delivery_accepted_at": "TEXT",
     "mail_channel": "TEXT",
     "delivery_attempted_at": "TEXT",
+    "public_signal_ref": "TEXT",
+    "origin_evidence": "TEXT",
     "price_observed_at": "TEXT",
     "price_source": "TEXT",
     "fill_evidence_verified": "INTEGER NOT NULL DEFAULT 0",
@@ -744,12 +763,35 @@ _SCHEMA_MIGRATIONS = {
     "price_session": "TEXT",
     "be_activated_at": "TEXT",
     "be_mail_sent_at": "TEXT",
+    "be_delivery_evidence_key": "TEXT",
+    "update_mail_sent_at": "TEXT",
+    "update_delivery_receipt_id": "TEXT",
+    "mae_evidence_mode": "TEXT",
     "r_realized_be": "REAL",
     "rates_json": "TEXT",
     # Shadow-Tracking (AUDIT 2026-07-31): bei mail_class='shadow' die Gruende,
     # warum das Signal NICHT gemailt wurde (komma-getrennt, max. 500 Zeichen).
     "block_reasons": "TEXT",
 }
+
+_FOLLOWUP_DELIVERY_RECEIPT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS followup_delivery_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    signal_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL CHECK(event_kind IN ('BE', 'TERMINAL')),
+    event_status TEXT NOT NULL DEFAULT '',
+    event_key_hash TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    consumed_at TEXT,
+    UNIQUE(signal_id, event_kind, event_status, event_key_hash)
+)
+"""
+
+_FOLLOWUP_DELIVERY_RECEIPT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_followup_receipt_signal_event "
+    "ON followup_delivery_receipts(signal_id, event_kind, event_status)",
+)
 
 
 def _read_process_code_revision() -> str:
@@ -844,6 +886,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_signals_setup_open ON signals(setup_key, status, mail_class)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_delivery_intent "
     "ON signals(delivery_intent_key) WHERE delivery_intent_key IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_public_signal_ref "
+    "ON signals(public_signal_ref) WHERE public_signal_ref IS NOT NULL",
 )
 
 
@@ -871,7 +915,10 @@ def _db_connection():
         for column, column_type in _SCHEMA_MIGRATIONS.items():
             if column not in existing_columns:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {column} {column_type}")
+        conn.execute(_FOLLOWUP_DELIVERY_RECEIPT_SCHEMA)
         for statement in _INDEXES:
+            conn.execute(statement)
+        for statement in _FOLLOWUP_DELIVERY_RECEIPT_INDEXES:
             conn.execute(statement)
         conn.commit()
         yield conn
@@ -1101,6 +1148,298 @@ def _prepare_identity_fields(
     return prepared
 
 
+_PUBLIC_SIGNAL_REF_RE = re.compile(r"AS1-[0-9A-F]{20}")
+_ORIGIN_EVIDENCE_VALUES = frozenset(
+    {
+        "delivery_prepared",
+        "smtp_acceptance",
+        "direct_post_send",
+        "shadow_counterfactual",
+    }
+)
+
+
+def is_valid_public_signal_ref(value: Any) -> bool:
+    """Return whether a value is exactly a safe, externally visible ref."""
+    return isinstance(value, str) and _PUBLIC_SIGNAL_REF_RE.fullmatch(value) is not None
+
+
+def normalize_origin_evidence(value: Any) -> str:
+    """Present missing or unknown stored provenance as an explicit legacy token."""
+    normalized = str(value or "").strip()
+    return normalized if normalized in _ORIGIN_EVIDENCE_VALUES else "legacy_origin_unknown"
+
+
+def _has_trade_qualified_origin(
+    row: Mapping[str, Any], *, allow_shadow_counterfactual: bool = False
+) -> bool:
+    """Require provenance that can support calibration/control evidence.
+
+    ``delivery_prepared`` proves only a pre-SMTP reservation and legacy NULL
+    proves no origin at all.  SMTP rows additionally retain their durable
+    public reference and acceptance instant.  Direct post-send rows use the
+    explicit recorder contract.  Shadow evidence is opt-in and reserved for
+    the existing breaker counterfactual path, never grade calibration.
+    """
+    mail_class = str(row.get("mail_class") or "").strip().lower()
+    origin = str(row.get("origin_evidence") or "").strip()
+    if mail_class == "trade":
+        if origin == "direct_post_send":
+            return True
+        if origin == "smtp_acceptance":
+            return bool(
+                is_valid_public_signal_ref(row.get("public_signal_ref"))
+                and _parse_utc_datetime(row.get("delivery_accepted_at")) is not None
+            )
+        return False
+    return bool(
+        allow_shadow_counterfactual
+        and mail_class == "shadow"
+        and origin == "shadow_counterfactual"
+    )
+
+
+def _present_signal_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a public signal row without mutating its persisted evidence."""
+    payload = dict(row)
+    payload["origin_evidence"] = normalize_origin_evidence(
+        payload.get("origin_evidence")
+    )
+    return payload
+
+
+def _delivery_evidence_matches_state(row: Mapping[str, Any]) -> bool:
+    """Require durable public evidence to match the delivery state transition."""
+    expected_origins = {
+        (STATUS_PENDING_DELIVERY, "PREPARED"): {"delivery_prepared"},
+        (STATUS_PENDING_DELIVERY, "ATTEMPTED"): {"delivery_prepared"},
+        # A durable journal can recover an interrupted pre-origin upgrade;
+        # finalization promotes this legacy-compatible pending state below.
+        (STATUS_PENDING_DELIVERY, "ACCEPTED_PENDING"): {
+            "delivery_prepared",
+            "smtp_acceptance",
+        },
+        (STATUS_OPEN, "ACTIVE"): {"smtp_acceptance"},
+    }.get((str(row.get("status") or ""), str(row.get("delivery_state") or "")))
+    return (
+        expected_origins is not None
+        and is_valid_public_signal_ref(row.get("public_signal_ref"))
+        and str(row.get("origin_evidence") or "") in expected_origins
+    )
+
+
+def _canonical_delivery_row_payload(
+    scanner: str,
+    fields: Mapping[str, Any],
+    asset_class: str,
+) -> Dict[str, Any]:
+    """Return the one canonical identity shared by AS1 refs and SMTP claims."""
+    asset_class_norm = _identity_text(asset_class)
+    return {
+        "scanner": _identity_text(scanner),
+        "asset_class": asset_class_norm,
+        "asset": _asset_identity(dict(fields), asset_class_norm),
+        "asset_id": {
+            "ticker": _identity_text(fields.get("ticker")),
+            "instrument_id": _identity_text(fields.get("instrument_id")),
+            "venue": _identity_text(fields.get("venue")),
+            "contract_symbol": _identity_text(fields.get("contract_symbol")),
+        },
+        "direction": _identity_text(fields.get("direction") or "LONG"),
+        "strategy": _identity_text(fields.get("strategy") or scanner),
+        "horizon": _identity_text(fields.get("trade_horizon") or "unspecified"),
+        "setup_key": _identity_text(fields.get("setup_key")),
+        "entry": _identity_level(fields.get("entry")),
+        "stop": _identity_level(fields.get("stop")),
+        "tp1": _identity_level(fields.get("tp1")),
+        "tp2": _identity_level(fields.get("tp2")),
+    }
+
+
+def _canonical_delivery_binding(row: Mapping[str, Any]) -> Optional[tuple[Any, ...]]:
+    """Validate that persisted intent/ref still matches every canonical input."""
+    scanner = _identity_text(row.get("scanner"))
+    ticker = _identity_text(row.get("ticker"))
+    asset_class = _identity_text(row.get("asset_class"))
+    direction = str(row.get("direction") or "").strip().upper()
+    geometry = trade_geometry(
+        row.get("entry"), row.get("stop"), row.get("tp1"), row.get("tp2"), direction
+    )
+    delivery_key = str(row.get("delivery_intent_key") or "").strip()
+    intent_key, separator, stored_row_token = delivery_key.rpartition(":row-")
+    if (
+        not scanner
+        or not ticker
+        or asset_class not in {"stock", "crypto"}
+        or direction not in {"LONG", "SHORT"}
+        or not geometry.get("valid")
+        or separator != ":row-"
+        or not intent_key
+    ):
+        return None
+    payload = _canonical_delivery_row_payload(scanner, row, asset_class)
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    row_token = _canonical_delivery_row_token(scanner, row, asset_class)
+    public_ref = str(row.get("public_signal_ref") or "")
+    if (
+        stored_row_token != row_token
+        or public_ref != _public_signal_reference(intent_key, row_token)
+    ):
+        return None
+    return encoded, delivery_key, public_ref
+
+
+def _normalized_delivery_recipient_keys(value: Any) -> Optional[tuple[str, ...]]:
+    """Return canonical pseudonymous recipient evidence or reject corruption."""
+    if value in (None, ""):
+        return ()
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    if not isinstance(raw, (list, tuple, set)):
+        return None
+    normalized = []
+    for item in raw:
+        key = str(item or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", key):
+            return None
+        if key not in normalized:
+            normalized.append(key)
+    return tuple(sorted(normalized))
+
+
+def _prepared_delivery_snapshot(row: Mapping[str, Any]) -> Optional[tuple[Any, ...]]:
+    """Return the immutable prepared evidence used to authorize one SMTP attempt."""
+    if (
+        not _delivery_evidence_matches_state(row)
+        or str(row.get("status") or "") != STATUS_PENDING_DELIVERY
+        or str(row.get("delivery_state") or "") != "PREPARED"
+        or row.get("delivery_accepted_at") is not None
+    ):
+        return None
+    try:
+        signal_id = int(row.get("id"))
+    except (TypeError, ValueError):
+        return None
+    if signal_id <= 0:
+        return None
+    prepared_at = _parse_utc_datetime(row.get("delivery_prepared_at"))
+    canonical_binding = _canonical_delivery_binding(row)
+    recipient_keys = _normalized_delivery_recipient_keys(
+        row.get("delivery_recipient_keys_json")
+    )
+    if (
+        prepared_at is None
+        or canonical_binding is None
+        or not recipient_keys
+    ):
+        return None
+    return (
+        signal_id,
+        prepared_at.isoformat(),
+        _identity_text(row.get("mail_channel")),
+        str(row.get("origin_evidence") or ""),
+        recipient_keys,
+        *canonical_binding,
+    )
+
+
+def _prepared_delivery_snapshot_map(
+    rows: Iterable[Mapping[str, Any]],
+) -> Optional[Dict[int, tuple[Any, ...]]]:
+    """Validate a complete, unambiguous expected prepared-intent snapshot."""
+    try:
+        supplied_rows = list(rows)
+    except TypeError:
+        return None
+    snapshots: Dict[int, tuple[Any, ...]] = {}
+    for row in supplied_rows:
+        if not isinstance(row, Mapping):
+            return None
+        snapshot = _prepared_delivery_snapshot(row)
+        if snapshot is None or int(snapshot[0]) in snapshots:
+            return None
+        snapshots[int(snapshot[0])] = snapshot
+    return snapshots or None
+
+
+def _canonical_delivery_row_token(
+    scanner: str,
+    fields: Mapping[str, Any],
+    asset_class: str,
+) -> str:
+    """Return a stable, economic row identity for a prepared delivery intent."""
+    payload = _canonical_delivery_row_payload(scanner, fields, asset_class)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _public_signal_reference(intent_key: str, row_token: str) -> str:
+    """Build the opaque public reference from an intent and canonical row."""
+    payload = json.dumps(
+        {"intent": str(intent_key), "row": str(row_token)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "AS1-" + hashlib.sha256(payload).hexdigest().upper()[:20]
+
+
+def _delivery_intent_row_key(intent_key: str, row_token: str) -> str:
+    """Keep a retry-bound row identity out of the unstable input order."""
+    return f"{intent_key}:row-{row_token}"
+
+
+def _deferred_delivery_candidates(
+    scanner: str,
+    rows: Iterable[Any],
+    intent_key: str,
+    asset_class: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Precompute one unambiguous persisted identity for every delivery row."""
+    candidates: List[Dict[str, Any]] = []
+    seen_row_tokens = set()
+    seen_public_refs = set()
+    for row in rows:
+        fields = _prepare_identity_fields(
+            extract_signal_fields(row), scanner, asset_class
+        )
+        ticker = fields.get("ticker")
+        geometry = trade_geometry(
+            fields.get("entry"),
+            fields.get("stop"),
+            fields.get("tp1"),
+            fields.get("tp2"),
+            fields.get("direction"),
+        )
+        if not ticker or not geometry.get("valid"):
+            return None
+        row_token = _canonical_delivery_row_token(scanner, fields, asset_class)
+        public_ref = _public_signal_reference(intent_key, row_token)
+        if (
+            row_token in seen_row_tokens
+            or not is_valid_public_signal_ref(public_ref)
+            or public_ref in seen_public_refs
+        ):
+            return None
+        seen_row_tokens.add(row_token)
+        seen_public_refs.add(public_ref)
+        candidates.append(
+            {
+                "row": row,
+                "fields": fields,
+                "row_token": row_token,
+                "delivery_intent_key": _delivery_intent_row_key(intent_key, row_token),
+                "public_signal_ref": public_ref,
+            }
+        )
+    return candidates
+
+
 def _geometry_equivalent(existing: sqlite3.Row, fields: Dict[str, Any]) -> bool:
     levels = {
         "entry": (_to_float(existing["entry"]), _to_float(fields.get("entry"))),
@@ -1288,21 +1627,69 @@ def record_alert_signals(
         )
         intent_base = str(_delivery_intent_key or "").strip()[:180]
         defer_activation = bool(_defer_activation and intent_base and mail_norm == "trade")
+        deferred_candidates: Optional[List[Dict[str, Any]]] = None
+        if defer_activation:
+            deferred_candidates = _deferred_delivery_candidates(
+                scanner, rows, intent_base, asset_class
+            )
+            if deferred_candidates is None or len(deferred_candidates) != len(rows):
+                logger.warning("record_alert_signals: mehrdeutiger Zustellungsintent")
+                return 0
         with _DB_LOCK:
             with _db_connection() as conn:
-                for row_index, row in enumerate(rows):
-                    try:
-                        row_intent_key = (
-                            f"{intent_base}:{row_index}" if defer_activation else None
-                        )
-                        if row_intent_key and conn.execute(
-                            "SELECT 1 FROM signals WHERE delivery_intent_key = ? LIMIT 1",
-                            (row_intent_key,),
-                        ).fetchone() is not None:
+                existing_by_delivery_key: Dict[str, Dict[str, Any]] = {}
+                if deferred_candidates is not None:
+                    delivery_keys = [
+                        str(candidate["delivery_intent_key"])
+                        for candidate in deferred_candidates
+                    ]
+                    placeholders = ",".join("?" for _ in delivery_keys)
+                    existing_by_delivery_key = {
+                        str(row["delivery_intent_key"]): dict(row)
+                        for row in conn.execute(
+                            "SELECT id, delivery_intent_key, public_signal_ref "
+                            f"FROM signals WHERE delivery_intent_key IN ({placeholders})",
+                            delivery_keys,
+                        ).fetchall()
+                    }
+                    for candidate in deferred_candidates:
+                        delivery_key = str(candidate["delivery_intent_key"])
+                        public_ref = str(candidate["public_signal_ref"])
+                        existing = existing_by_delivery_key.get(delivery_key)
+                        if existing is not None:
+                            if str(existing.get("public_signal_ref") or "") != public_ref:
+                                raise sqlite3.IntegrityError(
+                                    "delivery intent key has a different public reference"
+                                )
                             continue
-                        fields = _prepare_identity_fields(
-                            extract_signal_fields(row), scanner, asset_class
-                        )
+                        collision = conn.execute(
+                            "SELECT id FROM signals WHERE public_signal_ref=? LIMIT 1",
+                            (public_ref,),
+                        ).fetchone()
+                        if collision is not None:
+                            raise sqlite3.IntegrityError(
+                                "public signal reference already belongs to another signal"
+                            )
+                row_work = deferred_candidates if deferred_candidates is not None else rows
+                for work_item in row_work:
+                    try:
+                        if deferred_candidates is not None:
+                            candidate = dict(work_item)
+                            row = candidate["row"]
+                            fields = dict(candidate["fields"])
+                            row_token = str(candidate["row_token"])
+                            row_intent_key = str(candidate["delivery_intent_key"])
+                            candidate_public_ref = str(candidate["public_signal_ref"])
+                        else:
+                            row = work_item
+                            fields = _prepare_identity_fields(
+                                extract_signal_fields(row), scanner, asset_class
+                            )
+                            row_token = None
+                            row_intent_key = None
+                            candidate_public_ref = None
+                        if row_intent_key and row_intent_key in existing_by_delivery_key:
+                            continue
                         ticker = fields["ticker"]
                         entry = fields["entry"]
                         stop = fields["stop"]
@@ -1333,6 +1720,10 @@ def record_alert_signals(
                             asset_class,
                             mail_norm,
                         ):
+                            if defer_activation:
+                                raise sqlite3.IntegrityError(
+                                    "delivery intent contains an equivalent existing signal"
+                                )
                             continue
                         fill_at = None
                         fill_price = None
@@ -1393,10 +1784,18 @@ def record_alert_signals(
                         delivery_state = None
                         delivery_prepared_at = None
                         delivery_accepted_at = None
+                        public_signal_ref = None
+                        origin_evidence = (
+                            "shadow_counterfactual"
+                            if mail_norm == "shadow"
+                            else "direct_post_send"
+                        )
                         if defer_activation and signal_status == STATUS_OPEN:
                             signal_status = STATUS_PENDING_DELIVERY
                             delivery_state = "PREPARED"
                             delivery_prepared_at = now_iso
+                            public_signal_ref = candidate_public_ref
+                            origin_evidence = "delivery_prepared"
                         elif defer_activation:
                             # A pre-send invalid row is not part of the SMTP
                             # intent and must not block/reconcile that intent.
@@ -1420,8 +1819,8 @@ def record_alert_signals(
                                 code_revision, fill_evidence_mode,
                                 delivery_intent_key, delivery_state,
                                 delivery_prepared_at, delivery_accepted_at,
-                                mail_channel
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                mail_channel, public_signal_ref, origin_evidence
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
@@ -1442,11 +1841,13 @@ def record_alert_signals(
                                 code_revision, fill_evidence_mode,
                                 row_intent_key, delivery_state,
                                 delivery_prepared_at, delivery_accepted_at,
-                                mail_channel_norm,
+                                mail_channel_norm, public_signal_ref, origin_evidence,
                             ),
                         )
                         inserted += 1
                     except Exception as row_exc:
+                        if defer_activation:
+                            raise
                         logger.warning(
                             "record_alert_signals: Row uebersprungen (scanner=%s): %s",
                             scanner, row_exc,
@@ -1503,8 +1904,9 @@ def build_alert_delivery_intent_key(
     *,
     channel: str = "email",
     mail_channel: Optional[str] = None,
+    delivery_recipient_keys: Optional[Iterable[str]] = None,
 ) -> str:
-    """Build an order-stable SHA-256 key from scanner, channel and rows."""
+    """Build an order-stable SHA-256 key from rows and intended recipients."""
     scanner = str(scanner_name or "").strip().lower()
     channel_norm = str(channel or "email").strip().lower() or "email"
     mail_channel_norm = str(mail_channel or "").strip().lower() or None
@@ -1528,6 +1930,9 @@ def build_alert_delivery_intent_key(
             "scanner": scanner,
             "channel": channel_norm,
             "mail_channel": mail_channel_norm,
+            "recipient_keys": list(
+                _normalized_delivery_recipient_keys(delivery_recipient_keys) or ()
+            ),
             "rows": canonical_rows,
         },
         sort_keys=True,
@@ -1545,6 +1950,7 @@ def prepare_alert_delivery_intent(
     channel: str = "email",
     mail_channel: Optional[str] = None,
     rates_context: Optional[Dict[str, Any]] = None,
+    delivery_recipient_keys: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Persist stable signal IDs before SMTP without exposing them to eval.
 
@@ -1565,6 +1971,15 @@ def prepare_alert_delivery_intent(
     }
     if not base or not rows:
         return result
+    scanner = str(scanner_name or "").strip().lower()
+    asset_class = "crypto" if scanner in CRYPTO_SCANNERS else "stock"
+    try:
+        candidates = _deferred_delivery_candidates(scanner, rows, base, asset_class)
+    except Exception as exc:
+        logger.warning("Alert-Zustellungsintent konnte nicht kanonisiert werden: %s", exc)
+        return result
+    if candidates is None or len(candidates) != len(rows):
+        return result
     record_alert_signals(
         scanner_name,
         rows,
@@ -1572,6 +1987,7 @@ def prepare_alert_delivery_intent(
         channel=channel,
         mail_channel=mail_channel,
         rates_context=rates_context,
+        delivery_recipient_keys=delivery_recipient_keys,
         _delivery_intent_key=base,
         _defer_activation=True,
     )
@@ -1579,26 +1995,52 @@ def prepare_alert_delivery_intent(
         prefix = f"{base}:"
         with _DB_LOCK:
             with _db_connection() as conn:
-                matches = [
+                all_matches = [
                     dict(row)
                     for row in conn.execute(
-                        "SELECT id, created_at, scanner, ticker, direction, status, "
+                        "SELECT id, created_at, scanner, ticker, asset_class, instrument_id, "
+                        "venue, contract_symbol, direction, strategy, trade_horizon, setup_key, "
+                        "entry, stop, tp1, tp2, status, "
                         "delivery_intent_key, delivery_state, delivery_prepared_at, "
                         "delivery_attempted_at, delivery_accepted_at, "
-                        "delivery_recipient_keys_json, mail_channel "
+                        "delivery_recipient_keys_json, mail_channel, "
+                        "public_signal_ref, origin_evidence "
                         "FROM signals WHERE delivery_intent_key IS NOT NULL "
                         "ORDER BY id"
                     ).fetchall()
                     if str(row["delivery_intent_key"] or "").startswith(prefix)
                 ]
+        matches_by_delivery_key = {}
+        mapping_valid = len(all_matches) == len(candidates)
+        for row in all_matches:
+            delivery_key = str(row.get("delivery_intent_key") or "")
+            if delivery_key in matches_by_delivery_key:
+                mapping_valid = False
+                break
+            matches_by_delivery_key[delivery_key] = row
+        matches = []
+        for candidate in candidates:
+            row = matches_by_delivery_key.get(str(candidate["delivery_intent_key"]))
+            if (
+                row is None
+                or str(row.get("public_signal_ref") or "")
+                != str(candidate["public_signal_ref"])
+                or not is_valid_public_signal_ref(row.get("public_signal_ref"))
+                or _canonical_delivery_binding(row) is None
+            ):
+                mapping_valid = False
+                continue
+            matches.append(_present_signal_payload(row))
+        if len(matches) != len(candidates):
+            mapping_valid = False
         result["signals"] = matches
         result["signal_ids"] = [int(row["id"]) for row in matches]
-        expected_count = len(rows)
+        expected_count = len(candidates)
         state_pairs = {
             (str(row.get("status") or ""), str(row.get("delivery_state") or ""))
             for row in matches
         }
-        complete = bool(matches) and len(matches) == expected_count
+        complete = mapping_valid and bool(matches) and len(matches) == expected_count
         if complete and state_pairs == {(STATUS_PENDING_DELIVERY, "PREPARED")}:
             intent_state = "PREPARED"
         elif complete and state_pairs == {(STATUS_PENDING_DELIVERY, "ATTEMPTED")}:
@@ -1627,6 +2069,7 @@ def mark_alert_delivery_attempted(
     intent_key: str,
     *,
     attempted_at: Any = None,
+    expected_prepared_rows: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Durably close replay before entering an SMTP delivery attempt.
 
@@ -1649,6 +2092,12 @@ def mark_alert_delivery_attempted(
     }
     if not base:
         return result
+    expected_snapshots = None
+    if expected_prepared_rows is not None:
+        expected_snapshots = _prepared_delivery_snapshot_map(expected_prepared_rows)
+        if expected_snapshots is None:
+            result["intent_state"] = "INCONSISTENT"
+            return result
     attempted_dt = _parse_utc_datetime(attempted_at) or _coerce_now(_utc_now())
     prefix = f"{base}:"
     try:
@@ -1657,8 +2106,13 @@ def mark_alert_delivery_attempted(
                 rows = [
                     dict(row)
                     for row in conn.execute(
-                        "SELECT id, status, delivery_state, delivery_intent_key "
-                        "FROM signals WHERE delivery_intent_key IS NOT NULL"
+                        "SELECT id, scanner, ticker, asset_class, instrument_id, venue, "
+                        "contract_symbol, direction, strategy, trade_horizon, setup_key, "
+                        "entry, stop, tp1, tp2, "
+                        "status, delivery_state, delivery_intent_key, delivery_prepared_at, "
+                        "delivery_accepted_at, delivery_recipient_keys_json, mail_channel, "
+                        "public_signal_ref, origin_evidence "
+                        "FROM signals WHERE delivery_intent_key IS NOT NULL ORDER BY id"
                     ).fetchall()
                     if str(row["delivery_intent_key"] or "").startswith(prefix)
                 ]
@@ -1671,6 +2125,16 @@ def mark_alert_delivery_attempted(
                     for row in rows
                 }
                 if states == {(STATUS_PENDING_DELIVERY, "PREPARED")}:
+                    current_snapshots = _prepared_delivery_snapshot_map(rows)
+                    if (
+                        current_snapshots is None
+                        or (
+                            expected_snapshots is not None
+                            and current_snapshots != expected_snapshots
+                        )
+                    ):
+                        result["intent_state"] = "INCONSISTENT"
+                        return result
                     placeholders = ",".join("?" for _ in ids)
                     cursor = conn.execute(
                         "UPDATE signals SET delivery_state='ATTEMPTED', "
@@ -1867,6 +2331,7 @@ def finalize_alert_delivery(
         "delivery_recipient_keys_json": None,
         "error": None,
         "signal_ids": [],
+        "intent_state": "MISSING",
     }
     if not base or not recipient_keys:
         return result
@@ -1899,7 +2364,8 @@ def finalize_alert_delivery(
                     dict(row)
                     for row in conn.execute(
                         "SELECT id, delivery_intent_key, status, delivery_state, "
-                        "delivery_accepted_at FROM signals "
+                        "delivery_accepted_at, public_signal_ref, origin_evidence "
+                        "FROM signals "
                         "WHERE delivery_intent_key IS NOT NULL"
                     ).fetchall()
                     if str(row["delivery_intent_key"] or "").startswith(prefix)
@@ -1920,9 +2386,16 @@ def finalize_alert_delivery(
                     not in allowed_states
                     for row in rows
                 ):
+                    result["intent_state"] = "INCONSISTENT"
                     raise sqlite3.IntegrityError(
                         "delivery intent contains inconsistent signal state"
                     )
+                if any(not _delivery_evidence_matches_state(row) for row in rows):
+                    result["intent_state"] = "INCONSISTENT"
+                    raise sqlite3.IntegrityError(
+                        "delivery intent contains invalid public evidence"
+                    )
+                result["intent_state"] = "ACCEPTANCE_PENDING"
                 for row in rows:
                     previous_at = _parse_utc_datetime(
                         row.get("delivery_accepted_at")
@@ -1939,7 +2412,9 @@ def finalize_alert_delivery(
                     )
                     conn.execute(
                         "UPDATE signals SET delivery_state=?, "
-                        "delivery_accepted_at=?, delivery_recipient_keys_json=? "
+                        "delivery_accepted_at=?, delivery_recipient_keys_json=?, "
+                        "origin_evidence=CASE WHEN public_signal_ref IS NOT NULL "
+                        "THEN 'smtp_acceptance' ELSE origin_evidence END "
                         "WHERE id=?",
                         (
                             next_state,
@@ -1982,6 +2457,19 @@ def finalize_alert_delivery(
                 with _db_connection() as conn:
                     ids = result["signal_ids"]
                     placeholders = ",".join("?" for _ in ids)
+                    activation_rows = conn.execute(
+                        "SELECT id, status, delivery_state, public_signal_ref, origin_evidence "
+                        f"FROM signals WHERE id IN ({placeholders})",
+                        ids,
+                    ).fetchall()
+                    if any(
+                        not _delivery_evidence_matches_state(dict(row))
+                        for row in activation_rows
+                    ):
+                        result["intent_state"] = "INCONSISTENT"
+                        raise sqlite3.IntegrityError(
+                            "delivery activation contains invalid public evidence"
+                        )
                     conn.execute(
                         "UPDATE signals SET status = ?, delivery_state = 'ACTIVE' "
                         f"WHERE id IN ({placeholders}) "
@@ -1997,6 +2485,8 @@ def finalize_alert_delivery(
                 row["status"] == STATUS_OPEN and row["delivery_state"] == "ACTIVE"
                 for row in states
             )
+            if result["activated"]:
+                result["intent_state"] = "ACTIVE"
         except Exception as exc:
             tracker_error = f"{type(exc).__name__}:{str(exc)[:180]}"
             result["error"] = tracker_error
@@ -2056,7 +2546,7 @@ def load_pending_accepted_deliveries() -> List[Dict[str, Any]]:
         for row in rows:
             row_key = str(row.get("delivery_intent_key") or "")
             base, separator, suffix = row_key.rpartition(":")
-            if not separator or not suffix.isdigit():
+            if not separator or not suffix:
                 continue
             group = grouped.setdefault(base, {
                 "intent_key": base,
@@ -2072,7 +2562,7 @@ def load_pending_accepted_deliveries() -> List[Dict[str, Any]]:
                 "activation_pending": True,
             })
             group["signal_ids"].append(int(row["id"]))
-            group["signals"].append(row)
+            group["signals"].append(_present_signal_payload(row))
     except Exception as exc:
         logger.warning("Akzeptierte Alert-Zustellungen konnten nicht geladen werden: %s", exc)
     try:
@@ -2340,23 +2830,75 @@ def _is_ambiguous_outcome(value: Any) -> bool:
     return str(detail or "").startswith("ambiguous_same_")
 
 
-def _realized_upper(row: Dict[str, Any]) -> Optional[float]:
-    """Upper feasible R bound for path-ambiguous bars, never below lower R."""
+_CURRENT_AMBIGUOUS_DETAILS = frozenset({
+    "ambiguous_same_day_stop_and_tp1",
+    "ambiguous_same_day_stop_and_tp2",
+    "ambiguous_same_day_entry_stop_and_tp1",
+    "ambiguous_same_day_entry_stop_and_tp2",
+    "ambiguous_same_day_entry_and_stop_unresolved_upper",
+    "ambiguous_same_day_stop_and_be_trigger",
+    "ambiguous_same_interval_stop_and_tp1",
+    "ambiguous_same_interval_stop_and_tp2",
+    "ambiguous_same_interval_stop_and_be_trigger",
+})
+_TERMINAL_AMBIGUOUS_UPPER_DETAILS = frozenset({
+    "ambiguous_same_day_stop_and_tp2",
+    "ambiguous_same_day_entry_stop_and_tp2",
+    "ambiguous_same_interval_stop_and_tp2",
+})
+
+
+def _legacy_ambiguous_upper_is_unresolved(row: Mapping[str, Any]) -> bool:
+    """Return whether an ambiguous row predates explicit path provenance."""
+    detail = str(row.get("outcome_detail") or "").strip()
+    return bool(
+        detail.startswith("ambiguous_same_")
+        and detail not in _CURRENT_AMBIGUOUS_DETAILS
+    )
+
+
+def _realized_upper_resolution(
+    row: Mapping[str, Any],
+) -> Tuple[Optional[float], bool]:
+    """Return a numeric terminal upper bound only when its path can terminate.
+
+    A TP1 touch or an interval close is not a full exit.  Old ambiguous rows
+    carry no raw OHLC provenance that could distinguish TP1 from TP2, so their
+    optimistic stored upper is quarantined instead of reconstructed.
+    """
     lower = _to_float(row.get("r_realized"))
     if lower is None:
-        return None
+        return None, False
+    if not _is_ambiguous_outcome(row):
+        upper = _to_float(row.get("r_realized_upper"))
+        return (max(lower, upper) if upper is not None else lower), False
+    detail = str(row.get("outcome_detail") or "").strip()
+    if detail not in _TERMINAL_AMBIGUOUS_UPPER_DETAILS:
+        return None, True
     upper = _to_float(row.get("r_realized_upper"))
-    return max(lower, upper) if upper is not None else lower
+    if upper is None or upper <= lower:
+        return None, True
+    return upper, False
 
 
-def _managed_upper_r(row: Dict[str, Any]) -> Optional[float]:
+def _realized_upper(row: Dict[str, Any]) -> Optional[float]:
+    """Resolved terminal R upper bound, or None for an unsequenced path."""
+    value, _unresolved = _realized_upper_resolution(row)
+    return value
+
+
+def _managed_upper_resolution(
+    row: Dict[str, Any],
+) -> Tuple[Optional[float], bool]:
     """Feasible upper bound under the recommended 50/50 plus BE policy."""
     managed_value, unresolved = _managed_5050_be_resolution(row)
     if unresolved:
-        return None
+        return None, True
     if not _is_ambiguous_outcome(row):
-        return managed_value
-    upper = _realized_upper(row)
+        return managed_value, False
+    upper, upper_unresolved = _realized_upper_resolution(row)
+    if upper_unresolved:
+        return None, True
     lower = _to_float(row.get("r_realized"))
     fill = _to_float(row.get("entry_fill_price"))
     if fill is None:
@@ -2365,19 +2907,23 @@ def _managed_upper_r(row: Dict[str, Any]) -> Optional[float]:
     tp1 = _to_float(row.get("tp1"))
     tp2 = _to_float(row.get("tp2"))
     if None in (upper, lower, fill, stop, tp1, tp2) or upper <= lower:
-        return managed_value
+        return None, True
     direction = "SHORT" if str(row.get("direction")) == "SHORT" else "LONG"
     geometry = trade_geometry(fill, stop, tp1, tp2, direction)
     risk = geometry.get("risk")
     if not geometry.get("valid") or not risk:
-        return upper
+        return None, True
     r_tp1 = _signed_r(tp1, fill, risk, direction)
     r_tp2 = _signed_r(tp2, fill, risk, direction)
     if upper >= r_tp2 - 1e-6:
-        return round(0.5 * r_tp1 + 0.5 * r_tp2, 4)
-    if upper >= r_tp1 - 1e-6:
-        return round(0.5 * r_tp1, 4)
-    return upper
+        return round(0.5 * r_tp1 + 0.5 * r_tp2, 4), False
+    return None, True
+
+
+def _managed_upper_r(row: Dict[str, Any]) -> Optional[float]:
+    """Resolved managed terminal upper bound, never a partial-exit credit."""
+    value, _unresolved = _managed_upper_resolution(row)
+    return value
 
 
 def _managed_r_50_50(row: Dict[str, Any]) -> Optional[float]:
@@ -2486,8 +3032,189 @@ def _managed_be_was_triggered(row: Dict[str, Any], mfe_trigger: float = 1.0) -> 
     return explicit_evidence
 
 
-def _be_delivery_is_proven(row: Dict[str, Any]) -> bool:
-    """Require a causal, parseable activation and delivery acknowledgement."""
+def _expected_be_delivery_evidence_key(signal_id: Any) -> Optional[str]:
+    """Return the recipient marker a BE receipt may attest."""
+    try:
+        normalized_id = int(signal_id)
+    except (TypeError, ValueError):
+        return None
+    if normalized_id <= 0:
+        return None
+    return f"signal_be_{normalized_id}_recipient_delivered"
+
+
+def _expected_terminal_delivery_evidence_key(
+    signal_id: Any,
+    event_status: Any,
+) -> Optional[str]:
+    try:
+        normalized_id = int(signal_id)
+    except (TypeError, ValueError):
+        return None
+    status = str(event_status or "").strip().upper()
+    if normalized_id <= 0 or status not in _MAILABLE_TERMINAL_STATUSES:
+        return None
+    return f"signal_update_{normalized_id}_{status}_recipient_delivered"
+
+
+_FOLLOWUP_RECEIPT_ID_RE = re.compile(r"^fr1_[A-Za-z0-9_-]{43}$")
+
+
+def _valid_followup_receipt_id(value: Any) -> bool:
+    return bool(_FOLLOWUP_RECEIPT_ID_RE.fullmatch(str(value or "").strip()))
+
+
+def _normalized_followup_event(
+    event_kind: Any,
+    event_status: Any = None,
+) -> Optional[Tuple[str, str]]:
+    kind = str(event_kind or "").strip().upper()
+    status = str(event_status or "").strip().upper()
+    if kind == "BE" and not status:
+        return "BE", ""
+    if kind == "TERMINAL" and status in _MAILABLE_TERMINAL_STATUSES:
+        return "TERMINAL", status
+    return None
+
+
+def record_followup_delivery_receipt(
+    signal_id: Any,
+    *,
+    event_kind: Any,
+    delivery_evidence_key: Any,
+    accepted_at: Optional[datetime] = None,
+    event_status: Any = None,
+) -> Optional[str]:
+    """Persist an opaque, event-bound proof before a follow-up acknowledgement.
+
+    The mail layer calls this only after the recipient-level delivery marker is
+    durable.  The predictable marker is never sufficient for an acknowledgement:
+    this store validates the current event, hashes that marker, and generates an
+    unguessable receipt ID.  The unique event/hash binding makes recovery after a
+    crash idempotent without producing a second receipt or requiring another SMTP
+    attempt.
+    """
+    try:
+        normalized_id = int(signal_id)
+    except (TypeError, ValueError):
+        return None
+    normalized_event = _normalized_followup_event(event_kind, event_status)
+    if normalized_id <= 0 or normalized_event is None:
+        return None
+    kind, status = normalized_event
+    evidence_key = str(delivery_evidence_key or "").strip()
+    expected_key = (
+        _expected_be_delivery_evidence_key(normalized_id)
+        if kind == "BE"
+        else _expected_terminal_delivery_evidence_key(normalized_id, status)
+    )
+    if expected_key is None or evidence_key != expected_key:
+        return None
+    if accepted_at is not None and not isinstance(accepted_at, datetime):
+        return None
+    accepted_dt = _coerce_now(accepted_at)
+    accepted_iso = accepted_dt.isoformat()
+    key_hash = hashlib.sha256(evidence_key.encode("utf-8")).hexdigest()
+
+    try:
+        with _DB_LOCK:
+            with _db_connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                signal = conn.execute(
+                    "SELECT status, be_activated_at, be_mail_sent_at, "
+                    "be_delivery_evidence_key, pending_update_status, "
+                    "pending_update_at, update_delivery_receipt_id "
+                    "FROM signals WHERE id=?",
+                    (normalized_id,),
+                ).fetchone()
+                if signal is None:
+                    return None
+                existing = conn.execute(
+                    "SELECT receipt_id, accepted_at FROM followup_delivery_receipts "
+                    "WHERE signal_id=? AND event_kind=? AND event_status=? "
+                    "AND event_key_hash=?",
+                    (normalized_id, kind, status, key_hash),
+                ).fetchone()
+                if existing is not None:
+                    receipt_id = str(existing["receipt_id"] or "")
+                    if kind == "BE":
+                        still_pending = (
+                            signal["be_activated_at"] is not None
+                            and signal["be_mail_sent_at"] is None
+                        )
+                        already_bound = (
+                            signal["be_mail_sent_at"] is not None
+                            and signal["be_delivery_evidence_key"] == receipt_id
+                        )
+                    else:
+                        still_pending = (
+                            signal["pending_update_status"] == status
+                            and signal["status"] == status
+                        )
+                        already_bound = (
+                            signal["update_delivery_receipt_id"] == receipt_id
+                            and signal["status"] == status
+                        )
+                    return receipt_id if still_pending or already_bound else None
+
+                if kind == "BE":
+                    event_at = _parse_utc_datetime(signal["be_activated_at"])
+                    event_pending = event_at is not None and signal["be_mail_sent_at"] is None
+                else:
+                    event_at = _parse_utc_datetime(signal["pending_update_at"])
+                    event_pending = (
+                        event_at is not None
+                        and signal["pending_update_status"] == status
+                        and signal["status"] == status
+                    )
+                if not event_pending or event_at is None or accepted_dt < event_at:
+                    return None
+
+                for _attempt in range(4):
+                    receipt_id = f"fr1_{secrets.token_urlsafe(32)}"
+                    if not _valid_followup_receipt_id(receipt_id):
+                        continue
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO followup_delivery_receipts "
+                        "(receipt_id, signal_id, event_kind, event_status, "
+                        "event_key_hash, accepted_at, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            receipt_id,
+                            normalized_id,
+                            kind,
+                            status,
+                            key_hash,
+                            accepted_iso,
+                            _utc_iso(),
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) == 1:
+                        return receipt_id
+                    existing = conn.execute(
+                        "SELECT receipt_id FROM followup_delivery_receipts "
+                        "WHERE signal_id=? AND event_kind=? AND event_status=? "
+                        "AND event_key_hash=?",
+                        (normalized_id, kind, status, key_hash),
+                    ).fetchone()
+                    if existing is not None:
+                        return str(existing["receipt_id"])
+                return None
+    except Exception as exc:
+        logger.warning("Follow-up-Zustellbeleg konnte nicht gespeichert werden: %s", exc)
+        return None
+
+
+def _be_delivery_is_proven(row: Mapping[str, Any]) -> bool:
+    """Require causal timestamps plus an atomically consumed opaque receipt.
+
+    Legacy ``be_mail_sent_at`` values were sometimes written when only the
+    workflow-level dedupe key existed.  They remain in the database for audit
+    history, but cannot prove that any original recipient accepted the update.
+    """
+    receipt_id = str(row.get("be_delivery_evidence_key") or "").strip()
+    if not _valid_followup_receipt_id(receipt_id):
+        return False
     activated_at = _parse_utc_datetime(row.get("be_activated_at"))
     delivered_at = _parse_utc_datetime(row.get("be_mail_sent_at"))
     trigger_at = _parse_utc_datetime(row.get("be_trigger_at"))
@@ -2511,6 +3238,11 @@ def _breakeven_after_mfe_resolution(
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None, False
+    if (
+        str(row.get("be_exit_evidence_mode") or "").strip()
+        == _BE_DELIVERY_BOUNDARY_TOUCH_UNRESOLVED
+    ):
+        return None, True
     if not _managed_be_was_triggered(row, mfe_trigger):
         return realized, False
     if not _be_delivery_is_proven(row):
@@ -2532,6 +3264,11 @@ def _managed_5050_be_resolution(row: Dict[str, Any]) -> Tuple[Optional[float], b
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None, False
+    if (
+        str(row.get("be_exit_evidence_mode") or "").strip()
+        == _BE_DELIVERY_BOUNDARY_TOUCH_UNRESOLVED
+    ):
+        return None, True
     if _managed_control_geometry(row) is None:
         # A terminal Level-R without auditable geometry is incomplete control
         # evidence, not a neutral omission that could silently shrink n.
@@ -2884,6 +3621,103 @@ def _signal_has_full_observation_window(row: Dict[str, Any], as_of: datetime) ->
     return bool(maturity_at is not None and maturity_at <= as_of)
 
 
+def _control_population_resolution(
+    row: Mapping[str, Any],
+    as_of: datetime,
+    *,
+    allow_shadow_counterfactual: bool = False,
+) -> Optional[str]:
+    """Classify one mature, qualified control-population observation.
+
+    Terminal labels are outcome claims and therefore remain in the denominator
+    even when their fill or Level-R evidence is corrupt.  Conversely, a
+    non-terminal row joins the control population only when it carries a fill
+    claim.  A clean, explicitly closed ``NO_FILL`` remains visible as a
+    non-trade instead of being counted as either a winner or a loser.
+    """
+    materialized = dict(row)
+    if (
+        not _has_trade_qualified_origin(
+            materialized,
+            allow_shadow_counterfactual=allow_shadow_counterfactual,
+        )
+        or not _signal_has_full_observation_window(materialized, as_of)
+    ):
+        return None
+
+    status = str(materialized.get("status") or "").strip()
+    fill_at_raw = materialized.get("entry_filled_at")
+    fill_price_raw = materialized.get("entry_fill_price")
+    realized_raw = materialized.get("r_realized")
+    fill_claimed = any(
+        value is not None and str(value).strip() != ""
+        for value in (fill_at_raw, fill_price_raw)
+    )
+    realized_claimed = realized_raw is not None and str(realized_raw).strip() != ""
+    fill_at = _parse_utc_datetime(fill_at_raw)
+    fill_price = _to_float(fill_price_raw)
+    causal_start = _signal_causal_start(materialized)
+    closed_at = _parse_utc_datetime(materialized.get("closed_at"))
+    fill_evidence_valid = bool(
+        fill_at is not None
+        and fill_price is not None
+        and fill_price > 0.0
+        and causal_start is not None
+        and causal_start <= fill_at <= as_of
+        and (closed_at is None or fill_at <= closed_at)
+    )
+
+    if status == STATUS_NO_FILL:
+        explicit_no_fill = bool(
+            not fill_claimed
+            and not realized_claimed
+            and closed_at is not None
+            and str(materialized.get("outcome_detail") or "").strip()
+        )
+        return "no_fill" if explicit_no_fill else "unresolved"
+
+    if status in {STATUS_STOP, STATUS_TP2, STATUS_EXPIRED}:
+        if _legacy_ambiguous_upper_is_unresolved(materialized):
+            return "unresolved"
+        return (
+            "resolved"
+            if fill_evidence_valid and _to_float(realized_raw) is not None
+            else "unresolved"
+        )
+
+    if fill_claimed:
+        return "unresolved"
+    return None
+
+
+def _control_population_counts(
+    rows: Iterable[Mapping[str, Any]],
+    as_of: datetime,
+    *,
+    allow_shadow_counterfactual: bool = False,
+) -> Dict[str, int]:
+    counts = {
+        "eligible": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "no_fill": 0,
+        "ambiguity_unresolved": 0,
+    }
+    for row in rows:
+        resolution = _control_population_resolution(
+            row,
+            as_of,
+            allow_shadow_counterfactual=allow_shadow_counterfactual,
+        )
+        if resolution is None:
+            continue
+        counts["eligible"] += 1
+        counts[resolution] += 1
+        if resolution == "unresolved" and _legacy_ambiguous_upper_is_unresolved(row):
+            counts["ambiguity_unresolved"] += 1
+    return counts
+
+
 # 119 regular sessions for the supported 60-bar worst case, plus the two
 # conservative sessions above, fit within 190 calendar days even across the
 # densest regular US holiday windows. Querying farther is cheap and fail-safe.
@@ -3083,6 +3917,7 @@ def _evaluate_stock_signal(
     tp1_hit_at = sig.get("tp1_hit_at") or None
     max_fav = float(sig.get("max_favorable_r") or 0.0)
     max_adv = float(sig.get("max_adverse_r") or 0.0)
+    mae_evidence_mode = str(sig.get("mae_evidence_mode") or "").strip()
     fill_at = sig.get("entry_filled_at") or None
     fill_price = _to_float(sig.get("entry_fill_price"))
     fill_date = _parse_bar_date(fill_at) if fill_at else None
@@ -3092,13 +3927,17 @@ def _evaluate_stock_signal(
     )
     # A trading rule becomes user-actionable only after the dedicated update
     # was actually delivered. Trigger/activation time alone is not execution.
-    be_effective_candidates = [
-        value
-        for value in (
+    be_delivery_proven = _be_delivery_is_proven(sig)
+    be_effective_candidates = []
+    if shadow_counterfactual_be:
+        be_effective_candidates.append(_parse_bar_date(sig.get("be_trigger_at")))
+    elif be_delivery_proven:
+        be_effective_candidates.extend((
             _parse_bar_date(sig.get("be_trigger_at")),
             _parse_bar_date(sig.get("be_mail_sent_at")),
-        )
-        if value is not None
+        ))
+    be_effective_candidates = [
+        value for value in be_effective_candidates if value is not None
     ]
     be_effective_date = max(be_effective_candidates) if be_effective_candidates else None
     bars_after_alert = 0
@@ -3184,6 +4023,12 @@ def _evaluate_stock_signal(
             updates["entry_filled_at"] = fill_at
             updates["entry_fill_price"] = round(fill_price, 8)
             updates["fill_evidence_mode"] = "post_alert_interval"
+            mae_evidence_mode = (
+                "intrabar_fill_order_unresolved"
+                if filled_intrabar_this_bar
+                else "exact_post_fill_path"
+            )
+            updates["mae_evidence_mode"] = mae_evidence_mode
 
         if fill_date is not None and bar_date < fill_date:
             continue
@@ -3201,20 +4046,92 @@ def _evaluate_stock_signal(
             stop_hit = low <= stop
             tp2_hit = tp2 is not None and high >= tp2
             tp1_touch = tp1 is not None and high >= tp1
-            favorable = (high - fill_price) / risk
-            adverse = (low - fill_price) / risk
+            gap_through_stop = filled_before_bar and open_price < stop
+            ordered_open_stop = filled_before_bar and open_price <= stop
+            ordered_open_tp2 = (
+                filled_before_bar and tp2 is not None and open_price >= tp2
+            )
+            ordered_open_tp1 = (
+                filled_before_bar and tp1 is not None and open_price >= tp1
+            )
         else:
             stop_hit = high >= stop
             tp2_hit = tp2 is not None and low <= tp2
             tp1_touch = tp1 is not None and low <= tp1
+            gap_through_stop = filled_before_bar and open_price > stop
+            ordered_open_stop = filled_before_bar and open_price >= stop
+            ordered_open_tp2 = (
+                filled_before_bar and tp2 is not None and open_price <= tp2
+            )
+            ordered_open_tp1 = (
+                filled_before_bar and tp1 is not None and open_price <= tp1
+            )
+        ordered_terminal_open = ordered_open_stop or ordered_open_tp2
+        if ordered_terminal_open:
+            # The open is the only ordered price in Daily OHLC. Once an
+            # existing position exits at its stop or TP2 there, later extrema
+            # belong to a flat position and cannot become MFE/MAE.
+            favorable = _signed_r(open_price, fill_price, risk, direction)
+            adverse = favorable
+        elif direction == "LONG":
+            favorable = (high - fill_price) / risk
+            adverse = (low - fill_price) / risk
+        else:
             favorable = (fill_price - low) / risk
             adverse = (fill_price - high) / risk
+        max_fav_before_bar = max_fav
         max_fav = max(max_fav, favorable)
-        max_adv = min(max_adv, adverse)
+        # In an unordered OHLC fill bar the adverse extreme may have happened
+        # before entry.  Keep only the neutral proven bound for that bar and
+        # retain an explicit unresolved marker; later completed bars may still
+        # extend the proven post-fill bound without making lifetime MAE exact.
+        adverse_order_unresolved_this_bar = bool(
+            mae_evidence_mode == "intrabar_fill_order_unresolved"
+            and fill_date == bar_date
+        )
+        if not adverse_order_unresolved_this_bar:
+            max_adv = min(max_adv, adverse)
         day_iso = bar_date.isoformat()
 
+        if ordered_open_stop:
+            lower_r = round(
+                _signed_r(open_price, fill_price, risk, direction), 4
+            )
+            updates.update({
+                "status": STATUS_STOP,
+                "stop_hit_at": day_iso,
+                "closed_at": now_iso,
+                "r_realized": lower_r,
+                "r_realized_upper": lower_r,
+                "outcome_detail": (
+                    "stop_gap_slippage"
+                    if gap_through_stop
+                    else "ordered_open_stop"
+                ),
+            })
+            updates.update(
+                _stop_exit_metrics(open_price, stop, fill_price, direction)
+            )
+            break
+        if ordered_open_tp2:
+            if tp1 is not None and not tp1_hit_at:
+                tp1_hit_at = day_iso
+            tp2_r = round(_signed_r(tp2, fill_price, risk, direction), 4)
+            updates.update({
+                "status": STATUS_TP2,
+                "tp2_hit_at": day_iso,
+                "closed_at": now_iso,
+                "r_realized": tp2_r,
+                "r_realized_upper": tp2_r,
+                "outcome_detail": "ordered_open_tp2",
+            })
+            break
+        ordered_open_tp1_first = bool(ordered_open_tp1 and not tp1_hit_at)
+        if ordered_open_tp1_first:
+            tp1_hit_at = day_iso
+
         if (
-            (sig.get("be_mail_sent_at") or shadow_counterfactual_be)
+            (be_delivery_proven or shadow_counterfactual_be)
             and be_exit_fill_price is None
             and be_effective_date is not None
             and bar_date > be_effective_date
@@ -3237,21 +4154,19 @@ def _evaluate_stock_signal(
                     ),
                 })
 
-        if (
+        be_triggered_this_bar = bool(
             not sig.get("be_activated_at")
             and "be_trigger_at" not in updates
+            and max_fav_before_bar < 1.0
             and max_fav >= 1.0
-        ):
+        )
+        if be_triggered_this_bar:
             updates["be_trigger_at"] = day_iso
 
         if stop_hit:
             # Stop und ein NEUES TP-Level am selben Tag -> Reihenfolge unklar:
             # konservativ den Stop zuerst werten, TP nicht gutschreiben.
             ambiguous_entry_stop = filled_intrabar_this_bar
-            if direction == "LONG":
-                gap_through_stop = filled_before_bar and open_price < stop
-            else:
-                gap_through_stop = filled_before_bar and open_price > stop
             stop_exit = open_price if gap_through_stop else stop
             stop_gap_slippage = bool(gap_through_stop)
             # Bei einem echten Gap liegt der Stop bereits zur Eroeffnung hinter
@@ -3260,28 +4175,49 @@ def _evaluate_stock_signal(
             ambiguous_target = (not stop_gap_slippage) and (
                 tp2_hit or (tp1_touch and not tp1_hit_at)
             )
+            ambiguous_be_trigger = bool(
+                not stop_gap_slippage
+                and be_triggered_this_bar
+                and not ambiguous_target
+                and not ambiguous_entry_stop
+                and not ordered_open_tp1_first
+            )
             lower_r = round(_signed_r(stop_exit, fill_price, risk, direction), 4)
-            upper_r = lower_r
+            upper_r: Optional[float] = lower_r
             if ambiguous_target:
-                upper_target = tp2 if tp2_hit else tp1
-                if upper_target is not None:
+                upper_target = tp2 if tp2_hit else None
+                if upper_target is not None:  # TP2 is terminal; TP1 is not.
                     upper_r = round(_signed_r(upper_target, fill_price, risk, direction), 4)
+                else:
+                    upper_r = None
             elif ambiguous_entry_stop:
-                # Ohne Intraday-Reihenfolge ist auch moeglich, dass der Stop-
-                # Extrempunkt vor dem Entry lag. Dann blieb die Position bis
-                # zum Close offen. Das ist nur eine Obergrenze, kein Gewinn.
-                upper_r = max(
-                    lower_r,
-                    round(_signed_r(close, fill_price, risk, direction), 4),
-                )
+                # A close is not a terminal alternative to the stop.  Keep the
+                # uncertainty explicit instead of inventing a full-exit R.
+                upper_r = None
+            elif ambiguous_be_trigger:
+                upper_r = None
             if ambiguous_entry_stop and ambiguous_target:
-                outcome_detail = "ambiguous_same_day_entry_stop_and_target"
+                outcome_detail = (
+                    "ambiguous_same_day_entry_stop_and_tp2"
+                    if tp2_hit
+                    else "ambiguous_same_day_entry_stop_and_tp1"
+                )
             elif ambiguous_entry_stop:
-                outcome_detail = "ambiguous_same_day_entry_and_stop"
+                outcome_detail = (
+                    "ambiguous_same_day_entry_and_stop_unresolved_upper"
+                )
             elif ambiguous_target:
-                outcome_detail = "ambiguous_same_day"
+                outcome_detail = (
+                    "ambiguous_same_day_stop_and_tp2"
+                    if tp2_hit
+                    else "ambiguous_same_day_stop_and_tp1"
+                )
+            elif ambiguous_be_trigger:
+                outcome_detail = "ambiguous_same_day_stop_and_be_trigger"
             elif stop_gap_slippage:
                 outcome_detail = "stop_gap_slippage"
+            elif ordered_open_tp1_first:
+                outcome_detail = "ordered_open_tp1_then_stop"
             else:
                 outcome_detail = ""
             updates.update({
@@ -3289,7 +4225,9 @@ def _evaluate_stock_signal(
                 "stop_hit_at": day_iso,
                 "closed_at": now_iso,
                 "r_realized": lower_r,
-                "r_realized_upper": max(lower_r, upper_r),
+                "r_realized_upper": (
+                    max(lower_r, upper_r) if upper_r is not None else None
+                ),
                 "outcome_detail": outcome_detail,
             })
             updates.update(_stop_exit_metrics(stop_exit, stop, fill_price, direction))
@@ -3323,6 +4261,8 @@ def _evaluate_stock_signal(
         updates["tp1_hit_at"] = tp1_hit_at
     updates["max_favorable_r"] = round(max_fav, 4)
     updates["max_adverse_r"] = round(max_adv, 4)
+    if mae_evidence_mode:
+        updates["mae_evidence_mode"] = mae_evidence_mode
     return updates, False
 
 
@@ -3360,11 +4300,42 @@ def _fetch_crypto_price(
     return fetcher(ticker)
 
 
+def _completed_interval_ohlc_is_valid(interval: Any) -> bool:
+    """Require explicit, positive and internally consistent completed OHLC."""
+    if not isinstance(interval, Mapping):
+        return False
+
+    def _first_number(keys: Iterable[str]) -> Optional[float]:
+        for key in keys:
+            if key in interval:
+                value = _to_float(interval.get(key))
+                if value is not None:
+                    return value
+        return None
+
+    open_price = _first_number(("interval_open", "open"))
+    high = _first_number(("interval_high", "high"))
+    low = _first_number(("interval_low", "low"))
+    close = _first_number(("current", "price", "close", "last"))
+    if (
+        open_price is None
+        or high is None
+        or low is None
+        or close is None
+        or min(open_price, high, low, close) <= 0.0
+    ):
+        return False
+    return bool(
+        low <= min(open_price, close)
+        and max(open_price, close) <= high
+    )
+
+
 def _normalize_crypto_observation(raw: Any) -> Optional[Dict[str, Any]]:
     """Normalize a point price or an exchange interval observation."""
+    intervals: List[Dict[str, Any]] = []
     if isinstance(raw, dict):
         raw_intervals = raw.get("intervals")
-        intervals: List[Dict[str, Any]] = []
         if isinstance(raw_intervals, list):
             for interval in raw_intervals:
                 normalized_interval = _normalize_crypto_observation(interval)
@@ -3412,23 +4383,41 @@ def _normalize_crypto_observation(raw: Any) -> Optional[Dict[str, Any]]:
         started_at = None
         boundary_overlap = False
 
+    completed_leaf = bool(interval_complete and not intervals)
+    if completed_leaf and not _completed_interval_ohlc_is_valid(raw):
+        return None
+    if current is None and intervals:
+        current = _to_float(intervals[-1].get("current"))
+
     if current is None or current <= 0:
         return None
-    if interval_high is None:
-        interval_high = current
-    if interval_low is None:
-        interval_low = current
-    if interval_high <= 0 or interval_low <= 0:
-        return None
-    if interval_low > interval_high:
-        interval_low, interval_high = interval_high, interval_low
-    if interval_open is not None and interval_open <= 0:
-        interval_open = None
+    if completed_leaf:
+        # The validator proves all four values. Preserve the provider's exact
+        # range; never manufacture or reorder a completed market path.
+        if interval_open is None or interval_high is None or interval_low is None:
+            return None
+    else:
+        # Point and incomplete observations intentionally retain the legacy
+        # fallback because they are never accepted as completed path evidence.
+        if interval_high is None:
+            interval_high = current
+        if interval_low is None:
+            interval_low = current
+        if interval_high <= 0 or interval_low <= 0:
+            return None
+        if interval_low > interval_high:
+            interval_low, interval_high = interval_high, interval_low
+        if interval_open is not None and interval_open <= 0:
+            interval_open = None
     normalized = {
         "current": current,
         "interval_open": interval_open,
-        "interval_high": max(interval_high, current),
-        "interval_low": min(interval_low, current),
+        "interval_high": (
+            interval_high if completed_leaf else max(interval_high, current)
+        ),
+        "interval_low": (
+            interval_low if completed_leaf else min(interval_low, current)
+        ),
         "interval_complete": interval_complete,
         "source": source,
         "observed_at": observed_at,
@@ -3486,7 +4475,11 @@ def _has_complete_interval_coverage(
     previous_end: Optional[datetime] = None
     boundary_tolerance_seconds = 1e-6
     for interval in intervals:
-        if not isinstance(interval, dict) or not interval.get("interval_complete"):
+        if (
+            not isinstance(interval, dict)
+            or not interval.get("interval_complete")
+            or not _completed_interval_ohlc_is_valid(interval)
+        ):
             return False
         started_at = _parse_utc_datetime(interval.get("started_at"))
         ended_at = _parse_utc_datetime(interval.get("observed_at"))
@@ -3594,7 +4587,7 @@ def _causal_boundary_interval_touches_relevant_level(
                 direction == "LONG" and high >= be_trigger
             ):
                 return True
-        if sig.get("be_activated_at") and sig.get("be_mail_sent_at"):
+        if sig.get("be_activated_at") and _be_delivery_is_proven(sig):
             if (direction == "SHORT" and high >= fill) or (
                 direction == "LONG" and low <= fill
             ):
@@ -3729,6 +4722,9 @@ def _evaluate_crypto_signal(
     )
     fill_at = sig.get("entry_filled_at") or None
     fill_price = _to_float(sig.get("entry_fill_price"))
+    filled_before_interval = fill_price is not None
+    filled_intrabar_this_interval = False
+    mae_evidence_mode = str(sig.get("mae_evidence_mode") or "").strip()
     # Only a completed interval may advance the causal cursor. A running bar
     # would otherwise make its unfinished range disappear from the next fetch.
     updates: Dict[str, Any] = {"last_eval_at": now_iso} if interval_complete else {}
@@ -3847,6 +4843,7 @@ def _evaluate_crypto_signal(
             return updates, False
         if entry_touched:
             fill_price = interval_open if filled_at_open else entry
+            filled_intrabar_this_interval = not filled_at_open
         elif expired:
             updates.update({
                 "status": STATUS_NO_FILL,
@@ -3878,6 +4875,12 @@ def _evaluate_crypto_signal(
         updates["entry_filled_at"] = fill_at
         updates["entry_fill_price"] = round(fill_price, 8)
         updates["fill_evidence_mode"] = "post_alert_interval"
+        mae_evidence_mode = (
+            "intrabar_fill_order_unresolved"
+            if filled_intrabar_this_interval
+            else "exact_post_fill_path"
+        )
+        updates["mae_evidence_mode"] = mae_evidence_mode
 
     if not interval_complete:
         # A live point/running interval may invalidate an unfilled setup above,
@@ -3906,20 +4909,111 @@ def _evaluate_crypto_signal(
         return updates, False
 
     r_now = _signed_r(price, fill_price, risk, direction)
-    favorable_price = interval_high if direction == "LONG" else interval_low
-    adverse_price = interval_low if direction == "LONG" else interval_high
+    ordered_open_stop = bool(
+        filled_before_interval
+        and stop_touched
+        and interval_open is not None
+        and (
+            (direction == "LONG" and interval_open <= stop)
+            or (direction == "SHORT" and interval_open >= stop)
+        )
+    )
+    stop_gap_at_open = bool(
+        ordered_open_stop
+        and interval_open is not None
+        and (
+            (direction == "LONG" and interval_open < stop)
+            or (direction == "SHORT" and interval_open > stop)
+        )
+    )
+    ordered_open_tp2 = bool(
+        filled_before_interval
+        and interval_open is not None
+        and tp2 is not None
+        and (
+            (direction == "LONG" and interval_open >= tp2)
+            or (direction == "SHORT" and interval_open <= tp2)
+        )
+    )
+    ordered_open_tp1 = bool(
+        filled_before_interval
+        and interval_open is not None
+        and tp1 is not None
+        and (
+            (direction == "LONG" and interval_open >= tp1)
+            or (direction == "SHORT" and interval_open <= tp1)
+        )
+    )
+    if ordered_open_stop or ordered_open_tp2:
+        # The completed interval may continue after an executable terminal
+        # open. Only that ordered price belongs to the position's path.
+        favorable_price = interval_open
+        adverse_price = interval_open
+    else:
+        favorable_price = interval_high if direction == "LONG" else interval_low
+        adverse_price = interval_low if direction == "LONG" else interval_high
     interval_favorable_r = _signed_r(favorable_price, fill_price, risk, direction)
     interval_adverse_r = _signed_r(adverse_price, fill_price, risk, direction)
-    max_fav = max(float(sig.get("max_favorable_r") or 0.0), interval_favorable_r)
-    max_adv = min(float(sig.get("max_adverse_r") or 0.0), interval_adverse_r)
+    max_fav_before_interval = float(sig.get("max_favorable_r") or 0.0)
+    max_fav = max(max_fav_before_interval, interval_favorable_r)
+    max_adv_before_interval = float(sig.get("max_adverse_r") or 0.0)
+    max_adv = (
+        max_adv_before_interval
+        if filled_intrabar_this_interval
+        else min(max_adv_before_interval, interval_adverse_r)
+    )
     tp1_hit_at = sig.get("tp1_hit_at") or None
     updates.update({
         "max_favorable_r": round(max_fav, 4),
         "max_adverse_r": round(max_adv, 4),
     })
+    if mae_evidence_mode:
+        updates["mae_evidence_mode"] = mae_evidence_mode
+
+    if ordered_open_stop:
+        stop_r = round(_signed_r(interval_open, fill_price, risk, direction), 4)
+        updates.update({
+            "status": STATUS_STOP,
+            "stop_hit_at": now_iso,
+            "closed_at": now_iso,
+            "r_realized": stop_r,
+            "r_realized_upper": stop_r,
+            "outcome_detail": (
+                "stop_gap_slippage"
+                if stop_gap_at_open
+                else "ordered_open_stop"
+            ),
+        })
+        updates.update(
+            _stop_exit_metrics(interval_open, stop, fill_price, direction)
+        )
+        return updates, False
+    if ordered_open_tp2:
+        if tp1 is not None and not tp1_hit_at:
+            tp1_hit_at = now_iso
+        tp2_r = round(_signed_r(tp2, fill_price, risk, direction), 4)
+        updates.update({
+            "status": STATUS_TP2,
+            "tp1_hit_at": tp1_hit_at,
+            "tp2_hit_at": now_iso,
+            "closed_at": now_iso,
+            "r_realized": tp2_r,
+            "r_realized_upper": tp2_r,
+            "outcome_detail": "ordered_open_tp2",
+        })
+        return updates, False
+    ordered_open_tp1_first = bool(ordered_open_tp1 and not tp1_hit_at)
+    if ordered_open_tp1_first:
+        tp1_hit_at = now_iso
 
     interval_started_at = _parse_utc_datetime(observation.get("started_at"))
-    be_mail_sent_at = _parse_utc_datetime(sig.get("be_mail_sent_at"))
+    interval_ended_at = _parse_utc_datetime(observation.get("observed_at"))
+    be_delivery_proven = _be_delivery_is_proven(sig)
+    be_mail_sent_at = (
+        _parse_utc_datetime(sig.get("be_mail_sent_at"))
+        if be_delivery_proven
+        else None
+    )
     be_trigger_at = _parse_utc_datetime(sig.get("be_trigger_at"))
     shadow_counterfactual_be = (
         str(sig.get("mail_class") or "").strip().lower() == "shadow"
@@ -3927,14 +5021,33 @@ def _evaluate_crypto_signal(
     be_effective_at = max(
         value for value in (be_mail_sent_at, be_trigger_at) if value is not None
     ) if (be_mail_sent_at is not None or be_trigger_at is not None) else None
-    if (
-        (sig.get("be_mail_sent_at") or shadow_counterfactual_be)
+    be_touched = (
+        interval_low <= fill_price
+        if direction == "LONG"
+        else interval_high >= fill_price
+    )
+    be_delivery_boundary_unresolved = bool(
+        be_mail_sent_at is not None
+        and be_effective_at is not None
+        and interval_started_at is not None
+        and interval_ended_at is not None
+        and interval_started_at < be_effective_at < interval_ended_at
+        and be_touched
+        and not sig.get("be_exit_at")
+    )
+    if be_delivery_boundary_unresolved:
+        updates["be_exit_evidence_mode"] = (
+            _BE_DELIVERY_BOUNDARY_TOUCH_UNRESOLVED
+        )
+    elif (
+        (be_delivery_proven or shadow_counterfactual_be)
         and be_effective_at is not None
         and interval_started_at is not None
         and interval_started_at >= be_effective_at
         and not sig.get("be_exit_at")
+        and str(sig.get("be_exit_evidence_mode") or "").strip()
+        != _BE_DELIVERY_BOUNDARY_TOUCH_UNRESOLVED
     ):
-        be_touched = interval_low <= fill_price if direction == "LONG" else interval_high >= fill_price
         if be_touched:
             if direction == "LONG" and interval_open is not None and interval_open < fill_price:
                 be_exit_fill = interval_open
@@ -3952,10 +5065,12 @@ def _evaluate_crypto_signal(
                 ),
             })
 
-    if (
+    be_triggered_this_interval = bool(
         not sig.get("be_activated_at")
+        and max_fav_before_interval < 1.0
         and max_fav >= 1.0
-    ):
+    )
+    if be_triggered_this_interval:
         updates["be_trigger_at"] = now_iso
 
     if stop_touched:
@@ -3974,26 +5089,47 @@ def _evaluate_crypto_signal(
         ambiguous_stop_and_target = (
             interval_complete
             and not stop_slipped
-            and (tp1_touched or tp2_touched)
+            and (tp2_touched or (tp1_touched and not tp1_hit_at))
+        )
+        ambiguous_stop_and_be_trigger = bool(
+            interval_complete
+            and not stop_slipped
+            and not ambiguous_stop_and_target
+            and be_triggered_this_interval
+            and not ordered_open_tp1_first
         )
         if ambiguous_stop_and_target:
-            outcome_detail = "ambiguous_same_interval_stop_first"
+            outcome_detail = (
+                "ambiguous_same_interval_stop_and_tp2"
+                if tp2_touched
+                else "ambiguous_same_interval_stop_and_tp1"
+            )
+        elif ambiguous_stop_and_be_trigger:
+            outcome_detail = "ambiguous_same_interval_stop_and_be_trigger"
         elif stop_slipped:
             outcome_detail = "stop_gap_slippage"
+        elif ordered_open_tp1_first:
+            outcome_detail = "ordered_open_tp1_then_stop"
         else:
             outcome_detail = ""
         lower_r = round(_signed_r(stop_fill_price, fill_price, risk, direction), 4)
-        upper_r = lower_r
+        upper_r: Optional[float] = lower_r
         if ambiguous_stop_and_target:
-            upper_target = tp2 if tp2_touched else tp1
-            if upper_target is not None:
+            upper_target = tp2 if tp2_touched else None
+            if upper_target is not None:  # TP2 is terminal; TP1 is not.
                 upper_r = round(_signed_r(upper_target, fill_price, risk, direction), 4)
+            else:
+                upper_r = None
+        elif ambiguous_stop_and_be_trigger:
+            upper_r = None
         updates.update({
             "status": STATUS_STOP,
             "stop_hit_at": now_iso,
             "closed_at": now_iso,
             "r_realized": lower_r,
-            "r_realized_upper": max(lower_r, upper_r),
+            "r_realized_upper": (
+                max(lower_r, upper_r) if upper_r is not None else None
+            ),
             "outcome_detail": outcome_detail,
         })
         updates.update(
@@ -4146,6 +5282,11 @@ def _transition_record(
         "channel": str(sig.get("channel") or "email"),
         "mail_channel": sig.get("mail_channel"),
         "delivery_recipient_keys_json": sig.get("delivery_recipient_keys_json"),
+        "public_signal_ref": sig.get("public_signal_ref"),
+        "origin_evidence": normalize_origin_evidence(sig.get("origin_evidence")),
+        "delivery_accepted_at": updates.get(
+            "delivery_accepted_at", sig.get("delivery_accepted_at")
+        ),
         "direction": direction,
         "old_status": str(sig.get("status") or STATUS_OPEN),
         "new_status": new_status,
@@ -4173,6 +5314,9 @@ def _transition_record(
         ),
         "r_realized": _to_float(updates.get("r_realized")),
         "r_realized_upper": _to_float(updates.get("r_realized_upper")),
+        "mfe": _to_float(
+            updates.get("max_favorable_r", sig.get("max_favorable_r"))
+        ),
         "outcome_detail": str(updates.get("outcome_detail") or ""),
         "tp1_hit_this_run": bool(tp1_hit_this_run),
         "asset_class": str(sig.get("asset_class") or "stock"),
@@ -4427,8 +5571,14 @@ def evaluate_open_signals(
             if r_now is not None:
                 be_row = dict(sig)
                 be_row.update(updates)
-                updates["r_realized_be"] = breakeven_adjusted_r(be_row)
+                be_value, _be_unresolved = _breakeven_after_mfe_resolution(
+                    be_row
+                )
+                updates["r_realized_be"] = be_value
             new_status = updates.get("status")
+            tp1_hit_this_run = bool(updates.get("tp1_hit_at")) and not sig.get(
+                "tp1_hit_at"
+            )
             if new_status and new_status != STATUS_OPEN:
                 result["closed"] += 1
             if (
@@ -4440,6 +5590,9 @@ def evaluate_open_signals(
                 # terminal follow-up event; the pending loader reconstructs it.
                 updates["pending_update_status"] = str(new_status)
                 updates["pending_update_at"] = now_dt.isoformat()
+                updates["pending_update_tp1_hit_this_run"] = (
+                    1 if tp1_hit_this_run else 0
+                )
             try:
                 _apply_signal_updates(int(sig["id"]), updates)
             except Exception as exc:
@@ -4449,7 +5602,6 @@ def evaluate_open_signals(
                 # Transition nur fuer PERSISTIERTE Aenderungen melden: echter
                 # Statuswechsel ODER TP1 in diesem Lauf erreicht (Signal
                 # bleibt OPEN -> virtueller Status TP1_HIT_OPEN).
-                tp1_hit_this_run = bool(updates.get("tp1_hit_at")) and not sig.get("tp1_hit_at")
                 if new_status and new_status != STATUS_OPEN:
                     transition_status = new_status
                 elif tp1_hit_this_run:
@@ -4478,6 +5630,13 @@ def evaluate_open_signals(
                             "mail_channel": sig.get("mail_channel"),
                             "delivery_recipient_keys_json": sig.get(
                                 "delivery_recipient_keys_json"
+                            ),
+                            "public_signal_ref": sig.get("public_signal_ref"),
+                            "origin_evidence": normalize_origin_evidence(
+                                sig.get("origin_evidence")
+                            ),
+                            "delivery_accepted_at": sig.get(
+                                "delivery_accepted_at"
                             ),
                             "direction": "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG",
                             "entry": _to_float(sig.get("entry")),
@@ -4523,7 +5682,8 @@ def load_pending_be_activations(
                                setup_key, mail_class, channel, mail_channel, direction,
                                entry, entry_fill_price, stop, tp1, tp2,
                                max_favorable_r, asset_class, be_activated_at,
-                               delivery_recipient_keys_json
+                               delivery_recipient_keys_json, public_signal_ref,
+                               origin_evidence, delivery_accepted_at
                         FROM signals
                         WHERE status = ?
                           AND mail_class = 'trade'
@@ -4553,6 +5713,11 @@ def load_pending_be_activations(
                 "delivery_recipient_keys_json": sig.get(
                     "delivery_recipient_keys_json"
                 ),
+                "public_signal_ref": sig.get("public_signal_ref"),
+                "origin_evidence": normalize_origin_evidence(
+                    sig.get("origin_evidence")
+                ),
+                "delivery_accepted_at": sig.get("delivery_accepted_at"),
                 "direction": (
                     "SHORT" if str(sig.get("direction")) == "SHORT" else "LONG"
                 ),
@@ -4575,8 +5740,17 @@ def load_pending_be_activations(
 def mark_be_alerts_sent(
     signal_ids: Iterable[Any],
     sent_at: Optional[datetime] = None,
+    *,
+    delivery_evidence_keys: Optional[Mapping[Any, Any]] = None,
+    delivery_receipt_ids: Optional[Mapping[Any, Any]] = None,
 ) -> int:
-    """Idempotently acknowledge delivered stop updates for signal IDs."""
+    """Atomically consume durable BE receipts and acknowledge their signals.
+
+    ``delivery_evidence_keys`` remains a fail-closed compatibility parameter:
+    predictable strings are not receipts and are never accepted.  Replaying the
+    same already-consumed receipt confirms the existing acknowledgement so a
+    crash after the transaction commit does not cause another SMTP attempt.
+    """
     ids: List[int] = []
     for raw_id in signal_ids or []:
         try:
@@ -4585,20 +5759,79 @@ def mark_be_alerts_sent(
             continue
         if signal_id > 0 and signal_id not in ids:
             ids.append(signal_id)
-    if not ids:
+    if not ids or not isinstance(delivery_receipt_ids, Mapping):
         return 0
 
-    stamp = _coerce_now(sent_at).isoformat() if sent_at is not None else _utc_iso()
-    placeholders = ",".join("?" for _ in ids)
+    normalized_receipts: Dict[int, str] = {}
+    for raw_id, raw_receipt_id in delivery_receipt_ids.items():
+        try:
+            signal_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        receipt_id = str(raw_receipt_id or "").strip()
+        if signal_id in ids and _valid_followup_receipt_id(receipt_id):
+            normalized_receipts[signal_id] = receipt_id
+    if not normalized_receipts:
+        return 0
+
     try:
         with _DB_LOCK:
             with _db_connection() as conn:
-                cursor = conn.execute(
-                    f"UPDATE signals SET be_mail_sent_at = ? "
-                    f"WHERE id IN ({placeholders}) AND be_mail_sent_at IS NULL",
-                    [stamp, *ids],
-                )
-                return int(cursor.rowcount or 0)
+                conn.execute("BEGIN IMMEDIATE")
+                acknowledged = 0
+                for signal_id, receipt_id in normalized_receipts.items():
+                    receipt = conn.execute(
+                        "SELECT accepted_at, consumed_at FROM "
+                        "followup_delivery_receipts WHERE receipt_id=? "
+                        "AND signal_id=? AND event_kind='BE' AND event_status=''",
+                        (receipt_id, signal_id),
+                    ).fetchone()
+                    if receipt is None:
+                        continue
+                    row = conn.execute(
+                        "SELECT be_activated_at, be_trigger_at, be_mail_sent_at, "
+                        "be_delivery_evidence_key FROM signals WHERE id=?",
+                        (signal_id,),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if receipt["consumed_at"] is not None:
+                        if (
+                            row["be_mail_sent_at"] is not None
+                            and row["be_delivery_evidence_key"] == receipt_id
+                        ):
+                            acknowledged += 1
+                        continue
+                    if row["be_mail_sent_at"] is not None:
+                        continue
+                    activated_at = _parse_utc_datetime(row["be_activated_at"])
+                    trigger_at = _parse_utc_datetime(row["be_trigger_at"])
+                    accepted_dt = _parse_utc_datetime(receipt["accepted_at"])
+                    if (
+                        activated_at is None
+                        or accepted_dt is None
+                        or accepted_dt < activated_at
+                    ):
+                        continue
+                    if trigger_at is not None and accepted_dt < trigger_at:
+                        continue
+                    cursor = conn.execute(
+                        "UPDATE signals SET be_mail_sent_at = ?, "
+                        "be_delivery_evidence_key = ? "
+                        "WHERE id = ? AND be_mail_sent_at IS NULL",
+                        (accepted_dt.isoformat(), receipt_id, signal_id),
+                    )
+                    if int(cursor.rowcount or 0) != 1:
+                        continue
+                    consumed = conn.execute(
+                        "UPDATE followup_delivery_receipts SET consumed_at=? "
+                        "WHERE receipt_id=? AND consumed_at IS NULL",
+                        (_utc_iso(), receipt_id),
+                    )
+                    if int(consumed.rowcount or 0) != 1:
+                        raise RuntimeError("BE receipt consumption lost atomicity")
+                    acknowledged += 1
+                return acknowledged
     except Exception as exc:
         logger.warning("Stop-Update-Zustellung konnte nicht gespeichert werden: %s", exc)
         return 0
@@ -4638,7 +5871,12 @@ def load_pending_terminal_updates() -> List[Dict[str, Any]]:
                 continue
             prior = dict(sig)
             prior["status"] = STATUS_OPEN
-            event = _transition_record(prior, pending_status, sig, False)
+            event = _transition_record(
+                prior,
+                pending_status,
+                sig,
+                bool(sig.get("pending_update_tp1_hit_this_run")),
+            )
             event["pending_update_at"] = sig.get("pending_update_at")
             event["tracker_persisted"] = True
             pending.append(event)
@@ -4648,8 +5886,12 @@ def load_pending_terminal_updates() -> List[Dict[str, Any]]:
         return []
 
 
-def mark_terminal_updates_sent(signal_ids: Iterable[Any]) -> int:
-    """Idempotently acknowledge durable terminal updates by signal ID."""
+def mark_terminal_updates_sent(
+    signal_ids: Iterable[Any],
+    *,
+    delivery_receipt_ids: Optional[Mapping[Any, Any]] = None,
+) -> int:
+    """Atomically consume status-bound receipts for terminal update events."""
     ids: List[int] = []
     for raw_id in signal_ids or []:
         try:
@@ -4658,20 +5900,88 @@ def mark_terminal_updates_sent(signal_ids: Iterable[Any]) -> int:
             continue
         if signal_id > 0 and signal_id not in ids:
             ids.append(signal_id)
-    if not ids:
+    if not ids or not isinstance(delivery_receipt_ids, Mapping):
+        return 0
+    normalized_receipts: Dict[int, str] = {}
+    for raw_id, raw_receipt_id in delivery_receipt_ids.items():
+        try:
+            signal_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        receipt_id = str(raw_receipt_id or "").strip()
+        if signal_id in ids and _valid_followup_receipt_id(receipt_id):
+            normalized_receipts[signal_id] = receipt_id
+    if not normalized_receipts:
         return 0
     try:
-        placeholders = ",".join("?" for _ in ids)
         with _DB_LOCK:
             with _db_connection() as conn:
-                cursor = conn.execute(
-                    "UPDATE signals "
-                    "SET pending_update_status = NULL, pending_update_at = NULL "
-                    f"WHERE id IN ({placeholders}) "
-                    "AND pending_update_status IS NOT NULL",
-                    ids,
-                )
-                return int(cursor.rowcount or 0)
+                conn.execute("BEGIN IMMEDIATE")
+                acknowledged = 0
+                for signal_id, receipt_id in normalized_receipts.items():
+                    receipt = conn.execute(
+                        "SELECT event_status, accepted_at, consumed_at FROM "
+                        "followup_delivery_receipts WHERE receipt_id=? "
+                        "AND signal_id=? AND event_kind='TERMINAL'",
+                        (receipt_id, signal_id),
+                    ).fetchone()
+                    if receipt is None:
+                        continue
+                    event_status = str(receipt["event_status"] or "")
+                    if event_status not in _MAILABLE_TERMINAL_STATUSES:
+                        continue
+                    signal = conn.execute(
+                        "SELECT status, pending_update_status, pending_update_at, "
+                        "update_mail_sent_at, update_delivery_receipt_id "
+                        "FROM signals WHERE id=?",
+                        (signal_id,),
+                    ).fetchone()
+                    if signal is None:
+                        continue
+                    if receipt["consumed_at"] is not None:
+                        if (
+                            signal["status"] == event_status
+                            and signal["pending_update_status"] is None
+                            and signal["update_mail_sent_at"] is not None
+                            and signal["update_delivery_receipt_id"] == receipt_id
+                        ):
+                            acknowledged += 1
+                        continue
+                    accepted_dt = _parse_utc_datetime(receipt["accepted_at"])
+                    pending_at = _parse_utc_datetime(signal["pending_update_at"])
+                    if (
+                        signal["status"] != event_status
+                        or signal["pending_update_status"] != event_status
+                        or accepted_dt is None
+                        or pending_at is None
+                        or accepted_dt < pending_at
+                    ):
+                        continue
+                    cursor = conn.execute(
+                        "UPDATE signals SET pending_update_status=NULL, "
+                        "pending_update_at=NULL, "
+                        "pending_update_tp1_hit_this_run=NULL, "
+                        "update_mail_sent_at=?, update_delivery_receipt_id=? "
+                        "WHERE id=? AND status=? AND pending_update_status=?",
+                        (
+                            accepted_dt.isoformat(),
+                            receipt_id,
+                            signal_id,
+                            event_status,
+                            event_status,
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) != 1:
+                        continue
+                    consumed = conn.execute(
+                        "UPDATE followup_delivery_receipts SET consumed_at=? "
+                        "WHERE receipt_id=? AND consumed_at IS NULL",
+                        (_utc_iso(), receipt_id),
+                    )
+                    if int(consumed.rowcount or 0) != 1:
+                        raise RuntimeError("terminal receipt consumption lost atomicity")
+                    acknowledged += 1
+                return acknowledged
     except Exception as exc:
         logger.warning("Terminal-Update-Zustellung konnte nicht gespeichert werden: %s", exc)
         return 0
@@ -4694,7 +6004,16 @@ def _empty_bucket() -> Dict[str, Any]:
             "sum_r_upper": 0.0,
             "ambiguous_outcomes": 0,
             "ambiguity_rate_pct": None,
+            "upper_unresolved": 0,
             "alerts_per_day": 0.0,
+            "be_decided_signals": 0,
+            "be_unresolved": 0,
+            "control_eligible_signals": 0,
+            "control_resolved_signals": 0,
+            "control_no_fill": 0,
+            "control_unresolved": 0,
+            "terminal_r_unresolved": 0,
+            "ambiguity_unresolved": 0,
             "managed_be_decided_signals": 0,
             "managed_be_wins": 0,
             "managed_be_losses": 0,
@@ -4771,7 +6090,10 @@ def _finalize_bucket(
     r_upper_values: Optional[List[float]] = None,
     managed_be_upper_values: Optional[List[float]] = None,
     ambiguous_outcomes: int = 0,
+    upper_unresolved: int = 0,
     managed_be_unresolved: int = 0,
+    be_unresolved: int = 0,
+    control_counts: Optional[Mapping[str, int]] = None,
 ) -> None:
     wins = sum(1 for value in r_values if value > 0)
     decided = len(r_values)
@@ -4780,18 +6102,43 @@ def _finalize_bucket(
     bucket["win_rate_wilson_95"] = _wilson_interval_95(wins, decided)
     # AUDIT 2026-07-24 (Kalibrier-Loop): 30 entschiedene Signale ist die im
     # Weekly-Report verankerte Mindest-Stichprobe fuer belastbare Quoten.
-    bucket["sample_reliable"] = bool(decided >= 30)
+    control = dict(control_counts or {})
+    control_unresolved = int(control.get("unresolved", 0))
+    ambiguity_unresolved = int(control.get("ambiguity_unresolved", 0))
+    bucket["control_eligible_signals"] = int(control.get("eligible", 0))
+    bucket["control_resolved_signals"] = int(control.get("resolved", 0))
+    bucket["control_no_fill"] = int(control.get("no_fill", 0))
+    bucket["control_unresolved"] = control_unresolved
+    bucket["ambiguity_unresolved"] = ambiguity_unresolved
+    bucket["terminal_r_unresolved"] = max(
+        0, control_unresolved - ambiguity_unresolved
+    )
+    bucket["sample_reliable"] = bool(
+        decided >= 30
+        and control_unresolved == 0
+        and ambiguous_outcomes == 0
+        and upper_unresolved == 0
+    )
     bucket["avg_r"] = round(sum(r_values) / len(r_values), 3) if r_values else None
     bucket["sum_r"] = round(sum(r_values), 3) if r_values else 0.0
     upper = [value for value in (r_upper_values or []) if value is not None]
     upper_wins = sum(1 for value in upper if value > 0)
+    bucket["upper_unresolved"] = int(upper_unresolved)
     bucket["win_rate_pct_upper"] = (
         round(100.0 * upper_wins / len(upper), 1)
-        if upper
+        if upper and upper_unresolved == 0
         else bucket["win_rate_pct"]
     )
-    bucket["avg_r_upper"] = round(sum(upper) / len(upper), 3) if upper else bucket["avg_r"]
-    bucket["sum_r_upper"] = round(sum(upper), 3) if upper else bucket["sum_r"]
+    bucket["avg_r_upper"] = (
+        round(sum(upper) / len(upper), 3)
+        if upper and upper_unresolved == 0
+        else bucket["avg_r"]
+    )
+    bucket["sum_r_upper"] = (
+        round(sum(upper), 3)
+        if upper and upper_unresolved == 0
+        else bucket["sum_r"]
+    )
     bucket["ambiguous_outcomes"] = int(ambiguous_outcomes)
     bucket["ambiguity_rate_pct"] = (
         round(100.0 * ambiguous_outcomes / decided, 1) if decided else None
@@ -4800,10 +6147,16 @@ def _finalize_bucket(
     bucket["avg_r_managed_50_50"] = (
         round(sum(managed) / len(managed), 3) if managed else None
     )
-    # AUDIT 2026-07-30 (BE-Trigger): live gemessenes R unter der Einstand-Regel
-    # (r_realized_be) + Zaehler fuer Markierungen und verhinderte Verlierer.
+    # AUDIT 2026-07-30 (BE-Trigger): trackerbasierte, preiswegabgeleitete
+    # BE-Gegenrechnung (r_realized_be) + Zaehler fuer MFE-Markierungen.
     be = [value for value in (be_values or []) if value is not None]
-    bucket["avg_r_be"] = round(sum(be) / len(be), 3) if be else None
+    bucket["be_decided_signals"] = len(be)
+    bucket["be_unresolved"] = int(be_unresolved)
+    bucket["avg_r_be"] = (
+        round(sum(be) / len(be), 3)
+        if be and be_unresolved == 0
+        else None
+    )
     bucket["be_activations"] = int(be_activations)
     bucket["be_saved"] = int(be_saved)
     recommended = _recommended_payoff_statistics(managed_be_values or [])
@@ -4821,11 +6174,19 @@ def _finalize_bucket(
     bucket["managed_be_win_rate_wilson_95"] = recommended["win_rate_wilson_95"]
     bucket["managed_be_unresolved"] = int(managed_be_unresolved)
     bucket["managed_be_sample_reliable"] = bool(
-        recommended["decided"] >= 30 and managed_be_unresolved == 0
+        recommended["decided"] >= 30
+        and managed_be_unresolved == 0
+        and control_unresolved == 0
+        and ambiguous_outcomes == 0
+        and upper_unresolved == 0
     )
     bucket["avg_r_managed_50_50_be"] = recommended["avg_r"]
     bucket["sum_r_managed_50_50_be"] = recommended["sum_r"]
-    recommended_upper = _recommended_payoff_statistics(managed_be_upper_values or [])
+    recommended_upper = (
+        _recommended_payoff_statistics(managed_be_upper_values or [])
+        if upper_unresolved == 0
+        else recommended
+    )
     bucket["managed_be_win_rate_pct_upper"] = (
         recommended_upper["win_rate_pct"]
         if recommended_upper["decided"]
@@ -4871,6 +6232,7 @@ def _add_stop_gap_metrics(bucket: Dict[str, Any], rows: Iterable[Dict[str, Any]]
 def _performance_bucket_for_rows(
     rows: Iterable[Dict[str, Any]],
     window_days: int,
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Build one complete performance bucket for an additive dimension."""
     materialized = list(rows)
@@ -4884,7 +6246,9 @@ def _performance_bucket_for_rows(
     be_activations = 0
     be_saved = 0
     ambiguous = 0
+    upper_unresolved = 0
     managed_be_unresolved = 0
+    be_unresolved = 0
     for row in materialized:
         bucket["signals"] += 1
         bucket[_classify_row(row)] += 1
@@ -4897,9 +6261,11 @@ def _performance_bucket_for_rows(
         if r_value is None or not is_decided_fill:
             continue
         r_values.append(r_value)
-        upper = _realized_upper(row)
+        upper, is_upper_unresolved = _realized_upper_resolution(row)
         if upper is not None:
             r_upper_values.append(upper)
+        if is_upper_unresolved:
+            upper_unresolved += 1
         if _is_ambiguous_outcome(row):
             ambiguous += 1
         managed = _managed_r_50_50(row)
@@ -4915,11 +6281,13 @@ def _performance_bucket_for_rows(
             managed_be_upper_values.append(managed_be_upper)
         if row.get("be_activated_at"):
             be_activations += 1
-        be_value = _to_float(row.get("r_realized_be"))
+        be_value, is_be_unresolved = _breakeven_after_mfe_resolution(row)
         if be_value is not None:
             be_values.append(be_value)
             if r_value < 0.0 and be_value >= 0.0:
                 be_saved += 1
+        if is_be_unresolved:
+            be_unresolved += 1
     _finalize_bucket(
         bucket,
         r_values,
@@ -4932,7 +6300,10 @@ def _performance_bucket_for_rows(
         r_upper_values,
         managed_be_upper_values,
         ambiguous,
+        upper_unresolved,
         managed_be_unresolved,
+        be_unresolved,
+        _control_population_counts(materialized, as_of or _utc_now()),
     )
     _add_stop_gap_metrics(bucket, materialized)
     return bucket
@@ -4942,13 +6313,14 @@ def _grouped_performance(
     rows: Iterable[Dict[str, Any]],
     window_days: int,
     key_fn: Callable[[Dict[str, Any]], str],
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         key = str(key_fn(row) or "unknown")
         grouped.setdefault(key, []).append(row)
     return {
-        key: _performance_bucket_for_rows(group_rows, window_days)
+        key: _performance_bucket_for_rows(group_rows, window_days, as_of)
         for key, group_rows in sorted(grouped.items())
     }
 
@@ -4978,6 +6350,12 @@ def scanner_verdict(bucket: Dict[str, Any]) -> Tuple[str, str]:
                    Breakeven)
       beobachten — alles andere / zu kleine Stichprobe
     """
+    control_unresolved = bucket.get("control_unresolved") or 0
+    if isinstance(control_unresolved, int) and control_unresolved > 0:
+        return (
+            "beobachten",
+            f"Terminal-R-Evidenz unvollstaendig: {control_unresolved}",
+        )
     unresolved = bucket.get("managed_be_unresolved") or 0
     if isinstance(unresolved, int) and unresolved > 0:
         return "beobachten", f"Managed-BE-Evidenz unvollstaendig: {unresolved}"
@@ -5035,6 +6413,128 @@ def _calibration_cell_key(row: Dict[str, Any]) -> Tuple[str, str, str, str]:
         _performance_horizon_key(row),
         _performance_regime_key(row),
     )
+
+
+def _grade_calibration_cell_key(
+    row: Dict[str, Any],
+) -> Optional[Tuple[str, str, str, str, str]]:
+    """Return the reporting-only five-dimensional grade cell identity."""
+    scanner = str(row.get("scanner") or "").strip()
+    grade = str(row.get("grade") or "").strip().upper()
+    direction = str(row.get("direction") or "").strip().upper()
+    if not scanner or not grade or direction not in {"LONG", "SHORT"}:
+        return None
+    return (
+        scanner,
+        grade,
+        direction,
+        _performance_horizon_key(row),
+        _performance_regime_key(row),
+    )
+
+
+def _build_grade_calibration_cells(
+    rows: Iterable[Dict[str, Any]], as_of: datetime
+) -> List[Dict[str, Any]]:
+    """Build informational grade cells without feeding any verdict/breaker.
+
+    Eligibility is intentionally stricter than the descriptive legacy
+    performance buckets: actual delivered trade provenance, a completed
+    observation window, a terminal fill-backed outcome and finite Level-R are
+    all mandatory.  Managed 50/50+BE outcomes determine the reported payoff;
+    due-but-unresolved BE control evidence remains in the cell and blocks its
+    reliability instead of disappearing from the denominator silently.
+    """
+    grouped: Dict[
+        Tuple[str, str, str, str, str], Dict[str, Any]
+    ] = {}
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        row = raw_row
+        key = _grade_calibration_cell_key(row)
+        resolution = _control_population_resolution(row, as_of)
+        if key is None or resolution is None:
+            continue
+        group = grouped.setdefault(
+            key,
+            {
+                "eligible_signals": 0,
+                "values": [],
+                "unresolved": 0,
+                "terminal_r_unresolved": 0,
+                "ambiguity_unresolved": 0,
+                "ambiguous_outcomes": 0,
+                "upper_unresolved": 0,
+                "managed_be_unresolved": 0,
+                "no_fill": 0,
+            },
+        )
+        group["eligible_signals"] += 1
+        if _is_ambiguous_outcome(row):
+            group["ambiguous_outcomes"] += 1
+            _upper, is_upper_unresolved = _realized_upper_resolution(row)
+            if is_upper_unresolved:
+                group["upper_unresolved"] += 1
+        if resolution == "no_fill":
+            group["no_fill"] += 1
+            continue
+        if resolution == "unresolved":
+            group["unresolved"] += 1
+            if _legacy_ambiguous_upper_is_unresolved(row):
+                group["ambiguity_unresolved"] += 1
+            else:
+                group["terminal_r_unresolved"] += 1
+            continue
+        value, unresolved = _managed_5050_be_resolution(row)
+        if unresolved or value is None or not math.isfinite(value):
+            group["unresolved"] += 1
+            group["managed_be_unresolved"] += 1
+        else:
+            group["values"].append(value)
+
+    cells: List[Dict[str, Any]] = []
+    for key, group in sorted(grouped.items()):
+        stats = _recommended_payoff_statistics(group["values"])
+        unresolved = int(group["unresolved"])
+        cells.append(
+            {
+                "cell_id": "|".join(key),
+                "scanner": key[0],
+                "grade": key[1],
+                "direction": key[2],
+                "horizon": key[3],
+                "market_regime": key[4],
+                "r_model": "managed_50_50_plus_be_actual_delivery",
+                "reporting_only": True,
+                "eligible_signals": int(group["eligible_signals"]),
+                "n": stats["decided"],
+                "wins": stats["wins"],
+                "losses": stats["losses"],
+                "breakevens": stats["breakevens"],
+                "hit_rate_pct": stats["win_rate_pct"],
+                "win_rate_wilson_95": stats["win_rate_wilson_95"],
+                "avg_r": stats["avg_r"],
+                "sum_r": stats["sum_r"],
+                "profit_factor": stats["profit_factor"],
+                "unresolved": unresolved,
+                "terminal_r_unresolved": int(
+                    group["terminal_r_unresolved"]
+                ),
+                "ambiguity_unresolved": int(group["ambiguity_unresolved"]),
+                "ambiguous_outcomes": int(group["ambiguous_outcomes"]),
+                "upper_unresolved": int(group["upper_unresolved"]),
+                "managed_be_unresolved": int(group["managed_be_unresolved"]),
+                "no_fill": int(group["no_fill"]),
+                "sample_reliable": bool(
+                    stats["decided"] >= 30
+                    and unresolved == 0
+                    and int(group["ambiguous_outcomes"]) == 0
+                    and int(group["upper_unresolved"]) == 0
+                ),
+            }
+        )
+    return cells
 
 
 def build_calibration_cell_identity(
@@ -5113,11 +6613,11 @@ def load_performance_summary(
                      0R bleibt im Nenner, None ohne R-Ergebnisse
       avg_r / sum_r — ueber geschlossene Signale mit r_realized
       avg_r_managed_50_50 — R des empfohlenen 50/50-Managements (T1)
-      avg_r_be — live gemessenes R unter der Einstand-Regel (Stop auf
-                 Einstand ab MFE >= +1R; seit 30.07., kein Backtest);
-                 None solange keine BE-Daten existieren
-      be_activations / be_saved — Signale mit BE-Markierung / davon vor
-                 einem Verlust bewahrt (r_realized < 0, BE-R >= 0)
+      avg_r_be — trackerbasierte, preiswegabgeleitete BE-Gegenrechnung nach
+                 beobachteter MFE >= +1R; keine Broker-Ausfuehrung und keine
+                 gebuchte Netto-Kontoperformance; None ohne BE-Daten
+      be_activations / be_saved — MFE-markierte Signale / Faelle mit
+                 nicht-negativem BE-Gegenrechnungs-R statt negativem Level-R
       win_rate_wilson_95 — Wilson-Konfidenzintervall der Trefferquote
       decided_signals / sample_reliable — Stichprobengroesse / >=30-Flag
       alerts_per_day — signals / window_days
@@ -5151,6 +6651,10 @@ def load_performance_summary(
         "calibration_cells": [],
         "calibration_cell_dimensions": [
             "scanner", "direction", "horizon", "market_regime",
+        ],
+        "grade_calibration_cells": [],
+        "grade_calibration_dimensions": [
+            "scanner", "grade", "direction", "horizon", "market_regime",
         ],
         "segment_dimensions": [
             "scanner", "strategy", "direction", "horizon", "market_regime",
@@ -5234,9 +6738,13 @@ def load_performance_summary(
         managed_be_unresolved_scanner: Dict[str, int] = {}
         ambiguous_total = 0
         ambiguous_scanner: Dict[str, int] = {}
+        upper_unresolved_total = 0
+        upper_unresolved_scanner: Dict[str, int] = {}
         # BE-Trigger (AUDIT 2026-07-30): live-Wirkung der Einstand-Regel
         total_be: List[float] = []
         scanner_be: Dict[str, List[float]] = {}
+        be_unresolved_total = 0
+        scanner_be_unresolved: Dict[str, int] = {}
         be_act_total = 0
         be_saved_total = 0
         be_act_scanner: Dict[str, int] = {}
@@ -5257,10 +6765,15 @@ def load_performance_summary(
             if r_value is not None and is_decided_fill:
                 total_r.append(r_value)
                 scanner_r.setdefault(scanner, []).append(r_value)
-                upper_value = _realized_upper(row)
+                upper_value, is_upper_unresolved = _realized_upper_resolution(row)
                 if upper_value is not None:
                     total_r_upper.append(upper_value)
                     scanner_r_upper.setdefault(scanner, []).append(upper_value)
+                if is_upper_unresolved:
+                    upper_unresolved_total += 1
+                    upper_unresolved_scanner[scanner] = (
+                        upper_unresolved_scanner.get(scanner, 0) + 1
+                    )
                 if _is_ambiguous_outcome(row):
                     ambiguous_total += 1
                     ambiguous_scanner[scanner] = ambiguous_scanner.get(scanner, 0) + 1
@@ -5284,7 +6797,7 @@ def load_performance_summary(
                 if row.get("be_activated_at"):
                     be_act_total += 1
                     be_act_scanner[scanner] = be_act_scanner.get(scanner, 0) + 1
-                be_value = _to_float(row.get("r_realized_be"))
+                be_value, is_be_unresolved = _breakeven_after_mfe_resolution(row)
                 if be_value is not None:
                     total_be.append(be_value)
                     scanner_be.setdefault(scanner, []).append(be_value)
@@ -5293,6 +6806,23 @@ def load_performance_summary(
                     if r_value < 0.0 and be_value >= 0.0:
                         be_saved_total += 1
                         be_saved_scanner[scanner] = be_saved_scanner.get(scanner, 0) + 1
+                if is_be_unresolved:
+                    be_unresolved_total += 1
+                    scanner_be_unresolved[scanner] = (
+                        scanner_be_unresolved.get(scanner, 0) + 1
+                    )
+        total_control_counts = _control_population_counts(rows, as_of_dt)
+        scanner_control_counts = {
+            scanner: _control_population_counts(
+                (
+                    row
+                    for row in rows
+                    if str(row.get("scanner") or "unknown") == scanner
+                ),
+                as_of_dt,
+            )
+            for scanner in summary["per_scanner"]
+        }
         _finalize_bucket(
             summary["total"],
             total_r,
@@ -5305,7 +6835,10 @@ def load_performance_summary(
             total_r_upper,
             total_managed_be_upper,
             ambiguous_total,
+            upper_unresolved_total,
             managed_be_unresolved_total,
+            be_unresolved_total,
+            total_control_counts,
         )
         summary["total"]["alerts_per_day"] = round(created_in_window / float(window), 3)
         created_scanner_counts: Dict[str, int] = {}
@@ -5321,7 +6854,10 @@ def load_performance_summary(
                 scanner_r_upper.get(scanner, []),
                 scanner_managed_be_upper.get(scanner, []),
                 ambiguous_scanner.get(scanner, 0),
+                upper_unresolved_scanner.get(scanner, 0),
                 managed_be_unresolved_scanner.get(scanner, 0),
+                scanner_be_unresolved.get(scanner, 0),
+                scanner_control_counts.get(scanner),
             )
             bucket["alerts_per_day"] = round(
                 created_scanner_counts.get(scanner, 0) / float(window), 3
@@ -5344,13 +6880,23 @@ def load_performance_summary(
         evidence_key = lambda row: str(
             row.get("fill_evidence_mode") or "legacy_unclassified"
         )
-        summary["per_strategy"] = _grouped_performance(rows, window, strategy_key)
-        summary["per_direction"] = _grouped_performance(rows, window, direction_key)
-        summary["per_horizon"] = _grouped_performance(rows, window, horizon_key)
-        summary["per_market_regime"] = _grouped_performance(rows, window, regime_key)
-        summary["per_code_revision"] = _grouped_performance(rows, window, revision_key)
+        summary["per_strategy"] = _grouped_performance(
+            rows, window, strategy_key, as_of_dt
+        )
+        summary["per_direction"] = _grouped_performance(
+            rows, window, direction_key, as_of_dt
+        )
+        summary["per_horizon"] = _grouped_performance(
+            rows, window, horizon_key, as_of_dt
+        )
+        summary["per_market_regime"] = _grouped_performance(
+            rows, window, regime_key, as_of_dt
+        )
+        summary["per_code_revision"] = _grouped_performance(
+            rows, window, revision_key, as_of_dt
+        )
         summary["per_fill_evidence_mode"] = _grouped_performance(
-            rows, window, evidence_key
+            rows, window, evidence_key, as_of_dt
         )
         for grouped, key_fn in (
             (summary["per_strategy"], strategy_key),
@@ -5390,7 +6936,7 @@ def load_performance_summary(
                 "market_regime": key[4],
                 "code_revision": key[5],
                 "fill_evidence_mode": key[6],
-                **_performance_bucket_for_rows(group_rows, window),
+                **_performance_bucket_for_rows(group_rows, window, as_of_dt),
             }
             segment["alerts_per_day"] = round(
                 created_segment_counts.get(key, 0) / float(window), 3
@@ -5400,17 +6946,24 @@ def load_performance_summary(
             Tuple[str, str, str, str], List[Dict[str, Any]]
         ] = {}
         for row in rows:
+            # ``calibration_cells`` drives the live breaker.  Descriptive
+            # history may retain legacy rows, but only mature rows with a
+            # delivery-qualified origin may enter this control population.
+            if _control_population_resolution(row, as_of_dt) is None:
+                continue
             cell_key = _calibration_cell_key(row)
             calibration_rows.setdefault(cell_key, []).append(row)
         created_calibration_counts: Dict[Tuple[str, str, str, str], int] = {}
         for row in created_rows:
+            if not _has_trade_qualified_origin(row):
+                continue
             cell_key = _calibration_cell_key(row)
             created_calibration_counts[cell_key] = (
                 created_calibration_counts.get(cell_key, 0) + 1
             )
         summary["calibration_cells"] = []
         for key, group_rows in sorted(calibration_rows.items()):
-            bucket = _performance_bucket_for_rows(group_rows, window)
+            bucket = _performance_bucket_for_rows(group_rows, window, as_of_dt)
             verdict, verdict_reason = scanner_verdict(bucket)
             cell = {
                 "cell_id": "|".join(key),
@@ -5427,20 +6980,27 @@ def load_performance_summary(
                 created_calibration_counts.get(key, 0) / float(window), 3
             )
             summary["calibration_cells"].append(cell)
+        summary["grade_calibration_cells"] = _build_grade_calibration_cells(
+            rows, as_of_dt
+        )
         summary["r_semantics"] = (
             "avg_r = Level-R (TP2 volles Geometrie-R, unmanaged); "
             "avg_r_managed_50_50 = R des empfohlenen 50/50-Managements "
             "(50% Teilverkauf am TP1, Rest Stop/TP2/Expiry). "
-            "avg_r_be = live gemessenes R unter der Einstand-Regel "
-            "(Stop auf Einstand ab MFE >= +1R; seit 30.07., kein Backtest); "
+            "avg_r_be = trackerbasierte, preiswegabgeleitete BE-Gegenrechnung "
+            "nach beobachteter MFE >= +1R und kausal beobachtetem "
+            "Einstands-Level-Touch; keine Broker-Ausfuehrung und keine gebuchte "
+            "Netto-Kontoperformance; Forward-Tracker, kein historischer Backtest; "
             "avg_r_managed_50_50_be = einheitliches Empfehlungsmodell: "
-            "50% am TP1, Rest bis TP2/Stop/Expiry und Stop auf Einstand ab +1R. "
+            "50% am TP1, Rest bis TP2/Stop/Expiry und Stop auf Einstand nach "
+            "beobachteter MFE >= +1R. "
             "Die exakte Breakeven-Trefferquote stammt aus realisiertem "
             "Durchschnittsgewinn, Durchschnittsverlust und der beobachteten "
             "0R-Einstandsquote dieses Modells. "
             "mature_only=true schliesst rechtszensierte, noch nicht voll "
             "beobachtbare Versandkohorten aus. "
-            "be_activations/be_saved = BE-Markierungen / verhinderte Verlierer. "
+            "be_activations/be_saved = MFE-Markierungen / nicht-negative "
+            "BE-Gegenrechnung statt negativem Level-R. "
             "managed_be_unresolved zaehlt entschiedene Signale, bei denen die "
             "BE-Regel faellig war, aber Zustellung bzw. kausaler Exit nicht "
             "belegt ist; solche Zeilen sperren Managed-BE-Reliability und Verdikt. "
@@ -5498,12 +7058,20 @@ def load_performance_summary(
                 "tp2": row.get("tp2"),
                 "r_realized": row.get("r_realized"),
                 "r_realized_upper": _realized_upper(row),
-                "r_realized_be": row.get("r_realized_be"),
+                "r_realized_be": _breakeven_after_mfe_resolution(row)[0],
+                "be_unresolved": _breakeven_after_mfe_resolution(row)[1],
                 "r_managed_50_50": _managed_r_50_50(row),
                 "r_managed_50_50_be": simulate_managed_5050_breakeven(row),
                 "r_managed_50_50_be_upper": _managed_upper_r(row),
                 "managed_be_unresolved": _managed_5050_be_resolution(row)[1],
                 "tp1_hit_at": row.get("tp1_hit_at"),
+                "public_signal_ref": row.get("public_signal_ref"),
+                "origin_evidence": normalize_origin_evidence(
+                    row.get("origin_evidence")
+                ),
+                "delivery_accepted_at": row.get("delivery_accepted_at"),
+                "mfe": _to_float(row.get("max_favorable_r")),
+                "max_favorable_r": _to_float(row.get("max_favorable_r")),
             }
             for row in rows[:20]
         ]
@@ -5544,6 +7112,11 @@ def load_breaker_recovery_summary(
         "as_of": as_of_dt.isoformat(),
         "minimum_decided": 30,
         "fully_observed_post_trip": 0,
+        "eligible_signals": 0,
+        "control_no_fill": 0,
+        "control_unresolved": 0,
+        "terminal_r_unresolved": 0,
+        "ambiguity_unresolved": 0,
         "r_model": "managed_50_50_plus_be_actual_or_shadow_counterfactual",
         "shadow_counterfactual_contract": (
             "No delivery is asserted. Shadow results use complete fill/stop/TP "
@@ -5594,6 +7167,10 @@ def load_breaker_recovery_summary(
                 ]
         cells: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = {}
         for row in rows:
+            if not _has_trade_qualified_origin(
+                row, allow_shadow_counterfactual=True
+            ):
+                continue
             cells.setdefault(_calibration_cell_key(row), []).append(row)
         if all(value is not None for value in requested):
             requested_key = (
@@ -5616,13 +7193,20 @@ def load_breaker_recovery_summary(
         if not selected_cell_rows:
             summary["error"] = "joint_cell_not_found"
             return summary
-        selected_rows = [
-            row
+        selected_population = [
+            (row, resolution)
             for row in selected_cell_rows
-            if row.get("r_realized") is not None
-            and _signal_has_full_observation_window(row, as_of_dt)
+            if (
+                resolution := _control_population_resolution(
+                    row,
+                    as_of_dt,
+                    allow_shadow_counterfactual=True,
+                )
+            )
+            is not None
         ]
-        summary["fully_observed_post_trip"] = len(selected_rows)
+        summary["fully_observed_post_trip"] = len(selected_population)
+        summary["eligible_signals"] = len(selected_population)
         summary["post_trip_cell_signals"] = len(selected_cell_rows)
         summary.update({
             "joint_cell_verified": True,
@@ -5632,8 +7216,20 @@ def load_breaker_recovery_summary(
             "cell_id": "|".join(selected_key),
         })
         resolved_rows: List[Tuple[Dict[str, Any], float]] = []
-        unresolved = 0
-        for row in selected_rows:
+        managed_unresolved = 0
+        terminal_unresolved = 0
+        ambiguity_unresolved = 0
+        no_fill = 0
+        for row, resolution in selected_population:
+            if resolution == "no_fill":
+                no_fill += 1
+                continue
+            if resolution == "unresolved":
+                if _legacy_ambiguous_upper_is_unresolved(row):
+                    ambiguity_unresolved += 1
+                else:
+                    terminal_unresolved += 1
+                continue
             is_shadow = str(row.get("mail_class") or "").lower() == "shadow"
             if is_shadow:
                 value, is_unresolved = (
@@ -5641,16 +7237,19 @@ def load_breaker_recovery_summary(
                 )
             else:
                 value, is_unresolved = _managed_5050_be_resolution(row)
-            if is_unresolved:
-                unresolved += 1
+            if is_unresolved or value is None or not math.isfinite(value):
+                managed_unresolved += 1
             elif value is not None:
                 resolved_rows.append((row, value))
         realized = [value for _row, value in resolved_rows]
         decided = len(realized)
         wins = sum(1 for value in realized if value > 0.0)
         sufficient = decided >= 30
+        control_unresolved = (
+            terminal_unresolved + ambiguity_unresolved + managed_unresolved
+        )
         summary.update({
-                "available": sufficient and unresolved == 0,
+                "available": sufficient and control_unresolved == 0,
                 "decided": decided,
                 "wins": wins,
                 "win_pct": round((wins / decided) * 100.0, 2) if decided else None,
@@ -5676,11 +7275,27 @@ def load_breaker_recovery_summary(
                     for row, _value in resolved_rows
                     if str(row["mail_class"] or "").lower() == "shadow"
                 ),
-                "managed_be_unresolved": unresolved,
+                "control_no_fill": no_fill,
+                "control_unresolved": control_unresolved,
+                "terminal_r_unresolved": terminal_unresolved,
+                "ambiguity_unresolved": ambiguity_unresolved,
+                "managed_be_unresolved": managed_unresolved,
                 "error": (
-                    "managed_be_unresolved"
-                    if unresolved
-                    else ("insufficient_joint_cell_sample" if not sufficient else None)
+                    "ambiguity_unresolved"
+                    if ambiguity_unresolved
+                    else (
+                        "terminal_r_unresolved"
+                        if terminal_unresolved
+                        else (
+                            "managed_be_unresolved"
+                            if managed_unresolved
+                            else (
+                                "insufficient_joint_cell_sample"
+                                if not sufficient
+                                else None
+                            )
+                        )
+                    )
                 ),
             })
     except Exception as exc:

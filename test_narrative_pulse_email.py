@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import api
 
 
@@ -53,6 +55,33 @@ def test_narrative_pulse_email_is_daily_and_does_not_use_etf_word(monkeypatch):
     assert "Regional Banks" in sent["body"]
     assert "ETF" not in sent["body"].upper()
     assert sent["recipients"] == ["narrative@example.com"]
+
+
+def test_narrative_pulse_body_and_send_share_one_render_time(monkeypatch):
+    rendered_at = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
+    sent = []
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        api,
+        "_narrative_pulse_recipients",
+        lambda frequency: ["narrative@example.com"] if frequency == "daily" else [],
+    )
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: sent.append((subject, body, kwargs)) or True,
+    )
+    payload = {
+        "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
+        "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
+    }
+
+    assert api._send_narrative_pulse_email(payload, now=rendered_at.timestamp()) is True
+
+    assert len(sent) == 1
+    _subject, body, kwargs = sent[0]
+    assert api._mail_timestamp_dual(rendered_at) in body
+    assert kwargs["rendered_at"] == rendered_at
 
 
 def test_narrative_pulse_respects_frequency_recipients(monkeypatch):

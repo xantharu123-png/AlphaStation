@@ -36,6 +36,30 @@ def test_ampl_orb_targets_are_valid_percentage_and_r_moves():
     assert api._orb_signal_gate_reasons(_orb_row()) == []
 
 
+def test_orb_reachability_is_telemetry_only_when_an_injected_budget_is_exceeded():
+    row = _orb_row()
+    row.update(
+        {
+            "atr": 0.1,
+            "trade_horizon": "orb",
+            "target_reachability_atr_budgets": {"orb": 1.0},
+        }
+    )
+    without_budget = _orb_row()
+    without_budget.update({"atr": 0.1, "trade_horizon": "orb"})
+
+    telemetry_metrics = api._orb_target_plan_metrics(row)
+    baseline_metrics = api._orb_target_plan_metrics(without_budget)
+
+    assert telemetry_metrics["valid"] is baseline_metrics["valid"] is True
+    assert telemetry_metrics["issues"] == baseline_metrics["issues"] == []
+    assert api._orb_signal_gate_reasons(row) == api._orb_signal_gate_reasons(without_budget) == []
+    telemetry = telemetry_metrics["target_reachability"]
+    assert telemetry["data_available"] is True
+    assert telemetry["within_budget"] is False
+    assert telemetry["issues"] == ["target_beyond_configured_atr_budget"]
+
+
 def test_orb_target_validation_is_symmetric_for_shorts():
     row = _orb_row(
         direction="SHORT",

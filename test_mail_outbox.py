@@ -3,8 +3,10 @@
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
+import api
 from modules import mail_outbox as outbox
 
 
@@ -121,6 +123,36 @@ def test_process_success_marks_sent_and_updates_stats(monkeypatch, tmp_path):
     assert state["available"] is True
     assert state["queued"] == 0
     assert state["sent"] == 1
+
+
+def test_outbox_replay_keeps_already_branded_render_time_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAIL_OUTBOX_ENABLED", "1")
+    db_path = tmp_path / "outbox.sqlite"
+    rendered_at = datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc)
+    stamp = api._mail_timestamp_dual(rendered_at)
+    branded = api._brand_email_html(
+        "Outbox Zeit",
+        f"<p>Body-Zeit: {stamp}</p>",
+        rendered_at=rendered_at,
+    )
+    outbox.enqueue(
+        "Outbox Zeit",
+        branded,
+        ["a@example.com"],
+        now=3_100,
+        db_path=str(db_path),
+    )
+    delivered = []
+
+    result = outbox.process_outbox(
+        lambda item: delivered.append(item["body_html"]),
+        now=3_100,
+        db_path=str(db_path),
+    )
+
+    assert result["sent"] == 1
+    assert delivered == [branded]
+    assert delivered[0].count(stamp) == 2
 
 
 def test_failed_delivery_uses_backoff_then_succeeds(monkeypatch, tmp_path):

@@ -230,6 +230,41 @@ def test_manifest_cannot_change_signal_identity_or_plan(tmp_path):
     assert _row(db)["entry"] == pytest.approx(20.41)
 
 
+def test_manifest_cannot_change_public_reference_and_legacy_inspection_stays_readable(tmp_path):
+    db = tmp_path / "tracker.sqlite"
+    _make_db(db)
+    manifest = _manifest(tmp_path / "repair.json", updates={"public_signal_ref": "AS1-0123456789ABCDEF0123"})
+
+    with pytest.raises(repair.RepairError, match="nicht erlaubte Felder"):
+        repair.run_repair(db, manifest)
+
+    # Older databases without the additive audit columns remain inspectable.
+    inspected = repair.inspect_tickers(db, ["CBLL"])
+    assert inspected[0]["ticker"] == "CBLL"
+    assert "public_signal_ref" not in inspected[0]
+
+
+def test_inspection_includes_public_origin_fields_when_schema_has_them(tmp_path):
+    db = tmp_path / "tracker.sqlite"
+    _make_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("ALTER TABLE signals ADD COLUMN public_signal_ref TEXT")
+        conn.execute("ALTER TABLE signals ADD COLUMN origin_evidence TEXT")
+        conn.execute(
+            "UPDATE signals SET public_signal_ref=?, origin_evidence=? WHERE id=7",
+            ("AS1-0123456789ABCDEF0123", "smtp_acceptance"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    inspected = repair.inspect_tickers(db, ["CBLL"])
+
+    assert inspected[0]["public_signal_ref"] == "AS1-0123456789ABCDEF0123"
+    assert inspected[0]["origin_evidence"] == "smtp_acceptance"
+
+
 def test_new_exit_field_requires_deployed_schema(tmp_path):
     db = tmp_path / "tracker.sqlite"
     _make_db(db, include_exit_fields=False)

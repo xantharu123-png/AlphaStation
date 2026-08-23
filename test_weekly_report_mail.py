@@ -146,6 +146,30 @@ def _mature_summary(**total_overrides):
     }
 
 
+def _grade_cell(*, reliable=True, grade="A", scanner="stock_strategy"):
+    return {
+        "cell_id": f"{scanner}|{grade}|LONG|swing:5bars|GREEN",
+        "scanner": scanner,
+        "grade": grade,
+        "direction": "LONG",
+        "horizon": "swing:5bars",
+        "market_regime": "GREEN",
+        "eligible_signals": 30,
+        "n": 30,
+        "wins": 15,
+        "losses": 15,
+        "breakevens": 0,
+        "hit_rate_pct": 50.0,
+        "win_rate_wilson_95": {"lower_pct": 33.2, "upper_pct": 66.8},
+        "avg_r": 0.25,
+        "sum_r": 7.5,
+        "profit_factor": 1.5,
+        "unresolved": 0 if reliable else 1,
+        "sample_reliable": reliable,
+        "reporting_only": True,
+    }
+
+
 def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     """Dedupe auf tmp, Startup-Delay aus, Uhr fixiert, Versand aufgezeichnet."""
     monkeypatch.setattr(bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json"))
@@ -569,6 +593,17 @@ def test_unreliable_or_unresolved_joint_cell_never_releases(
     assert _read_verdict_state(tmp_path) == {}
 
 
+def test_grade_calibration_never_enters_verdict_state():
+    summary = _summary()
+    summary["calibration_cells"] = []
+    summary["grade_calibration_cells"] = [_grade_cell()]
+
+    alerts, new_state = bg_service._verdict_alerts(summary, {})
+
+    assert alerts == []
+    assert new_state == {}
+
+
 # ── BE-Spalte + BE-Box (BE-Trigger, AUDIT 2026-07-30) ────────────────────────
 
 def _summary_with_be():
@@ -594,13 +629,20 @@ def test_be_column_in_head_and_scanner_table(monkeypatch, tmp_path):
 
 
 def test_be_box_with_activations_and_saved(monkeypatch, tmp_path):
-    """Gruene BE-Box: Aktivierungen, verhinderte Verlierer, Ist-vs-BE-Vergleich."""
+    """BE-Box trennt MFE-Beobachtung und Gegenrechnung von echter Ausfuehrung."""
     sent = _setup(monkeypatch, tmp_path, summary=_summary_with_be())
     bg_service._run_weekly_report({})
     body = sent[0]["body"]
-    assert "Einstand-Regel (seit 30.07. live)" in body
+    assert "Einstand-Regel (seit 30.07. im Tracker)" in body
     assert "5 Signale" in body
-    assert "2 vor einem Verlust bewahrt" in body
+    assert "MFE >= +1R beobachtet" in body
+    assert "trackerbasierten BE-Gegenrechnung" in body
+    assert "weder Zustellung noch Ausfuehrung oder realisierten Gewinn" in body
+    assert "preiswegabgeleitete BE-Gegenrechnung" in body
+    assert "keine Broker-Ausfuehrung" in body
+    assert "live gemessenes R" not in body
+    assert "+1R gelaufen" not in body
+    assert "vor einem Verlust bewahrt" not in body
     assert "+0.29R" in body and "+0.61R" in body   # ØR Ist vs. ØR BE
 
 
@@ -610,7 +652,7 @@ def test_no_be_box_without_activations(monkeypatch, tmp_path):
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
     assert "Ø R BE" in body                            # Spaltenkopf bleibt
-    assert "Einstand-Regel (seit 30.07. live)" not in body   # keine Box
+    assert "Einstand-Regel (seit 30.07. im Tracker)" not in body  # keine Box
     assert "Einstand-Regel (Stop auf Einstand ab +1R" in body  # Footer-Semantik
 
 
@@ -696,7 +738,7 @@ def test_mature_report_separates_activity_from_performance():
     )
 
     assert "50/50+BE" in subject
-    assert "10 reife Signale" in subject
+    assert "18 reife Signale (10 resolved / 0 unresolved)" in subject
     assert "Aktivitaet der letzten 7 Tage" in body
     assert "Ausgereifte Signale im 30-Tage-Berichtsfenster" in body
     assert "Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote" in body
@@ -707,7 +749,92 @@ def test_mature_report_separates_activity_from_performance():
     assert "8 noch unreife Signale wurden ausgeschlossen" in body
     assert "Brokergebuehren" in body
     assert "keine Netto-Kontoperformance" in body
-    assert "periodischen Kurs-Snapshots" in body
+    assert "vollstaendigen chronologischen 5-Minuten-OHLC-Intervallen" in body
+
+
+def test_mature_report_keeps_unresolved_only_total_and_scanner_visible():
+    """Unresolved rows remain in the denominator and block reliability."""
+    mature = _mature_summary(
+        signals=2,
+        managed_be_decided_signals=0,
+        managed_be_unresolved=2,
+        be_decided_signals=0,
+        be_unresolved=2,
+        managed_be_win_rate_pct=None,
+        managed_be_win_rate_pct_upper=None,
+        managed_be_win_rate_wilson_95=None,
+        sum_r_managed_50_50_be=None,
+        sum_r_managed_50_50_be_upper=None,
+        avg_r_managed_50_50_be=None,
+        avg_r_managed_50_50_be_upper=None,
+        profit_factor_managed_be=None,
+    )
+    mature["per_scanner"] = {
+        "crypto_unresolved_only": {
+            "managed_be_decided_signals": 0,
+            "managed_be_unresolved": 2,
+            "be_decided_signals": 0,
+            "be_unresolved": 2,
+        }
+    }
+
+    subject, body = bg_service._build_mature_weekly_report_mail(
+        _summary(), mature, now_et=FRIDAY_1620, watchdog_events=[]
+    )
+
+    assert "2 reife Signale (0 resolved / 2 unresolved)" in subject
+    assert "0 reife Signale" not in subject
+    assert "0 resolved / 2 unresolved" in subject
+    assert "50/50+BE: 0 resolved / 2 unresolved" in body
+    assert "BE-Gegenrechnung: 0 resolved / 2 unresolved" in body
+    assert "crypto_unresolved_only" in body
+    assert "Reliability gesperrt" in body
+    assert "Noch keine vollstaendig beobachteten Signale" not in body
+
+
+def test_mature_report_falls_back_to_managed_counts_for_legacy_summaries():
+    """Older summaries without be_* fields keep their unresolved denominator."""
+    mature = _mature_summary(
+        signals=1,
+        managed_be_decided_signals=0,
+        managed_be_unresolved=1,
+        managed_be_win_rate_pct=None,
+        managed_be_win_rate_pct_upper=None,
+        managed_be_win_rate_wilson_95=None,
+        sum_r_managed_50_50_be=None,
+        sum_r_managed_50_50_be_upper=None,
+        avg_r_managed_50_50_be=None,
+        avg_r_managed_50_50_be_upper=None,
+        profit_factor_managed_be=None,
+    )
+    mature["per_scanner"] = {
+        "legacy_unresolved_only": {
+            "managed_be_decided_signals": 0,
+            "managed_be_unresolved": 1,
+        }
+    }
+
+    _subject, body = bg_service._build_mature_weekly_report_mail(
+        _summary(), mature, now_et=FRIDAY_1620, watchdog_events=[]
+    )
+
+    assert "BE-Gegenrechnung: 0 resolved / 1 unresolved" in body
+    assert "legacy_unresolved_only" in body
+
+
+def test_weekly_methodology_describes_complete_5m_path_and_counterfactual_be():
+    """The report describes observed intervals, not missing touches or fills."""
+    _subject, body = bg_service._build_mature_weekly_report_mail(
+        _summary(), _mature_summary(), now_et=FRIDAY_1620, watchdog_events=[]
+    )
+    rendered_text = " ".join(body.split())
+
+    assert "Krypto- und Intraday-Pfade" in rendered_text
+    assert "vollstaendigen chronologischen 5-Minuten-OHLC-Intervallen" in rendered_text
+    assert "Beruehrungen zwischen zwei Auswertungen koennen daher fehlen" not in rendered_text
+    assert "tracker- und preiswegabgeleitete BE-Gegenrechnung" in rendered_text
+    assert "beobachteter MFE" in rendered_text
+    assert "keine Broker-Ausfuehrung" in rendered_text
 
 
 def test_mature_report_discloses_ohlc_ordering_as_metric_bands():
@@ -729,6 +856,62 @@ def test_mature_report_discloses_ohlc_ordering_as_metric_bands():
     assert "-0.40R bis +0.15R*" in body
     assert "95%-KI konservativer Pfad" in body
     assert "kein Erwartungswert" in body
+
+
+def test_mature_report_renders_only_reliable_grade_cells_with_disclaimer():
+    mature = _mature_summary()
+    mature["grade_calibration_cells"] = [
+        _grade_cell(),
+        _grade_cell(reliable=False, grade="B", scanner="hidden-unreliable"),
+        _grade_cell(grade="S<script>", scanner="unsafe<script>"),
+    ]
+
+    _subject, body = bg_service._build_mature_weekly_report_mail(
+        _summary(), mature, now_et=FRIDAY_1620, watchdog_events=[]
+    )
+
+    assert "Grade-Kalibrierung (nur Information)" in body
+    assert "stock_strategy" in body
+    assert "A" in body
+    assert "30" in body
+    assert "50.0%" in body
+    assert "KI 33.2–66.8%" in body
+    assert "+0.25R" in body
+    assert "+7.50R" in body
+    assert "1.50" in body
+    assert "hidden-unreliable" not in body
+    assert "<script>" not in body
+    assert "unsafe&lt;script&gt;" in body
+    assert "Grade ist Rangklasse, keine Wahrscheinlichkeit" in body
+
+
+def test_legacy_weekly_builder_also_disclaims_grade_probability():
+    _subject, body = bg_service._build_weekly_report_mail(
+        _summary(), now_et=FRIDAY_1620, watchdog_events=[]
+    )
+
+    assert "Grade ist Rangklasse, keine Wahrscheinlichkeit" in body
+
+
+def test_legacy_shadow_report_uses_neutral_modeled_level_r_wording():
+    shadow = {
+        "total": {
+            "signals": 8,
+            "open": 2,
+            "decided_signals": 6,
+            "avg_r": 0.4,
+            "win_rate_pct": 50.0,
+        },
+        "per_reason": {"chase_gate": 8},
+    }
+    _subject, body = bg_service._build_weekly_report_mail(
+        _summary(), now_et=FRIDAY_1620, watchdog_events=[], shadow=shadow
+    )
+
+    assert "modellierter Level-R" in body
+    assert "Gates Geld" not in body
+    assert "kosten sie" not in body
+    assert "weder erspartes noch entgangenes Geld" in body
 
 
 def test_weekly_job_loads_activity_and_mature_cohorts(monkeypatch, tmp_path):

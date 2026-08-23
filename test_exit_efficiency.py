@@ -7,6 +7,9 @@ Deckt die zwei Gegenprobe-Regeln in modules.signal_tracker ab:
 from modules import signal_tracker as st
 
 
+_VALID_BE_RECEIPT = "fr1_" + ("A" * 43)
+
+
 def _row(**overrides):
     row = {
         "scanner": "stock_strategy",
@@ -94,11 +97,13 @@ def test_5050_be_after_tp1_expired_negative():
 
 def test_observed_be_gap_is_used_instead_of_invented_zero():
     row = _row(
+        id=101,
         r_realized=-1.0,
         tp1_hit_at="",
         status="STOP_HIT",
         be_activated_at="2026-08-13T14:00:00+00:00",
         be_mail_sent_at="2026-08-13T14:01:00+00:00",
+        be_delivery_evidence_key=_VALID_BE_RECEIPT,
         be_exit_at="2026-08-13T14:05:00+00:00",
         be_exit_fill_price=9.9,
         entry_fill_price=10.0,
@@ -108,6 +113,7 @@ def test_observed_be_gap_is_used_instead_of_invented_zero():
 
 def test_5050_be_keeps_tp2_winner():
     row = _row(
+        id=102,
         status="TP2_HIT",
         r_realized=3.0,
         outcome_detail="",
@@ -115,17 +121,20 @@ def test_5050_be_keeps_tp2_winner():
         entry_fill_price=10.0,
         be_activated_at="2026-08-13T14:00:00+00:00",
         be_mail_sent_at="2026-08-13T14:01:00+00:00",
+        be_delivery_evidence_key=_VALID_BE_RECEIPT,
     )
     assert st.simulate_managed_5050_breakeven(row) == st._managed_r_50_50(row)
 
 
 def test_5050_be_keeps_positive_expiry_after_tp1():
     row = _row(
+        id=103,
         r_realized=0.6,
         entry_filled_at="2026-08-13T13:00:00+00:00",
         entry_fill_price=10.0,
         be_activated_at="2026-08-13T14:00:00+00:00",
         be_mail_sent_at="2026-08-13T14:01:00+00:00",
+        be_delivery_evidence_key=_VALID_BE_RECEIPT,
     )
     assert st.simulate_managed_5050_breakeven(row) == st._managed_r_50_50(row)
 

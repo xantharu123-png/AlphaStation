@@ -109,6 +109,26 @@ def test_final_revalidation_long_uses_fresh_ask_without_pre_delivery_fill(monkey
     assert item["final_quote_spread_pct"] == pytest.approx(0.4)
 
 
+def test_final_revalidation_carries_exceeded_reachability_budget_without_blocking(monkeypatch):
+    _patch_market_evidence(monkeypatch)
+    row = _row(
+        trade_horizon="swing",
+        target_reachability_atr_budgets={"swing": 1.0},
+    )
+    row["trade_setup"]["atr"] = 1.0
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        row, now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result["ok"] is True
+    telemetry = result["candidate"]["target_reachability"]
+    assert telemetry["data_available"] is True
+    assert telemetry["within_budget"] is False
+    assert telemetry["issues"] == ["target_beyond_configured_atr_budget"]
+    assert result["candidate"]["trade_setup"]["target_reachability"] == telemetry
+
+
 def test_final_revalidation_short_is_symmetric_and_uses_bid(monkeypatch):
     _patch_market_evidence(
         monkeypatch,

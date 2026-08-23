@@ -28,6 +28,42 @@ def test_clean_long_breakout_is_tradeable():
     assert health["metrics"]["live_rr"] >= 2.0
 
 
+def test_target_reachability_metrics_are_telemetry_only_even_beyond_explicit_budget():
+    row = {
+        "ticker": "REACH",
+        "direction": "LONG",
+        "current_price": 10.05,
+        "entry": 10.00,
+        "stop": 9.50,
+        "target1": 11.00,
+        "target2": 12.00,
+        "atr": 0.50,
+        "trade_horizon": "orb",
+        "rvol": 2.5,
+        "vol_confirmed": True,
+        "vwap_aligned": True,
+        "close_pos": 0.86,
+        "dollar_volume": 8_000_000,
+    }
+
+    baseline = calculate_trade_health(row, "orb")
+    budgeted = calculate_trade_health(
+        {
+            **row,
+            "target_reachability_atr_budgets": {"orb": 1.0},
+        },
+        "orb",
+    )
+
+    assert budgeted["decision"] == baseline["decision"]
+    assert budgeted["health_score"] == baseline["health_score"]
+    assert budgeted["exclusion_reasons"] == baseline["exclusion_reasons"]
+    telemetry = budgeted["metrics"]["target_reachability"]
+    assert telemetry["data_available"] is True
+    assert telemetry["within_budget"] is False
+    assert telemetry["issues"] == ["target_beyond_configured_atr_budget"]
+
+
 def test_chased_long_after_tp1_is_no_trade():
     row = {
         "ticker": "FOMO",

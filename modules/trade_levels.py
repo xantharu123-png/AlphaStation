@@ -255,6 +255,153 @@ def trade_geometry(
     }
 
 
+def target_reachability(
+    levels: Dict[str, Any],
+    atr: Any,
+    *,
+    horizon: Any = None,
+    atr_budgets: Any = None,
+) -> Dict[str, Any]:
+    """Describe planned stop/target distances in ATR units without gating them.
+
+    ``atr_budgets`` is deliberately opt-in.  A caller can provide a mapping
+    such as ``{"swing": 4.0}`` (or an explicitly configured ``"default"``)
+    to report that TP2 is outside its own stated budget.  The return value is
+    telemetry only; it never changes trade geometry or any caller decision.
+    """
+    levels = levels if isinstance(levels, dict) else {}
+    raw_horizon = str(horizon or "").strip().lower()
+    normalized_horizon = raw_horizon or None
+
+    provenance = "unknown"
+    source = str(levels.get("source") or "").strip().lower()
+    if bool(levels.get("synthetic")) or source == "synthetic":
+        provenance = "synthetic"
+    elif bool(levels.get("estimated")) or source == "estimated":
+        provenance = "estimated"
+    elif bool(levels.get("native")) or source == "native":
+        provenance = "native"
+
+    configured_budget = None
+    if isinstance(atr_budgets, dict):
+        lowered_budgets = {
+            str(key).strip().lower(): value
+            for key, value in atr_budgets.items()
+        }
+        raw_budget = lowered_budgets.get(normalized_horizon)
+        if raw_budget is None:
+            raw_budget = lowered_budgets.get("default")
+        if isinstance(raw_budget, dict):
+            for key in ("max_target_atr", "target_atr", "budget_atr", "budget"):
+                if key in raw_budget:
+                    raw_budget = raw_budget[key]
+                    break
+        configured_budget = safe_float(raw_budget, None)
+        if configured_budget is not None and configured_budget <= 0:
+            configured_budget = None
+
+    base_payload = {
+        "data_available": False,
+        "stop_distance_atr": None,
+        "tp1_distance_atr": None,
+        "tp2_distance_atr": None,
+        "budget_configured": configured_budget is not None,
+        "configured_budget_atr": configured_budget,
+        "within_budget": None,
+        "provenance": provenance,
+        "horizon": normalized_horizon,
+    }
+
+    atr_value = safe_float(atr, None)
+    geometry = trade_geometry(
+        levels.get("entry"),
+        levels.get("stop"),
+        levels.get("tp1"),
+        levels.get("tp2"),
+        levels.get("direction"),
+    )
+    if atr_value is None or atr_value <= 0 or not geometry.get("valid"):
+        return {**base_payload, "issues": ["target_reachability_unavailable"]}
+
+    try:
+        raw_stop_distance = float(geometry["risk"]) / atr_value
+        raw_tp1_distance = float(geometry["reward1"]) / atr_value
+        raw_tp2_distance = float(geometry["reward2"]) / atr_value
+    except (OverflowError, TypeError, ValueError, ZeroDivisionError):
+        return {**base_payload, "issues": ["target_reachability_unavailable"]}
+    if not all(math.isfinite(value) for value in (
+        raw_stop_distance,
+        raw_tp1_distance,
+        raw_tp2_distance,
+    )):
+        return {**base_payload, "issues": ["target_reachability_unavailable"]}
+
+    stop_distance = round(raw_stop_distance, 4)
+    tp1_distance = round(raw_tp1_distance, 4)
+    tp2_distance = round(raw_tp2_distance, 4)
+    within_budget = (
+        raw_tp2_distance <= configured_budget
+        if configured_budget is not None
+        else None
+    )
+    issues = []
+    if within_budget is False:
+        issues.append("target_beyond_configured_atr_budget")
+    return {
+        **base_payload,
+        "data_available": True,
+        "stop_distance_atr": stop_distance,
+        "tp1_distance_atr": tp1_distance,
+        "tp2_distance_atr": tp2_distance,
+        "within_budget": within_budget,
+        "issues": issues,
+    }
+
+
+def format_target_reachability_text(payload: Dict[str, Any]) -> str:
+    """Return one neutral, HTML-free presentation of reachability telemetry."""
+    disclaimer = (
+        "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit"
+    )
+    if not isinstance(payload, dict) or not payload.get("data_available"):
+        return (
+            "Reichweiten-Telemetrie: nicht verfuegbar "
+            f"(ATR/Geometrie unvollstaendig; {disclaimer})"
+        )
+
+    stop_distance = safe_float(payload.get("stop_distance_atr"), None)
+    tp1_distance = safe_float(payload.get("tp1_distance_atr"), None)
+    tp2_distance = safe_float(payload.get("tp2_distance_atr"), None)
+    if any(value is None for value in (stop_distance, tp1_distance, tp2_distance)):
+        return (
+            "Reichweiten-Telemetrie: nicht verfuegbar "
+            f"(ATR/Geometrie unvollstaendig; {disclaimer})"
+        )
+
+    provenance = str(payload.get("provenance") or "unknown").strip().lower()
+    if provenance not in {"native", "estimated", "synthetic", "unknown"}:
+        provenance = "unknown"
+    text = (
+        "Reichweiten-Telemetrie: "
+        f"Stop {stop_distance:.1f}×ATR | TP1 {tp1_distance:.1f}×ATR | "
+        f"TP2 {tp2_distance:.1f}×ATR | Provenienz: {provenance}"
+    )
+    if payload.get("budget_configured"):
+        budget = safe_float(payload.get("configured_budget_atr"), None)
+        if budget is not None and budget > 0:
+            if payload.get("within_budget"):
+                text += (
+                    f" | TP2 liegt innerhalb des konfigurierten "
+                    f"{budget:.1f}×ATR-Budgets"
+                )
+            else:
+                text += (
+                    f" | TP2 ueberschreitet das konfigurierte "
+                    f"{budget:.1f}×ATR-Budget"
+                )
+    return f"{text} ({disclaimer})"
+
+
 def trade_plan_quality(
     levels: Dict[str, Any],
     *,

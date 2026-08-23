@@ -20,7 +20,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -79,12 +79,28 @@ def _stock_fetcher(bars_by_ticker):
     return lambda ticker, since_iso_date: bars_by_ticker.get(ticker)
 
 
+def _record_terminal_receipt(tracker, signal_id, event_status):
+    receipt_id = tracker.record_followup_delivery_receipt(
+        signal_id,
+        event_kind="TERMINAL",
+        event_status=event_status,
+        delivery_evidence_key=(
+            f"signal_update_{signal_id}_{event_status}_recipient_delivered"
+        ),
+    )
+    assert receipt_id
+    return receipt_id
+
+
 @pytest.fixture()
 def tracker(tmp_path, monkeypatch):
     """Frische tmp-DB pro Test: ENV (Import-Kontrakt) + Modulglobale (Laufzeit)."""
     db_path = str(tmp_path / "signal_tracker_test.sqlite")
     monkeypatch.setenv("SIGNAL_TRACKER_DB_PATH", db_path)
     monkeypatch.setattr(st, "SIGNAL_DB_PATH", db_path)
+    monkeypatch.setattr(
+        st, "SIGNAL_DELIVERY_JOURNAL_DB_PATH", str(tmp_path / "acceptance.sqlite")
+    )
     return st
 
 
@@ -116,6 +132,7 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
         "exit_fill_price", "stop_gap_slippage_r", "stop_gap_slippage_pct",
         "code_revision", "fill_evidence_mode",
         "delivery_recipient_keys_json",
+        "public_signal_ref", "origin_evidence", "delivery_accepted_at", "mfe",
     }
     assert tr["id"] == _signal("AAPL")["id"]
     assert tr["ticker"] == "AAPL"
@@ -138,6 +155,10 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert tr["stop_gap_slippage_pct"] == pytest.approx(0.0)
     assert tr["tp1_hit_this_run"] is False
     assert tr["asset_class"] == "stock"
+    assert tr["public_signal_ref"] is None
+    assert tr["origin_evidence"] == "direct_post_send"
+    assert tr["delivery_accepted_at"] is None
+    assert tr["mfe"] == pytest.approx(0.2)
 
 
 def test_tracker_tp1_without_close_yields_tp1_hit_open_exactly_once(tracker):
@@ -155,6 +176,29 @@ def test_tracker_tp1_without_close_yields_tp1_hit_open_exactly_once(tracker):
     assert r2["transitions"] == []           # tp1_hit_at war schon gesetzt
 
 
+def test_legacy_null_origin_stays_raw_but_transition_payload_is_normalized(tracker):
+    """Migrated NULL evidence is never rewritten just to make a payload explicit."""
+    tracker.record_alert_signals("breakout", [_base_row(Ticker="LEGACYORIGIN")])
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE signals SET origin_evidence=NULL WHERE ticker='LEGACYORIGIN'"
+        )
+        conn.commit()
+        raw = conn.execute(
+            "SELECT origin_evidence FROM signals WHERE ticker='LEGACYORIGIN'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert raw is None
+
+    bars = _bars_after("LEGACYORIGIN", [(101.0, 94.5, 96.0)])
+    transition = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"LEGACYORIGIN": bars})
+    )["transitions"][0]
+    assert transition["origin_evidence"] == "legacy_origin_unknown"
+
+
 def test_tracker_tp2_transition_with_implied_tp1(tracker):
     """TP2 => new_status TP2_HIT mit Geometrie-R; TP1 fiel im selben Lauf."""
     tracker.record_alert_signals("breakout", [_base_row()])
@@ -167,7 +211,49 @@ def test_tracker_tp2_transition_with_implied_tp1(tracker):
     assert _signal("AAPL")["status"] == "TP2_HIT"
 
 
-def test_terminal_update_is_durable_until_idempotent_ack(tracker):
+def test_tp2_pending_outbox_preserves_same_run_tp1_business_payload(tracker):
+    """A persisted TP2 event must retain that TP1 was first reached this run."""
+    recipient_key = "f" * 64
+    tracker.record_alert_signals(
+        "breakout",
+        [_base_row(Ticker="TP2OUTBOX")],
+        delivery_recipient_keys=[recipient_key],
+        mail_channel="stocks_swing",
+    )
+    bars = _bars_after("TP2OUTBOX", [(111.0, 99.0, 110.5)])
+    direct = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"TP2OUTBOX": bars})
+    )["transitions"]
+    assert len(direct) == 1
+    assert direct[0]["new_status"] == "TP2_HIT"
+    assert direct[0]["tp1_hit_this_run"] is True
+
+    reloaded = tracker.load_pending_terminal_updates()
+    assert len(reloaded) == 1
+    assert reloaded[0]["tp1_hit_this_run"] is True
+    technical = {"tracker_persisted", "pending_update_at"}
+    assert set(reloaded[0]) - technical == set(direct[0])
+    for field in set(direct[0]):
+        assert reloaded[0][field] == direct[0][field]
+
+    signal_id = direct[0]["id"]
+    receipt_id = _record_terminal_receipt(tracker, signal_id, "TP2_HIT")
+    assert tracker.mark_terminal_updates_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 1
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        pending_marker = conn.execute(
+            "SELECT pending_update_status, pending_update_at, "
+            "pending_update_tp1_hit_this_run FROM signals WHERE id=?",
+            (signal_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert pending_marker == (None, None, None)
+
+
+def test_terminal_ack_requires_durable_status_bound_receipt(tracker):
     recipient_key = "c" * 64
     tracker.record_alert_signals(
         "breakout",
@@ -189,9 +275,101 @@ def test_terminal_update_is_durable_until_idempotent_ack(tracker):
     assert pending[0]["mail_channel"] == "stocks_premarket"
     assert pending[0]["delivery_recipient_keys_json"] == f'["{recipient_key}"]'
 
-    assert tracker.mark_terminal_updates_sent([signal_id]) == 1
-    assert tracker.load_pending_terminal_updates() == []
+    # A naked, caller-controlled ID is not delivery evidence.
     assert tracker.mark_terminal_updates_sent([signal_id]) == 0
+    assert len(tracker.load_pending_terminal_updates()) == 1
+
+    recorder = getattr(tracker, "record_followup_delivery_receipt", None)
+    assert callable(recorder)
+    delivery_key = f"signal_update_{signal_id}_STOP_HIT_recipient_delivered"
+    assert recorder(
+        signal_id,
+        event_kind="TERMINAL",
+        event_status="STOP_HIT",
+        delivery_evidence_key=delivery_key,
+        accepted_at="not-a-delivery-timestamp",
+    ) is None
+    receipt_id = recorder(
+        signal_id,
+        event_kind="TERMINAL",
+        event_status="STOP_HIT",
+        delivery_evidence_key=delivery_key,
+    )
+    assert isinstance(receipt_id, str) and receipt_id.startswith("fr1_")
+
+    # The event status is part of the durable receipt binding.
+    assert recorder(
+        signal_id,
+        event_kind="TERMINAL",
+        event_status="TP2_HIT",
+        delivery_evidence_key=f"signal_update_{signal_id}_TP2_HIT_recipient_delivered",
+    ) is None
+    assert tracker.mark_be_alerts_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 0
+
+    assert tracker.mark_terminal_updates_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 1
+    assert tracker.load_pending_terminal_updates() == []
+    assert tracker.mark_terminal_updates_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 1
+
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        state = conn.execute(
+            "SELECT update_mail_sent_at, update_delivery_receipt_id "
+            "FROM signals WHERE id=?",
+            (signal_id,),
+        ).fetchone()
+        receipt = conn.execute(
+            "SELECT signal_id, event_kind, event_status, event_key_hash, "
+            "consumed_at FROM followup_delivery_receipts WHERE receipt_id=?",
+            (receipt_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert state == (state[0], receipt_id)
+    assert state[0] is not None
+    assert receipt is not None
+    assert receipt[0:3] == (signal_id, "TERMINAL", "STOP_HIT")
+    assert receipt[3] != delivery_key
+    assert receipt[4] is not None
+
+
+def test_terminal_direct_and_reloaded_events_keep_public_delivery_evidence(tracker):
+    """The fresh event and the durable outbox describe the same accepted plan."""
+    recipient_key = "d" * 64
+    intent_key = "terminal-public-evidence"
+    prepared = tracker.prepare_alert_delivery_intent(
+        "breakout", [_base_row(Ticker="PUBTERM")], intent_key,
+        mail_channel="stocks_swing",
+    )
+    assert prepared["send_allowed"] is True
+    public_ref = prepared["signals"][0]["public_signal_ref"]
+    accepted_at = datetime.now(timezone.utc)
+    finalized = tracker.finalize_alert_delivery(
+        intent_key, [recipient_key], accepted_at=accepted_at
+    )
+    assert finalized["activated"] is True
+
+    bars = _bars_after("PUBTERM", [(101.0, 94.5, 96.0)])
+    direct = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher({"PUBTERM": bars})
+    )["transitions"]
+    assert len(direct) == 1
+    pending = tracker.load_pending_terminal_updates()
+    assert len(pending) == 1
+
+    for field in (
+        "public_signal_ref", "origin_evidence", "delivery_accepted_at", "mfe",
+    ):
+        assert direct[0][field] == pending[0][field]
+    assert direct[0]["public_signal_ref"] == public_ref
+    assert direct[0]["origin_evidence"] == "smtp_acceptance"
+    assert direct[0]["delivery_accepted_at"] == accepted_at.isoformat()
+    assert direct[0]["mfe"] == pytest.approx(0.2)
 
 
 def test_tracker_no_status_change_means_empty_transitions(tracker):
@@ -232,6 +410,10 @@ def _transition(**overrides):
         "mail_class": "trade", "channel": "email",
         "trade_horizon": "swing",
         "delivery_recipient_keys": [recipient_key],
+        "public_signal_ref": "AS1-0123456789ABCDEF0123",
+        "origin_evidence": "smtp_acceptance",
+        "delivery_accepted_at": "2026-08-21T10:00:00+00:00",
+        "mfe": 1.2,
     }
     tr.update(overrides)
     return tr
@@ -253,7 +435,12 @@ def _setup_bg(monkeypatch, tmp_path, transitions, origin_keys=()):
     monkeypatch.setattr(
         bg_service,
         "mark_terminal_updates_sent",
-        lambda signal_ids: len(list(signal_ids)),
+        lambda signal_ids, *, delivery_receipt_ids=None: len(list(signal_ids)),
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "record_followup_delivery_receipt",
+        lambda signal_id, **_kwargs: f"fr1_{int(signal_id):043d}",
     )
     monkeypatch.setattr(
         bg_service,
@@ -292,6 +479,39 @@ def _setup_bg(monkeypatch, tmp_path, transitions, origin_keys=()):
     return sent, payload
 
 
+def test_followup_receipt_recovery_uses_durable_marker_timestamp(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        bg_service, "_EMAIL_DEDUPE_FILE", str(tmp_path / "dedupe.json")
+    )
+    marker_at = 1_787_500_000.25
+    now = marker_at + 120.0
+    delivery_key = "signal_update_77_STOP_HIT_recipient_delivered"
+    bg_service._email_delivery_mark(delivery_key, now=marker_at)
+    seen = {}
+
+    def _record(signal_id, **kwargs):
+        seen["signal_id"] = signal_id
+        seen.update(kwargs)
+        return "fr1_" + ("A" * 43)
+
+    monkeypatch.setattr(bg_service, "record_followup_delivery_receipt", _record)
+    receipt_id = bg_service._record_followup_event_receipt(
+        77,
+        event_kind="TERMINAL",
+        event_status="STOP_HIT",
+        delivery_key=delivery_key,
+        now=now,
+    )
+
+    assert receipt_id == "fr1_" + ("A" * 43)
+    assert seen["signal_id"] == 77
+    assert seen["delivery_evidence_key"] == delivery_key
+    assert seen["accepted_at"].timestamp() == pytest.approx(marker_at)
+    assert now - seen["accepted_at"].timestamp() == pytest.approx(120.0)
+
+
 # ── Teil 2: bg-ℹ️-Sammelmail im signal_eval-Job ──────────────────────────────
 def test_bg_transitions_send_exactly_one_info_mail(monkeypatch, tmp_path):
     """Sammelmail: alle Transitionen eines Laufs in EINER Info-Mail; Body mit
@@ -319,9 +539,69 @@ def test_bg_transitions_send_exactly_one_info_mail(monkeypatch, tmp_path):
     assert mail["subject"] == "Signal-Update: 3 Position(en) — 1 Stop / 1 TP"
     body = mail["body"]
     assert "UNF" in body and "Stop erreicht" in body and "-1.00R" in body
-    assert "MBX" in body and "TP1 erreicht — Rest Freiroll Richtung TP2" in body
+    assert "MBX" in body and "TP1 erreicht, Position offen" in body
     assert "OLDX" in body and "Verfallen" in body and "+0.40R" in body
     assert "GHST" not in body  # UNTRACKED = Datenproblem, kein Abo-Ereignis
+
+
+def test_signal_update_renderer_labels_refs_origins_and_nonfinal_tp1():
+    """Rows expose immutable identity and distinguish price progress from plan R."""
+    _subject, body = bg_service._build_signal_update_digest([
+        (
+            "signal_update_7_TP1_HIT_OPEN",
+            "TP1 erreicht, Position offen",
+            _transition(new_status="TP1_HIT_OPEN", r_realized=None,
+                        tp1_hit_this_run=True),
+        ),
+        (
+            "signal_update_8_STOP_HIT",
+            "Stop erreicht",
+            _transition(
+                id=8,
+                public_signal_ref=None,
+                origin_evidence="legacy_origin_unknown",
+                delivery_accepted_at=None,
+            ),
+        ),
+    ])
+
+    assert "Signal-Ref" in body
+    assert "AS1-0123456789ABCDEF0123" in body
+    assert "21.08.2026 10:00 UTC / 12:00 MESZ" in body
+    assert "Ursprung historisch nicht belegt" in body
+    assert "MFE-R (Kursfortschritt)" in body
+    assert "Level-R (getrackter Planpfad)" in body
+    assert "Abschluss-R" not in body
+    assert "Zielgeometrie-R" not in body
+    assert "TP1 erreicht, Position offen" in body
+    assert "offen (nicht final)" in body
+    assert "-1.00R" in body
+    assert "brokerbestaetigt" in body
+    assert "Restposition" not in body
+    assert "Keine neue Entry-Empfehlung; Management-Hinweis zum bestehenden Signal." in body
+    assert "Freiroll" not in body
+
+
+def test_renderer_fails_closed_for_corrupt_smtp_evidence_tuple():
+    """A claimed SMTP origin needs a valid public ref and parseable acceptance time."""
+    _subject, body = bg_service._build_signal_update_digest([
+        (
+            "signal_update_7_STOP_HIT",
+            "Stop erreicht",
+            _transition(
+                public_signal_ref="invalid-public-ref",
+                origin_evidence="smtp_acceptance",
+                delivery_accepted_at="2026-08-21T10:00:00+00:00",
+            ),
+        ),
+    ])
+
+    assert "invalid-public-ref" not in body
+    assert "smtp_acceptance" not in body
+    assert "21.08.2026 10:00 UTC / 12:00 MESZ" not in body
+    assert "Signal-Ref:</b> historisch nicht belegt" in body
+    assert "Ursprung historisch nicht belegt" in body
+    assert "Herkunft: legacy_origin_unknown" in body
 
 
 def test_bg_same_transition_second_run_is_deduped(monkeypatch, tmp_path):
@@ -361,6 +641,11 @@ def test_bg_reloads_terminal_transition_after_crash_and_acks_once(
     monkeypatch.setattr(
         bg_service, "mark_terminal_updates_sent",
         tracker.mark_terminal_updates_sent,
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "record_followup_delivery_receipt",
+        tracker.record_followup_delivery_receipt,
     )
 
     bg_service._run_signal_eval_job(secrets={})

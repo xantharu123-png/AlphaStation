@@ -107,6 +107,27 @@ def test_leere_liste_und_muell_geben_leeren_string(monkeypatch):
     assert api._cluster_warning_html(["kein-dict", 42]) == ""
 
 
+def test_batch_hint_adds_only_hypothetical_plan_r_without_suppressing_rows(monkeypatch):
+    _patch_adr_set(monkeypatch, set())
+    rows = [
+        _sweep_row("AAA", idx=0),
+        _sweep_row("BBB", idx=1),
+        _sweep_row("CCC", idx=2),
+    ]
+    rows[0].update(group_key="TECH", group_verified=True)
+    rows[1].update(group_key="TECH", group_verified=False)
+
+    html = api._cluster_warning_html(rows)
+
+    assert "Hypothetische Batch-Belastung" in html
+    assert "3 gültige Pläne = 3R" in html
+    assert "LONG 3R" in html
+    assert "Verifizierte Gruppen: TECH 1R" in html
+    assert "TECH 2R" not in html
+    assert "$" not in html and "USD" not in html
+    assert "unterdr" not in html.lower()
+
+
 # ── _adr_ticker_set: Cache-Formate + Fehlerpfad ──
 
 def test_adr_set_neues_cache_format_und_altes_format_kompatibel(monkeypatch, tmp_path):

@@ -555,3 +555,140 @@ abgenommen. Der unabhaengige finale Read-only-Audit meldete P0 0, P1 0, P2 0.
 Diese Zahlen dokumentieren ausschliesslich die lokale technische Abnahme und
 aendern keine Produktions-, Performance-, Broker-, Rechts- oder Store-Grenze
 dieser Bibel.
+
+---
+
+## 15. Verbindlicher Nachtrag: lokale Audit-Remediation (21.-23.08.2026)
+
+Dieser Nachtrag dokumentiert lokal implementierte und vollstaendig getestete
+Vertraege. Er ist kein Produktions-, Server-, Konto- oder Profitabilitaetsnachweis
+und ersetzt nicht den mehrtaegigen DU-Paper-Soak.
+
+### 15.1 Oeffentliche Signalreferenz und Ursprung
+
+- Vor SMTP erhalten vorbereitete Trade-Zeilen eine stabile, externe Referenz im
+  exakten Format `AS1-[0-9A-F]{20}`. Sie wird deterministisch aus Delivery-Intent
+  und kanonischer Planidentitaet abgeleitet; die Eingabereihenfolge darf die
+  Zuordnung nicht veraendern.
+- Eine Referenz ist kein interner Signal-Identifier. Sie bleibt nach Persistenz
+  unveraendert; fehlende, ungueltige, doppelte oder kollidierende Referenzen
+  blockieren den gesamten neuen Intent vor SMTP. Es gibt keinen Ersatz- oder
+  Fallback-Ref.
+- `origin_evidence` unterscheidet vorbereitete Zustellung, SMTP-Akzeptanz,
+  direkte Post-Send-Erfassung und Shadow-Counterfactual. Fuer SMTP-Evidenz
+  gehoeren valider AS1-Ref und parsebare Akzeptanzzeit zusammen.
+- Historische rohe `NULL`-Werte werden nicht umgeschrieben. Konsumierende
+  Payloads stellen sie ausnahmslos als `legacy_origin_unknown` dar; sie sind
+  keine qualifizierte Zustell- oder Kalibrierungsevidenz.
+- Der Delivery-Intent bindet den vollstaendigen kanonischen Plansnapshot, die
+  Empfaengerkohorte und den Einwilligungsstand unveraenderlich. BE- und
+  Terminal-Folgeereignisse benoetigen ein dauerhaftes exakt signalgebundenes
+  Receipt; synthetische, nackte oder signal-/kohortenfremde Receipts bleiben
+  fail-closed.
+
+### 15.2 Mail-, Zeit- und Ergebniswahrheit
+
+- Die in Task 3 erfassten gebrandeten API-Mailpfade verwenden denselben
+  injizierten UTC-Zeitpunkt fuer Inhalt und Markenheader und zeigen ihn dual
+  als UTC sowie Europe/Berlin (MEZ/MESZ). Bereits gebrandetes Outbox-HTML wird
+  beim Replay nicht neu gerendert; historische unbranded Nebenpfade sind damit
+  nicht pauschal als migriert behauptet.
+- `MFE-R` beschreibt beobachteten Kursfortschritt, nicht gebuchten oder
+  realisierten Gewinn. `Level-R (getrackter Planpfad)` ist erst bei terminalem
+  Ergebnis final.
+- `TP1_HIT_OPEN` bedeutet: TP1-Kurszone erreicht, Position offen. Es beweist
+  weder Teilverkauf noch Restposition oder Broker-bestaetigten Gewinn. Bei TP1
+  und BE bleibt Level-R offen/nicht final; etwaige Zielgeometrie-R wird getrennt
+  beschriftet.
+- Ein Stop auf Einstand reduziert nur das geplante Preisrisiko. Gap-, Slippage-
+  und Ausfuehrungsrisiko bleiben; eine BE-Mail darf daher keinen risikofreien
+  oder gebuchten Gewinn behaupten.
+- Modelliertes Level-R wird neutral als Planpfad bezeichnet. Es ist ohne
+  Broker-Fills weder Realized-R noch Kontogewinn; insbesondere erzeugt TP1
+  allein keine realisierte Teilposition.
+
+### 15.3 Zielreichweite, Paper-Risiko und Batch-Anzeige
+
+- ATR-Zielreichweite misst nur endliche, geometrisch gueltige Distanzen zu TP1
+  und TP2 in ATR samt Level-Provenienz. Fehlende oder ungueltige ATR/Geometrie
+  bleibt als `target_reachability_unavailable` sichtbar. Ein explizites
+  ATR-Budget ist rein deskriptive Telemetrie: kein Default-Hartlimit, keine
+  Trefferwahrscheinlichkeit und kein Health-, ORB-, Revalidierungs- oder
+  Mail-Gate.
+- Der Paper-AutoTrader bleibt auf IBKR-Paperkonten `DU...` beschraenkt. Sein
+  separater dauerhafter Risk Store fuehrt unveraenderliche Intents und
+  Order-Mappings, ein append-only Fill-Ledger je `exec_id` mit expliziter
+  unveraenderlicher Sequenz, gezaeunte Leases und atomare Reservierungen.
+  Konfliktierende oder unvollstaendige Fill-Evidenz, spaete Fills/Mappings nach
+  Freigabe und rueckwaerts laufende Reservation-Zeit bleiben fail-closed; eine
+  Reservierung wird nicht allein durch Lease-Ablauf freigegeben.
+- Vor Brokerplatzierung werden tickgerundete Geometrie, Quantity und Risiko neu
+  berechnet und gegen Paper-Policies geprueft: maximal 0,75 % Gesamt- und
+  Richtungsrisiko, 0,50 % je verifizierter Gruppe sowie drei vollstaendig
+  belegte Verlustserien. Broker-Sichtbarkeit und die daraus abgeleitete
+  Outcome-Arithmetik sind getrennte, persistierte Nachweise.
+- `COMPLETE` verlangt eine gueltige Lease/Fence und einen frischen vollstaendigen
+  Terminal-Snapshot ohne Brokerposition und ohne offene gemappte Parent-, Stop-
+  oder Target-Order. Terminal-Evidenz, Fill-basiertes Outcome und Abschluss der
+  Reservierung werden atomar in derselben SQLite-Transaktion persistiert.
+- `BROKER_VISIBLE` wird nur mit vollstaendiger, intentgebundener Parent-/Stop-/
+  Target-Geometrie sowie eindeutigen positiven Broker-`permId`s und aktiven
+  Broker-Acks zertifiziert. Unvollstaendige Legacy-Intents, doppelte Broker-
+  Identitaeten, Provider-Protokollfehler und unvollstaendige Snapshots bleiben
+  fail-closed; fehlende Geometrie wird nicht nachtraeglich geraten.
+- Offene Orders werden fuer Terminal-Evidenz ueber Konto, Client, Contract,
+  Order-ID, positive `permId`, exakte Referenz und Geometrie gebunden. Die
+  Lieferreihenfolge wird vor dem Evidenz-Hash kanonisiert. Ein dynamisches
+  Nachziehen des Broker-Stops bleibt gesperrt, bis dafuer eine dauerhaft
+  gezaeunte, monotone Geometrie-Revision implementiert und abgenommen ist.
+- Re-Arm und die unmittelbar folgende Pre-Reservation verlangen frische,
+  kausale Orders-, Positions-, Fill-, Account- und PnL-Snapshots. Full-Account-
+  und PnL-Fenster verwenden eigene rohe Request-IDs und objektgebundene
+  Listener; alte, fremde oder gecachte Events erteilen keine Freigabe.
+- Generation-Fencing, bestaetigte Kill-Cancels, OS-Prozess-Lock-Owner-Claims und
+  Crash-Recovery verhindern eine Freigabe durch TTL oder Lease-Ablauf allein.
+  Limit-Risiko, Exposure und Cash werden in USD mit dem konservativen Worst-
+  Fill-Preis auch fuer aktive und noch ausstehende Parent-Orders berechnet.
+- Die Batch-Anzeige in Entry-Mails summiert ausschliesslich hypothetische 1R
+  je gueltigem Plan nach Richtung und nur nach explizit verifizierter Gruppe.
+  Sie behauptet weder Konto-, Dollar- noch Positionswerte und unterdrueckt
+  keine Mail.
+
+### 15.4 Tracker- und Oberflaechenwahrheit
+
+- MFE und MAE enden am belegten Exit; spaetere Bar-Extrema werden nicht als
+  Tradepfad verbucht. Ein belegter Open-Gap durch den Stop wird vor spaeteren
+  Tageshochs/-tiefs verarbeitet. Nicht aufloesbare Intrabar-Reihenfolgen bleiben
+  explizit unaufgeloest und erhalten keinen positiven Upper-Credit.
+- Kontrollpopulationen, Grade-Zellen und Breaker verwenden explizite Nenner und
+  nur qualifizierte Origin-/Fill-Evidenz. Legacy-Ursprung, offene Ergebnisse und
+  unaufgeloestes Managed-R werden weder als 0R eingesetzt noch still entfernt.
+- Das Frontend bezeichnet den AutoTrader oeffentlich als Paper-only, mischt
+  keine Metrikfamilien und wertet STOP/EXPIRED nach TP1 nicht als positiven
+  Terminalfall. CTA-IDs sind stabil; sicheres Scrollen und das Boot-Overlay
+  duerfen eine bereits erfolgreich gerenderte Anwendung nicht verdecken.
+
+### 15.5 Grade-Kalibrierung und unveraenderte Grenzen
+
+- Grade-Zellen sind ausschliesslich Reporting: Scanner x Grade x Richtung x
+  Horizont x Marktregime. Sie verlangen vollstaendige Beobachtung, terminale
+  Fill-/Ursprungsevidenz und das 50/50-plus-BE-Modell. Belastbar sind sie nur
+  bei `n >= 30` und `unresolved = 0`.
+- Grade ist eine Rangklasse, keine Wahrscheinlichkeit. Grade-Zellen erzeugen
+  kein Verdict, veraendern keinen Breaker und ersetzen die bestehende
+  vierdimensionale Freigabezelle nicht.
+- Der untersuchte Ausschnitt aus 51 Mails enthielt 37 neue Plaene und 24 im
+  Archiv terminal/verfallen sichtbare Trackerfaelle: 8 positiv, 16 negativ,
+  Rohsumme -5,06R und Profit-Faktor 0,68. Bei 25 der 37 neuen Plaene fehlte im
+  Archiv ein Folgeergebnis. Das ist weder eine vollstaendige Kohorte noch
+  Broker-PnL; daraus wurden keine Trading-Schwellen geaendert.
+- Das 51-Mail-Archiv ist weder Backtest noch Grundlage fuer neue Schwellen.
+  Server und Live-System blieben in dieser lokalen Remediation unveraendert;
+  es gab keinen Commit und keinen Push. Die lokale Vollabnahme bestand mit
+  2490 Tests und 4 Skips; Compile, Bundle-Quelle `54bc2efa62cc`, Bundle-SHA-256
+  `d2e03be31a79983fc91f07a80795fd4ccc70be49dfed8d23a8c80d639b1b9bf9`,
+  JavaScript-Syntax, Diff- und Secret-Scope-Pruefung waren gruen. Zwei finale
+  unabhaengige Risiko-Reviews sowie der finale Mail-/Tracker-Review meldeten
+  P0/P1/P2 = 0/0/0. Live-Trading bleibt blockiert; realer mehrtaegiger DU-Soak,
+  echte TWS/Gateway-Event-/Disconnect-Pruefung, Deployment und der visuelle
+  Browser-Smoke nach den letzten UI-Aenderungen stehen noch aus.

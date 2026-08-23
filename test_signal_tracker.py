@@ -100,6 +100,38 @@ def _stock_fetcher(bars_by_ticker):
     return fetcher
 
 
+def _assert_gap_stop_is_resolved_in_performance(tracker, ticker):
+    """A proven open-gap exit must stay a decided non-BE result downstream."""
+    as_of = datetime.now(timezone.utc)
+    created_at = as_of - timedelta(days=45)
+    filled_at = created_at + timedelta(minutes=1)
+    stopped_at = created_at + timedelta(minutes=5)
+    with sqlite3.connect(st.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET created_at=?, entry_filled_at=?, closed_at=?, "
+            "stop_hit_at=? WHERE ticker=?",
+            (
+                created_at.isoformat(),
+                filled_at.isoformat(),
+                stopped_at.isoformat(),
+                stopped_at.isoformat(),
+                ticker,
+            ),
+        )
+        conn.commit()
+
+    summary = tracker.load_performance_summary(
+        days=90, mature_only=True, as_of=as_of
+    )
+    assert summary["total"]["managed_be_unresolved"] == 0
+    assert summary["total"]["managed_be_decided_signals"] == 1
+    assert len(summary["grade_calibration_cells"]) == 1
+    grade_cell = summary["grade_calibration_cells"][0]
+    assert grade_cell["eligible_signals"] == 1
+    assert grade_cell["n"] == 1
+    assert grade_cell["unresolved"] == 0
+
+
 @pytest.fixture()
 def tracker(tmp_path, monkeypatch):
     """Frische tmp-DB pro Test (SIGNAL_DB_PATH wird pro Aufruf gelesen)."""
@@ -546,9 +578,11 @@ def test_evaluate_stock_ambiguous_same_day_conservative_stop(tracker):
     tracker.evaluate_open_signals(stock_daily_fetcher=_stock_fetcher({"AAPL": bars}))
     sig = _signal("AAPL")
     assert sig["status"] == "STOP_HIT"
-    assert sig["outcome_detail"] == "ambiguous_same_day"
+    assert sig["outcome_detail"] == "ambiguous_same_day_stop_and_tp1"
     assert sig["r_realized"] == pytest.approx(-1.0)
-    assert sig["r_realized_upper"] == pytest.approx(1.0)
+    assert sig["r_realized_upper"] is None
+    assert tracker._realized_upper(sig) is None
+    assert tracker._managed_upper_r(sig) is None
     assert not sig["tp1_hit_at"]  # TP wird im Zweifel NICHT gutgeschrieben
 
 
@@ -581,9 +615,114 @@ def test_stock_entry_and_stop_in_same_bar_is_marked_ambiguous(tracker, row, bar)
     )
     sig = _signal(ticker)
     assert sig["status"] == "STOP_HIT"
-    assert sig["outcome_detail"] == "ambiguous_same_day_entry_and_stop"
+    assert sig["outcome_detail"] == "ambiguous_same_day_entry_and_stop_unresolved_upper"
     assert sig["r_realized"] == pytest.approx(-1.0)
-    assert sig["r_realized_upper"] == pytest.approx(-0.2)
+    assert sig["r_realized_upper"] is None
+    assert tracker._realized_upper(sig) is None
+    assert tracker._managed_upper_r(sig) is None
+
+
+@pytest.mark.parametrize("asset_class", ["stock", "crypto"])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_tp1_stop_ambiguity_has_no_nonterminal_upper_credit(
+    tracker, asset_class, direction
+):
+    ticker = f"UPPER-{asset_class.upper()}-{direction}"
+    row = _base_row(Ticker=ticker)
+    if direction == "SHORT":
+        row.update({
+            "Signal_Direction": "SHORT",
+            "StopLoss": 105.0,
+            "TP1": 95.0,
+            "TP2": 90.0,
+            "price_mode": "bid",
+        })
+    scanner = "crypto_explosion" if asset_class == "crypto" else "breakout"
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+
+    if asset_class == "stock":
+        bar = (
+            (100.0, 106.0, 94.0, 99.0)
+            if direction == "LONG"
+            else (100.0, 106.0, 94.0, 101.0)
+        )
+        result = tracker.evaluate_open_signals(
+            stock_daily_fetcher=_stock_fetcher({ticker: _bars_after(ticker, [bar])})
+        )
+        expected_detail = "ambiguous_same_day_stop_and_tp1"
+    else:
+        observation = {
+            "current": 99.0 if direction == "LONG" else 101.0,
+            "interval_open": 100.0,
+            "interval_high": 106.0,
+            "interval_low": 94.0,
+            "interval_complete": True,
+            "source": "binance_5m",
+        }
+        result = tracker.evaluate_open_signals(
+            crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+        )
+        expected_detail = "ambiguous_same_interval_stop_and_tp1"
+
+    assert result == {"evaluated": 1, "closed": 1, "errors": 0}
+    signal = _signal(ticker)
+    assert signal["status"] == "STOP_HIT"
+    assert signal["r_realized"] == pytest.approx(-1.0)
+    assert signal["r_realized_upper"] is None
+    assert signal["outcome_detail"] == expected_detail
+    assert tracker._realized_upper(signal) is None
+    assert tracker._managed_upper_r(signal) is None
+
+
+@pytest.mark.parametrize("asset_class", ["stock", "crypto"])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_stop_and_first_plus_one_r_touch_is_be_path_ambiguous(
+    tracker, asset_class, direction
+):
+    ticker = f"BEORDER-{asset_class.upper()}-{direction}"
+    row = _base_row(Ticker=ticker, TP1=107.5, TP2=112.5)
+    if direction == "SHORT":
+        row.update({
+            "Signal_Direction": "SHORT",
+            "StopLoss": 105.0,
+            "TP1": 92.5,
+            "TP2": 87.5,
+            "price_mode": "bid",
+        })
+    scanner = "crypto_explosion" if asset_class == "crypto" else "breakout"
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+
+    if asset_class == "stock":
+        bar = (
+            (100.0, 105.0, 94.0, 99.0)
+            if direction == "LONG"
+            else (100.0, 106.0, 95.0, 101.0)
+        )
+        tracker.evaluate_open_signals(
+            stock_daily_fetcher=_stock_fetcher({ticker: _bars_after(ticker, [bar])})
+        )
+        expected_detail = "ambiguous_same_day_stop_and_be_trigger"
+    else:
+        observation = {
+            "current": 99.0 if direction == "LONG" else 101.0,
+            "interval_open": 100.0,
+            "interval_high": 105.0 if direction == "LONG" else 106.0,
+            "interval_low": 94.0 if direction == "LONG" else 95.0,
+            "interval_complete": True,
+            "source": "binance_5m",
+        }
+        tracker.evaluate_open_signals(
+            crypto_price_fetcher=lambda _ticker, **_kwargs: observation
+        )
+        expected_detail = "ambiguous_same_interval_stop_and_be_trigger"
+
+    signal = _signal(ticker)
+    assert signal["status"] == "STOP_HIT"
+    assert signal["outcome_detail"] == expected_detail
+    assert signal["max_favorable_r"] == pytest.approx(1.0)
+    assert signal["be_trigger_at"] is None
+    assert signal["be_activated_at"] is None
+    assert tracker._managed_be_was_triggered(signal) is False
 
 
 @pytest.mark.parametrize(
@@ -626,6 +765,62 @@ def test_stock_gap_through_stop_is_not_ambiguous_even_if_target_touches_later(
     assert sig["outcome_detail"] == "stop_gap_slippage"
     assert sig["r_realized"] == pytest.approx(expected_r)
     assert sig["r_realized_upper"] == pytest.approx(expected_r)
+
+
+@pytest.mark.parametrize(
+    ("direction", "row_overrides", "gap_bar"),
+    [
+        (
+            "LONG",
+            {"Ticker": "DAILYGAPMFELONG", "grade": "A"},
+            (92.0, 111.0, 90.0, 109.0),
+        ),
+        (
+            "SHORT",
+            {
+                "Ticker": "DAILYGAPMFESHORT",
+                "Signal_Direction": "SHORT",
+                "StopLoss": 105.0,
+                "TP1": 95.0,
+                "TP2": 90.0,
+                "price_mode": "bid",
+                "grade": "A",
+            },
+            (108.0, 110.0, 89.0, 91.0),
+        ),
+    ],
+)
+def test_daily_gap_stop_truncates_path_telemetry_at_open(
+    tracker, direction, row_overrides, gap_bar
+):
+    """Later daily extrema cannot become MFE/MAE after an open stop exit."""
+    # Build execution evidence at test execution time.  Parametrization happens
+    # during collection, which can precede this test by more than the product's
+    # intentional five-minute freshness window in the complete suite.
+    row = _base_row(**row_overrides)
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("stock_strategy", [row]) == 1
+
+    result = tracker.evaluate_open_signals(
+        stock_daily_fetcher=_stock_fetcher(
+            {ticker: _bars_after(ticker, [gap_bar])}
+        )
+    )
+
+    signal = _signal(ticker)
+    assert result["closed"] == 1
+    assert result["be_activations"] == []
+    assert signal["direction"] == direction
+    assert signal["status"] == "STOP_HIT"
+    assert signal["outcome_detail"] == "stop_gap_slippage"
+    assert signal["r_realized"] == pytest.approx(-1.6)
+    assert signal["r_realized_upper"] == pytest.approx(-1.6)
+    assert signal["exit_fill_price"] == pytest.approx(gap_bar[0])
+    assert signal["max_favorable_r"] == pytest.approx(0.0)
+    assert signal["max_adverse_r"] == pytest.approx(-1.6)
+    assert signal["be_trigger_at"] is None
+    assert signal["be_activated_at"] is None
+    _assert_gap_stop_is_resolved_in_performance(tracker, ticker)
 
 
 @pytest.mark.parametrize(
@@ -1524,6 +1719,237 @@ def test_interval_coverage_rejects_overlap_and_out_of_order(
     assert tracker._has_complete_interval_coverage(observation, since) is False
 
 
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "missing_open",
+        "missing_high",
+        "missing_low",
+        "missing_close",
+        "low_above_high",
+        "open_outside_range",
+        "close_outside_range",
+    ],
+)
+@pytest.mark.parametrize(
+    ("scanner", "fetcher_name"),
+    [
+        ("crypto_explosion", "crypto_price_fetcher"),
+        ("stock_strategy", "stock_intraday_fetcher"),
+    ],
+)
+def test_invalid_completed_ohlc_batch_is_rejected_without_cursor_progress(
+    tracker, monkeypatch, invalid_case, scanner, fetcher_name
+):
+    causal_at = datetime(2026, 8, 11, 14, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: causal_at)
+    case_id = {
+        "missing_open": "MO",
+        "missing_high": "MH",
+        "missing_low": "ML",
+        "missing_close": "MC",
+        "low_above_high": "LH",
+        "open_outside_range": "OR",
+        "close_outside_range": "CR",
+    }[invalid_case]
+    ticker = f"BAD-OHLC-{'C' if scanner.startswith('crypto') else 'S'}-{case_id}"
+    assert tracker.record_alert_signals(
+        scanner,
+        [_base_row(Ticker=ticker, price_observed_at=causal_at.isoformat())],
+    ) == 1
+    first_end = causal_at + timedelta(minutes=5)
+    second_end = first_end + timedelta(minutes=5)
+    first = {
+        "current": 100.0,
+        "interval_open": 100.0,
+        "interval_high": 101.0,
+        "interval_low": 99.0,
+        "interval_complete": True,
+        "source": "exchange_5m",
+        "started_at": causal_at.isoformat(),
+        "observed_at": first_end.isoformat(),
+    }
+    invalid = {
+        "current": 110.0,
+        "interval_open": 100.0,
+        "interval_high": 111.0,
+        "interval_low": 99.0,
+        "interval_complete": True,
+        "source": "exchange_5m",
+        "started_at": first_end.isoformat(),
+        "observed_at": second_end.isoformat(),
+    }
+    if invalid_case.startswith("missing_"):
+        invalid.pop({
+            "missing_open": "interval_open",
+            "missing_high": "interval_high",
+            "missing_low": "interval_low",
+            "missing_close": "current",
+        }[invalid_case])
+    elif invalid_case == "low_above_high":
+        invalid.update({
+            "current": 100.0,
+            "interval_open": 100.0,
+            "interval_high": 99.0,
+            "interval_low": 101.0,
+        })
+    elif invalid_case == "open_outside_range":
+        invalid["interval_open"] = 112.0
+    elif invalid_case == "close_outside_range":
+        invalid["current"] = 112.0
+
+    raw_batch = {
+        "current": invalid.get("current", 110.0),
+        "interval_complete": True,
+        "source": "exchange_5m",
+        "intervals": [first, invalid],
+    }
+    assert tracker._has_complete_interval_coverage(raw_batch, causal_at) is False
+    assert tracker._normalize_crypto_observation(raw_batch) is None
+
+    kwargs = {fetcher_name: lambda *_args, **_kwargs: raw_batch}
+    result = tracker.evaluate_open_signals(now=second_end, **kwargs)
+    signal = _signal(ticker)
+
+    assert result["closed"] == 0
+    assert signal["status"] == "OPEN"
+    assert signal["last_eval_at"] is None
+    assert signal["tp1_hit_at"] is None
+    assert signal["tp2_hit_at"] is None
+    assert signal["r_realized"] is None
+
+
+@pytest.mark.parametrize("asset_path", ["daily", "interval"])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("target", ["TP1", "TP2"])
+@pytest.mark.parametrize("beyond", [False, True])
+def test_existing_fill_favourable_ordered_open_precedes_later_stop(
+    tracker, asset_path, direction, target, beyond
+):
+    ticker = "OO-%s-%s-%s-%s" % (
+        asset_path[0].upper(), direction[0], target[-1], int(beyond)
+    )
+    row = _base_row(Ticker=ticker)
+    if direction == "SHORT":
+        row.update({
+            "Signal_Direction": "SHORT",
+            "StopLoss": 105.0,
+            "TP1": 95.0,
+            "TP2": 90.0,
+            "price_mode": "bid",
+            "price_session": "24_7" if asset_path == "interval" else "US_REGULAR",
+        })
+    scanner = "stock_strategy" if asset_path == "daily" else "crypto_explosion"
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+    target_price = 105.0 if target == "TP1" else 110.0
+    if direction == "SHORT":
+        target_price = 95.0 if target == "TP1" else 90.0
+    open_price = target_price + (1.0 if direction == "LONG" else -1.0) * int(beyond)
+    if direction == "LONG":
+        high = open_price + 1.0
+        low = 94.0
+        close = 96.0
+    else:
+        high = 106.0
+        low = open_price - 1.0
+        close = 104.0
+
+    if asset_path == "daily":
+        result = tracker.evaluate_open_signals(
+            stock_daily_fetcher=_stock_fetcher(
+                {ticker: _bars_after(ticker, [(open_price, high, low, close)])}
+            )
+        )
+    else:
+        observation = {
+            "current": close,
+            "interval_open": open_price,
+            "interval_high": high,
+            "interval_low": low,
+            "interval_complete": True,
+            "source": "exchange_5m",
+        }
+        result = tracker.evaluate_open_signals(
+            crypto_price_fetcher=lambda *_args, **_kwargs: observation
+        )
+
+    signal = _signal(ticker)
+    assert result["closed"] == 1
+    if target == "TP2":
+        assert signal["status"] == "TP2_HIT"
+        assert signal["r_realized"] == pytest.approx(2.0)
+        assert signal["r_realized_upper"] == pytest.approx(2.0)
+        assert signal["tp1_hit_at"] is not None
+        assert signal["tp2_hit_at"] is not None
+        assert signal["outcome_detail"] == "ordered_open_tp2"
+        assert signal["max_favorable_r"] == pytest.approx(
+            2.0 + 0.2 * int(beyond)
+        )
+        assert signal["max_adverse_r"] == pytest.approx(0.0)
+    else:
+        assert signal["status"] == "STOP_HIT"
+        assert signal["r_realized"] == pytest.approx(-1.0)
+        assert signal["r_realized_upper"] == pytest.approx(-1.0)
+        assert signal["tp1_hit_at"] is not None
+        assert signal["tp2_hit_at"] is None
+        assert signal["outcome_detail"] == "ordered_open_tp1_then_stop"
+        assert tracker._managed_r_50_50(signal) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("asset_path", ["daily", "interval"])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_existing_fill_ordered_open_at_stop_precedes_later_tp2(
+    tracker, asset_path, direction
+):
+    ticker = f"OO-STOP-{asset_path[0].upper()}-{direction[0]}"
+    row = _base_row(Ticker=ticker)
+    if direction == "SHORT":
+        row.update({
+            "Signal_Direction": "SHORT",
+            "StopLoss": 105.0,
+            "TP1": 95.0,
+            "TP2": 90.0,
+            "price_mode": "bid",
+            "price_session": "24_7" if asset_path == "interval" else "US_REGULAR",
+        })
+    scanner = "stock_strategy" if asset_path == "daily" else "crypto_explosion"
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+    if direction == "LONG":
+        open_price, high, low, close = 95.0, 111.0, 94.0, 110.0
+    else:
+        open_price, high, low, close = 105.0, 106.0, 89.0, 90.0
+
+    if asset_path == "daily":
+        result = tracker.evaluate_open_signals(
+            stock_daily_fetcher=_stock_fetcher(
+                {ticker: _bars_after(ticker, [(open_price, high, low, close)])}
+            )
+        )
+    else:
+        observation = {
+            "current": close,
+            "interval_open": open_price,
+            "interval_high": high,
+            "interval_low": low,
+            "interval_complete": True,
+            "source": "exchange_5m",
+        }
+        result = tracker.evaluate_open_signals(
+            crypto_price_fetcher=lambda *_args, **_kwargs: observation
+        )
+
+    signal = _signal(ticker)
+    assert result["closed"] == 1
+    assert signal["status"] == "STOP_HIT"
+    assert signal["r_realized"] == pytest.approx(-1.0)
+    assert signal["r_realized_upper"] == pytest.approx(-1.0)
+    assert signal["outcome_detail"] == "ordered_open_stop"
+    assert signal["tp1_hit_at"] is None
+    assert signal["tp2_hit_at"] is None
+    assert signal["max_favorable_r"] == pytest.approx(0.0)
+    assert signal["max_adverse_r"] == pytest.approx(-1.0)
+
+
 def test_same_day_stock_internal_candle_gap_retries_without_tp2_or_cursor_loss(
     tracker, monkeypatch
 ):
@@ -1945,6 +2371,49 @@ def test_evaluate_tracks_max_favorable_and_adverse_r(tracker):
     assert sig["max_adverse_r"] == pytest.approx(-0.6)   # bleibt das Minimum
 
 
+@pytest.mark.parametrize("asset_path", ["daily", "interval"])
+def test_intrabar_fill_does_not_claim_exact_prefill_mae(tracker, asset_path):
+    ticker = f"MAE-{asset_path.upper()}"
+    row = _base_row(
+        Ticker=ticker,
+        StopLoss=90.0,
+        TP1=110.0,
+        TP2=120.0,
+        Preis=95.0,
+        price_observed_at=None,
+        price_source=None,
+        fill_evidence_verified=False,
+    )
+    scanner = "stock_strategy" if asset_path == "daily" else "crypto_explosion"
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+    assert _signal(ticker)["entry_filled_at"] is None
+
+    if asset_path == "daily":
+        result = tracker.evaluate_open_signals(
+            stock_daily_fetcher=_stock_fetcher(
+                {ticker: _bars_after(ticker, [(95.0, 105.0, 92.0, 104.0)])}
+            )
+        )
+    else:
+        result = tracker.evaluate_open_signals(
+            crypto_price_fetcher=lambda _ticker, **_kwargs: {
+                "current": 104.0,
+                "interval_open": 95.0,
+                "interval_high": 105.0,
+                "interval_low": 92.0,
+                "interval_complete": True,
+                "source": "exchange_5m",
+            }
+        )
+
+    assert result == {"evaluated": 1, "closed": 0, "errors": 0}
+    signal = _signal(ticker)
+    assert signal["entry_fill_price"] == pytest.approx(100.0)
+    assert signal["max_favorable_r"] == pytest.approx(0.5)
+    assert signal["max_adverse_r"] == pytest.approx(0.0)
+    assert signal["mae_evidence_mode"] == "intrabar_fill_order_unresolved"
+
+
 # ── evaluate_open_signals: Fehlversuche / UNTRACKED ──────────────────────────
 def test_evaluate_untracked_after_five_failures(tracker):
     tracker.record_alert_signals("breakout", [_base_row()])
@@ -1984,6 +2453,255 @@ def test_evaluate_fetcher_exception_counts_as_failure(tracker):
 
 
 # ── evaluate_open_signals: Crypto (Spot-Check) ───────────────────────────────
+@pytest.mark.parametrize(
+    ("direction", "row", "interval_values"),
+    [
+        (
+            "LONG",
+            _base_row(Ticker="CRYPTGAPMFELONG", grade="A"),
+            {"open": 92.0, "high": 111.0, "low": 90.0, "current": 109.0},
+        ),
+        (
+            "SHORT",
+            _base_row(
+                Ticker="CRYPTGAPMFESHORT",
+                Signal_Direction="SHORT",
+                StopLoss=105.0,
+                TP1=95.0,
+                TP2=90.0,
+                price_mode="bid",
+                grade="A",
+            ),
+            {"open": 108.0, "high": 110.0, "low": 89.0, "current": 91.0},
+        ),
+    ],
+)
+def test_crypto_gap_stop_truncates_path_telemetry_at_interval_open(
+    tracker, monkeypatch, direction, row, interval_values
+):
+    """Later completed-interval extrema cannot become MFE/MAE after exit."""
+    causal_at = datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc)
+    interval_end = causal_at + timedelta(minutes=5)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: causal_at)
+    row["price_observed_at"] = causal_at.isoformat()
+    ticker = row["Ticker"]
+    assert tracker.record_alert_signals("crypto_explosion", [row]) == 1
+    interval = {
+        "current": interval_values["current"],
+        "interval_open": interval_values["open"],
+        "interval_high": interval_values["high"],
+        "interval_low": interval_values["low"],
+        "interval_complete": True,
+        "source": "binance_5m",
+        "started_at": causal_at.isoformat(),
+        "observed_at": interval_end.isoformat(),
+    }
+
+    result = tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda *_args, **_kwargs: {
+            "current": interval_values["current"],
+            "interval_complete": True,
+            "source": "binance_5m",
+            "intervals": [interval],
+        },
+        now=interval_end,
+    )
+
+    signal = _signal(ticker)
+    assert result["closed"] == 1
+    assert result["be_activations"] == []
+    assert signal["direction"] == direction
+    assert signal["status"] == "STOP_HIT"
+    assert signal["outcome_detail"] == "stop_gap_slippage"
+    assert signal["r_realized"] == pytest.approx(-1.6)
+    assert signal["r_realized_upper"] == pytest.approx(-1.6)
+    assert signal["exit_fill_price"] == pytest.approx(interval_values["open"])
+    assert signal["max_favorable_r"] == pytest.approx(0.0)
+    assert signal["max_adverse_r"] == pytest.approx(-1.6)
+    assert signal["be_trigger_at"] is None
+    assert signal["be_activated_at"] is None
+    _assert_gap_stop_is_resolved_in_performance(tracker, ticker)
+
+
+@pytest.mark.parametrize(
+    ("scanner", "fetcher_name", "direction", "interval_values"),
+    [
+        (
+            "crypto_explosion",
+            "crypto_price_fetcher",
+            "LONG",
+            {"open": 104.0, "high": 111.0, "low": 99.0, "current": 110.0},
+        ),
+        (
+            "crypto_explosion",
+            "crypto_price_fetcher",
+            "SHORT",
+            {"open": 96.0, "high": 101.0, "low": 89.0, "current": 90.0},
+        ),
+        (
+            "stock_strategy",
+            "stock_intraday_fetcher",
+            "LONG",
+            {"open": 104.0, "high": 111.0, "low": 99.0, "current": 110.0},
+        ),
+    ],
+)
+def test_be_delivery_inside_completed_interval_keeps_control_unresolved(
+    tracker, monkeypatch, scanner, fetcher_name, direction, interval_values
+):
+    """A candle straddling BE delivery cannot prove whether BE preceded TP2."""
+    interval_start = datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc)
+    interval_end = interval_start + timedelta(minutes=5)
+    delivered_at = interval_start + timedelta(seconds=30)
+    activated_at = interval_start - timedelta(minutes=1)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: interval_start)
+    ticker = f"BOUNDARYBE-{scanner}-{direction}".upper()
+    row = _base_row(
+        Ticker=ticker,
+        grade="A",
+        price_observed_at=interval_start.isoformat(),
+    )
+    if direction == "SHORT":
+        row.update({
+            "Signal_Direction": "SHORT",
+            "StopLoss": 105.0,
+            "TP1": 95.0,
+            "TP2": 90.0,
+            "price_mode": "bid",
+        })
+    assert tracker.record_alert_signals(scanner, [row]) == 1
+    with sqlite3.connect(st.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET last_eval_at=?, max_favorable_r=1.2, "
+            "be_trigger_at=?, be_activated_at=? "
+            "WHERE ticker=?",
+            (
+                interval_start.isoformat(),
+                activated_at.isoformat(),
+                activated_at.isoformat(),
+                ticker,
+            ),
+        )
+        conn.commit()
+    signal_id = _signal(ticker)["id"]
+    receipt_id = tracker.record_followup_delivery_receipt(
+        signal_id,
+        event_kind="BE",
+        delivery_evidence_key=f"signal_be_{signal_id}_recipient_delivered",
+        accepted_at=delivered_at,
+    )
+    assert receipt_id
+    assert tracker.mark_be_alerts_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 1
+    interval = {
+        "current": interval_values["current"],
+        "interval_open": interval_values["open"],
+        "interval_high": interval_values["high"],
+        "interval_low": interval_values["low"],
+        "interval_complete": True,
+        "source": "exchange_5m",
+        "started_at": interval_start.isoformat(),
+        "observed_at": interval_end.isoformat(),
+    }
+    fetcher = lambda *_args, **_kwargs: {
+        "current": interval_values["current"],
+        "interval_complete": True,
+        "source": "exchange_5m",
+        "intervals": [interval],
+    }
+
+    result = tracker.evaluate_open_signals(
+        now=interval_end,
+        **{fetcher_name: fetcher},
+    )
+
+    signal = _signal(ticker)
+    assert result["closed"] == 1
+    assert signal["status"] == "TP2_HIT"
+    assert signal["r_realized"] == pytest.approx(2.0)
+    assert signal["be_exit_at"] is None
+    assert signal["be_exit_evidence_mode"] == (
+        "causal_boundary_be_touch_unresolved"
+    )
+    assert signal["r_realized_be"] is None
+    assert tracker._breakeven_after_mfe_resolution(signal) == (None, True)
+    assert tracker._managed_5050_be_resolution(signal) == (None, True)
+    total = tracker.load_performance_summary(days=7)["total"]
+    assert total["avg_r_be"] is None
+    assert total["be_unresolved"] == 1
+    assert total["managed_be_unresolved"] == 1
+
+
+def test_completed_interval_starting_after_be_delivery_is_causally_resolved(
+    tracker, monkeypatch
+):
+    """A fully post-delivery interval may persist its observed BE exit."""
+    causal_at = datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc)
+    interval_start = causal_at + timedelta(minutes=5)
+    interval_end = interval_start + timedelta(minutes=5)
+    delivered_at = interval_start - timedelta(seconds=1)
+    monkeypatch.setattr(tracker, "_utc_now", lambda: causal_at)
+    ticker = "POSTDELIVERYBE"
+    assert tracker.record_alert_signals(
+        "crypto_explosion",
+        [_base_row(Ticker=ticker, price_observed_at=causal_at.isoformat())],
+    ) == 1
+    with sqlite3.connect(st.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET last_eval_at=?, max_favorable_r=1.2, "
+            "be_trigger_at=?, be_activated_at=? "
+            "WHERE ticker=?",
+            (
+                interval_start.isoformat(),
+                causal_at.isoformat(),
+                causal_at.isoformat(),
+                ticker,
+            ),
+        )
+        conn.commit()
+    signal_id = _signal(ticker)["id"]
+    receipt_id = tracker.record_followup_delivery_receipt(
+        signal_id,
+        event_kind="BE",
+        delivery_evidence_key=f"signal_be_{signal_id}_recipient_delivered",
+        accepted_at=delivered_at,
+    )
+    assert receipt_id
+    assert tracker.mark_be_alerts_sent(
+        [signal_id], delivery_receipt_ids={signal_id: receipt_id}
+    ) == 1
+    interval = {
+        "current": 110.0,
+        "interval_open": 104.0,
+        "interval_high": 111.0,
+        "interval_low": 99.0,
+        "interval_complete": True,
+        "source": "binance_5m",
+        "started_at": interval_start.isoformat(),
+        "observed_at": interval_end.isoformat(),
+    }
+
+    tracker.evaluate_open_signals(
+        crypto_price_fetcher=lambda *_args, **_kwargs: {
+            "current": 110.0,
+            "interval_complete": True,
+            "source": "binance_5m",
+            "intervals": [interval],
+        },
+        now=interval_end,
+    )
+
+    signal = _signal(ticker)
+    assert signal["status"] == "TP2_HIT"
+    assert signal["be_exit_fill_price"] == pytest.approx(100.0)
+    assert signal["be_exit_evidence_mode"] == (
+        "completed_interval_open_or_entry_level"
+    )
+    assert tracker._breakeven_after_mfe_resolution(signal) == (0.0, False)
+    assert tracker._managed_5050_be_resolution(signal) == (0.5, False)
+
+
 def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):
     rows = [
         _base_row(Ticker="DOGE"),             # Spot unter Stop
@@ -2277,7 +2995,7 @@ def test_open_proves_fill_before_same_interval_stop_and_target(
     assert signal["entry_fill_price"] == pytest.approx(100.0)
     assert signal["r_realized"] == pytest.approx(-1.0)
     assert signal["r_realized_upper"] == pytest.approx(2.0)
-    assert signal["outcome_detail"] == "ambiguous_same_interval_stop_first"
+    assert signal["outcome_detail"] == "ambiguous_same_interval_stop_and_tp2"
 
 
 @pytest.mark.parametrize(
@@ -2357,7 +3075,7 @@ def test_crypto_same_interval_stop_and_target_is_conservatively_stopped(tracker)
     assert signal["status"] == "STOP_HIT"
     assert signal["r_realized"] == pytest.approx(-1.0)
     assert signal["r_realized_upper"] == pytest.approx(2.0)
-    assert signal["outcome_detail"] == "ambiguous_same_interval_stop_first"
+    assert signal["outcome_detail"] == "ambiguous_same_interval_stop_and_tp2"
 
 
 def test_crypto_gap_fill_is_rejected_when_slippage_breaks_plan(tracker):
@@ -2742,8 +3460,12 @@ def test_independent_acceptance_journal_recovers_tracker_db_outage(
     tracker, monkeypatch, tmp_path
 ):
     intent_key = "intent-journal-outage"
+    recipient_key = "c" * 64
     prepared = tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="JOURNAL")], intent_key
+        "breakout",
+        [_base_row(Ticker="JOURNAL")],
+        intent_key,
+        delivery_recipient_keys=[recipient_key],
     )
     assert prepared["prepared"] is True
     assert tracker.mark_alert_delivery_attempted(intent_key)[
@@ -2756,7 +3478,6 @@ def test_independent_acceptance_journal_recovers_tracker_db_outage(
         tracker, "SIGNAL_DB_PATH", str(blocker / "unavailable.sqlite")
     )
 
-    recipient_key = "c" * 64
     accepted_at = datetime.now(timezone.utc)
     result = tracker.finalize_alert_delivery(
         intent_key, [recipient_key], accepted_at=accepted_at
@@ -2796,14 +3517,18 @@ def test_delivery_health_counts_legacy_open_email_rows_without_cohort(tracker):
         "breakout", [_base_row(Ticker="LEGACY")], channel="email"
     ) == 1
     intent_key = "intent-cohort-known"
+    recipient_key = "f" * 64
     assert tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="KNOWN")], intent_key
+        "breakout",
+        [_base_row(Ticker="KNOWN")],
+        intent_key,
+        delivery_recipient_keys=[recipient_key],
     )["prepared"] is True
     assert tracker.mark_alert_delivery_attempted(intent_key)[
         "claimed_this_call"
     ] is True
     assert tracker.finalize_alert_delivery(
-        intent_key, ["f" * 64], accepted_at=datetime.now(timezone.utc)
+        intent_key, [recipient_key], accepted_at=datetime.now(timezone.utc)
     )["activated"] is True
 
     health = tracker.load_delivery_acceptance_health()
@@ -2817,14 +3542,17 @@ def test_partial_smtp_attempt_journal_preserves_earliest_data_acceptance(
     tracker,
 ):
     intent_key = "intent-partial-attempts"
+    first_key = "1" * 64
+    retry_key = "2" * 64
     assert tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="PARTIAL")], intent_key
+        "breakout",
+        [_base_row(Ticker="PARTIAL")],
+        intent_key,
+        delivery_recipient_keys=[first_key, retry_key],
     )["prepared"] is True
     assert tracker.mark_alert_delivery_attempted(intent_key)[
         "claimed_this_call"
     ] is True
-    first_key = "1" * 64
-    retry_key = "2" * 64
     first_accepted_at = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
     retry_accepted_at = first_accepted_at + timedelta(seconds=20)
 
@@ -2876,8 +3604,12 @@ def test_acceptance_requires_external_outbox_if_both_sqlite_stores_fail(
     tracker, monkeypatch, tmp_path
 ):
     intent_key = "intent-double-storage-failure"
+    recipient_key = "d" * 64
     assert tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="NOJOURNAL")], intent_key
+        "breakout",
+        [_base_row(Ticker="NOJOURNAL")],
+        intent_key,
+        delivery_recipient_keys=[recipient_key],
     )["prepared"] is True
     assert tracker.mark_alert_delivery_attempted(intent_key)[
         "claimed_this_call"
@@ -2893,7 +3625,7 @@ def test_acceptance_requires_external_outbox_if_both_sqlite_stores_fail(
         str(blocker / "acceptance.sqlite"),
     )
 
-    result = tracker.finalize_alert_delivery(intent_key, ["d" * 64])
+    result = tracker.finalize_alert_delivery(intent_key, [recipient_key])
 
     assert result["accepted"] is False
     assert result["journaled"] is False
@@ -2938,8 +3670,12 @@ def test_prepared_intent_cancel_and_stale_cleanup_never_delete_accepted(tracker)
 
 
 def test_attempted_unknown_intent_is_not_replayed_or_auto_expired(tracker):
+    recipient_key = "a" * 64
     prepared = tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="ATTEMPTED")], "intent-attempted"
+        "breakout",
+        [_base_row(Ticker="ATTEMPTED")],
+        "intent-attempted",
+        delivery_recipient_keys=[recipient_key],
     )
     signal_id = prepared["signal_ids"][0]
     attempt = tracker.mark_alert_delivery_attempted(
@@ -2958,7 +3694,10 @@ def test_attempted_unknown_intent_is_not_replayed_or_auto_expired(tracker):
     assert duplicate_attempt["send_allowed"] is False
     assert duplicate_attempt["manual_reconciliation_required"] is True
     replay = tracker.prepare_alert_delivery_intent(
-        "breakout", [_base_row(Ticker="ATTEMPTED")], "intent-attempted"
+        "breakout",
+        [_base_row(Ticker="ATTEMPTED")],
+        "intent-attempted",
+        delivery_recipient_keys=[recipient_key],
     )
     assert replay["intent_state"] == "ATTEMPTED_UNKNOWN"
     assert replay["send_allowed"] is False
@@ -2982,6 +3721,7 @@ def test_attempted_unknown_intent_is_not_replayed_or_auto_expired(tracker):
 
 
 def test_delivery_attempt_claim_has_exactly_one_worker_owner(tracker):
+    recipient_key = "b" * 64
     prepared = tracker.prepare_alert_delivery_intent(
         "breakout",
         [
@@ -2989,6 +3729,7 @@ def test_delivery_attempt_claim_has_exactly_one_worker_owner(tracker):
             _base_row(Ticker="CAS-B"),
         ],
         "intent-two-workers",
+        delivery_recipient_keys=[recipient_key],
     )
     assert len(prepared["signal_ids"]) == 2
 
@@ -3371,9 +4112,94 @@ def test_breaker_recovery_malformed_managed_geometry_blocks_release(tracker):
         as_of=as_of,
     )
     assert summary["decided"] == 30
-    assert summary["managed_be_unresolved"] == 1
+    assert summary["managed_be_unresolved"] == 0
+    assert summary["terminal_r_unresolved"] == 1
+    assert summary["control_unresolved"] == 1
     assert summary["available"] is False
-    assert summary["error"] == "managed_be_unresolved"
+    assert summary["error"] == "terminal_r_unresolved"
+
+
+def test_breaker_recovery_excludes_legacy_and_delivery_prepared_origins(tracker):
+    as_of = datetime.now(timezone.utc)
+    since = as_of - timedelta(days=45)
+    created = (as_of - timedelta(days=30)).isoformat()
+    rows = [
+        _base_row(
+            Ticker=f"UNQUALIFIED-{index:02d}",
+            trade_horizon="swing",
+            evaluation_horizon_bars=5,
+            market_regime="GREEN",
+        )
+        for index in range(30)
+    ]
+    assert tracker.record_alert_signals("breakout", rows, mail_class="trade") == 30
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, "
+            "entry_filled_at=?, entry_fill_price=entry, created_at=?, "
+            "origin_evidence=CASE WHEN id % 2 = 0 THEN NULL "
+            "ELSE 'delivery_prepared' END WHERE ticker LIKE 'UNQUALIFIED-%'",
+            (created, created),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = tracker.load_breaker_recovery_summary(
+        "breakout", since, as_of=as_of
+    )
+
+    assert summary["available"] is False
+    assert summary["fully_observed_post_trip"] == 0
+    assert summary["decided"] == 0
+    assert summary["error"] == "no_fully_observed_joint_cell"
+
+
+def test_breaker_recovery_accepts_smtp_origin_with_durable_reference(tracker):
+    as_of = datetime.now(timezone.utc)
+    since = as_of - timedelta(days=45)
+    created = (as_of - timedelta(days=30)).isoformat()
+    rows = [
+        _base_row(
+            Ticker=f"SMTP-REC-{index:02d}",
+            trade_horizon="swing",
+            evaluation_horizon_bars=5,
+            market_regime="GREEN",
+        )
+        for index in range(30)
+    ]
+    assert tracker.record_alert_signals("breakout", rows, mail_class="trade") == 30
+    conn = sqlite3.connect(st.SIGNAL_DB_PATH)
+    try:
+        db_rows = conn.execute(
+            "SELECT id FROM signals WHERE ticker LIKE 'SMTP-REC-%' ORDER BY id"
+        ).fetchall()
+        for index, (signal_id,) in enumerate(db_rows):
+            conn.execute(
+                "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, "
+                "entry_filled_at=?, entry_fill_price=entry, created_at=?, "
+                "delivery_accepted_at=?, origin_evidence='smtp_acceptance', "
+                "public_signal_ref=? WHERE id=?",
+                (
+                    created,
+                    created,
+                    created,
+                    f"AS1-{index:020X}",
+                    signal_id,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = tracker.load_breaker_recovery_summary(
+        "breakout", since, as_of=as_of
+    )
+
+    assert summary["available"] is True
+    assert summary["decided"] == 30
+    assert summary["actual_delivery_decided"] == 30
 
 
 def test_summary_and_count_safe_on_empty_or_broken_db(tracker, tmp_path, monkeypatch):

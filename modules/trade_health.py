@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from modules.trade_levels import minimum_stop_distance, trade_geometry
+from modules.trade_levels import (
+    minimum_stop_distance,
+    normalize_alert_trade_levels,
+    target_reachability,
+    trade_geometry,
+)
 
 
 PREFERRED_MIN_RR = 1.5
@@ -355,6 +360,17 @@ def calculate_trade_health(
     risk = geometry.get("risk") if geometry_valid else _risk(entry, stop, direction)
     planned_rr = _to_float(_first(row, ["risk_reward", "RiskReward", "rr_effective", "rr_ratio", "rr1"]))
     atr_value = _to_float(_first(row, ["atr", "ATR", "atr_14", "atr14"]))
+    reachability_levels = normalize_alert_trade_levels(
+        row,
+        price_fallback=None,
+        allow_estimated=False,
+    )
+    reachability = target_reachability(
+        reachability_levels,
+        atr_value,
+        horizon=_first(row, ["trade_horizon", "TradeHorizon", "horizon", "_alert_horizon"]),
+        atr_budgets=_first(row, ["target_reachability_atr_budgets", "atr_budgets"]),
+    )
     spread_pct = _to_float(_first(row, ["spread_pct", "spread_percent"]))
     execution_cost_pct = _execution_cost_pct(row, spread_pct)
     distance_r = _distance_to_entry_r(row, current, entry, risk, direction)
@@ -771,6 +787,7 @@ def calculate_trade_health(
             "tp1": tp1,
             "tp2": tp2,
             "risk": risk,
+            "target_reachability": reachability,
             "distance_to_entry_r": distance_r,
             "live_rr": live_rr,
             "live_rr_gross": live_rr_gross,

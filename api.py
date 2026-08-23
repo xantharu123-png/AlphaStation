@@ -123,7 +123,8 @@ from modules.data_fetchers import (
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
-from modules.trade_levels import minimum_stop_distance, normalize_alert_trade_levels, trade_geometry, trade_plan_quality
+from modules.trade_levels import format_target_reachability_text, minimum_stop_distance, normalize_alert_trade_levels, target_reachability, trade_geometry, trade_plan_quality
+from modules.trading_risk import summarize_hypothetical_batch_risk
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline, project_partial_rvol
 from modules.business_quality import BUSINESS_QUALITY_MODEL_VERSION, fetch_business_quality
@@ -209,6 +210,7 @@ try:
         load_breaker_recovery_summary,
         get_signal_count,
         has_open_equivalent_signal,
+        is_valid_public_signal_ref,
         validate_fill_quality,
     )
 except ImportError as _sig_track_err:
@@ -226,6 +228,7 @@ except ImportError as _sig_track_err:
     load_breaker_recovery_summary = None
     get_signal_count = None
     has_open_equivalent_signal = None
+    is_valid_public_signal_ref = None
     validate_fill_quality = None
     print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
 
@@ -3376,6 +3379,51 @@ def _alert_atr_value(row: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _target_reachability_for_alert_row(
+    row: Dict[str, Any],
+    levels: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the shared, descriptive ATR-distance payload for one plan row."""
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    horizon = _alert_get_any(
+        row,
+        "target_reachability_horizon",
+        "trade_horizon",
+        "TradeHorizon",
+        "horizon",
+        "_alert_horizon",
+        default=None,
+    )
+    if horizon in (None, ""):
+        horizon = setup.get(
+            "target_reachability_horizon",
+            setup.get("trade_horizon", setup.get("horizon")),
+        )
+    atr_budgets = _alert_get_any(
+        row,
+        "target_reachability_atr_budgets",
+        "atr_budgets",
+        default=None,
+    )
+    if not isinstance(atr_budgets, dict):
+        atr_budgets = setup.get(
+            "target_reachability_atr_budgets",
+            setup.get("atr_budgets"),
+        )
+    return target_reachability(
+        levels,
+        _alert_atr_value(row),
+        horizon=horizon,
+        atr_budgets=atr_budgets,
+    )
+
+
+def _target_reachability_html(payload: Dict[str, Any]) -> str:
+    """Wrap the shared plain-text telemetry for the API mail renderer."""
+    text = html.escape(format_target_reachability_text(payload))
+    return f'<br><span style="color:#64748b;font-size:11px">{text}</span>'
+
+
 def _atr_distance_annotations(row: Dict[str, Any], levels: Dict[str, Any]) -> Dict[str, str]:
     """Pro Level '+/-x.x% ≈ y.y×ATR' (Stop/TP1/TP2 vs. Entry).
 
@@ -3433,8 +3481,11 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         issue_text = (
             '<br><span style="color:#dc2626;font-size:11px;font-weight:bold">'
             f'Trade-Plan blockiert: {issue_label}</span>'
-        )
+    )
     level_source_text = _alert_level_source_line(row)
+    reachability_text = _target_reachability_html(
+        _target_reachability_for_alert_row(row, levels)
+    )
     atr_notes = _atr_distance_annotations(row, levels)
     stop_atr_text = (
         f' <span style="color:#64748b;font-size:11px">({atr_notes["stop"]})</span>'
@@ -3478,6 +3529,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'{runner_text}'
         f'{issue_text}'
         f'{level_source_text}'
+        f'{reachability_text}'
         f'{move_warning}'
         f'{source_text}'
         f'{synthetic_text}'
@@ -6393,6 +6445,7 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
     if not watch_rows:
         return False
     now = now or time.time()
+    rendered_at = datetime.fromtimestamp(now, tz=timezone.utc)
     remaining = _email_dedupe_remaining(_EARLY_MOVER_WATCH_DIGEST_KEY, _EARLY_MOVER_WATCH_DIGEST_DEDUPE_SEC, now)
     if remaining > 0:
         _record_email_event(
@@ -6436,7 +6489,7 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
       <b>BEOBACHTUNG — kein Einstiegssignal.</b> Warte auf Trigger/Retest.
       Diese Setups erfuellen Grade/Score/Plan-Qualitaet, sind aber im Versandmoment NICHT handelbar.
     </div>
-    <p style="color:#666">{_mail_timestamp_dual()} | Top {len(items)} von {len(watch_rows)} Watch-Kandidat(en)</p>
+    <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Top {len(items)} von {len(watch_rows)} Watch-Kandidat(en)</p>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#fffbeb"><th style="padding:8px;text-align:left">Coin</th>
     <th style="padding:8px;text-align:left">Aktion (Warte-Grund)</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -6464,6 +6517,7 @@ def _send_early_mover_watch_alerts(watch_rows: List[Dict[str, Any]], now: Option
             trade_horizon="swing",
             mail_class="watch",
             mail_channel="crypto",
+            rendered_at=rendered_at,
         )
     except Exception:
         _email_dedupe_release(_EARLY_MOVER_WATCH_DIGEST_KEY, claimed_at=now)
@@ -7076,6 +7130,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         item = validation["candidate"]
+        rendered_at = datetime.now(timezone.utc)
         symbol = html.escape(str(item["symbol"]))
         name = html.escape(str(item.get("name") or ""))
         action = html.escape(str(item.get("action") or "LONG"))
@@ -7101,7 +7156,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         )
         single_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:980px;margin:0 auto">
         <h2 style="color:#059669">Crypto Early Mover LONG</h2>
-        <p style="color:#666">{_mail_timestamp_dual()} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
+        <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
         <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#ecfdf5"><th style="padding:8px;text-align:left">Coin</th>
         <th style="padding:8px;text-align:left">Aktion</th><th style="padding:8px;text-align:left">Grade/Score</th>
@@ -7121,6 +7176,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
                 tracking_scanner="early_movers",
                 tracking_rows=[item],
                 delivery_dedupe_keys=[dedupe_key],
+                rendered_at=rendered_at,
             )
         except Exception:
             _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
@@ -8541,6 +8597,7 @@ def _orb_target_plan_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
         allow_estimated=False,
     )
     direction = str(levels.get("direction") or row.get("direction") or "").strip().upper()
+    reachability = _target_reachability_for_alert_row(row, levels)
     entry = _alert_float(levels.get("entry"), None)
     stop = _alert_float(levels.get("stop"), None)
     target1 = _alert_float(levels.get("tp1"), None)
@@ -8556,6 +8613,7 @@ def _orb_target_plan_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
             "tp1_move_pct": None,
             "tp2_move_pct": None,
             "target_gap_r": None,
+            "target_reachability": reachability,
             "issues": list(geometry.get("errors") or ["invalid_target_geometry"]),
         }
 
@@ -8580,6 +8638,7 @@ def _orb_target_plan_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
         "tp1_move_pct": round((reward1 / float(entry)) * 100.0, 2),
         "tp2_move_pct": round((reward2 / float(entry)) * 100.0, 2),
         "target_gap_r": round((reward2 - reward1) / risk, 2),
+        "target_reachability": reachability,
         "issues": issues,
     }
 
@@ -9217,11 +9276,27 @@ def _extract_email_body_inner(body_html: str) -> str:
     return text.strip()
 
 
-def _brand_email_html(subject: str, body_html: str) -> str:
+def _normalize_mail_rendered_at(rendered_at: Optional[datetime] = None) -> datetime:
+    """Return one UTC-aware render instant without changing caller semantics."""
+    if not isinstance(rendered_at, datetime):
+        return datetime.now(timezone.utc)
+    if rendered_at.tzinfo is None:
+        return rendered_at.replace(tzinfo=timezone.utc)
+    if rendered_at.tzinfo is timezone.utc:
+        return rendered_at
+    return rendered_at.astimezone(timezone.utc)
+
+
+def _brand_email_html(
+    subject: str,
+    body_html: str,
+    *,
+    rendered_at: Optional[datetime] = None,
+) -> str:
     """Wrap every alert in the same Alpha Station email layout."""
     safe_subject = html.escape(str(subject or "Alpha Station Alert"))
     inner = _extract_email_body_inner(body_html)
-    timestamp = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    timestamp = _mail_timestamp_dual(_normalize_mail_rendered_at(rendered_at))
     return f"""<!doctype html>
 <html>
 <body style="margin:0;padding:0;background:#0a0f1e;font-family:Arial,Helvetica,sans-serif;color:#111827">
@@ -9622,8 +9697,10 @@ def _send_email_alert(
     tracking_rows: Optional[Iterable[Dict[str, Any]]] = None,
     tracking_scope: str = "",
     delivery_dedupe_keys: Optional[Iterable[str]] = None,
+    rendered_at: Optional[datetime] = None,
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    rendered_at = _normalize_mail_rendered_at(rendered_at)
     _set_last_delivery_recipients(())
     _set_last_delivery_outcome("not_attempted")
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
@@ -9654,6 +9731,9 @@ def _send_email_alert(
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         _record_email_event(subject, "skipped", "missing_recipient")
         return False
+    prepared_recipient_keys = sorted({
+        key for key in (_recipient_delivery_key(value) for value in recipients) if key
+    })
     tracking_rows_list = [
         dict(row) for row in (tracking_rows or []) if isinstance(row, dict)
     ]
@@ -9668,6 +9748,7 @@ def _send_email_alert(
             or mark_alert_delivery_attempted is None
             or journal_alert_delivery_acceptance is None
             or finalize_alert_delivery is None
+            or is_valid_public_signal_ref is None
             or _mail_outbox is None
             or not callable(
                 getattr(_mail_outbox, "record_tracker_acceptance_pending", None)
@@ -9680,6 +9761,7 @@ def _send_email_alert(
             tracking_rows_list,
             channel="email",
             mail_channel=mail_channel,
+            delivery_recipient_keys=prepared_recipient_keys,
         )
         prepared = prepare_alert_delivery_intent(
             tracking_scanner,
@@ -9687,18 +9769,54 @@ def _send_email_alert(
             intent_key,
             channel="email",
             mail_channel=mail_channel,
+            delivery_recipient_keys=prepared_recipient_keys,
         )
         if not prepared.get("send_allowed"):
             reason = str(prepared.get("intent_state") or "not_prepared").lower()
             _record_email_event(subject, "skipped", f"tracker_delivery_intent_{reason}")
             return False
-        signal_ids = [int(value) for value in prepared.get("signal_ids") or []]
-        if signal_ids:
-            body_html = (
-                f"{body_html}<p style='font-size:11px;color:#64748b'>"
-                f"Signal-ID: {html.escape(', '.join(str(value) for value in signal_ids))}</p>"
+        persisted_signals = list(prepared.get("signals") or [])
+        public_refs = [row.get("public_signal_ref") for row in persisted_signals]
+        if (
+            len(persisted_signals) != len(tracking_rows_list)
+            or len(set(public_refs)) != len(public_refs)
+            or any(not is_valid_public_signal_ref(value) for value in public_refs)
+        ):
+            _record_email_event(subject, "skipped", "tracker_public_signal_ref_invalid")
+            return False
+        plan_lines = []
+        for signal, public_ref in zip(persisted_signals, public_refs):
+            ticker = str(signal.get("ticker") or "").strip().upper()
+            direction = str(signal.get("direction") or "").strip().upper()
+            plan_values = [
+                _alert_float(signal.get(field), None)
+                for field in ("entry", "stop", "tp1", "tp2")
+            ]
+            if (
+                not ticker
+                or direction not in {"LONG", "SHORT"}
+                or any(value is None for value in plan_values)
+            ):
+                _record_email_event(subject, "skipped", "tracker_public_signal_plan_invalid")
+                return False
+            entry, stop, tp1, tp2 = (float(value) for value in plan_values)
+            plan_lines.append(
+                "Signal-Ref: "
+                f"{html.escape(str(public_ref))} | Plan: {html.escape(ticker)} "
+                f"{html.escape(direction)} | E={entry:g} | SL={stop:g} | "
+                f"TP1={tp1:g} | TP2={tp2:g}"
             )
-    branded_body_html = _brand_email_html(subject, body_html)
+        body_html = (
+            f"{_extract_email_body_inner(body_html)}"
+            "<p style='font-size:11px;color:#64748b'>"
+            + "<br>".join(plan_lines)
+            + "</p>"
+        )
+    branded_body_html = _brand_email_html(
+        subject,
+        body_html,
+        rendered_at=rendered_at,
+    )
     msg = MIMEMultipart("alternative")
     msg["From"] = f"Alpha Station Alert <{gmail_user}>"
     # Never disclose subscriber addresses to other recipients.
@@ -9712,6 +9830,27 @@ def _send_email_alert(
     msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
     wire_message = msg.as_string()
 
+    if intent_key:
+        # Consent is mutable. Bind the prepared pseudonymous cohort above, then
+        # immediately before the SMTP ownership claim retain only recipients
+        # who are still globally/channel/horizon authorized. A recipient added
+        # after preparation is deliberately excluded from this intent. Explicit
+        # recipient overrides do not bypass this final authorization boundary.
+        currently_authorized = set(_resolve_email_alert_recipients(
+            recipient_emails=None,
+            trade_horizon=trade_horizon,
+            mail_class=mail_class,
+            mail_channel=mail_channel,
+        ))
+        recipients = sorted(set(recipients).intersection(currently_authorized))
+        if not recipients:
+            _record_email_event(
+                subject,
+                "skipped",
+                "tracker_recipient_authorization_changed",
+            )
+            return False
+
     # Cross-process compare-and-set immediately before the external side
     # effect. Only the worker that changed every PREPARED row to ATTEMPTED may
     # issue SMTP DATA; replays and concurrent schedulers fail closed.
@@ -9719,6 +9858,7 @@ def _send_email_alert(
         attempt_claim = mark_alert_delivery_attempted(
             intent_key,
             attempted_at=time.time(),
+            expected_prepared_rows=persisted_signals,
         )
         if not (
             attempt_claim.get("claimed_this_call") is True
@@ -10103,6 +10243,30 @@ def _cluster_warning_html(rows) -> str:
             if change_val is not None and abs(change_val) > 5:
                 strong_movers += 1
         warnings: list[str] = []
+        batch_risk = summarize_hypothetical_batch_risk(safe_rows)
+        if batch_risk["valid_plans"] >= 2:
+            def _r_units(value):
+                number = float(value)
+                return f"{number:g}R"
+
+            direction_text = ", ".join(
+                f"{html.escape(str(direction))} {_r_units(value)}"
+                for direction, value in batch_risk["by_direction_r"].items()
+            )
+            group_text = ", ".join(
+                f"{html.escape(str(group))} {_r_units(value)}"
+                for group, value in batch_risk["by_verified_group_r"].items()
+            )
+            detail = f" Richtung: {direction_text}." if direction_text else ""
+            if group_text:
+                detail += f" Verifizierte Gruppen: {group_text}."
+            warnings.append(
+                "ℹ Hypothetische Batch-Belastung: "
+                f"{batch_risk['valid_plans']} gültige Pläne = "
+                f"{_r_units(batch_risk['total_hypothetical_r'])} "
+                "(je Plan 1R; keine Konto- oder Positionskenntnis)."
+                f"{detail}"
+            )
         if len(adr_hits) >= 2:
             warnings.append(
                 f"⚠ Klumpenrisiko: {len(adr_hits)} Setups sind auslaendische US-Listings "
@@ -10289,6 +10453,7 @@ def _check_and_alert(scanner_name, cache_file):
                   "biotech": "Biotech Scanner", "bear": "Bear Scanner"}
         label = labels.get(scanner_name, scanner_name)
         n = len(alerts)
+        rendered_at = datetime.now(timezone.utc)
         # Emoji pro Grade
         _grade_emoji = {"S": "🏆", "A": "🔥", "A+": "🔥", "B": "⭐"}
         subject = f"🚨 {n} Top-Setup{'s' if n > 1 else ''} — {label}"
@@ -10309,7 +10474,7 @@ def _check_and_alert(scanner_name, cache_file):
         _cluster_hint = _cluster_warning_html(alerts)
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
         <h2 style="color:#1a73e8">🚨 TradingBot Alert — {label}</h2>
-        <p style="color:#666">{_mail_timestamp_dual()} | {n} starke Setups</p>
+        <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | {n} starke Setups</p>
         {_cluster_hint}
         <table style="width:100%;border-collapse:collapse;font-size:14px">
         <tr style="background:#f5f5f5"><th style="padding:8px;text-align:left">Ticker / Unternehmen</th>
@@ -10331,6 +10496,7 @@ def _check_and_alert(scanner_name, cache_file):
             tracking_scanner=scanner_name,
             tracking_rows=_signal_rows,
             delivery_dedupe_keys=[alert["cooldown_key"] for alert in alerts],
+            rendered_at=rendered_at,
         )
         if sent:
             mail_sent = True
@@ -10773,6 +10939,7 @@ def _revalidate_stock_strategy_mail_candidate(
     levels = _alert_trade_levels(item)
     if not levels.get("valid"):
         return {"ok": False, "reason": "final_trade_levels_invalid"}
+    reachability = _target_reachability_for_alert_row(item, levels)
     direction = str(levels.get("direction") or _infer_alert_direction(item)).upper()
     if direction not in ("LONG", "SHORT"):
         return {"ok": False, "reason": "final_direction_missing"}
@@ -10985,22 +11152,23 @@ def _revalidate_stock_strategy_mail_candidate(
         "live_rr": live_quality.get("effective_rr"),
         "live_rr_tp1": live_quality.get("rr_tp1"),
         "live_rr_tp2": live_quality.get("rr_tp2"),
+        "target_reachability": reachability,
     })
     if previous_close is not None and previous_close > 0:
         change_pct = (current_price - previous_close) / previous_close * 100.0
         item["Change_Pct"] = round(change_pct, 4)
         item["change_pct"] = round(change_pct, 4)
     setup = dict(item.get("trade_setup") or {})
-    if setup:
-        setup.update({
-            "live_price": current_price,
-            "live_price_observed_at": observed_at,
-            "live_price_source": _STOCK_FINAL_PRICE_SOURCE,
-            "live_rr": live_quality.get("effective_rr"),
-            "live_rr_tp1": live_quality.get("rr_tp1"),
-            "live_rr_tp2": live_quality.get("rr_tp2"),
-        })
-        item["trade_setup"] = setup
+    setup.update({
+        "live_price": current_price,
+        "live_price_observed_at": observed_at,
+        "live_price_source": _STOCK_FINAL_PRICE_SOURCE,
+        "live_rr": live_quality.get("effective_rr"),
+        "live_rr_tp1": live_quality.get("rr_tp1"),
+        "live_rr_tp2": live_quality.get("rr_tp2"),
+        "target_reachability": reachability,
+    })
+    item["trade_setup"] = setup
     return {"ok": True, "candidate": item}
 
 
@@ -11577,9 +11745,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 if market_type == "stocks"
                 else ""
             )
+            _watch_rendered_at = datetime.now(timezone.utc)
             _watch_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
             <h2 style="color:#991b1b">Markt-Regime - nur Beobachtung</h2>
-            <p style="color:#666">{_mail_timestamp_dual()} | Long-Risikogate</p>
+            <p style="color:#666">{_mail_timestamp_dual(_watch_rendered_at)} | Long-Risikogate</p>
             {(_market_red_decision or {}).get("banner") or ""}
             {_watch_cluster_hint}
             <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -11597,6 +11766,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     delivery_dedupe_keys=[
                         alert["cooldown_key"] for alert in _market_watch_alerts
                     ],
+                    rendered_at=_watch_rendered_at,
                 )
             except Exception:
                 for _alert in _market_watch_alerts:
@@ -11731,9 +11901,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 "</tr>"
                 for a in _watch_alerts
             )
+            _watch_rendered_at = datetime.now(timezone.utc)
             _watch_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
             <h2 style="color:#991b1b">Performance-Cooldown - nur Beobachtung</h2>
-            <p style="color:#666">{_mail_timestamp_dual()} | Exakte Kalibrierzelle {html.escape(str(_cell_key))}</p>
+            <p style="color:#666">{_mail_timestamp_dual(_watch_rendered_at)} | Exakte Kalibrierzelle {html.escape(str(_cell_key))}</p>
             {_decision.get("banner") or ""}
             <table style="width:100%;border-collapse:collapse;font-size:13px">
             <tr style="background:#fef2f2"><th>Ticker</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Plan</th></tr>
@@ -11750,6 +11921,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     delivery_dedupe_keys=[
                         alert["cooldown_key"] for alert in _watch_alerts
                     ],
+                    rendered_at=_watch_rendered_at,
                 )
             except Exception:
                 for _alert in _watch_alerts:
@@ -11862,7 +12034,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "KEIN Market-Einstieg; nur Limit-Orders und kleine Positionsgroesse."
             if premarket_mail_mode
             else "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind "
-            "Struktur-Level; nicht als Intraday-Scalp interpretieren."
+            "Struktur-Level; nicht als Intraday-Scalp interpretieren. "
+            "Nach TP1: Teilgewinn nach Plan pruefen; ein Stop Richtung Entry senkt nur "
+            "das geplante Preisrisiko. Gap-, Slippage- und Ausfuehrungsrisiken bleiben "
+            "bestehen; weder Exit noch Gewinn sind garantiert."
         )
         sent_any = False
         pending_claims = {
@@ -11942,9 +12117,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 f'<td style="padding:8px;border-bottom:1px solid #eee">{timing_label}</td></tr>'
             )
             cluster_hint = batch_cluster_hint
+            rendered_at = datetime.now(timezone.utc)
             body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
             <h2 style="color:#1a73e8">{label} Alert - {html.escape(str(strategy_name))}</h2>
-            <p style="color:#666">{_mail_timestamp_dual()} | Top {len(email_alerts)} von {total_alerts}; Einzelversand 1 Setup ab Score {score_floor}</p>
+            <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Top {len(email_alerts)} von {total_alerts}; Einzelversand 1 Setup ab Score {score_floor}</p>
             <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
             {_regime_banner}{cluster_hint}
             <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -11977,6 +12153,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     tracking_rows=(None if _regime_shadow_tag else [signal_row]),
                     tracking_scope=("watch" if _regime_shadow_tag else "entry"),
                     delivery_dedupe_keys=[alert["cooldown_key"]],
+                    rendered_at=rendered_at,
                 )
             except Exception:
                 _email_dedupe_release(
@@ -12049,7 +12226,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     horizon_note = (
         "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind Struktur-Level; "
         "nicht als Intraday-Scalp oder sofortiger Minuten-TP interpretieren. "
-        "Nach TP1: Teilgewinn/Freeroll planen und Stop mindestens Richtung Entry nachziehen."
+        "Nach TP1: Teilgewinn nach Plan pruefen; ein Stop Richtung Entry senkt nur "
+        "das geplante Preisrisiko. Gap-, Slippage- und Ausfuehrungsrisiken bleiben "
+        "bestehen; weder Exit noch Gewinn sind garantiert."
         if market_type == "stocks"
         else "Crypto Strategie-Alert: nur mit bestaetigtem Exchange-Trigger handeln."
     )
@@ -12085,9 +12264,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     # Klumpenrisiko-Hinweis (ADR-Cluster / Mehrfach-Mover) — nur Aktien-Mails:
     # in Crypto-Sweeps waere Regel B (Mover >5%) quasi immer aktiv => Warn-Fatigue.
     _cluster_hint = _cluster_warning_html(email_alerts) if market_type == "stocks" else ""
+    rendered_at = datetime.now(timezone.utc)
     body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
     <h2 style="color:#1a73e8">{label} Alert - {strategy_name}</h2>
-    <p style="color:#666">{_mail_timestamp_dual()} | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
+    <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Top {count_text} S/A Setup(s) ab Score {_score_floor_shown}</p>
     <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
     {_regime_banner}
     {_cluster_hint}
@@ -12125,6 +12305,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             tracking_rows=(None if _regime_shadow_tag else _signal_rows),
             tracking_scope=("watch" if _regime_shadow_tag else "entry"),
             delivery_dedupe_keys=[alert["cooldown_key"] for alert in email_alerts],
+            rendered_at=rendered_at,
         )
     except Exception:
         for alert in email_alerts:
@@ -12380,6 +12561,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
         trade_horizon="swing",
         mail_class="watch",
         mail_channel="new_listing",
+        rendered_at=watch_dt,
     )  # AUDIT H-3 / H-2 (Beobachtung, kein Einstiegssignal)
     if not sent:
         _email_dedupe_release(dedupe_key, claimed_at=now)
@@ -12598,6 +12780,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         alert = validation["candidate"]
+        rendered_at = datetime.now(timezone.utc)
         row = (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{html.escape(str(alert["symbol"]))}</b></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(alert["exchange"]))}</td>'
@@ -12611,7 +12794,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         )
         body = f'''<html><body style="font-family:Arial,sans-serif;max-width:820px;margin:0 auto">
         <h2 style="color:#dc2626">Pump & Dump SHORT Alert</h2>
-        <p style="color:#666">{_mail_timestamp_dual()} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
+        <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Einzelsetup nach finaler Venue-Quote und lueckenloser 1m-Pfadpruefung</p>
         <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="background:#fef2f2"><th style="padding:8px;text-align:left">Coin</th>
         <th style="padding:8px;text-align:left">Exchange</th><th style="padding:8px;text-align:left">Grade</th>
@@ -12631,6 +12814,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
                 tracking_scanner="new_listing",
                 tracking_rows=[alert["source_row"]],
                 delivery_dedupe_keys=[dedupe_key],
+                rendered_at=rendered_at,
             )
         except Exception:
             _email_dedupe_release_after_send(dedupe_key, claimed_at=claim_time)
@@ -18786,9 +18970,10 @@ def _bear_scan_wrapper() -> None:
                             f"<td style='padding:6px 8px;text-align:left'>{_format_alert_plan_html(_cs)}</td>"
                             f"<td style='padding:6px 8px;text-align:right;font-weight:bold'>{_cs.get('score',0)}</td></tr>"
                         )
+                    _crash_rendered_at = datetime.now(timezone.utc)
                     _crash_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
                     <h2 style="color:#dc2626">⚠️ Crash-Risiko — {len(_crash_stocks)} Aktien unter starkem Verkaufsdruck</h2>
-                    <p style="color:#666;font-size:13px">{_mail_timestamp_dual()}</p>
+                    <p style="color:#666;font-size:13px">{_mail_timestamp_dual(_crash_rendered_at)}</p>
                     <p style="padding:10px;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;color:#9a3412">
                     Kein Sofort-Short: Der starke Drop ist bereits gelaufen. Erst nach einem gescheiterten Reclaim
                     oder einem schwachen Bounce einen neuen Short pruefen.</p>
@@ -18813,6 +18998,7 @@ def _bear_scan_wrapper() -> None:
                             mail_class="info",
                             telegram_text="",
                             mail_channel="bear",
+                            rendered_at=_crash_rendered_at,
                         )
                     except Exception:
                         _email_dedupe_release(_crash_ck, claimed_at=_crash_claim_now)
@@ -18940,7 +19126,8 @@ def _bear_scan_wrapper() -> None:
                 # zum In-Memory-Cooldown (Restart-sicher).
                 _bear_claim_now = time.time()
                 if _bear_ck not in _EMAIL_COOLDOWN and _email_dedupe_claim(_bear_ck, _DAILY_SUMMARY_DEDUPE_SEC, now=_bear_claim_now):
-                    _ts = f"<p style='color:#666;font-size:13px'>{_mail_timestamp_dual()} | {_total_signals} Aktien-Shorts</p>"
+                    _bear_rendered_at = datetime.now(timezone.utc)
+                    _ts = f"<p style='color:#666;font-size:13px'>{_mail_timestamp_dual(_bear_rendered_at)} | {_total_signals} Aktien-Shorts</p>"
                     _bd_html = ""
                     if _bd_rows:
                         _bd_html = (
@@ -18976,6 +19163,7 @@ def _bear_scan_wrapper() -> None:
                             tracking_scanner="bear",
                             tracking_rows=_bear_alert_rows,
                             delivery_dedupe_keys=[_bear_ck],
+                            rendered_at=_bear_rendered_at,
                         )
                     except Exception:
                         _email_dedupe_release(_bear_ck, claimed_at=_bear_claim_now)
@@ -19338,10 +19526,11 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=
             "Serverbefehl dafuer lautet: "
             "<code>systemctl restart tradingbot-api</code>."
         )
+    rendered_at = datetime.now(timezone.utc)
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#b45309">Scan-Waechter</h2>
-    <p style="color:#666">{_mail_timestamp_dual()}</p>
+    <p style="color:#666">{_mail_timestamp_dual(rendered_at)}</p>
     <p><b>{headline}</b></p>
     <p>{detail}</p>
     <p style="color:#999;font-size:12px;margin-top:20px">
@@ -19349,7 +19538,13 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=
         Kein Trading-Signal, keine Handelsaufforderung.
     </p>
     </body></html>"""
-    sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
+    sent = _send_email_alert(
+        subject,
+        body_html,
+        bypass_startup_cooldown=True,
+        mail_class="info",
+        rendered_at=rendered_at,
+    )
     if sent:
         _email_dedupe_mark(dedupe_key)
         if not hard:
@@ -19380,10 +19575,11 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
     if _email_dedupe_active(dedupe_key, 7 * 86400):
         return False
     subject = f"Scan-Waechter: {name} laeuft wieder"
+    rendered_at = datetime.now(timezone.utc)
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
-    <p style="color:#666">{_mail_timestamp_dual()}</p>
+    <p style="color:#666">{_mail_timestamp_dual(rendered_at)}</p>
     <p><b>{name} laeuft wieder — Episode beendet nach ca. {minutes} Min.</b></p>
     <p>Der zuletzt gemeldete Haenger ist beendet: der Scan ist erfolgreich
     durchgelaufen. <b>Kein Neustart noetig</b> — der Scheduler arbeitet
@@ -19393,7 +19589,13 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
         Kein Trading-Signal, keine Handelsaufforderung.
     </p>
     </body></html>"""
-    sent = _send_email_alert(subject, body_html, bypass_startup_cooldown=True, mail_class="info")
+    sent = _send_email_alert(
+        subject,
+        body_html,
+        bypass_startup_cooldown=True,
+        mail_class="info",
+        rendered_at=rendered_at,
+    )
     if sent:
         _email_dedupe_mark(dedupe_key)
     _log_watchdog_event("recovery", name, stuck_min=minutes, mailed=bool(sent))
@@ -21673,11 +21875,12 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
     # Adresse (ALERT_EMAIL, Fallback GMAIL_USER), nie an Abonnenten.
     _admin_alert_to = str(_SECRETS.get("ALERT_EMAIL", _SECRETS.get("GMAIL_USER", "")) or "")
     _admin_recipients = [addr.strip() for addr in _admin_alert_to.split(",") if addr.strip()]
+    rendered_at = datetime.now(timezone.utc)
     success = _send_email_alert(
         "TradingBot Test — Email Alerts funktionieren!",
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
         <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
-        <p>Dieser Test wurde am <b>{_mail_timestamp_dual()}</b> gesendet.</p>
+        <p>Dieser Test wurde am <b>{_mail_timestamp_dual(rendered_at)}</b> gesendet.</p>
         <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/A+</b> (BI + Biotech), <b>Bear/Crash</b>, <b>ORB Breakouts</b>, <b>Pump-&-Dump SHORT</b> und manuellen Aktien-/Crypto-Strategie-Scans mit Top-Grade.</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>''',
@@ -21685,6 +21888,7 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
         trade_horizon="swing",  # AUDIT H-3: explizit
         recipient_emails=_admin_recipients,  # AUDIT H-3: nur Admin/Betreiber
         mail_class="info",  # AUDIT H-2
+        rendered_at=rendered_at,
     )
     if success:
         return {"status": "ok", "message": "Test-Email gesendet!"}
@@ -27160,7 +27364,7 @@ def _narrative_pulse_recipients(frequency: str) -> List[str]:
 
 def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = None) -> bool:
     now = now or time.time()
-    utc_now = datetime.now(timezone.utc)
+    utc_now = datetime.fromtimestamp(now, tz=timezone.utc)
 
     bullish = payload.get("bullish", [])[:5]
     bearish = payload.get("bearish", [])[:5]
@@ -27202,7 +27406,14 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
             _record_email_event(f"Narrative Pulse {frequency}", "skipped", "frequency_dedupe_active")
             continue
         subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
-        sent = _send_email_alert(subject, body, recipient_emails=recipients, trade_horizon="swing", mail_class="info")  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
+        sent = _send_email_alert(
+            subject,
+            body,
+            recipient_emails=recipients,
+            trade_horizon="swing",
+            mail_class="info",
+            rendered_at=utc_now,
+        )  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
         if not sent:
             _email_dedupe_release(dedupe_key, claimed_at=now)
         sent_any = bool(sent) or sent_any

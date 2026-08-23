@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime, timezone
 
 import api
 
@@ -33,9 +34,11 @@ def test_email_status_never_exposes_credentials(monkeypatch):
 
 
 def test_alert_email_uses_alpha_station_brand_shell():
+    rendered_at = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
     branded = api._brand_email_html(
         "Crypto Early Mover LONG",
         "<html><body><h2>TradingBot Alert</h2><p>Setup ready</p></body></html>",
+        rendered_at=rendered_at,
     )
 
     assert "Alpha Station" in branded
@@ -44,6 +47,7 @@ def test_alert_email_uses_alpha_station_brand_shell():
     assert "Setup ready" in branded
     assert "TradingBot Alert" not in branded
     assert "Keine Anlageberatung" in branded
+    assert "31.07.2026 14:09 UTC / 16:09 MESZ" in branded
 
 
 def test_pump_dump_scheduler_uses_intraday_execution_cadence():

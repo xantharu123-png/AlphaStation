@@ -1,3 +1,4 @@
+import hashlib
 import os
 
 import pytest
@@ -8,6 +9,11 @@ os.environ.setdefault("JWT_SECRET", "test-personal-position-followups-secret")
 import bg_service
 from modules import auth
 from modules import mail_outbox
+
+
+def _fake_followup_receipt_id(delivery_key):
+    digest = hashlib.sha256(str(delivery_key).encode("utf-8")).hexdigest()[:43]
+    return f"fr1_{digest}"
 
 
 def _position(ticker, direction="LONG", scanner="stock_strategy", signal_id=None, **extra):
@@ -274,6 +280,66 @@ def test_personal_followup_digest_filters_rows_per_recipient(monkeypatch):
         (("mine@example.com",), "ABC"),
     ]
     assert {"signal-11", "signal-22"}.issubset(active_keys)
+
+
+def test_personal_same_ticker_followup_renders_only_the_matched_public_ref(monkeypatch):
+    """A personal digest cannot blur two simultaneous plans for one ticker."""
+    profiles = [{
+        "email": "mine@example.com",
+        "position_update_scope": "mine",
+        "personal_positions": [_position("SAME", signal_id=11)],
+    }]
+    _active_keys, deliveries = _install_dispatch_fakes(
+        monkeypatch, profiles, lambda _recipients: True
+    )
+    cohort = _delivery_cohort("mine@example.com")
+    base = {
+        "ticker": "SAME",
+        "direction": "LONG",
+        "scanner": "stock_strategy",
+        "old_status": "OPEN",
+        "new_status": "TP1_HIT_OPEN",
+        "entry": 100.0,
+        "stop": 95.0,
+        "tp1": 105.0,
+        "tp2": 110.0,
+        "r_realized": None,
+        "mfe": 1.2,
+        "mail_class": "trade",
+        "channel": "email",
+        "trade_horizon": "swing",
+        "delivery_recipient_keys": cohort,
+        "origin_evidence": "smtp_acceptance",
+        "delivery_accepted_at": "2026-08-21T10:00:00+00:00",
+    }
+    pending = [
+        (
+            "signal_update_11_TP1_HIT_OPEN",
+            "TP1 erreicht, Position offen",
+            {**base, "id": 11, "public_signal_ref": "AS1-0123456789ABCDEF0123"},
+        ),
+        (
+            "signal_update_12_TP1_HIT_OPEN",
+            "TP1 erreicht, Position offen",
+            {**base, "id": 12, "public_signal_ref": "AS1-FEDCBA9876543210ABCD"},
+        ),
+    ]
+
+    sent, complete = bg_service._dispatch_followup_digest(
+        pending,
+        {},
+        bg_service._build_signal_update_digest,
+        lambda item: item[2],
+        lambda item: item[0],
+    )
+
+    assert sent is True
+    assert complete is True
+    assert len(deliveries) == 1
+    body = deliveries[0][2]
+    assert "AS1-0123456789ABCDEF0123" in body
+    assert "AS1-FEDCBA9876543210ABCD" not in body
+    assert "historisch nicht belegt" not in body
 
 
 def test_followup_retry_only_resends_failed_recipient(monkeypatch):
@@ -682,3 +748,422 @@ def test_global_subscriber_optout_completes_without_endless_pending(monkeypatch)
     assert sent is False
     assert complete is True
     assert "signal-11" in active_keys
+
+
+def _be_activation(signal_id, email, **overrides):
+    activation = _event(
+        f"BE{signal_id}",
+        scanner="stock_strategy",
+        signal_id=signal_id,
+        entry=100.0,
+        entry_fill_price=100.0,
+        stop=95.0,
+        tp1=105.0,
+        tp2=110.0,
+        mfe=1.2,
+        mail_class="trade",
+        channel="email",
+        mail_channel="stocks_swing",
+        trade_horizon="swing",
+        tracker_persisted=True,
+        delivery_recipient_keys=_delivery_cohort(email),
+    )
+    activation.update(overrides)
+    return activation
+
+
+def _install_be_delivery_fakes(monkeypatch, accepted_emails=()):
+    active_keys = set()
+    accepted_emails = {
+        str(email).strip().lower() for email in accepted_emails
+    }
+    smtp_calls = []
+    ack_calls = []
+
+    monkeypatch.setattr(
+        bg_service,
+        "_email_dedupe_active",
+        lambda key, _ttl, now=None: key in active_keys,
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_email_dedupe_mark",
+        lambda key, now=None: active_keys.add(key),
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_email_delivery_claim",
+        lambda key, _ttl, now=None: key not in active_keys,
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_email_delivery_mark",
+        lambda key, now=None: active_keys.add(key),
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_email_delivery_release",
+        lambda key, claimed_at=None: True,
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "_followup_recipient_delivery_uncertain",
+        lambda _recipient_key, now=None: False,
+    )
+
+    def fake_send(_subject, _body_html, _secrets, **kwargs):
+        intended = tuple(kwargs.get("recipient_emails") or ())
+        accepted = tuple(
+            email for email in intended if email in accepted_emails
+        )
+        pending = tuple(
+            email for email in intended if email not in accepted_emails
+        )
+        smtp_calls.append(intended)
+        bg_service._set_last_email_delivery(
+            intended=intended,
+            accepted=accepted,
+            pending=pending,
+        )
+        return bool(accepted)
+
+    def record_receipt(signal_id, *, delivery_key, **_kwargs):
+        if delivery_key not in active_keys:
+            return None
+        return _fake_followup_receipt_id(delivery_key)
+
+    def record_ack(signal_ids, *, delivery_receipt_ids=None):
+        ids = list(signal_ids)
+        ack_calls.append((ids, dict(delivery_receipt_ids or {})))
+        return len(ids)
+
+    monkeypatch.setattr(bg_service, "_send_email_alert", fake_send)
+    monkeypatch.setattr(bg_service, "_record_followup_event_receipt", record_receipt)
+    monkeypatch.setattr(bg_service, "mark_be_alerts_sent", record_ack)
+    return active_keys, smtp_calls, ack_calls
+
+
+def _install_auth_followup_routing(monkeypatch, users):
+    monkeypatch.delenv("ALERT_OPERATOR_FOLLOWUP_OPTIN", raising=False)
+    monkeypatch.setattr(auth, "_load_effective_users_atomic", lambda: users)
+    monkeypatch.setattr(
+        auth, "get_plan_features", lambda _plan: {"has_email_alerts": True}
+    )
+    monkeypatch.setattr(bg_service, "HAS_AUTH_ALERT_RECIPIENTS", True)
+    monkeypatch.setattr(
+        bg_service,
+        "get_followup_alert_recipient_profiles",
+        auth.get_followup_alert_recipient_profiles,
+    )
+    monkeypatch.setattr(
+        bg_service,
+        "get_email_alert_recipients",
+        auth.get_email_alert_recipients,
+    )
+    monkeypatch.setattr(
+        bg_service, "scanner_mail_channel", auth.scanner_mail_channel
+    )
+
+
+@pytest.mark.parametrize(
+    "user_overrides",
+    [
+        {"email_alerts_enabled": False},
+        {"mail_channels": {"stocks_swing": False}},
+        {"trade_alert_horizon": "intraday"},
+    ],
+    ids=("global-optout", "channel-optout", "horizon-optout"),
+)
+def test_be_optout_completes_workflow_without_delivery_ack(
+    monkeypatch, user_overrides
+):
+    email = "subscriber@example.com"
+    user = {
+        "plan": "elite",
+        "email_alerts_enabled": True,
+        "alert_email": email,
+        "position_update_scope": "all",
+        "personal_positions": [],
+        "trade_alert_horizon": "swing",
+        "mail_channels": {"stocks_swing": True},
+    }
+    user.update(user_overrides)
+    _install_auth_followup_routing(monkeypatch, {email: user})
+    active_keys, smtp_calls, ack_calls = _install_be_delivery_fakes(
+        monkeypatch, accepted_emails={email}
+    )
+
+    sent = bg_service._send_be_alert_mail(
+        [_be_activation(101, email)], {}
+    )
+
+    assert sent is False
+    assert smtp_calls == []
+    assert "signal_be_101" in active_keys
+    assert ack_calls == []
+
+    assert bg_service._send_be_alert_mail(
+        [_be_activation(101, email)], {}
+    ) is False
+    assert smtp_calls == []
+    assert ack_calls == []
+
+
+def test_be_mixed_batch_acks_only_smtp_accepted_event(monkeypatch):
+    delivered = "delivered@example.com"
+    opted_out = "optedout@example.com"
+    users = {
+        delivered: {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": delivered,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+        opted_out: {
+            "plan": "elite",
+            "email_alerts_enabled": False,
+            "alert_email": opted_out,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+    }
+    _install_auth_followup_routing(monkeypatch, users)
+    _active_keys, smtp_calls, ack_calls = _install_be_delivery_fakes(
+        monkeypatch, accepted_emails={delivered}
+    )
+
+    assert bg_service._send_be_alert_mail(
+        [
+            _be_activation(201, delivered),
+            _be_activation(202, opted_out),
+        ],
+        {},
+    ) is True
+
+    assert smtp_calls == [(delivered,)]
+    assert ack_calls == [
+        ([201], {201: _fake_followup_receipt_id("signal_be_201_recipient_delivered")})
+    ]
+
+
+def test_be_mixed_batch_acks_only_event_with_durable_recipient_delivery(
+    monkeypatch,
+):
+    delivered = "delivered@example.com"
+    opted_out = "optedout@example.com"
+    users = {
+        delivered: {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": delivered,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+        opted_out: {
+            "plan": "elite",
+            "email_alerts_enabled": False,
+            "alert_email": opted_out,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+    }
+    _install_auth_followup_routing(monkeypatch, users)
+    active_keys, smtp_calls, ack_calls = _install_be_delivery_fakes(monkeypatch)
+    active_keys.add(
+        bg_service._followup_recipient_dedupe_key(
+            "signal_be_301", delivered
+        )
+    )
+
+    assert bg_service._send_be_alert_mail(
+        [
+            _be_activation(301, delivered),
+            _be_activation(302, opted_out),
+        ],
+        {},
+    ) is False
+
+    assert smtp_calls == []
+    assert ack_calls == [
+        ([301], {301: _fake_followup_receipt_id("signal_be_301_recipient_delivered")})
+    ]
+
+
+def _terminal_transition(signal_id, email, **overrides):
+    transition = _event(
+        f"TERM{signal_id}",
+        scanner="stock_strategy",
+        signal_id=signal_id,
+        old_status="OPEN",
+        new_status="STOP_HIT",
+        entry=100.0,
+        entry_fill_price=100.0,
+        stop=95.0,
+        tp1=105.0,
+        tp2=110.0,
+        r_realized=-1.0,
+        mfe=0.4,
+        mail_class="trade",
+        channel="email",
+        mail_channel="stocks_swing",
+        trade_horizon="swing",
+        tracker_persisted=True,
+        delivery_recipient_keys=_delivery_cohort(email),
+    )
+    transition.update(overrides)
+    return transition
+
+
+def _install_terminal_delivery_fakes(monkeypatch, accepted_emails=()):
+    active_keys, smtp_calls, _be_ack_calls = _install_be_delivery_fakes(
+        monkeypatch, accepted_emails=accepted_emails
+    )
+    ack_calls = []
+
+    def record_ack(signal_ids, *, delivery_receipt_ids=None):
+        ids = list(signal_ids)
+        ack_calls.append(ids)
+        return len(ids)
+
+    monkeypatch.setattr(
+        bg_service, "mark_terminal_updates_sent", record_ack
+    )
+    return active_keys, smtp_calls, ack_calls
+
+
+@pytest.mark.parametrize(
+    "user_overrides",
+    [
+        {"email_alerts_enabled": False},
+        {"mail_channels": {"stocks_swing": False}},
+        {"trade_alert_horizon": "intraday"},
+    ],
+    ids=("global-optout", "channel-optout", "horizon-optout"),
+)
+def test_terminal_optout_completes_workflow_without_delivery_ack(
+    monkeypatch, user_overrides
+):
+    email = "subscriber@example.com"
+    user = {
+        "plan": "elite",
+        "email_alerts_enabled": True,
+        "alert_email": email,
+        "position_update_scope": "all",
+        "personal_positions": [],
+        "trade_alert_horizon": "swing",
+        "mail_channels": {"stocks_swing": True},
+    }
+    user.update(user_overrides)
+    _install_auth_followup_routing(monkeypatch, {email: user})
+    active_keys, smtp_calls, ack_calls = _install_terminal_delivery_fakes(
+        monkeypatch, accepted_emails={email}
+    )
+
+    assert bg_service._send_signal_update_mail(
+        [_terminal_transition(401, email)], {}
+    ) is False
+    assert smtp_calls == []
+    assert "signal_update_401_STOP_HIT" in active_keys
+    assert ack_calls == []
+
+    assert bg_service._send_signal_update_mail(
+        [_terminal_transition(401, email)], {}
+    ) is False
+    assert smtp_calls == []
+    assert ack_calls == []
+
+
+def test_terminal_mixed_batch_acks_only_smtp_accepted_event(monkeypatch):
+    delivered = "delivered@example.com"
+    opted_out = "optedout@example.com"
+    users = {
+        delivered: {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": delivered,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+        opted_out: {
+            "plan": "elite",
+            "email_alerts_enabled": False,
+            "alert_email": opted_out,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+    }
+    _install_auth_followup_routing(monkeypatch, users)
+    _active_keys, smtp_calls, ack_calls = _install_terminal_delivery_fakes(
+        monkeypatch, accepted_emails={delivered}
+    )
+
+    assert bg_service._send_signal_update_mail(
+        [
+            _terminal_transition(501, delivered),
+            _terminal_transition(502, opted_out),
+        ],
+        {},
+    ) is True
+
+    assert smtp_calls == [(delivered,)]
+    assert ack_calls == [[501]]
+
+
+def test_terminal_mixed_batch_acks_only_event_with_durable_recipient_delivery(
+    monkeypatch,
+):
+    delivered = "delivered@example.com"
+    opted_out = "optedout@example.com"
+    users = {
+        delivered: {
+            "plan": "elite",
+            "email_alerts_enabled": True,
+            "alert_email": delivered,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+        opted_out: {
+            "plan": "elite",
+            "email_alerts_enabled": False,
+            "alert_email": opted_out,
+            "position_update_scope": "all",
+            "personal_positions": [],
+            "trade_alert_horizon": "swing",
+            "mail_channels": {"stocks_swing": True},
+        },
+    }
+    _install_auth_followup_routing(monkeypatch, users)
+    active_keys, smtp_calls, ack_calls = _install_terminal_delivery_fakes(
+        monkeypatch
+    )
+    active_keys.add(
+        bg_service._followup_recipient_dedupe_key(
+            "signal_update_601_STOP_HIT", delivered
+        )
+    )
+
+    assert bg_service._send_signal_update_mail(
+        [
+            _terminal_transition(601, delivered),
+            _terminal_transition(602, opted_out),
+        ],
+        {},
+    ) is False
+
+    assert smtp_calls == []
+    assert ack_calls == [[601]]

@@ -73,13 +73,26 @@
         return event && (event.message || (event.error && event.error.stack) || event.error);
     }
 
+    function appHasRendered() {
+        var root = document.getElementById('root');
+        return Boolean(root && root.children && root.children.length > 0);
+    }
+
+    function reportFrontendError(message) {
+        var normalized = message || 'Unbekannter Frontend-Fehler';
+        if (typeof console !== 'undefined' && typeof console.error === 'function') {
+            console.error('[Alpha Station frontend]', normalized);
+        }
+        if (!appHasRendered()) showBootError(normalized);
+    }
+
     window.showBootError = showBootError;
     window.addEventListener('error', function (event) {
-        showBootError(resourceFailure(event));
+        reportFrontendError(resourceFailure(event));
     }, true);
     window.addEventListener('unhandledrejection', function (event) {
         var reason = event ? event.reason : null;
-        showBootError((reason && (reason.stack || reason.message)) || reason || 'Unhandled promise rejection');
+        reportFrontendError((reason && (reason.stack || reason.message)) || reason || 'Unhandled promise rejection');
     });
     window.addEventListener('load', function () {
         window.setTimeout(function () {
@@ -88,7 +101,7 @@
                 var missing = [];
                 if (!window.React) missing.push('React fehlt');
                 if (!window.ReactDOM) missing.push('ReactDOM fehlt');
-                showBootError(missing.length
+                reportFrontendError(missing.length
                     ? 'Fehlende Runtime: ' + missing.join(', ')
                     : 'Die Runtime ist geladen, aber die App hat nichts in #root gerendert.');
             }

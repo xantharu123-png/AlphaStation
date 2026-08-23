@@ -355,7 +355,8 @@ konservativ (ambiguous_same_day unangetastet).
   „Stop-Update: n Trade(s) auf Einstand sichern (+1R gelaufen)".
   Scanner-differenziert: **crash\*** → „Stop auf Einstand — KEIN Teilverkauf"
   (Daten: Halten +0,40 R schlug 50/50 +0,27 R); alle anderen → „Stop auf Einstand;
-  an TP1 50 % verkaufen, Rest risikofrei" (Regel B). Gleiche Sicherungen wie bei
+  an TP1 50 % verkaufen; Restposition mit Stop auf Einstand — Gap-, Slippage-
+  und Ausführungsrisiko bleibt" (Regel B). Gleiche Sicherungen wie bei
   Exit-Update-Mails: Zweitsicherung `_signal_origin_was_mailed`, persistentes
   Dedupe `signal_be_{id}` (7 d), Mark erst nach erfolgreichem Versand, Fehler im
   Mail-Bau beschädigen den Eval-Job nie.
@@ -1629,3 +1630,88 @@ gesperrt. Es erfolgte deshalb weder Deployment noch Produktions-Repair. Vor dem
 Rollout muessen GitHub- und Serverzugang sicher wiederhergestellt, produktive
 Datenbanken gesichert, Quote-Entitlement/Recency belegt und danach derselbe
 Commit in Server-HEAD, API, Bundle, Services und Health nachgewiesen werden.
+
+### 10.9 Lokale Audit-Remediation (21.-23.08.2026)
+
+Der isolierte Worktree ergaenzt die folgende lokal getestete Schutzschicht. Die
+Angaben sind Implementierungs- und Vollsuite-Nachweise; sie sind weder ein
+Server-, Konto- noch ein Performancebeleg.
+
+- **AS1 und Herkunft:** Prepared-Trade-Zeilen tragen eine stabile externe
+  `AS1-[0-9A-F]{20}`-Referenz aus kanonischem Delivery-Intent/Plan. Reorder-
+  Retries bleiben 1:1 zugeordnet; Kollision, Duplikat oder nachtraegliche
+  Korruption blockiert den Intent vor SMTP. `origin_evidence` trennt
+  Vorbereitung, SMTP-Akzeptanz, direkten Post-Send-Pfad und Shadow. Rohes
+  Legacy-`NULL` bleibt in der DB erhalten und erscheint in Payloads nur als
+  `legacy_origin_unknown`.
+- **Snapshot, Kohorte und Receipts:** Der Intent bindet den vollstaendigen
+  kanonischen Plansnapshot, Empfaengerkohorte und Einwilligungsstand. BE- und
+  Terminal-Folgemails verlangen ein dauerhaftes exakt signalgebundenes Receipt;
+  synthetische, nackte oder fremde Receipts bleiben fail-closed.
+- **Ehrliche Folge-Mails:** Ref und belegter Ursprung werden auch nach Outbox-
+  Reload gezeigt. UTC und MEZ/MESZ stammen aus genau einem Renderzeitpunkt;
+  Replay rendert gebrandetes Outbox-HTML nicht neu. MFE-R ist Kursfortschritt,
+  nicht Gewinn. TP1 bedeutet Kurszone erreicht bei offener Position, ohne
+  behaupteten Teilverkauf; Level-R ist erst terminal final. BE senkt nur
+  geplantes Preisrisiko, nicht Gap-, Slippage- oder Ausfuehrungsrisiko.
+- **Zielreichweite:** Die ATR-Distanzen/Provenienz sind deskriptive
+  Reichweiten-Telemetrie. Fehlende Daten bleiben unavailable, explizite Budgets
+  sind kein Default und veraendern weder Trading-Health noch ORB, finale
+  Revalidierung oder Mailfreigabe; sie sagen keine Trefferwahrscheinlichkeit
+  aus.
+- **Paper-Risiko:** Der separate SQLite Risk Store persistiert unveraenderliche
+  Intents/Order-Mappings, append-only Fill-Evidenz je `exec_id` mit expliziter
+  immutable Sequenz, gezaeunte Submit-Leases und atomare Risikoreservierungen.
+  Konflikte, spaete Fills/Mappings oder unvollstaendige Evidenz bleiben
+  fail-closed. `COMPLETE` benoetigt gueltige Lease/Fence und einen frischen
+  vollstaendigen Broker-Snapshot ohne Position und ohne offene gemappte Order;
+  Terminal-Evidenz, Outcome und Reservation werden atomar persistiert. Die
+  Paper-Policy betraegt 0,75 % Gesamt- und Richtungsrisiko, 0,50 % je
+  verifizierter Gruppe und drei vollstaendig belegte Verlustserien. Endgueltige
+  Tick-Geometrie und Quantity werden vor Platzierung neu berechnet;
+  Broker-Sichtbarkeit wird danach nur mit vollstaendiger Parent-/Stop-/Target-
+  Geometrie, eindeutigen positiven `permId`s und aktiven Broker-Acks belegt.
+  Provider-`None`, nicht iterierbare oder doppelte Snapshot-Zeilen sowie
+  unvollstaendige Legacy-Geometrie bleiben fail-closed. Terminal offene Orders
+  werden ueber Konto, Client, Contract, Order-ID, `permId`, Referenz und
+  Geometrie gebunden und vor dem Evidenz-Hash kanonisch sortiert. Automatisches
+  Stop-Nachziehen ist absichtlich gesperrt, bis eine dauerhaft gezaeunte,
+  monotone Geometrie-Revision implementiert und separat abgenommen ist.
+- **Frische und Crash-Sicherheit:** Re-Arm und unmittelbare Pre-Reservation
+  verlangen frische kausale Orders-/Positions-/Fill-/Account-/PnL-Snapshots.
+  Account/PnL nutzen eigene rohe Request-IDs und objektgebundene Listener;
+  fremde, alte oder gecachte Events autorisieren nichts. Generation-Fencing,
+  Kill-Cancel-Acks, OS-Prozess-Lock-Owner-Claims und Crash-Recovery verhindern
+  Freigabe nur durch TTL/Lease-Ablauf. Limit-Risiko, Exposure und Cash werden in
+  USD mit Worst-Fill-Preis auch fuer aktive oder pending Parents geprueft.
+- **Batch und Grade:** Der Mailhinweis ist nur hypothetisches 1R je gueltigem
+  Plan, nach Richtung und verifizierter Gruppe; keine Dollar-/Konto-Aussage und
+  keine Suppression. Die Grade-Kalibrierung ist eine Reporting-Zelle aus
+  Scanner/Grade/Richtung/Horizont/Regime, nur mit terminaler Origin-/Fill-
+  Evidenz und 50/50+BE. Sie ist erst bei `n >= 30` und `unresolved = 0`
+  belastbar, ist keine Wahrscheinlichkeit und kann weder Verdict noch Breaker
+  aendern.
+- **Tracker und UI:** MFE/MAE enden am belegten Exit; Open-Gaps haben Vorrang vor
+  spaeteren Tagesextrema, unaufloesbare OHLC-Reihenfolgen bleiben unaufgeloest.
+  Kontrollpopulationen und Breaker verwenden explizite Nenner und qualifizierte
+  Origin-/Fill-Evidenz. Das Frontend ist oeffentlich Paper-only, mischt keine
+  Metrikfamilien und zaehlt STOP/EXPIRED nach TP1 nicht positiv; CTA-/Scroll-/
+  Boot-Vertraege sind automatisiert geprueft.
+
+Fokussierte Nachweise: 439/439 Mail-/Tracker-, 385/385 Risiko-/Broker- und 24/24
+Frontend-Vertragstests; die gemeinsame Paketregression umfasst 959/959 Tests.
+Die Vollsuite bestand mit 2490 Tests und 4 Skips in 1066,94 Sekunden. Compile,
+Bundle-Quelle `54bc2efa62cc`, Bundle-SHA-256
+`d2e03be31a79983fc91f07a80795fd4ccc70be49dfed8d23a8c80d639b1b9bf9`,
+JavaScript-Syntax, `git diff --check` und der Scope-/Secret-Scan (44 Dateien,
+0/0 Treffer, `Mailarchiv/` ausgeschlossen) waren gruen. Die finalen
+unabhaengigen Reviews meldeten P0/P1/P2 = 0/0/0.
+
+Der 51-Mail-Ausschnitt zeigte 37 neue Plaene und 24 terminal/verfallen sichtbare
+Trackerfaelle: 8 positiv, 16 negativ, Rohsumme -5,06R, Profit-Faktor 0,68; fuer
+25 neue Plaene fehlte im Archiv jedes Folgeergebnis. Das ist kein Backtest,
+keine vollstaendige Kohorte und kein Broker-PnL, deshalb wurden daraus keine
+Trading-Schwellen abgeleitet. Server und Live-System blieben unveraendert; es
+gab keinen Commit und keinen Push. Reale TWS/Gateway-/DU-Soaks, Deployment,
+visueller Browser-Smoke der letzten UI-Aenderungen und jede Live-Freigabe
+bleiben offen.

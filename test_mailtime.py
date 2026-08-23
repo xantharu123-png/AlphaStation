@@ -8,6 +8,9 @@ fuer den Empfaenger nicht erkennbar derselbe Moment (BHC-Mail 14:09 UTC =
 
 from datetime import datetime, timezone
 
+import pytest
+
+import api
 from modules.mailtime import berlin_offset_hours, mail_timestamp_dual
 
 
@@ -59,10 +62,32 @@ def test_dual_timestamp_ohne_argument_laeuft():
 
 def test_api_alias_deckt_modul_ab():
     # api._mail_timestamp_dual muss dasselbe Format liefern (Import-Pfad).
-    import api
-
     now = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
     assert api._mail_timestamp_dual(now) == "31.07.2026 14:09 UTC / 16:09 MESZ"
+
+
+@pytest.mark.parametrize(
+    "rendered_at",
+    [
+        datetime(2026, 3, 29, 0, 59, tzinfo=timezone.utc),
+        datetime(2026, 3, 29, 1, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 25, 0, 59, tzinfo=timezone.utc),
+        datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc),
+    ],
+)
+def test_brand_and_body_share_exact_injected_dual_timestamp_at_dst_boundaries(
+    rendered_at,
+):
+    stamp = mail_timestamp_dual(rendered_at)
+    body = f"<p>Body-Zeit: {api._mail_timestamp_dual(rendered_at)}</p>"
+
+    branded = api._brand_email_html(
+        "Zeitstempel-Regression",
+        body,
+        rendered_at=rendered_at,
+    )
+
+    assert branded.count(stamp) == 2
 
 
 def test_bg_service_alias_deckt_modul_ab():

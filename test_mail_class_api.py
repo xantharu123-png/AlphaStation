@@ -17,10 +17,12 @@ Mock-/Fixture-Muster folgt test_email_alert_audit.py.
 """
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
 import api
+import bg_service
 import modules.auth as auth
 
 
@@ -437,6 +439,9 @@ def test_h2_stock_strategy_swing_mail_uses_swing_class_and_label(monkeypatch):
     assert kwargs["trade_horizon"] == "swing"
     assert "Swing-Setup aktiv" in body
     assert ">SWING_SETUP<" not in body
+    assert "Teilgewinn nach Plan pruefen" in body
+    assert "Gap-, Slippage- und Ausfuehrungsrisiken bleiben bestehen" in body
+    assert "Freeroll" not in body
 
 
 def test_h2_send_email_alert_records_prefixed_subject(monkeypatch):
@@ -453,6 +458,80 @@ def test_h2_send_email_alert_records_prefixed_subject(monkeypatch):
     assert events
     assert events[-1][0].startswith(api._MAIL_CLASS_SUBJECT_PREFIXES["watch"])
     assert events[-1][2] == "missing_gmail_config"
+
+
+@pytest.mark.parametrize(
+    ("mail_class", "trade_horizon"),
+    [
+        ("trade", "intraday"),
+        ("swing_trade", "swing"),
+        ("watch", "swing"),
+        ("info", "swing"),
+    ],
+)
+def test_send_email_alert_passes_exact_rendered_at_to_brand_per_mail_class(
+    monkeypatch,
+    mail_class,
+    trade_horizon,
+):
+    captured = []
+
+    class _FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self, context=None):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            return {}
+
+        def quit(self):
+            pass
+
+    rendered_at = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(api.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(
+        api,
+        "_SECRETS",
+        {
+            "GMAIL_USER": "sender@example.com",
+            "GMAIL_APP_PASSWORD": "app-password",
+            "ALERT_EMAIL": "recipient@example.com",
+        },
+    )
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+    monkeypatch.setattr(api, "_mail_outbox", None)
+
+    def fake_brand(subject, body, *, rendered_at=None):
+        captured.append((subject, body, rendered_at))
+        return f"<html><body>{body}</body></html>"
+
+    monkeypatch.setattr(api, "_brand_email_html", fake_brand)
+
+    assert api._send_email_alert(
+        "Zeitstempel",
+        "<p>Body</p>",
+        bypass_startup_cooldown=True,
+        recipient_emails=["recipient@example.com"],
+        trade_horizon=trade_horizon,
+        mail_class=mail_class,
+        rendered_at=rendered_at,
+    ) is True
+
+    assert captured == [
+        (
+            api._MAIL_CLASS_SUBJECT_PREFIXES[mail_class] + "Zeitstempel",
+            "<p>Body</p>",
+            rendered_at,
+        )
+    ]
 
 
 # ── H3: Empfaenger-Routing nach Mail-Klasse ──
@@ -670,6 +749,111 @@ def test_atr_distance_annotations_fallback_to_row_key():
     html_out = api._format_alert_plan_html(row)
     # Stop -1.0 => -5.0% ≈ 2.0xATR
     assert "(-5.0% ≈ 2.0×ATR)" in html_out
+
+
+@pytest.mark.parametrize("atr", [1.0, 0.0])
+def test_api_and_background_plan_renderers_show_reachability_as_telemetry(atr):
+    row = {
+        "Ticker": "RCH",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.0,
+        "TP1": 12.0,
+        "TP2": 13.0,
+        "trade_setup": {"atr": atr},
+    }
+
+    for renderer in (api._format_alert_plan_html, bg_service._format_alert_plan_html):
+        html_out = renderer(row)
+
+        assert "Reichweiten-Telemetrie" in html_out
+        assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
+        assert "blockiert" not in html_out
+        if atr > 0:
+            assert "Stop 1.0×ATR" in html_out
+            assert "TP1 2.0×ATR" in html_out
+            assert "TP2 3.0×ATR" in html_out
+            assert "Provenienz: native" in html_out
+        else:
+            assert "nicht verfuegbar" in html_out
+
+
+def test_api_and_background_renderers_name_tp2_budget_as_non_gate_telemetry():
+    row = {
+        "Ticker": "BUDGET",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.0,
+        "TP1": 12.0,
+        "TP2": 13.0,
+        "trade_horizon": "swing",
+        "target_reachability_atr_budgets": {"swing": 2.5},
+        "trade_setup": {"atr": 1.0},
+    }
+
+    for renderer in (api._format_alert_plan_html, bg_service._format_alert_plan_html):
+        html_out = renderer(row)
+
+        assert "TP2 ueberschreitet das konfigurierte 2.5×ATR-Budget" in html_out
+        assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
+        assert "Trade-Plan blockiert" not in html_out
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_provenance"),
+    [
+        (
+            {
+                "Ticker": "SYNTH",
+                "direction": "LONG",
+                "Entry": 10.0,
+                "StopLoss": 9.0,
+                "TP1": 12.0,
+                "TP2": 13.0,
+                "Trade_Setup_Synthetic": True,
+                "trade_setup": {"atr": 1.0},
+            },
+            "synthetic",
+        ),
+        (
+            {
+                "Ticker": "EST",
+                "direction": "LONG",
+                "Entry": 10.0,
+                "StopLoss": 9.0,
+                "DayHigh": 11.0,
+                "DayLow": 9.0,
+                "trade_setup": {"atr": 1.0},
+            },
+            "estimated",
+        ),
+    ],
+)
+def test_api_and_background_renderers_show_normalized_level_provenance(row, expected_provenance):
+    for renderer in (api._format_alert_plan_html, bg_service._format_alert_plan_html):
+        html_out = renderer(row)
+
+        assert f"Provenienz: {expected_provenance}" in html_out
+        assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
+
+
+def test_plan_quality_blocker_remains_independent_of_reachability_telemetry():
+    row = {
+        "Ticker": "QUALITY",
+        "direction": "LONG",
+        "Entry": 10.0,
+        "StopLoss": 9.0,
+        "TP1": 11.6,
+        "TP2": 11.7,
+        "trade_setup": {"atr": 1.0},
+    }
+
+    for renderer in (api._format_alert_plan_html, bg_service._format_alert_plan_html):
+        html_out = renderer(row)
+
+        assert "Trade-Plan blockiert" in html_out
+        assert "Reichweiten-Telemetrie" in html_out
+        assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
 
 
 # ── AUDIT 2026-07-28: Volatilitätsbudget (HLN) + Stop-Rausch-Warnung (BELFB) ──

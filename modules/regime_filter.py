@@ -165,6 +165,13 @@ def _breaker_row_metrics(row: dict | None) -> dict:
         fallback = row.get("avg_r_upper")
         avg_r_upper = float(fallback) if isinstance(fallback, (int, float)) else avg_r
     unresolved = int(row.get("managed_be_unresolved") or 0)
+    control_eligible = int(row.get("control_eligible_signals") or 0)
+    control_resolved = int(row.get("control_resolved_signals") or 0)
+    control_unresolved = int(row.get("control_unresolved") or 0)
+    control_no_fill = int(row.get("control_no_fill") or 0)
+    ambiguity_unresolved = int(row.get("ambiguity_unresolved") or 0)
+    ambiguous_outcomes = int(row.get("ambiguous_outcomes") or 0)
+    upper_unresolved = int(row.get("upper_unresolved") or 0)
     return {
         "decided": int(decided),
         "win_pct": float(win_pct),
@@ -172,6 +179,18 @@ def _breaker_row_metrics(row: dict | None) -> dict:
         "avg_r": float(avg_r),
         "avg_r_upper": float(avg_r_upper),
         "managed_be_unresolved": unresolved,
+        "control_eligible_signals": control_eligible,
+        "control_resolved_signals": control_resolved,
+        "control_unresolved": control_unresolved,
+        "control_no_fill": control_no_fill,
+        "ambiguity_unresolved": ambiguity_unresolved,
+        "ambiguous_outcomes": ambiguous_outcomes,
+        "upper_unresolved": upper_unresolved,
+        "sample_reliable": row.get("sample_reliable") is True,
+        "managed_be_sample_reliable": (
+            row.get("managed_be_sample_reliable") is True
+        ),
+        "control_evidence_complete": False,
         "joint_cell_verified": False,
         "trip_release_eligible": False,
         "cell_id": row.get("cell_id"),
@@ -234,8 +253,25 @@ def breaker_metrics(
             "cell_id", "scanner", "direction", "horizon", "market_regime"
         )
     )
+    control_partition_complete = (
+        normalized["control_eligible_signals"]
+        == normalized["control_resolved_signals"]
+        + normalized["control_unresolved"]
+        + normalized["control_no_fill"]
+    )
+    control_evidence_complete = bool(
+        control_partition_complete
+        and normalized["control_unresolved"] == 0
+        and normalized["ambiguity_unresolved"] == 0
+        and normalized["upper_unresolved"] == 0
+        and normalized["managed_be_unresolved"] == 0
+        and normalized["control_resolved_signals"] == normalized["decided"]
+    )
     normalized["joint_cell_verified"] = bool(exact_identity)
-    normalized["trip_release_eligible"] = bool(exact_identity)
+    normalized["control_evidence_complete"] = control_evidence_complete
+    normalized["trip_release_eligible"] = bool(
+        exact_identity and control_evidence_complete
+    )
     return normalized
 
 
@@ -290,6 +326,10 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
     avg_r = float(m.get("avg_r") or 0.0)
     avg_r_upper = float(m.get("avg_r_upper", avg_r) or 0.0)
     managed_be_unresolved = int(m.get("managed_be_unresolved") or 0)
+    control_unresolved = int(m.get("control_unresolved") or 0)
+    ambiguity_unresolved = int(m.get("ambiguity_unresolved") or 0)
+    upper_unresolved = int(m.get("upper_unresolved") or 0)
+    control_evidence_complete = m.get("control_evidence_complete") is True
     joint_cell_verified = m.get("joint_cell_verified") is True
     trip_release_eligible = m.get("trip_release_eligible") is True
     tripped_at = _parse_dt((state_entry or {}).get("tripped_at"))
@@ -347,6 +387,10 @@ def evaluate_breaker(metrics: dict | None, state_entry: dict | None, now=None, *
             "avg_r": avg_r,
             "avg_r_upper": avg_r_upper,
             "managed_be_unresolved": managed_be_unresolved,
+            "control_unresolved": control_unresolved,
+            "ambiguity_unresolved": ambiguity_unresolved,
+            "upper_unresolved": upper_unresolved,
+            "control_evidence_complete": control_evidence_complete,
             "joint_cell_verified": joint_cell_verified,
             "trip_release_eligible": trip_release_eligible,
             "cell_id": m.get("cell_id"),

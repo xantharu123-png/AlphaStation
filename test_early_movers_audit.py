@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import api
 
@@ -100,6 +100,44 @@ def test_early_mover_levels_are_structure_first_not_r_only():
     assert setup["entry"] > setup["stop_loss"]
     assert setup["tp1"] > setup["entry"]
     assert setup["rr_tp1"] >= 1.35
+
+
+def test_early_mover_watch_body_and_send_share_explicit_render_time(monkeypatch):
+    now = datetime(2026, 7, 31, 14, 9, tzinfo=timezone.utc)
+    sent = []
+    row = {
+        "symbol": "WATCH",
+        "name": "Render Time",
+        "wait_reason": "Auf Retest warten",
+        "exchange": "Bitget",
+        "grade": "A",
+        "score": 88,
+        "price": 1.25,
+        "entry": 1.2,
+        "stop": 1.1,
+        "tp1": 1.4,
+        "tp2": 1.6,
+        "live_rr": 2.0,
+        "distance_r": 0.1,
+        "change24": 4.0,
+        "vol_mcap": 8.0,
+        "key": "watch-render-time",
+    }
+    monkeypatch.setattr(api, "_email_dedupe_remaining", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(api, "_email_dedupe_mark", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: sent.append((subject, body, kwargs)) or True,
+    )
+
+    assert api._send_early_mover_watch_alerts([row], now=now.timestamp()) is True
+
+    assert len(sent) == 1
+    _subject, body, kwargs = sent[0]
+    assert api._mail_timestamp_dual(now) in body
+    assert kwargs["rendered_at"] == now
 
 
 def test_early_mover_extreme_turnover_without_alpha_is_wait_only():
