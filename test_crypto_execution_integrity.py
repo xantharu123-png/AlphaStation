@@ -192,6 +192,103 @@ def test_live_crypto_signals_require_timestamped_fresh_execution_data():
     assert normalized_short["trade_signal"] == "WARTEN"
 
 
+def test_crypto_trade_normalizers_fail_closed_on_every_structure_blocker():
+    blockers = (
+        {"barrier_gate": "BREAK_RECLAIM_REQUIRED", "barrier_gate_active": True},
+        {"structure_status": "WAIT_BREAK_RECLAIM"},
+        {"structure_status": "REJECT"},
+        {"target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER", "tp1_is_projection": True},
+        {"trade_setup": {"target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER", "tp1_is_projection": True}},
+    )
+    for index, blocker in enumerate(blockers):
+        long_row = {
+            "Symbol": f"LONG{index}",
+            "trade_signal": "JETZT_TRADEN",
+            "execution_trigger_ok": True,
+            "execution_data_age_seconds": 60,
+            "explosion_score": 90,
+            "entry_score": 90,
+            "Price": 1.0,
+            **blocker,
+        }
+        short_row = {
+            "symbol": f"SHORT{index}",
+            "trade_action": "SHORT_NOW",
+            "trade_category": "NEW_LISTING_DUMP",
+            "micro_trigger_ok": True,
+            "micro_data_age_seconds": 60,
+            "safety_ok": True,
+            "listing_trade_ok": True,
+            "exhaustion_score": 90,
+            "price": 1.0,
+            **blocker,
+        }
+
+        normalized_long = api._normalize_crypto_long_signal(long_row)
+        normalized_short = api._normalize_crypto_short_signal(short_row)
+
+        assert normalized_long["trade_action"] == "LONG_ARMED"
+        assert normalized_long["trade_signal"] == "WARTEN"
+        assert normalized_long["alertable_crypto"] is False
+        assert normalized_long["structure_trade_block_reason"]
+        assert normalized_short["trade_action"] == "SHORT_WATCH"
+        assert normalized_short["trade_signal"] == "WARTEN"
+        assert normalized_short["alertable_crypto"] is False
+        assert normalized_short["structure_trade_block_reason"]
+
+
+def test_crypto_merge_rechecks_structure_after_normalization(monkeypatch):
+    blocked = {
+        "Symbol": "CACHE",
+        "symbol": "CACHE",
+        "direction": "LONG",
+        "trade_action": "JETZT_LONG",
+        "trade_signal": "JETZT_TRADEN",
+        "decision": "JETZT_LONG",
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "structure_status": "WAIT_BREAK_RECLAIM",
+        "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+        "tp1_is_projection": True,
+    }
+    monkeypatch.setattr(api, "_normalize_crypto_long_signal", lambda row: dict(row))
+
+    rows = api._merge_crypto_trade_signals([blocked], [])
+
+    assert rows[0]["trade_action"] == "LONG_ARMED"
+    assert rows[0]["trade_signal"] == "WARTEN"
+    assert rows[0]["alertable_crypto"] is False
+    assert rows[0]["structure_trade_block_reason"] == "active_structural_barrier_gate"
+
+
+def test_final_crypto_structure_acceptance_masks_stale_nested_wait_state():
+    row = {
+        "Symbol": "FINAL",
+        "trade_signal": "JETZT_TRADEN",
+        "execution_trigger_ok": True,
+        "execution_data_age_seconds": 60,
+        "explosion_score": 90,
+        "entry_score": 90,
+        "Price": 1.0,
+        "barrier_gate": None,
+        "structure_status": "ACCEPT",
+        "target_quality": "STRUCTURAL_FIRST_BARRIER",
+        "tp1_is_projection": False,
+        "trade_setup": {
+            "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+            "barrier_gate_active": True,
+            "structure_status": "REJECT",
+            "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+            "tp1_is_projection": True,
+        },
+    }
+
+    normalized = api._normalize_crypto_long_signal(row)
+
+    assert normalized["trade_action"] == "JETZT_LONG"
+    assert normalized["trade_signal"] == "JETZT_TRADEN"
+    assert "structure_trade_block_reason" not in normalized
+
+
 def test_cached_live_crypto_row_without_candle_age_is_downgraded():
     rows = [{
         "Symbol": "STALECACHE",

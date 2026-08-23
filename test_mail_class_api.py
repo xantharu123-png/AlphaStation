@@ -48,6 +48,19 @@ def _isolate_email_state(monkeypatch, tmp_path):
     )
 
 
+def _fresh_5m_trigger(checked_at=None, age_seconds=60):
+    checked = float(time.time() if checked_at is None else checked_at)
+    age = float(age_seconds)
+    return {
+        "ok": True,
+        "reason": "adaptive_5m_retest_hold",
+        "timeframe": "5m",
+        "checked_at": checked,
+        "last_candle_closed_at": checked - age,
+        "execution_data_age_seconds": age,
+    }
+
+
 def _early_mover_row(**overrides):
     """Sauberes, im Versandmoment handelbares Crypto-Swing-Setup
     (Spiegel der Fixture aus test_email_alert_audit.py inkl. AUDIT-H-1
@@ -66,6 +79,7 @@ def _early_mover_row(**overrides):
         "entry_status": "CONDITIONAL_LONG",
         "entry_quality": "GOOD",
         "execution_trigger_ok": True,
+        "intraday_trigger": _fresh_5m_trigger(),
         "signal_quality": "conditional_long_setup",
         "entry": 1.25,
         "stop_loss": 1.15,
@@ -176,6 +190,66 @@ def test_q1_fresh_long_trigger_row_goes_to_trade_mail(monkeypatch):
     assert watch_mails == []
 
 
+def test_q1_trade_tracking_row_preserves_final_target_and_structure_telemetry(monkeypatch):
+    sent = _capture_send(monkeypatch)
+    barrier = {
+        "side": "resistance",
+        "price": 1.43,
+        "action": None,
+        "zone_id": "vrvp-5m-143",
+    }
+    decision = {
+        "status": "ACCEPT",
+        "reason": "first_opposing_barrier_is_tradable_tp1",
+        "barrier_gate": None,
+    }
+    setup = dict(_early_mover_row()["trade_setup"])
+    setup.update({
+        # Stale nested values must not override the finalized row telemetry.
+        "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+        "tp1_is_projection": True,
+        "tp2_is_projection": False,
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "barrier_gate_active": True,
+        "structure_status": "WAIT_BREAK_RECLAIM",
+    })
+    row = _early_mover_row(
+        Symbol="FINALMETA",
+        target_quality="STRUCTURAL_TP1_PROJECTION_TP2",
+        tp1_is_projection=False,
+        tp2_is_projection=True,
+        tp1_source="vrvp_confirmed_resistance",
+        tp2_source="measured_move_projection",
+        nearest_barrier=barrier,
+        overhead_resistance=barrier,
+        barrier_gate=None,
+        barrier_gate_active=False,
+        barrier_gate_reason=None,
+        structure_status="ACCEPT",
+        structure_reason="first_opposing_barrier_is_tradable_tp1",
+        structure_decision=decision,
+        trade_setup=setup,
+    )
+
+    api._send_early_mover_long_alerts({"coins": [row]})
+
+    trade = next(item for item in sent if item[2].get("mail_class") == "trade")
+    tracked = trade[2]["tracking_rows"][0]
+    assert tracked["target_quality"] == "STRUCTURAL_TP1_PROJECTION_TP2"
+    assert tracked["tp1_is_projection"] is False
+    assert tracked["tp2_is_projection"] is True
+    assert tracked["tp1_source"] == "vrvp_confirmed_resistance"
+    assert tracked["tp2_source"] == "measured_move_projection"
+    assert tracked["nearest_barrier"] == barrier
+    assert tracked["overhead_resistance"] == barrier
+    assert tracked["barrier_gate"] is None
+    assert tracked["barrier_gate_active"] is False
+    assert tracked["barrier_gate_reason"] is None
+    assert tracked["structure_status"] == "ACCEPT"
+    assert tracked["structure_reason"] == "first_opposing_barrier_is_tradable_tp1"
+    assert tracked["structure_decision"] == decision
+
+
 def test_q1_trade_and_watch_rows_split_into_separate_mails(monkeypatch):
     sent = _capture_send(monkeypatch)
     payload = {"coins": [
@@ -255,7 +329,7 @@ def test_q2_trigger_older_than_15min_is_suppressed_for_mail():
     now = 1_000_000.0
     row = _early_mover_row(
         Symbol="STALE",
-        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": now - 1200},
+        intraday_trigger=_fresh_5m_trigger(now - 1200),
     )
 
     state = api._classify_alert_candidate("early_movers", row, now)
@@ -269,7 +343,7 @@ def test_q2_trigger_younger_than_15min_stays_alertable():
     now = 1_000_000.0
     row = _early_mover_row(
         Symbol="FRESH",
-        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": now - 600},
+        intraday_trigger=_fresh_5m_trigger(now - 600),
     )
 
     state = api._classify_alert_candidate("early_movers", row, now)
@@ -280,24 +354,33 @@ def test_q2_trigger_younger_than_15min_stays_alertable():
 
 def test_q2_scan_age_proxy_used_when_row_timestamp_missing():
     now = 1_000_000.0
-    stale = _early_mover_row(Symbol="OLDSCAN", _mail_scan_age_sec=1200)
-    fresh = _early_mover_row(Symbol="NEWSCAN", _mail_scan_age_sec=300)
+    stale = _early_mover_row(Symbol="OLDSCAN", _mail_scan_age_sec=1200, intraday_trigger=None)
+    fresh = _early_mover_row(Symbol="NEWSCAN", _mail_scan_age_sec=300, intraday_trigger=None)
 
     stale_state = api._classify_alert_candidate("early_movers", stale, now)
     fresh_state = api._classify_alert_candidate("early_movers", fresh, now)
 
     assert "trigger_stale_for_mail" in stale_state["suppression_reasons"]
     assert "trigger_stale_for_mail" not in fresh_state["suppression_reasons"]
-    # Ohne jeden Zeitstempel: kein Gate (Alter unbekannt)
-    unknown_state = api._classify_alert_candidate("early_movers", _early_mover_row(Symbol="NOAGE"), now)
+    assert fresh_state["alertable_now"] is False
+    assert "early_mover_wait_entry_confirmation" in fresh_state["suppression_reasons"]
+    # Ohne abgeschlossene 5m-Zeitbelege gilt fail-closed, auch wenn das alte
+    # Top-Level-Boolean noch True ist.
+    unknown_state = api._classify_alert_candidate(
+        "early_movers",
+        _early_mover_row(Symbol="NOAGE", intraday_trigger={"ok": True, "timeframe": "5m"}),
+        now,
+    )
     assert "trigger_stale_for_mail" not in unknown_state["suppression_reasons"]
+    assert unknown_state["alertable_now"] is False
+    assert "early_mover_wait_entry_confirmation" in unknown_state["suppression_reasons"]
 
 
 def test_q2_stale_trigger_row_lands_in_watch_mail_with_hint(monkeypatch):
     sent = _capture_send(monkeypatch)
     row = _early_mover_row(
         Symbol="STALEROW",
-        intraday_trigger={"ok": True, "reason": "5m_breakout_volume_confirmed", "checked_at": time.time() - 1200},
+        intraday_trigger=_fresh_5m_trigger(time.time() - 1200),
     )
 
     api._send_early_mover_long_alerts({"coins": [row]})

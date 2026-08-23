@@ -39,6 +39,7 @@ from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
     calculate_wilder_atr,
+    normalize_ohlcv_bars,
 )
 from modules.trade_levels import trade_geometry
 from modules.volume_metrics import historical_volume_baseline
@@ -188,6 +189,44 @@ def _exchange_timestamp_iso(ts):
         return None
 
 
+def _coerce_utc_datetime(value):
+    """Return one stable UTC datetime for scanner cutoffs and candle opens."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = _normalize_epoch_seconds(value)
+        if seconds <= 0:
+            return None
+        try:
+            parsed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return _coerce_utc_datetime(float(text))
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _stable_utc_iso(value=None):
+    parsed = _coerce_utc_datetime(value)
+    if parsed is None and value is None:
+        parsed = datetime.now(timezone.utc)
+    return parsed.isoformat() if parsed is not None else None
+
+
 def _first_exchange_candle_anchor(candles, requested_count=50, timeframe_seconds=3600):
     """Use the first candle as listing anchor only for complete, uncapped history."""
     rows = [row for row in (candles or []) if isinstance(row, dict)]
@@ -263,6 +302,66 @@ def _monitor_key(symbol, exchange):
     return f"{venue}:{symbol}"
 
 
+def _structure_trade_state(signal):
+    """Collapse nested structure/gate metadata into one fail-closed state."""
+    if not isinstance(signal, dict):
+        return {"blocked": True, "status": "UNAVAILABLE", "gate": None, "reason": "invalid_signal"}
+    setup = signal.get("trade_setup") if isinstance(signal.get("trade_setup"), dict) else {}
+    sources = [signal, setup]
+    statuses = []
+    gates = []
+    reasons = []
+    gate_active = False
+    wait_action = False
+    for source in sources:
+        status = str(source.get("structure_status") or "").strip().upper()
+        if status:
+            statuses.append(status)
+        gate = str(source.get("barrier_gate") or "").strip().upper()
+        if gate:
+            gates.append(gate)
+        reason = str(source.get("structure_reason") or source.get("barrier_gate_reason") or "").strip()
+        if reason:
+            reasons.append(reason)
+        gate_active = gate_active or source.get("barrier_gate_active") is True
+        action = str(source.get("trade_action") or source.get("entry_status") or "").strip().upper()
+        wait_action = wait_action or "WAIT" in action or action in {"TRIGGER_ABWARTEN", "RETEST_ABWARTEN"}
+        decision = source.get("structure_decision")
+        if isinstance(decision, dict):
+            decision_status = str(decision.get("status") or "").strip().upper()
+            decision_gate = str(decision.get("barrier_gate") or "").strip().upper()
+            decision_reason = str(decision.get("reason") or "").strip()
+            if decision_status:
+                statuses.append(decision_status)
+            if decision_gate:
+                gates.append(decision_gate)
+            if decision_reason:
+                reasons.append(decision_reason)
+
+    blocking_status = next((
+        status for status in statuses
+        if status.startswith(("WAIT", "REJECT", "BLOCK", "UNAVAILABLE", "INVALID", "NO_TRADE"))
+        or status in {"KEIN_EINSTIEG", "TRIGGER_ABWARTEN", "RETEST_ABWARTEN"}
+    ), None)
+    blocking_gate = next((gate for gate in gates if gate not in {"NONE", "ACCEPT"}), None)
+    projection_only = any(
+        source.get("tp1_is_projection") is True
+        or str(source.get("target_quality") or "").strip().upper().startswith("PROJECTION")
+        for source in sources
+    )
+    if projection_only:
+        blocking_status = blocking_status or "REJECT"
+        blocking_gate = blocking_gate or "STRUCTURAL_TP1_REQUIRED"
+        if not reasons:
+            reasons.append("projection_only_tp1_not_tradeable")
+    return {
+        "blocked": bool(blocking_status or blocking_gate or gate_active or wait_action or projection_only),
+        "status": blocking_status or (statuses[0] if statuses else None),
+        "gate": blocking_gate,
+        "reason": reasons[0] if reasons else None,
+    }
+
+
 def _is_tradeable_short_signal(signal):
     if not isinstance(signal, dict):
         return False
@@ -271,6 +370,8 @@ def _is_tradeable_short_signal(signal):
         risk_pct = float(signal.get("risk_pct", 999) or 999)
     except (TypeError, ValueError):
         return False
+
+    structure = _structure_trade_state(signal)
 
     return (
         signal.get("direction") == "SHORT"
@@ -286,6 +387,7 @@ def _is_tradeable_short_signal(signal):
         and rr_effective >= CONFIG["min_short_rr"]
         and risk_pct <= CONFIG["max_signal_risk_pct"]
         and signal.get("listing_trade_ok") is True
+        and structure["blocked"] is False
     )
 
 
@@ -551,6 +653,7 @@ def fetch_mexc_ticker(symbol):
         "oi_usd_estimate": oi_usd_estimate,
         "oi_data_status": oi_data_status,
         "funding_rate": float(t.get("fundingRate", 0)),
+        "funding_interval_hours": 8.0,
         "open_interest_available": oi_data_status == "ok",
         "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
         "long_short_ratio_available": False,
@@ -642,6 +745,7 @@ def fetch_binance_ticker(symbol):
         "change_24h": float(data.get("priceChangePercent", 0)),
         "open_interest": 0,
         "funding_rate": 0,
+        "funding_interval_hours": 8.0,
         "long_short_ratio": 0,
         "open_interest_available": False,
         "funding_available": False,
@@ -764,6 +868,7 @@ def fetch_bitget_ticker(symbol):
         "change_24h": float(t.get("change24h", 0)) * 100,
         "open_interest": float(t.get("holdingAmount", 0)),
         "funding_rate": float(t.get("fundingRate", 0)),
+        "funding_interval_hours": 8.0,
         "open_interest_available": "holdingAmount" in t and t.get("holdingAmount") not in (None, ""),
         "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
         "long_short_ratio_available": False,
@@ -1307,7 +1412,15 @@ def detect_new_listings():
 # PUMP EXHAUSTION SCORING (7 Komponenten, 0-100)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=None, is_new_listing=True):
+def calculate_listing_exhaustion(
+    candles,
+    ticker,
+    book=None,
+    listing_age_hours=None,
+    is_new_listing=True,
+    *,
+    as_of=None,
+):
     """
     Berechnet Pump-Exhaustion Score speziell für neue Listings.
 
@@ -1371,6 +1484,7 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     last_ath_index = max(i for i, c in enumerate(candles) if c["high"] == ath)
     bars_since_ath = max(0, n - 1 - last_ath_index)
 
+    vrvp_as_of = _stable_utc_iso(as_of)
     pump_data = {
         "first_price": first_price,
         "current_price": current_price,
@@ -1389,8 +1503,15 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         "prior_3_low_broken": bool(prior_3_low and current_price < prior_3_low),
         "lower_high_confirmed": bool(last_candle["high"] < prior_6_high and current_price < recent_rejection_high),
         "bars_since_ath": bars_since_ath,
+        "vrvp_as_of": vrvp_as_of,
+        "vrvp_timeframe": "1H",
         "vrvp_bars": [
             {
+                # All supported exchange adapters expose candle OPEN time.
+                # Keeping it here lets VRVP/ATR reject forming and future bars
+                # against the single stable scan cutoff above.
+                "timestamp": c.get("timestamp"),
+                "open_time": c.get("timestamp"),
                 "open": c.get("open", c.get("close", 0)),
                 "high": c.get("high", c.get("close", 0)),
                 "low": c.get("low", c.get("close", 0)),
@@ -1672,7 +1793,11 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     #    Hohe positive Funding = Longs überhitzt, zahlen Shorts
     #    Extrem hohe Funding (>0.1%) bei neuen Listings = fast sicherer Dump
     # ═══════════════════════════════════════════════════════════════════════
-    fr = _to_float(ticker.get("funding_rate"))
+    # Telemetry contract: the venue value stays a fraction in
+    # ``funding_rate_raw``/``funding_rate_unit``; ``funding_rate_pct`` and the
+    # legacy ``funding_rate`` alias carry the interval-normalized percentage.
+    fr_raw = _to_float(ticker.get("funding_rate"))
+    fr = fr_raw
     # M-Funding-Intervall AUDIT FIX: Die Schwellen unten sind pro-8h kalibriert.
     # Liefert ein Fetcher kuenftig ein Intervall-Feld, wird hier auf 8h normalisiert.
     # Stand heute liefern fetch_mexc/bitget/binance_ticker KEIN Intervall-Feld
@@ -1680,9 +1805,15 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
     # TODO: Sobald ein Fetcher "funding_interval_hours" liefert (z.B. MEXC
     # collectCycle oder Bitget fundingTime-Abstand), Feld im Ticker-Dict setzen.
     FUNDING_STANDARD_INTERVAL_H = 8.0
-    funding_interval_h = _to_float((ticker or {}).get("funding_interval_hours"), 0)
-    if funding_available and funding_interval_h > 0 and funding_interval_h != FUNDING_STANDARD_INTERVAL_H:
-        fr = fr * (FUNDING_STANDARD_INTERVAL_H / funding_interval_h)
+    source_funding_interval_h = _to_float((ticker or {}).get("funding_interval_hours"), 0)
+    if funding_available and source_funding_interval_h <= 0:
+        source_funding_interval_h = FUNDING_STANDARD_INTERVAL_H
+    if (
+        funding_available
+        and source_funding_interval_h > 0
+        and source_funding_interval_h != FUNDING_STANDARD_INTERVAL_H
+    ):
+        fr = fr * (FUNDING_STANDARD_INTERVAL_H / source_funding_interval_h)
     if funding_available and fr > 0:
         fr_pct = fr * 100  # z.B. 0.001 → 0.1% (pro 8h)
         if fr_pct >= 0.3:      # Extrem (> 0.3% pro 8h = 0.9%/Tag, ohne Compounding)
@@ -1699,6 +1830,11 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
             pts = 0
         score += pts
         pump_data["funding_rate"] = round(fr_pct, 4)
+        pump_data["funding_rate_pct"] = round(fr_pct, 4)
+        pump_data["funding_rate_raw"] = fr_raw
+        pump_data["funding_rate_unit"] = "fraction"
+        pump_data["funding_interval_hours"] = FUNDING_STANDARD_INTERVAL_H
+        pump_data["funding_source_interval_hours"] = source_funding_interval_h
         details.append(f"💰 Funding: {fr_pct:.3f}% (Longs zahlen) → {pts}/15")
     elif funding_available and fr < 0:
         fr_pct = fr * 100
@@ -1706,9 +1842,19 @@ def calculate_listing_exhaustion(candles, ticker, book=None, listing_age_hours=N
         malus = 5 if fr_pct < -0.05 else 3 if fr_pct < -0.02 else 1
         score = max(0, score - malus)
         pump_data["funding_rate"] = round(fr_pct, 4)
+        pump_data["funding_rate_pct"] = round(fr_pct, 4)
+        pump_data["funding_rate_raw"] = fr_raw
+        pump_data["funding_rate_unit"] = "fraction"
+        pump_data["funding_interval_hours"] = FUNDING_STANDARD_INTERVAL_H
+        pump_data["funding_source_interval_hours"] = source_funding_interval_h
         details.append(f"💰 Funding: {fr_pct:.3f}% (negativ! Shorts zahlen) → -{malus} Malus")
     elif funding_available:
         pump_data["funding_rate"] = 0.0
+        pump_data["funding_rate_pct"] = 0.0
+        pump_data["funding_rate_raw"] = fr_raw
+        pump_data["funding_rate_unit"] = "fraction"
+        pump_data["funding_interval_hours"] = FUNDING_STANDARD_INTERVAL_H
+        pump_data["funding_source_interval_hours"] = source_funding_interval_h
         details.append("💰 Funding: 0.000% (gültiger Messwert, neutral)")
     else:
         details.append("💰 Funding: keine Daten")
@@ -2277,6 +2423,88 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     return result
 
 
+def _causal_listing_vrvp(pump_data, entry):
+    """Return profile/ATR inputs from verified completed 1H exchange bars."""
+    raw_bars = [
+        dict(row)
+        for row in (pump_data.get("vrvp_bars") or [])
+        if isinstance(row, dict)
+    ][-72:]
+    as_of = _coerce_utc_datetime(pump_data.get("vrvp_as_of"))
+    context = {
+        "timeframe": "1H",
+        "as_of": as_of.isoformat() if as_of is not None else None,
+        "raw_bar_count": len(raw_bars),
+        "completed_bar_count": 0,
+        "completion_verified": False,
+        "profile_applied": False,
+        "reason": None,
+    }
+    if not raw_bars:
+        context["reason"] = "missing_vrvp_bars"
+        return None, [], context
+    if as_of is None:
+        context["reason"] = "missing_stable_vrvp_as_of"
+        return None, [], context
+
+    interval_signatures = {}
+    for row in raw_bars:
+        open_value = row.get("open_time")
+        if open_value in (None, ""):
+            open_value = row.get("timestamp")
+        opened_at = _coerce_utc_datetime(open_value)
+        if opened_at is None:
+            context["reason"] = "unverified_vrvp_bar_timestamp"
+            return None, [], context
+        signature = tuple(
+            _to_float(row.get(long_key, row.get(short_key)))
+            for long_key, short_key in (
+                ("open", "o"),
+                ("high", "h"),
+                ("low", "l"),
+                ("close", "c"),
+                ("volume", "v"),
+            )
+        )
+        prior = interval_signatures.get(opened_at)
+        if prior is not None and prior != signature:
+            context["reason"] = "conflicting_vrvp_bar_timestamp"
+            return None, [], context
+        interval_signatures[opened_at] = signature
+
+    completed = normalize_ohlcv_bars(
+        raw_bars,
+        lookback=72,
+        timeframe="1H",
+        as_of=as_of,
+        timestamp_mode="open",
+    )
+    context["completion_verified"] = True
+    context["completed_bar_count"] = len(completed)
+    if len(completed) < 20:
+        context["reason"] = "insufficient_completed_vrvp_bars"
+        return None, completed, context
+
+    profile = build_vrvp_structure(
+        raw_bars,
+        entry,
+        "SHORT",
+        timeframe="1H",
+        num_bins=18,
+        min_bars=20,
+        lookback=72,
+        as_of=as_of,
+        timestamp_mode="open",
+    )
+    if not profile or profile.get("causal_completion_verified") is not True:
+        context["reason"] = "causal_vrvp_profile_unavailable"
+        return None, completed, context
+
+    context["profile_applied"] = True
+    context["reason"] = "completed_exchange_bars"
+    return profile, completed, context
+
+
 def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, safety_warnings):
     """
     Generiert ein Short-Signal mit Entry, Stop-Loss und Take-Profit Levels.
@@ -2311,20 +2539,13 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     tp1_source = "ath_dump_projection"
     tp2_source = "ath_dump_projection"
 
-    vrvp = build_vrvp_structure(
-        pump_data.get("vrvp_bars") or [],
-        entry,
-        "SHORT",
-        timeframe="1h_listing",
-        num_bins=18,
-        min_bars=20,
-        lookback=72,
-    )
+    vrvp, completed_vrvp_bars, vrvp_context = _causal_listing_vrvp(pump_data, entry)
     vrvp_atr = calculate_wilder_atr(
-        pump_data.get("vrvp_bars") or [],
+        completed_vrvp_bars,
         period=14,
         lookback=72,
     )
+    vrvp_atr_source = "completed_exchange_1h_bars" if vrvp_atr > 0 else "bounded_volatility_fallback"
     if vrvp_atr <= 0:
         # Sparse new-listing history cannot support ATR(14). Keep a bounded
         # volatility fallback instead of mislabelling ATH distance as ATR.
@@ -2340,12 +2561,44 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
             "stop_source": stop_model,
             "tp1_source": tp1_source,
             "tp2_source": tp2_source,
+            "tp1_is_projection": True,
+            "tp2_is_projection": True,
+            "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
         },
         vrvp,
         direction="SHORT",
         asset_type="crypto_short",
         atr=vrvp_atr,
     )
+    setup["vrvp_completion_verified"] = bool(vrvp_context.get("completion_verified"))
+    setup["vrvp_completed_bar_count"] = int(vrvp_context.get("completed_bar_count") or 0)
+    setup["vrvp_raw_bar_count"] = int(vrvp_context.get("raw_bar_count") or 0)
+    setup["vrvp_completion_reason"] = vrvp_context.get("reason")
+    setup["vrvp_as_of"] = vrvp_context.get("as_of")
+    setup["vrvp_timeframe"] = "1H"
+    setup["vrvp_atr"] = vrvp_atr
+    setup["vrvp_atr_source"] = vrvp_atr_source
+    if setup.get("tp1_is_projection") is not False:
+        setup["tp1_is_projection"] = True
+        setup.setdefault("target_quality", "PROJECTION_ONLY_NO_CONFIRMED_BARRIER")
+        setup["barrier_gate"] = setup.get("barrier_gate") or "STRUCTURAL_TP1_REQUIRED"
+        setup["barrier_gate_active"] = True
+        setup["structure_status"] = "REJECT"
+        setup["structure_reason"] = "projection_only_tp1_not_tradeable"
+        decision = dict(setup.get("structure_decision") or {})
+        decision.update({
+            "model": decision.get("model") or "structure_decision_v1",
+            "status": "REJECT",
+            "reason": "projection_only_tp1_not_tradeable",
+            "direction": "SHORT",
+            "barrier_gate": setup["barrier_gate"],
+        })
+        setup["structure_decision"] = decision
+    structure_state = _structure_trade_state(setup)
+    structure_blocked = bool(structure_state.get("blocked"))
+    structure_status = structure_state.get("status") or setup.get("structure_status")
+    structure_gate = structure_state.get("gate") or setup.get("barrier_gate")
+    structure_reason = structure_state.get("reason") or setup.get("structure_reason")
     entry = _to_float(setup.get("entry")) or entry
     stop = _to_float(setup.get("stop")) or stop
     tp1 = _to_float(setup.get("tp1")) or tp1
@@ -2451,6 +2704,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         and not tp2_missed
         and listing_trade_ok
         and btc_context_ok
+        and not structure_blocked
     )
     exhaustion_short_ok = exh_score >= CONFIG["exh_short_entry"]
     trade_setup_ok = (
@@ -2507,6 +2761,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("listing_too_early")
     elif listing_expired:
         risk_flags.append("listing_age_expired")
+    if structure_blocked:
+        risk_flags.append("structure_barrier_wait")
 
     if listing_info_missing:
         trade_category = "LISTING_INFO_MISSING"
@@ -2518,6 +2774,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         trade_category = "NEW_LISTING_TOO_EARLY"
     elif listing_expired:
         trade_category = "NEW_LISTING_EXPIRED"
+    elif structure_blocked:
+        trade_category = "STRUCTURE_WAIT"
     elif trade_setup_ok:
         trade_category = "NEW_LISTING_DUMP"
     else:
@@ -2551,6 +2809,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif listing_expired:
         timing = "[~] BEOBACHTEN - Listing-Fenster abgelaufen"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif structure_blocked:
+        timing = "[~] WARTEN - erste Strukturbarriere brechen und reclaimen"
+        timing_quality = 2
     elif trade_setup_ok:
         if early_crack_ok and not exhaustion_short_ok:
             timing = "[-] JETZT SHORTEN — Early Crack/Rejection"
@@ -2584,6 +2845,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     if tp2_missed:
         grade = "D"
         grade_label = "[X] D â€” NO TRADE"
+    elif structure_blocked:
+        grade = "B" if exh_score >= 50 and rr_effective >= 1.0 else "C"
+        grade_label = " B — STRUKTUR-WAIT" if grade == "B" else " C — STRUKTUR-WAIT"
     elif trade_setup_ok and rr_effective >= 2.0 and (exh_score >= 80 or (early_crack_ok and exh_score >= 60)):
         grade = "S"
         grade_label = " S — ELITE SHORT"
@@ -2615,6 +2879,12 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "listing_trade_ok": listing_trade_ok,
         "rr_effective": rr_effective,
         "risk_pct": risk_pct,
+        "trade_setup": setup,
+        "barrier_gate": structure_gate,
+        "barrier_gate_active": bool(setup.get("barrier_gate_active")),
+        "structure_status": structure_status,
+        "structure_reason": structure_reason,
+        "structure_decision": setup.get("structure_decision"),
     }
     is_tradeable = _is_tradeable_short_signal(tradeability_probe)
     if is_tradeable:
@@ -2626,6 +2896,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     elif not btc_context_ok or listing_too_early:
         trade_signal = "WARTEN"
         signal_label = "Warten"
+    elif structure_blocked:
+        trade_signal = "WARTEN"
+        signal_label = "Strukturbarriere abwarten"
     else:
         trade_signal = "BEOBACHTEN"
         signal_label = "Achtung beobachten"
@@ -2641,11 +2914,30 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "tp2": round(tp2, 6),
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
+        "tp1_is_projection": setup.get("tp1_is_projection", True),
+        "tp2_is_projection": setup.get("tp2_is_projection", True),
+        "tp1_structure": setup.get("tp1_structure"),
+        "tp2_structure": setup.get("tp2_structure"),
+        "target_quality": setup.get("target_quality", "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"),
         "trade_setup": setup,
+        "nearest_barrier": setup.get("nearest_barrier"),
+        "barrier_gate": structure_gate,
+        "barrier_gate_active": bool(setup.get("barrier_gate_active")),
+        "structure_status": structure_status,
+        "structure_reason": structure_reason,
+        "structure_decision": setup.get("structure_decision"),
         "vrvp_applied": setup.get("vrvp_applied", False),
         "vrvp_poc": setup.get("vrvp_poc"),
         "vrvp_vah": setup.get("vrvp_vah"),
         "vrvp_val": setup.get("vrvp_val"),
+        "vrvp_completion_verified": setup.get("vrvp_completion_verified", False),
+        "vrvp_completed_bar_count": setup.get("vrvp_completed_bar_count", 0),
+        "vrvp_raw_bar_count": setup.get("vrvp_raw_bar_count", 0),
+        "vrvp_completion_reason": setup.get("vrvp_completion_reason"),
+        "vrvp_as_of": setup.get("vrvp_as_of"),
+        "vrvp_timeframe": setup.get("vrvp_timeframe", "1H"),
+        "vrvp_atr": setup.get("vrvp_atr"),
+        "vrvp_atr_source": setup.get("vrvp_atr_source"),
         "rr1": rr1,
         "rr2": rr2,
         "rr_effective": rr_effective,
@@ -3108,9 +3400,10 @@ def run_new_listing_scanner():
     """
     log.info("🔥 === Pump & Dump Scanner gestartet ===")
     start_time = time.time()
+    scan_as_of = datetime.now(timezone.utc)
 
     results = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": scan_as_of.isoformat(),
         "new_listings_detected": [],
         "pumps_detected": [],
         "announcement_watchlist": [],
@@ -3372,6 +3665,7 @@ def run_new_listing_scanner():
                     candles, ticker, book,
                     listing_age_hours=listing_age_hours,
                     is_new_listing=is_new_source,
+                    as_of=scan_as_of,
                 )
                 pump_data["listing_source"] = source
                 pump_data["listing_age_hours"] = round(listing_age_hours, 1) if listing_age_hours is not None else None
@@ -3517,6 +3811,21 @@ def run_new_listing_scanner():
                 mon_data["listing_age_source"] = listing_age_source
                 mon_data["listing_trade_ok"] = signal.get("listing_trade_ok", False)
                 mon_data["trade_category"] = signal.get("trade_category", "UNKNOWN")
+                mon_data["barrier_gate"] = signal.get("barrier_gate")
+                mon_data["barrier_gate_active"] = signal.get("barrier_gate_active", False)
+                mon_data["structure_status"] = signal.get("structure_status")
+                mon_data["structure_reason"] = signal.get("structure_reason")
+                mon_data["structure_decision"] = signal.get("structure_decision")
+                mon_data["nearest_barrier"] = signal.get("nearest_barrier")
+                mon_data["tp1_source"] = signal.get("tp1_source")
+                mon_data["tp2_source"] = signal.get("tp2_source")
+                mon_data["tp1_is_projection"] = signal.get("tp1_is_projection", True)
+                mon_data["tp2_is_projection"] = signal.get("tp2_is_projection", True)
+                mon_data["tp1_structure"] = signal.get("tp1_structure")
+                mon_data["tp2_structure"] = signal.get("tp2_structure")
+                mon_data["target_quality"] = signal.get(
+                    "target_quality", "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+                )
 
                 if _is_tradeable_short_signal(signal):
                     # H-15 AUDIT FIX: Nur beim ERSTEN Uebergang zu "signal" mailen

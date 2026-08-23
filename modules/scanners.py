@@ -1490,6 +1490,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     num_bins=24,
                     min_bars=30,
                     lookback=90,
+                    as_of=dt.datetime.now(dt.timezone.utc),
+                    date_session_context="us_equity_regular",
                 )
                 _vrvp_atr = calculate_wilder_atr(_session_bars, period=14, lookback=90) or atr_5
                 _setup = apply_vrvp_to_trade_setup(

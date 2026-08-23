@@ -1,8 +1,9 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import api
+from modules.level_zones import LevelEvidence, build_level_zones, evaluate_break_reclaim
 
 
 class _TrendingResponse:
@@ -61,7 +62,7 @@ def _perp(symbol="TVOL", volume=10_000_000):
     }
 
 
-def test_early_mover_volume_spike_builds_conditional_long_setup(monkeypatch):
+def test_early_mover_volume_spike_without_confirmed_target_stays_wait_only(monkeypatch):
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=8: [_btc(), _volume_coin()])
     monkeypatch.setattr(api.req, "get", lambda *args, **kwargs: _TrendingResponse())
 
@@ -69,12 +70,18 @@ def test_early_mover_volume_spike_builds_conditional_long_setup(monkeypatch):
     row = next(c for c in result["coins"] if c["Symbol"] == "TVOL")
 
     assert row["direction"] == "LONG"
-    assert row["trade_action"] == "LONG_TRIGGER"
+    assert row["trade_action"] == "WAIT_FOR_RETEST"
     assert row["entry"] > row["stop_loss"]
     assert row["tp1"] > row["entry"]
     assert row["tp2"] > row["tp1"]
     assert row["risk_reward"] >= 1.5
     assert row["btc_context"]["tailwind"] is True
+    assert row["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert row["tp1_is_projection"] is True
+    assert api._alert_trade_plan_ok(row, require_native_levels=False) is False
+    assert row["funding_rate_fraction"] == 0.0001
+    assert row["funding_rate_pct"] == 0.01
+    assert row["funding_rate_unit"] == "fraction"
 
 
 def test_early_mover_levels_are_structure_first_not_r_only():
@@ -100,6 +107,84 @@ def test_early_mover_levels_are_structure_first_not_r_only():
     assert setup["entry"] > setup["stop_loss"]
     assert setup["tp1"] > setup["entry"]
     assert setup["rr_tp1"] >= 1.35
+
+
+def test_early_mover_compact_vrvp_keeps_causal_reclaim_identity(monkeypatch):
+    confirmed_at = "2026-08-23T12:00:00Z"
+    profile = {
+        "poc": 99.5,
+        "vah": 101.0,
+        "val": 98.5,
+        "timeframe": "5m",
+        "profile_id": "vrvp-profile-early",
+        "profile_confirmed_at": confirmed_at,
+        "as_of": confirmed_at,
+        "causal_structure_validated": True,
+        "provenance": {"method": "ohlcv_range_uniform_allocation_v1"},
+        "supports": [],
+        "resistances": [{
+            "price": 101.0,
+            "source": "VRVP VAH",
+            "kind": "VAH",
+            "weight": 1.7,
+            "source_family": "vrvp",
+            "timeframe": "5m",
+            "profile_id": "vrvp-profile-early",
+            "independence_key": "vrvp-profile-early",
+            "zone_id": "vrvp-zone-early-vah",
+            "zone_low": 100.8,
+            "zone_high": 101.2,
+            "lower": 100.8,
+            "upper": 101.2,
+            "confirmed_at": confirmed_at,
+            "data_cutoff_at": confirmed_at,
+            "causal_structure_validated": True,
+        }],
+    }
+    monkeypatch.setattr(api, "build_vrvp_structure", lambda *args, **kwargs: profile)
+
+    compact = api._early_mover_vrvp_from_bars([{"close": 100.0}])
+    level = compact["levels"][0]
+
+    assert level["zone_id"] == "vrvp-zone-early-vah"
+    assert level["confirmed_at"] == confirmed_at
+    assert level["zone_low"] == 100.8
+    assert level["zone_high"] == 101.2
+    assert level["reclaim_boundary"] == 101.2
+    assert level["causal_structure_validated"] is True
+
+    row = {
+        "entry": 100.0,
+        "stop_loss": 98.0,
+        "scan_price_observed_at": "2026-08-23T12:11:00Z",
+        "trade_setup": {},
+    }
+    api._apply_early_mover_vrvp_targets(row, compact)
+    barrier = row["overhead_resistance"]
+
+    assert barrier["action"] == "BREAK_RECLAIM_REQUIRED"
+    assert barrier["zone_id"] == level["zone_id"]
+    assert barrier["confirmed_at"] == confirmed_at
+    assert barrier["reclaim_boundary"] == level["zone_high"]
+
+    row["break_reclaim_evidence"] = {
+        "model": "break_reclaim_close_hold_v1",
+        "state": "RECLAIMED",
+        "direction": "LONG",
+        "zone_id": barrier["zone_id"],
+        "zone_confirmed_at": confirmed_at,
+        "boundary": barrier["reclaim_boundary"],
+        "break_closed_at": "2026-08-23T12:05:00Z",
+        "last_completed_at": "2026-08-23T12:10:00Z",
+        "as_of": "2026-08-23T12:10:00Z",
+        "last_completed_close": 101.3,
+        "completed_bars_used": 3,
+        "hold_bars_required": 1,
+        "hold_bars_observed": 1,
+        "retest_required": False,
+        "timeframe": "5m",
+    }
+    assert api._confirmed_break_reclaim_evidence(row, barrier) is not None
 
 
 def test_early_mover_watch_body_and_send_share_explicit_render_time(monkeypatch):
@@ -223,7 +308,7 @@ def test_early_mover_wait_states_keep_specific_timing_label():
     assert retest["entry_score_label"] == "RETEST WARTEN"
 
 
-def test_early_mover_targets_are_structural_fib_levels_not_arbitrary_floors():
+def test_early_mover_range_extensions_are_honest_projections_not_structure():
     setup = api._build_early_mover_long_setup(
         {
             "Price": 6.14,
@@ -242,12 +327,13 @@ def test_early_mover_targets_are_structural_fib_levels_not_arbitrary_floors():
 
     assert setup["tp1"] >= round(setup["entry"] * 1.055, 4)
     assert setup["tp2"] >= round(setup["entry"] * 1.095, 4)
-    assert setup["target_quality"] == "STRUCTURAL"
-    assert "extension" in setup["tp1_source"] or "measured_move" in setup["tp1_source"]
+    assert setup["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert setup["tp1_is_projection"] is True
+    assert "projection" in setup["tp1_source"]
     assert "minimum_momentum_target_floor" not in (setup["tp1_source"], setup["tp2_source"])
 
 
-def test_early_mover_vrvp_can_upgrade_weak_targets():
+def test_early_mover_one_vrvp_profile_upgrades_tp1_but_keeps_tp2_projection_honest():
     row = {
         "Symbol": "VRVP",
         "Price": 10.0,
@@ -280,7 +366,9 @@ def test_early_mover_vrvp_can_upgrade_weak_targets():
     assert row["tp1"] == 10.8
     assert row["tp2"] == 11.4
     assert row["tp1_source"] == "vrvp_poc_acceptance"
-    assert row["target_quality"] == "STRUCTURAL_VRVP"
+    assert row["target_quality"] == "STRUCTURAL_TP1_PROJECTION_TP2"
+    assert row["tp1_is_projection"] is False
+    assert row["tp2_is_projection"] is True
     assert "weak_structural_targets" not in row["risk_flags"]
     assert "vrvp_target_confirmed" in row["risk_flags"]
 
@@ -363,6 +451,287 @@ def test_trade_barrier_gate_downgrades_unreclaimed_long_now_signal():
     assert row["barrier_gate_active"] is True
     assert "near_overhead_resistance" in row["risk_flags"]
     assert row["trade_setup"]["barrier_gate_active"] is True
+
+
+def _canonical_reclaim_barrier(action="BREAK_RECLAIM_REQUIRED"):
+    return {
+        "side": "resistance",
+        "price": 0.25,
+        "zone_low": 0.25,
+        "zone_high": 0.251,
+        "reclaim_boundary": 0.251,
+        "zone_id": "zone-1",
+        "confirmed_at": "2026-01-01T00:00:00Z",
+        "source": "confirmed level zone",
+        "timeframe": "4H",
+        "distance_r": 0.75,
+        "action": action,
+    }
+
+
+def _canonical_reclaim_evidence(**overrides):
+    evidence = {
+        "model": "break_reclaim_close_hold_v1",
+        "state": "RECLAIMED",
+        "direction": "LONG",
+        "zone_id": "zone-1",
+        "boundary": 0.251,
+        "zone_confirmed_at": "2026-01-01T00:00:00Z",
+        "break_closed_at": "2026-01-01T00:05:00Z",
+        "last_completed_at": "2026-01-01T00:10:00Z",
+        "as_of": "2026-01-01T00:11:00Z",
+        "timeframe": "5m",
+        "last_completed_close": 0.252,
+        "hold_bars_required": 1,
+        "hold_bars_observed": 1,
+        "completed_bars_used": 2,
+        "retest_required": False,
+        "retest_observed": False,
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def test_price_above_barrier_without_completed_reclaim_evidence_still_waits():
+    barrier = _canonical_reclaim_barrier()
+    row = {
+        "Symbol": "XTZ",
+        "Price": 0.252,
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "trade_decision": "TRADEABLE",
+        "alertable_crypto": True,
+        "entry": 0.247,
+        "stop_loss": 0.243,
+        "tp1": 0.263,
+        "tp2": 0.28,
+        "trade_setup": {"direction": "LONG", "overhead_resistance": barrier},
+    }
+
+    result = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert result["reclaimed"] is False
+    assert row["trade_action"] == "WAIT_FOR_BREAK_RECLAIM"
+    assert row["barrier_gate_active"] is True
+
+
+def test_completed_bound_reclaim_atomically_clears_only_barrier_wait_state():
+    barrier = _canonical_reclaim_barrier()
+    barrier["break_reclaim"] = _canonical_reclaim_evidence()
+    row = {
+        "Symbol": "XTZ",
+        "Price": 0.252,
+        "trigger_checked_at": "2026-01-01T00:11:00Z",
+        "trade_signal": "WARTEN",
+        "trade_action": "WAIT_FOR_BREAK_RECLAIM",
+        "trade_decision": "WAIT_FOR_TRIGGER",
+        "entry_status": "WAIT_FOR_BREAK_RECLAIM",
+        "signal_quality": "wait_trigger",
+        "execution_trigger_ok": False,
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "risk_flags": ["near_overhead_resistance", "thin_orderbook"],
+        "entry": 0.247,
+        "stop_loss": 0.243,
+        "tp1": 0.263,
+        "tp2": 0.28,
+        "trade_setup": {
+            "direction": "LONG",
+            "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+            "overhead_resistance": barrier,
+            "structure_decision": {"status": "WAIT_BREAK_RECLAIM"},
+        },
+    }
+
+    result = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert result["reclaimed"] is True
+    assert result["action"] is None
+    assert row["barrier_gate"] is None
+    assert row["barrier_gate_active"] is False
+    assert row["structure_status"] == "ACCEPT_AFTER_RECLAIM"
+    assert row["trade_setup"]["structure_decision"]["status"] == "ACCEPT_AFTER_RECLAIM"
+    assert "near_overhead_resistance" not in row["risk_flags"]
+    assert "thin_orderbook" in row["risk_flags"]
+    assert row["execution_trigger_ok"] is False  # no entry trigger is invented
+
+
+def test_real_level_evaluator_payload_roundtrips_through_api_reclaim_gate():
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    zone = build_level_zones(
+        [LevelEvidence(
+            source_family="horizontal_swing",
+            source_name="confirmed_swing_high",
+            timeframe="5m",
+            lower=0.25,
+            upper=0.251,
+            observed_at=base,
+            confirmed_at=base,
+            data_cutoff_at=base,
+            provenance={"role_hint": "resistance"},
+        )],
+        reference_price=0.247,
+    )[0]
+    bars = [
+        {
+            "open_time": base,
+            "close_time": base + timedelta(minutes=5),
+            "open": 0.2505,
+            "high": 0.2525,
+            "low": 0.2504,
+            "close": 0.252,
+            "volume": 1000,
+        },
+        {
+            "open_time": base + timedelta(minutes=5),
+            "close_time": base + timedelta(minutes=10),
+            "open": 0.252,
+            "high": 0.2526,
+            "low": 0.2509,
+            "close": 0.2522,
+            "volume": 1100,
+        },
+    ]
+    evidence = evaluate_break_reclaim(
+        zone,
+        bars,
+        as_of=base + timedelta(minutes=11),
+        direction="LONG",
+        timeframe="5m",
+        hold_bars=1,
+        require_retest=True,
+        retest_tolerance=0.0001,
+    ).to_dict()
+    barrier = {
+        "side": "resistance",
+        "price": zone.upper,
+        "zone_low": zone.lower,
+        "zone_high": zone.upper,
+        "reclaim_boundary": zone.upper,
+        "zone_id": zone.zone_id,
+        "confirmed_at": zone.confirmed_at.isoformat(),
+        "timeframe": "5m",
+        "action": "BREAK_RECLAIM_REQUIRED",
+        "break_reclaim": evidence,
+    }
+    row = {
+        "Price": 0.2522,
+        "trigger_checked_at": "2026-01-01T00:11:00Z",
+        "trade_action": "WAIT_FOR_BREAK_RECLAIM",
+        "trade_signal": "WARTEN",
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "nearest_barrier": barrier,
+        "trade_setup": {
+            "direction": "LONG",
+            "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+            "nearest_barrier": barrier,
+        },
+    }
+
+    result = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert evidence["state"] == "RECLAIMED"
+    assert result["reclaimed"] is True
+    assert row["barrier_gate"] is None
+    assert row["structure_status"] == "ACCEPT_AFTER_RECLAIM"
+
+
+def test_malformed_or_wrong_boundary_reclaim_evidence_never_clears_gate():
+    for bad in (
+        _canonical_reclaim_evidence(break_closed_at="not-a-timestamp"),
+        _canonical_reclaim_evidence(boundary=0.25, last_completed_close=0.2505),
+    ):
+        barrier = _canonical_reclaim_barrier()
+        barrier["break_reclaim"] = bad
+        row = {
+            "Price": 0.252,
+            "trade_action": "LONG_NOW",
+            "trade_signal": "JETZT_TRADEN",
+            "entry": 0.247,
+            "stop_loss": 0.243,
+            "tp1": 0.263,
+            "tp2": 0.28,
+            "trade_setup": {"direction": "LONG", "overhead_resistance": barrier},
+        }
+        result = api._apply_trade_barrier_gate(row, "early_movers")
+        assert result["reclaimed"] is False
+        assert row["barrier_gate_active"] is True
+
+
+def test_future_reclaim_evidence_as_of_never_clears_gate():
+    barrier = _canonical_reclaim_barrier()
+    barrier["break_reclaim"] = _canonical_reclaim_evidence(
+        as_of="2026-01-01T00:15:00Z",
+    )
+    row = {
+        "Price": 0.252,
+        "trigger_checked_at": "2026-01-01T00:11:00Z",
+        "trade_action": "LONG_NOW",
+        "trade_signal": "JETZT_TRADEN",
+        "entry": 0.247,
+        "stop_loss": 0.243,
+        "tp1": 0.263,
+        "tp2": 0.28,
+        "nearest_barrier": barrier,
+    }
+
+    result = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert result["reclaimed"] is False
+    assert row["barrier_gate_active"] is True
+    assert row["trade_action"] == "WAIT_FOR_BREAK_RECLAIM"
+
+
+def test_final_row_barrier_without_evidence_cannot_reuse_stale_nested_reclaim():
+    final_barrier = _canonical_reclaim_barrier()
+    stale_nested = _canonical_reclaim_barrier()
+    stale_nested["break_reclaim"] = _canonical_reclaim_evidence()
+    row = {
+        "Price": 0.252,
+        "trigger_checked_at": "2026-01-01T00:11:00Z",
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "nearest_barrier": final_barrier,
+        "trade_setup": {
+            "direction": "LONG",
+            "nearest_barrier": stale_nested,
+            "break_reclaim_evidence": _canonical_reclaim_evidence(),
+        },
+    }
+
+    result = api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert result["reclaimed"] is False
+    assert row["barrier_gate_active"] is True
+    assert row["trade_action"] == "WAIT_FOR_BREAK_RECLAIM"
+
+
+def test_explicit_accepted_barrier_clears_a_stale_row_gate_without_trade_trigger():
+    barrier = _canonical_reclaim_barrier(action=None)
+    row = {
+        "Price": 0.247,
+        "entry": 0.247,
+        "stop_loss": 0.243,
+        "tp1": 0.263,
+        "tp2": 0.28,
+        "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+        "trade_action": "WAIT_FOR_BREAK_RECLAIM",
+        "execution_trigger_ok": False,
+        "trade_setup": {
+            "direction": "LONG",
+            "barrier_gate": "BREAK_RECLAIM_REQUIRED",
+            "overhead_resistance": barrier,
+            "structure_decision": {"status": "ACCEPT"},
+        },
+    }
+
+    api._apply_trade_barrier_gate(row, "early_movers")
+
+    assert row["barrier_gate"] is None
+    assert row["structure_status"] == "ACCEPT"
+    assert row["trade_setup"]["structure_decision"]["status"] == "ACCEPT"
+    assert "trade_action" not in row
+    assert row["execution_trigger_ok"] is False
 
 
 def test_early_mover_duplicate_targets_are_downgraded_and_not_alertable():
@@ -482,6 +851,8 @@ def test_early_mover_nested_coin_rows_receive_quality_payload(monkeypatch):
             coin["signal_quality"] = "tradeable"
             coin["grade"] = "S"
             coin["score"] = 90
+            coin["target_quality"] = "STRUCTURAL_TP1_PROJECTION_TP2"
+            coin["tp1_is_projection"] = False
 
     decorated = api._decorate_early_mover_results([result], cache_age_seconds=15)
     row = decorated[0]["coins"][0]

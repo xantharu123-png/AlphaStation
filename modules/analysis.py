@@ -10,7 +10,8 @@ Erweiterte Analyse-Funktionen:
 """
 import math
 import time
-from datetime import datetime, timedelta
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 try:
     import pytz
 except ImportError:
@@ -1573,487 +1574,350 @@ def _detect_chart_patterns(bars, direction="long"):
     return warnings
 
 
-def calculate_sr_from_historical(ohlc_data, current_price):
-    """
-    ECHTE S/R-Berechnung mit technischer Analyse.
-    
-    Methoden:
-    1. Major Swing Points (dynamischer Threshold basierend auf ATR)
-    2. Volume Clusters (wo wurde am meisten gehandelt?)
-    3. Fibonacci Retracements (50%, 61.8% = stärkste)
-    4. Recent Consolidation Zones (wo hat der Preis Zeit verbracht?)
-    5. Round Numbers (psychologische Levels)
-    6. Gap Levels (offene Gaps)
-    
-    PROXIMITY BOOST = Levels nah am aktuellen Preis werden bevorzugt!
-    CONFLUENCE = mehrere Levels nah beieinander = STÄRKER!
+def _normalize_sr_timeframe(timeframe):
+    """Map legacy UI labels to durations understood by level_zones."""
+    raw = str(timeframe or "1D").strip().upper().replace(" ", "")
+    aliases = {
+        "D": "1D", "DAY": "1D", "DAILY": "1D",
+        "W": "1W", "WEEK": "1W", "WEEKLY": "1W",
+        "5MIN": "5M", "15MIN": "15M", "30MIN": "30M",
+        "60MIN": "1H", "H": "1H", "HOURLY": "1H",
+        # Legacy 1M means monthly; level_zones uses M for minutes.
+        "1M": "30D", "MONTH": "30D", "MONTHLY": "30D",
+    }
+    return aliases.get(raw, raw or "1D")
+
+
+def _adapt_sr_bar(raw):
+    """Adapt legacy tuple/dict OHLC rows without inventing timestamps."""
+    if isinstance(raw, Mapping):
+        bar = dict(raw)
+        if not any(bar.get(key) is not None for key in (
+            "open_time", "timestamp", "time", "ts", "t",
+            "close_time", "close_timestamp", "end_time", "end", "T",
+        )):
+            for key in ("date", "datetime"):
+                if bar.get(key) is not None:
+                    bar["timestamp"] = bar[key]
+                    break
+        return bar
+    if isinstance(raw, (list, tuple)) and len(raw) >= 5:
+        return {
+            "timestamp": raw[0], "open": raw[1], "high": raw[2],
+            "low": raw[3], "close": raw[4],
+            "volume": raw[5] if len(raw) > 5 else 0,
+        }
+    return None
+
+
+def _smart_round_sr(price):
+    value = float(price)
+    if value >= 1000:
+        return round(value, 0)
+    if value >= 100:
+        return round(value, 1)
+    if value >= 10:
+        return round(value, 2)
+    if value >= 1:
+        return round(value, 3)
+    return round(value, 4)
+
+
+def _legacy_sr_zone_detail(zone, *, model, timeframe, as_of):
+    """Keep legacy detail fields and add lossless adaptive-zone metadata."""
+    payload = zone.to_dict()
+    labels = {
+        "confirmed_swing_high": "Swing High",
+        "confirmed_swing_low": "Swing Low",
+    }
+    names = [labels.get(name, name) for name in payload.get("sources", [])]
+    strength = int(round(min(99.0, max(1.0, zone.strength * 50.0))))
+    return {
+        "price": _smart_round_sr(zone.reference),
+        "type": " + ".join(names) if names else "Adaptive Zone",
+        "strength": strength,
+        "zone_id": zone.zone_id,
+        "zone_low": _smart_round_sr(zone.lower),
+        "zone_high": _smart_round_sr(zone.upper),
+        "source": " + ".join(payload.get("sources", [])),
+        "sources": payload.get("sources", []),
+        "independent_sources": zone.independent_sources,
+        "independent_structural_sources": zone.independent_structural_sources,
+        "touch_count": zone.touch_count,
+        "confirmed_at": payload.get("confirmed_at"),
+        "break_state": zone.break_state,
+        "projection_only": zone.projection_only,
+        "quality_flags": payload.get("quality_flags", []),
+        "provenance": {
+            "model": model,
+            "timeframe": timeframe,
+            "as_of": as_of,
+            "causal_completed_bars": True,
+            "adaptive_zone": True,
+            "zone": payload,
+        },
+    }
+
+
+def _causal_sr_unavailable(*, timeframe, reason, input_count=0, completed_count=0):
+    """Return the legacy container shape without inventing percentage levels."""
+    normalized = _normalize_sr_timeframe(timeframe)
+    info = {
+        "available": False,
+        "availability_reason": str(reason),
+        "period_high": None,
+        "period_low": None,
+        "prev_day_high": None,
+        "prev_day_low": None,
+        "prev_day_close": None,
+        "supports_detail": [],
+        "resistances_detail": [],
+        "consolidation_zones": [],
+        "zones": [],
+        "overlapping_zones": [],
+        "session_levels": {},
+        "session_levels_available": False,
+        "session_level_reason": "causal_structure_unavailable",
+        "total_candles": int(completed_count),
+        "completed_candles": int(completed_count),
+        "input_candles": int(input_count),
+        "zone_model": "causal_level_zones_v1",
+        "zone_provenance": {
+            "model": "causal_level_zones_v1",
+            "timeframe": normalized,
+            "causal_completed_bars": False,
+            "fixed_percent_cluster_used": False,
+            "standalone_fibonacci_strength_used": False,
+            "availability_reason": str(reason),
+            "input_bar_count": int(input_count),
+            "completed_bar_count": int(completed_count),
+        },
+        "fibonacci_provenance": {
+            "projection_only": True,
+            "used_as_structural_evidence": False,
+            "available": False,
+        },
+    }
+    return ([], []), info
+
+
+def calculate_sr_from_historical(
+    ohlc_data,
+    current_price,
+    timeframe="1D",
+    as_of=None,
+    direction="LONG",
+):
+    """Backward-compatible adapter over the causal level-zone model.
+
+    Structural levels use completed bars and ATR-adaptive zones. Fibonacci
+    values remain display-only and add no structural strength. Intraday tuples
+    have no exchange-session calendar, so PDH/PDL/PDC remain unavailable.
     """
     if not ohlc_data or len(ohlc_data) < 5:
-        return calculate_sr_levels_simple(current_price)
-    
-    # Extrahiere OHLC Daten
-    highs = [candle[2] for candle in ohlc_data]   # Index 2 = High
-    lows = [candle[3] for candle in ohlc_data]    # Index 3 = Low
-    closes = [candle[4] for candle in ohlc_data]  # Index 4 = Close
-    
-    total_candles = len(ohlc_data)
-    
-    # PDH/PDL/PDC — Echte Previous Day Berechnung
-    # ohlc_data ist Daily → vorletzte Candle = gestern
-    if total_candles >= 2:
-        prev_day_high = ohlc_data[-2][2]    # Vorletzte Candle High
-        prev_day_low = ohlc_data[-2][3]     # Vorletzte Candle Low
-        prev_day_close = ohlc_data[-2][4]   # Vorletzte Candle Close
-    else:
-        prev_day_high = highs[-1] if highs else 0
-        prev_day_low = lows[-1] if lows else 0
-        prev_day_close = closes[-1] if closes else 0
-    
-    # Period High und Low
-    period_high = max(highs)
-    period_low = min(lows)
-    price_range = period_high - period_low
-    
-    if price_range <= 0:
-        return calculate_sr_levels_simple(current_price), {}
-    
-    # =========================================================================
-    # ATR-basierter dynamischer Swing-Threshold
-    # =========================================================================
-    atr_bars = [
-        {"high": candle[2], "low": candle[3], "close": candle[4]}
-        for candle in ohlc_data
-        if len(candle) > 4
+        return _causal_sr_unavailable(
+            timeframe=timeframe,
+            reason="insufficient_input_bars",
+            input_count=len(ohlc_data or ()),
+        )
+    try:
+        price = float(current_price)
+    except (TypeError, ValueError):
+        return _causal_sr_unavailable(
+            timeframe=timeframe,
+            reason="invalid_reference_price",
+            input_count=len(ohlc_data or ()),
+        )
+    if not math.isfinite(price) or price <= 0:
+        return _causal_sr_unavailable(
+            timeframe=timeframe,
+            reason="invalid_reference_price",
+            input_count=len(ohlc_data or ()),
+        )
+
+    from modules import level_zones as _level_zones
+
+    normalized_timeframe = _normalize_sr_timeframe(timeframe)
+    cutoff = as_of if as_of is not None else datetime.now(timezone.utc)
+    adapted_bars = [
+        bar for bar in (_adapt_sr_bar(row) for row in ohlc_data)
+        if bar is not None
     ]
-    atr, _ = calculate_atr_14(atr_bars)
+    completed = _level_zones.normalize_completed_bars(
+        adapted_bars,
+        timeframe=normalized_timeframe,
+        as_of=cutoff,
+        timestamp_mode="open",
+    )
+    if len(completed) < 5:
+        return _causal_sr_unavailable(
+            timeframe=timeframe,
+            reason="insufficient_completed_timestamped_bars",
+            input_count=len(adapted_bars),
+            completed_count=len(completed),
+        )
+
+    period_high = max(bar.high for bar in completed)
+    period_low = min(bar.low for bar in completed)
+    price_range = period_high - period_low
+    if price_range <= 0:
+        return _causal_sr_unavailable(
+            timeframe=timeframe,
+            reason="zero_completed_price_range",
+            input_count=len(adapted_bars),
+            completed_count=len(completed),
+        )
+
+    atr_input = [
+        {"high": bar.high, "low": bar.low, "close": bar.close}
+        for bar in completed
+    ]
+    atr, _ = calculate_atr_14(atr_input)
+    atr = float(atr or 0.0)
+    if not math.isfinite(atr) or atr < 0:
+        atr = 0.0
     if atr <= 0:
-        atr = price_range * 0.03
-    atr_pct = atr / current_price if current_price > 0 else 0.03
-    
-    # Dynamischer Threshold: 2x ATR% (minimum 3%, maximum 15%)
-    min_swing_pct = max(0.03, min(0.15, atr_pct * 2))
-    
-    # Max Proximity: Levels weiter als 35% vom Preis weg sind nutzlos
-    max_distance_pct = 0.35
-    
-    key_levels = []
-    
-    # =========================================================================
-    # 1. MAJOR SWING POINTS (dynamischer Threshold!)
-    # =========================================================================
-    lookback = max(3, min(8, total_candles // 15))  # Adaptiver Lookback
-    
-    # Swing Highs
-    for i in range(lookback, len(highs) - 2):
-        window_before = highs[max(0, i-lookback):i]
-        window_after = highs[i+1:min(len(highs), i+max(2, lookback//2))]
-        
-        if window_before and window_after and highs[i] >= max(window_before) and highs[i] >= max(window_after):
-            # Prüfe: Wie weit ist der Kurs danach gefallen?
-            future_low = min(lows[i+1:min(len(lows), i+20)]) if i+1 < len(lows) else lows[-1]
-            drop_pct = (highs[i] - future_low) / highs[i] if highs[i] > 0 else 0
-            
-            # Proximity-Check: Ist das Level nah genug am aktuellen Preis?
-            if current_price <= 0:
-                continue
-            distance_pct = abs(highs[i] - current_price) / current_price
-            if distance_pct > max_distance_pct:
-                continue
-            
-            if drop_pct >= min_swing_pct:
-                # Recency-Bonus: Neuere Swing-Points wichtiger
-                recency = i / total_candles  # 0 = alt, 1 = neu
-                recency_bonus = int(recency * 15)
-                
-                # Proximity-Bonus: Näher am Preis = nützlicher
-                proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
-                
-                key_levels.append({
-                    "price": highs[i],
-                    "type": "Swing High",
-                    "strength": min(95, 50 + int(drop_pct * 80) + recency_bonus + proximity_bonus),
-                    "is_support": highs[i] < current_price
-                })
-    
-    # Swing Lows
-    for i in range(lookback, len(lows) - 2):
-        window_before = lows[max(0, i-lookback):i]
-        window_after = lows[i+1:min(len(lows), i+max(2, lookback//2))]
-        
-        if window_before and window_after and lows[i] <= min(window_before) and lows[i] <= min(window_after):
-            future_high = max(highs[i+1:min(len(highs), i+20)]) if i+1 < len(highs) else highs[-1]
-            rally_pct = (future_high - lows[i]) / lows[i] if lows[i] > 0 else 0
-            
-            if current_price <= 0:
-                continue
-            distance_pct = abs(lows[i] - current_price) / current_price
-            if distance_pct > max_distance_pct:
-                continue
-            
-            if rally_pct >= min_swing_pct:
-                recency = i / total_candles
-                recency_bonus = int(recency * 15)
-                proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
-                
-                key_levels.append({
-                    "price": lows[i],
-                    "type": "Swing Low",
-                    "strength": min(95, 50 + int(rally_pct * 80) + recency_bonus + proximity_bonus),
-                    "is_support": lows[i] < current_price
-                })
-    
-    # =========================================================================
-    # 2. RECENT CONSOLIDATION ZONES (wo hat der Preis Zeit verbracht?)
-    # =========================================================================
-    # Teile den Preisbereich in Bins und zähle wie oft der Preis dort war
-    recent_n = min(total_candles, max(30, total_candles // 3))  # Letzte 1/3 der Daten
-    recent_closes = closes[-recent_n:]
-    recent_highs = highs[-recent_n:]
-    recent_lows = lows[-recent_n:]
-    
-    if recent_closes:
-        recent_high = max(recent_highs)
-        recent_low = min(recent_lows)
-        recent_range = recent_high - recent_low
-        
-        if recent_range > 0:
-            num_bins = 20
-            bin_size = recent_range / num_bins
-            bins = {}
-            
-            for j in range(recent_n):
-                mid = (recent_highs[j] + recent_lows[j]) / 2
-                bin_idx = int((mid - recent_low) / bin_size)
-                bin_idx = min(bin_idx, num_bins - 1)
-                bins[bin_idx] = bins.get(bin_idx, 0) + 1
-            
-            # Finde die Top-Bins (> 15% der Bars)
-            threshold = recent_n * 0.15
-            for bin_idx, count in bins.items():
-                if count >= threshold:
-                    zone_price = recent_low + (bin_idx + 0.5) * bin_size
-                    distance_pct = abs(zone_price - current_price) / current_price if current_price > 0 else 1
+        # The legacy adapter accepts as few as five bars, while ATR-14 quite
+        # correctly stays unavailable on such a short history. Use a causal
+        # mean true range over the completed prefix so zone width remains
+        # volatility-adaptive without falling back to a fixed percentage.
+        true_ranges = []
+        previous_close = None
+        for bar in completed:
+            true_range = bar.high - bar.low
+            if previous_close is not None:
+                true_range = max(
+                    true_range,
+                    abs(bar.high - previous_close),
+                    abs(bar.low - previous_close),
+                )
+            if math.isfinite(true_range) and true_range > 0:
+                true_ranges.append(true_range)
+            previous_close = bar.close
+        if true_ranges:
+            atr = sum(true_ranges[-14:]) / len(true_ranges[-14:])
 
-                    if distance_pct > max_distance_pct or distance_pct < 0.02:
-                        continue
-                    
-                    proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 20)
-                    
-                    key_levels.append({
-                        "price": zone_price,
-                        "type": "Consolidation",
-                        "strength": min(90, 55 + int(count / recent_n * 60) + proximity_bonus),
-                        "is_support": zone_price < current_price
-                    })
-    
-    # =========================================================================
-    # 3. FIBONACCI LEVELS (nur innerhalb der Proximity-Zone)
-    # =========================================================================
-    fib_levels_dict = {
-        "23.6": period_low + price_range * 0.236,
-        "38.2": period_low + price_range * 0.382,
-        "50.0": period_low + price_range * 0.5,
-        "61.8": period_low + price_range * 0.618,
-        "78.6": period_low + price_range * 0.786,
+    side = str(direction or "LONG").strip().upper()
+    if side not in ("LONG", "SHORT"):
+        side = "LONG"
+    is_intraday = normalized_timeframe.endswith(("M", "H"))
+    snapshot = _level_zones.build_structure_snapshot(
+        {normalized_timeframe: completed},
+        symbol="",
+        asset_class="unknown",
+        horizon="intraday" if is_intraday else "swing",
+        as_of=cutoff,
+        current_price=price,
+        atr_by_timeframe={normalized_timeframe: atr},
+        timestamp_mode="close",
+        include_session_levels=normalized_timeframe in ("1D", "1W"),
+    )
+    directional = _level_zones.classify_for_trade(
+        snapshot, entry=price, direction=side
+    )
+    snapshot_as_of = snapshot.to_dict()["as_of"]
+
+    supports_detail = [
+        _legacy_sr_zone_detail(
+            zone, model=snapshot.model, timeframe=normalized_timeframe,
+            as_of=snapshot_as_of,
+        )
+        for zone in directional.supports[:3]
+    ]
+    resistances_detail = [
+        _legacy_sr_zone_detail(
+            zone, model=snapshot.model, timeframe=normalized_timeframe,
+            as_of=snapshot_as_of,
+        )
+        for zone in directional.resistances[:3]
+    ]
+    supports = [row["price"] for row in supports_detail]
+    resistances = [row["price"] for row in resistances_detail]
+
+    session_levels = {}
+    for zone in snapshot.zones:
+        for evidence in zone.evidence:
+            if evidence.source_family == "session":
+                session_levels[evidence.source_name] = _smart_round_sr(
+                    evidence.midpoint
+                )
+    session_levels = {
+        label: session_levels[label] for label in sorted(session_levels)
     }
-    
-    for fib_name, fib_price in fib_levels_dict.items():
-        distance_pct = abs(fib_price - current_price) / current_price if current_price > 0 else 1
-        if distance_pct > max_distance_pct or distance_pct < 0.02:
-            continue
-        
-        proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 15)
-        strength = (75 if fib_name in ["50.0", "61.8"] else 60) + proximity_bonus
-        
-        key_levels.append({
-            "price": fib_price,
-            "type": f"Fib {fib_name}%",
-            "strength": min(90, strength),
-            "is_support": fib_price < current_price
-        })
-    
-    # =========================================================================
-    # 4. PERIOD HIGH/LOW (nur wenn nah genug!)
-    # =========================================================================
-    ph_dist = abs(period_high - current_price) / current_price
-    pl_dist = abs(period_low - current_price) / current_price
-    
-    if ph_dist <= max_distance_pct:
-        key_levels.append({
-            "price": period_high,
-            "type": "Period High",
-            "strength": 90,
-            "is_support": False
-        })
-
-    if pl_dist <= max_distance_pct:
-        key_levels.append({
-            "price": period_low,
-            "type": "Period Low",
-            "strength": 90,
-            "is_support": True
-        })
-
-    # =========================================================================
-    # 4b. PREVIOUS DAY HIGH/LOW/CLOSE (wichtigste Intraday-Levels!)
-    # =========================================================================
-    pdh_dist = abs(prev_day_high - current_price) / current_price if current_price > 0 else 1
-    pdl_dist = abs(prev_day_low - current_price) / current_price if current_price > 0 else 1
-    pdc_dist = abs(prev_day_close - current_price) / current_price if current_price > 0 else 1
-
-    if pdh_dist <= max_distance_pct and pdh_dist >= 0.005:
-        key_levels.append({
-            "price": prev_day_high,
-            "type": "PDH",
-            "strength": 85,
-            "is_support": prev_day_high < current_price
-        })
-
-    if pdl_dist <= max_distance_pct and pdl_dist >= 0.005:
-        key_levels.append({
-            "price": prev_day_low,
-            "type": "PDL",
-            "strength": 85,
-            "is_support": prev_day_low < current_price
-        })
-
-    if pdc_dist <= max_distance_pct and pdc_dist >= 0.01:
-        key_levels.append({
-            "price": prev_day_close,
-            "type": "PDC",
-            "strength": 80,
-            "is_support": prev_day_close < current_price
-        })
-    
-    # =========================================================================
-    # 5. ROUND NUMBERS
-    # =========================================================================
-    if current_price >= 100:
-        round_step = 10
-    elif current_price >= 10:
-        round_step = 1
-    elif current_price >= 1:
-        round_step = 0.5
+    if normalized_timeframe == "1D" and all(
+        label in session_levels for label in ("PDH", "PDL", "PDC")
+    ):
+        previous_day = {
+            "high": session_levels["PDH"],
+            "low": session_levels["PDL"],
+            "close": session_levels["PDC"],
+        }
+        session_reason = "latest_verifiably_completed_daily_session"
     else:
-        round_step = 0.05
-    
-    round_price = round(current_price / round_step) * round_step
-    for offset in [-3, -2, -1, 1, 2, 3]:
-        rp = round_price + offset * round_step
-        distance_pct = abs(rp - current_price) / current_price if current_price > 0 else 1
-        if distance_pct > max_distance_pct or distance_pct < 0.02:
-            continue
-        
-        proximity_bonus = int(max(0, (1 - distance_pct / max_distance_pct)) * 15)
-        
-        key_levels.append({
-            "price": rp,
-            "type": f"Round ${rp:.2f}",
-            "strength": 55 + proximity_bonus,
-            "is_support": rp < current_price
-        })
-    
-    # =========================================================================
-    # 6. GAP LEVELS (nur innerhalb der Proximity-Zone)
-    # =========================================================================
-    for i in range(1, len(closes)):
-        prev_close = closes[i-1]
-        curr_high = highs[i]
-        curr_low = lows[i]
-
-        distance_pct = abs(prev_close - current_price) / current_price if current_price > 0 else 1
-        if distance_pct > max_distance_pct:
-            continue
-        
-        # Gap Up
-        if curr_low > prev_close:
-            gap_pct = (curr_low - prev_close) / prev_close if prev_close > 0 else 0
-            if gap_pct > 0.02:
-                key_levels.append({
-                    "price": prev_close,
-                    "type": "Gap Fill",
-                    "strength": 65,
-                    "is_support": prev_close < current_price
-                })
-        
-        # Gap Down
-        if curr_high < prev_close:
-            gap_pct = (prev_close - curr_high) / prev_close if prev_close > 0 else 0
-            if gap_pct > 0.02:
-                key_levels.append({
-                    "price": prev_close,
-                    "type": "Gap Fill",
-                    "strength": 65,
-                    "is_support": prev_close < current_price
-                })
-    
-    # =========================================================================
-    # 6b. WICK CLUSTER DETECTION (Docht-Ablehnungszonen)
-    # =========================================================================
-    # Findet Preiszonen, wo 3+ Kerzendochte abgeprallt sind
-    # (z.B. 5 Dochte bei ~$16.45 = starker Support)
-    _wc_tolerance = max(0.003, atr_pct * 0.3)  # Cluster-Breite: ~0.3x ATR%
-    _wc_min_touches = 3  # Minimum 3 Wick-Touches für ein gültiges Level
-
-    # Sammle alle Wick-Lows (unterer Docht) und Wick-Highs (oberer Docht)
-    _wick_lows = []  # Potentielle Support-Cluster
-    _wick_highs = []  # Potentielle Resistance-Cluster
-    _recent_start = max(0, total_candles - 60)  # Letzte 60 Kerzen relevant
-
-    for i in range(_recent_start, total_candles):
-        _low = lows[i]
-        _high = highs[i]
-        _open = ohlc_data[i][1]  # Index 1 = Open
-        _close = ohlc_data[i][4]  # Index 4 = Close
-        _body_low = min(_open, _close)
-        _body_high = max(_open, _close)
-        _candle_range = _high - _low if _high > _low else 0.001
-
-        # Unterer Docht: Low bis Body-Low (signifikant wenn > 30% der Kerze)
-        _lower_wick = _body_low - _low
-        if _lower_wick / _candle_range > 0.25:
-            _wick_lows.append(_low)
-
-        # Oberer Docht: Body-High bis High (signifikant wenn > 30% der Kerze)
-        _upper_wick = _high - _body_high
-        if _upper_wick / _candle_range > 0.25:
-            _wick_highs.append(_high)
-
-    # Cluster-Bildung: Gruppiere Wick-Lows in Preiszonen
-    def _find_wick_clusters(wicks, is_support):
-        if len(wicks) < _wc_min_touches:
-            return []
-        _sorted = sorted(wicks)
-        _clusters = []
-        _current = [_sorted[0]]
-
-        for w in _sorted[1:]:
-            _cluster_avg = sum(_current) / len(_current)
-            if _cluster_avg > 0 and abs(w - _cluster_avg) / _cluster_avg < _wc_tolerance:
-                _current.append(w)
-            else:
-                if len(_current) >= _wc_min_touches:
-                    _clusters.append(_current[:])
-                _current = [w]
-        if len(_current) >= _wc_min_touches:
-            _clusters.append(_current[:])
-
-        _results = []
-        for cl in _clusters:
-            _avg_price = sum(cl) / len(cl)
-            _touch_count = len(cl)
-            _distance_pct = abs(_avg_price - current_price) / current_price if current_price > 0 else 1
-
-            if _distance_pct > max_distance_pct or _distance_pct < 0.005:
-                continue
-
-            _proximity_bonus = int(max(0, (1 - _distance_pct / max_distance_pct)) * 20)
-            _touch_bonus = min(20, (_touch_count - _wc_min_touches) * 7)
-            _strength = min(97, 65 + _touch_bonus + _proximity_bonus)
-
-            _results.append({
-                "price": _avg_price,
-                "type": f"Wick Cluster ({_touch_count}x)",
-                "strength": _strength,
-                "is_support": is_support
-            })
-        return _results
-
-    key_levels.extend(_find_wick_clusters(_wick_lows, is_support=True))
-    key_levels.extend(_find_wick_clusters(_wick_highs, is_support=False))
-
-    # =========================================================================
-    # 7. CLUSTERING MIT CONFLUENCE
-    # =========================================================================
-    def cluster_with_confluence(levels, tolerance_pct=0.03):
-        if not levels:
-            return []
-        
-        sorted_levels = sorted(levels, key=lambda x: x["price"])
-        clusters = []
-        current_cluster = [sorted_levels[0]]
-        
-        for level in sorted_levels[1:]:
-            cluster_avg = sum(l["price"] for l in current_cluster) / len(current_cluster)
-            if cluster_avg > 0 and abs(level["price"] - cluster_avg) / cluster_avg < tolerance_pct:
-                current_cluster.append(level)
-            else:
-                best = max(current_cluster, key=lambda x: x["strength"])
-                types = list(set(l["type"] for l in current_cluster))
-                if len(types) > 1:
-                    best["type"] = " + ".join(types[:2])
-                best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
-                clusters.append(best)
-                current_cluster = [level]
-        
-        if current_cluster:
-            best = max(current_cluster, key=lambda x: x["strength"])
-            types = list(set(l["type"] for l in current_cluster))
-            if len(types) > 1:
-                best["type"] = " + ".join(types[:2])
-            best["strength"] = min(99, best["strength"] + len(current_cluster) * 5)
-            clusters.append(best)
-        
-        return clusters
-    
-    all_clustered = cluster_with_confluence(key_levels, tolerance_pct=0.03)
-    
-    # Trenne Support und Resistance
-    supports_raw = [l for l in all_clustered if l["price"] < current_price * 0.98]
-    resistances_raw = [l for l in all_clustered if l["price"] > current_price * 1.02]
-    
-    # Sortiere nach COMBINED Score: Stärke + Proximity
-    # Proximity-Gewichtung: Nähere Levels sind wichtiger!
-    def combined_score(level):
-        distance = abs(level["price"] - current_price) / current_price
-        proximity_factor = max(0.3, 1.0 - distance * 2)  # Näher = höherer Faktor
-        return level["strength"] * proximity_factor
-    
-    supports_raw = sorted(supports_raw, key=combined_score, reverse=True)[:3]
-    resistances_raw = sorted(resistances_raw, key=combined_score, reverse=True)[:3]
-    
-    # Sortiere nach Preis für Anzeige
-    supports_cleaned = sorted(supports_raw, key=lambda x: x["price"], reverse=True)
-    resistances_cleaned = sorted(resistances_raw, key=lambda x: x["price"])
-    
-    # =========================================================================
-    # OUTPUT
-    # =========================================================================
-    def smart_round(price):
-        if price >= 1000:
-            return round(price, 0)
-        elif price >= 100:
-            return round(price, 1)
-        elif price >= 10:
-            return round(price, 2)
-        elif price >= 1:
-            return round(price, 3)
+        previous_day = {"high": None, "low": None, "close": None}
+        if is_intraday:
+            session_reason = (
+                "intraday_source_has_no_verified_trading_session_calendar"
+            )
+        elif normalized_timeframe == "1W" and session_levels:
+            session_reason = "weekly_session_labels_available_as_PWH_PWL_PWC"
         else:
-            return round(price, 4)
-    
-    supports = [smart_round(s["price"]) for s in supports_cleaned]
-    resistances = [smart_round(r["price"]) for r in resistances_cleaned]
-    
-    supports_detail = [{"price": smart_round(s["price"]), "type": s["type"], "strength": s["strength"]} for s in supports_cleaned]
-    resistances_detail = [{"price": smart_round(r["price"]), "type": r["type"], "strength": r["strength"]} for r in resistances_cleaned]
-    
+            session_reason = "previous_daily_session_unavailable"
+
+    fib_levels = {
+        "fib_236": period_low + price_range * 0.236,
+        "fib_382": period_low + price_range * 0.382,
+        "fib_500": period_low + price_range * 0.500,
+        "fib_618": period_low + price_range * 0.618,
+        "fib_786": period_low + price_range * 0.786,
+    }
     fib_info = {
-        "period_high": smart_round(period_high),
-        "period_low": smart_round(period_low),
-        "prev_day_high": smart_round(prev_day_high),
-        "prev_day_low": smart_round(prev_day_low),
-        "prev_day_close": smart_round(prev_day_close),
-        "fib_236": smart_round(fib_levels_dict["23.6"]),
-        "fib_382": smart_round(fib_levels_dict["38.2"]),
-        "fib_500": smart_round(fib_levels_dict["50.0"]),
-        "fib_618": smart_round(fib_levels_dict["61.8"]),
-        "fib_786": smart_round(fib_levels_dict["78.6"]),
+        "period_high": _smart_round_sr(period_high),
+        "period_low": _smart_round_sr(period_low),
+        "prev_day_high": previous_day["high"],
+        "prev_day_low": previous_day["low"],
+        "prev_day_close": previous_day["close"],
+        **{name: _smart_round_sr(value) for name, value in fib_levels.items()},
         "supports_detail": supports_detail,
         "resistances_detail": resistances_detail,
         "consolidation_zones": [],
-        "total_candles": total_candles,
+        "total_candles": len(completed),
+        "completed_candles": len(completed),
+        "input_candles": len(adapted_bars),
+        "zones": [zone.to_dict() for zone in snapshot.zones],
+        "overlapping_zones": [
+            zone.to_dict() for zone in directional.overlapping
+        ],
+        "session_levels": session_levels,
+        "session_levels_available": bool(session_levels),
+        "session_level_reason": session_reason,
+        "zone_model": snapshot.model,
+        "zone_provenance": {
+            "adapter": "calculate_sr_from_historical_level_zones_v1",
+            "model": snapshot.model,
+            "timeframe_requested": str(timeframe or ""),
+            "timeframe": normalized_timeframe,
+            "as_of": snapshot_as_of,
+            "direction": side,
+            "timestamp_mode": "open",
+            "causal_completed_bars": True,
+            "input_bar_count": len(adapted_bars),
+            "completed_bar_count": len(completed),
+            "excluded_uncompleted_or_invalid_bars": (
+                len(adapted_bars) - len(completed)
+            ),
+            "atr": atr,
+            "adaptive_zone_width": True,
+            "fixed_percent_cluster_used": False,
+            "standalone_fibonacci_strength_used": False,
+            "quality_flags": list(snapshot.quality_flags),
+        },
+        "fibonacci_provenance": {
+            "projection_only": True,
+            "used_as_structural_evidence": False,
+            "anchor": "completed_period_high_low_display_only",
+        },
     }
-    
     return (supports, resistances), fib_info
 
 

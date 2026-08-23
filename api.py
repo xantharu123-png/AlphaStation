@@ -173,6 +173,18 @@ from modules.vrvp_levels import (
     build_vrvp_structure,
     calculate_wilder_atr,
 )
+from modules.level_zones import (
+    StructureSnapshot,
+    build_structure_snapshot,
+    classify_for_trade,
+    legacy_level_adapter,
+    normalize_completed_bars,
+    select_trade_structure,
+)
+from modules.fibonacci_levels import (
+    fibonacci_payload_adapter,
+    select_confirmed_swing_leg,
+)
 from modules.penny_stock_scanner import (
     PENNY_DEFAULT_SLIPPAGE_BPS,
     PENNY_EXECUTION_MAX_SPREAD_BPS,
@@ -2999,6 +3011,72 @@ def _early_mover_alert_key(row: Dict[str, Any], ticker: Optional[str] = None) ->
     return _alert_signal_identity_key("early_movers", row, ticker)
 
 
+def _strict_optional_bool(value: Any) -> Optional[bool]:
+    """Parse only explicit boolean representations; unknown text is not truthy."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "y", "ja"}:
+            return True
+        if token in {"0", "false", "no", "n", "nein"}:
+            return False
+    return None
+
+
+def _early_mover_execution_evidence(row: Dict[str, Any]) -> bool:
+    """Require internally consistent proof from a fresh completed 5m candle.
+
+    An explicit row flag wins over any nested legacy copy.  This prevents a
+    stale ``trade_setup.execution_trigger_ok=True`` from overriding a current
+    top-level rejection.  A bare boolean is never sufficient evidence.
+    """
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    if "execution_trigger_ok" in row:
+        explicit_ok = _strict_optional_bool(row.get("execution_trigger_ok"))
+    else:
+        explicit_ok = _strict_optional_bool(setup.get("execution_trigger_ok"))
+    if explicit_ok is not True:
+        return False
+
+    trigger = row.get("intraday_trigger")
+    if not isinstance(trigger, dict):
+        trigger = setup.get("intraday_trigger")
+    if not isinstance(trigger, dict):
+        return False
+    if _strict_optional_bool(trigger.get("ok")) is not True:
+        return False
+    if str(trigger.get("timeframe") or "").strip().lower() != "5m":
+        return False
+
+    checked_at = _alert_float(trigger.get("checked_at"), None)
+    closed_at = _alert_float(trigger.get("last_candle_closed_at"), None)
+    candle_age = _alert_float(trigger.get("execution_data_age_seconds"), None)
+    if (
+        checked_at is None
+        or closed_at is None
+        or candle_age is None
+        or checked_at <= 0
+        or closed_at <= 0
+        or closed_at > checked_at + 2.0
+        or candle_age < 0
+        or candle_age > 2 * 5 * 60
+    ):
+        return False
+    # The scorer calculates age at ``checked_at``.  A small tolerance permits
+    # integer timestamp rounding, but rejects mixed evidence from different
+    # scans/candles.
+    if abs((checked_at - closed_at) - candle_age) > 5.0:
+        return False
+    return True
+
+
 def _alert_signal_identity_key(
     scanner_name: str,
     row: Dict[str, Any],
@@ -3052,17 +3130,20 @@ def _alert_signal_identity_key(
 
 
 def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
-    """Only mail Early-Mover crypto rows that are close to an actual long decision."""
+    """Only mail Early-Mover crypto rows with a fresh, closed-5m execution trigger.
+
+    The Early-Mover product contract is execution-specific even when the
+    intended holding horizon is a swing.  A higher-timeframe setup may stay on
+    the watch list, but it is not an entry mail until the venue-native 5m
+    breakout/retest has been confirmed.  Keeping this rule independent of the
+    holding horizon prevents a ``swing`` label from bypassing execution proof.
+    """
     fields = _extract_early_mover_fields(row)
     reasons: List[str] = []
     action = fields["trade_action"]
     risk_flags = set(fields["risk_flags"])
-    row_horizon_value = row.get("_alert_horizon")
-    row_horizon_explicit = row_horizon_value not in (None, "")
-    horizon = _normalize_trade_horizon_value(row_horizon_value if row_horizon_explicit else _DEFAULT_TRADE_HORIZON)
-    require_intraday_trigger = horizon in {"intraday", "both"} and (
-        row_horizon_explicit or _scanner_uses_intraday_horizon("early_movers")
-    )
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    execution_trigger_ok = _early_mover_execution_evidence(row)
 
     if fields["direction"] and fields["direction"] != "LONG":
         reasons.append("early_mover_not_long")
@@ -3096,10 +3177,12 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
         reasons.append("early_mover_weak_targets")
     if fields["live_rr"] < _EARLY_MOVER_MIN_ALERT_RR:
         reasons.append("early_mover_live_rr_below_threshold")
-    if require_intraday_trigger and risk_flags.intersection({"no_market_entry", "no_intraday_execution_trigger", "micro_trigger_missing"}):
+    # ``requires_5m_trigger`` and the other trigger-missing flags describe the
+    # pre-confirmation state and can remain in a copied/legacy row.  A current
+    # explicit trigger is the stronger evidence.  ``no_market_entry`` is a
+    # separate geometry/venue contradiction and therefore remains fail-closed.
+    if not execution_trigger_ok or "no_market_entry" in risk_flags:
         reasons.append("early_mover_wait_entry_confirmation")
-    # Swing mails do not require 5m. Intraday mode performs a fresh exchange
-    # trigger check before sending and only then treats missing 5m as a blocker.
     if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
         reasons.append("early_mover_retest_not_near_entry")
     return reasons
@@ -3568,6 +3651,52 @@ def _alert_trade_plan_ok(
     min_rr: float = _ALERT_MIN_LEVEL_RR,
     require_native_levels: bool = True,
 ) -> bool:
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+
+    def _final_field(name: str) -> Any:
+        """Use an explicitly finalized row field; nested setup is fallback."""
+        return row.get(name) if name in row else setup.get(name)
+
+    barrier_gate = str(
+        _final_field("barrier_gate")
+        or ""
+    ).upper()
+    structure_status = str(
+        _final_field("structure_status")
+        or ""
+    ).upper()
+    # A finalized row status is authoritative on its own.  Do not let a stale
+    # nested decision override it merely because callers did not duplicate the
+    # whole decision payload at top level.
+    raw_structure_decision = (
+        row.get("structure_decision")
+        if "structure_decision" in row
+        else setup.get("structure_decision")
+        if "structure_status" not in row
+        else None
+    )
+    structure_decision = raw_structure_decision if isinstance(raw_structure_decision, dict) else {}
+    target_quality = str(
+        _final_field("target_quality")
+        or ""
+    ).upper()
+    if (
+        structure_status in {"REJECT", "STRUCTURE_UNAVAILABLE"}
+        or str(structure_decision.get("status") or "").upper() == "REJECT"
+        or target_quality.startswith("PROJECTION_ONLY")
+        or target_quality.startswith("WEAK_")
+        or _final_field("tp1_is_projection") is True
+    ):
+        return False
+    barrier = _extract_trade_barrier(row)
+    reclaim_confirmed = bool(
+        barrier and _confirmed_break_reclaim_evidence(row, barrier)
+    )
+    if not reclaim_confirmed and (
+        barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
+        or structure_status == "WAIT_BREAK_RECLAIM"
+    ):
+        return False
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
         return False
@@ -5135,11 +5264,33 @@ def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str
         price = _alert_float(level.get("price"))
         if price is None or price <= 0:
             continue
-        levels.append({
+        zone_low = _alert_float(level.get("zone_low", level.get("lower")), price)
+        zone_high = _alert_float(level.get("zone_high", level.get("upper")), price)
+        compact_level = {
             "price": _round_crypto_price(price),
             "source": str(level.get("source") or "vrvp_level").lower().replace(" ", "_"),
+            "kind": level.get("kind"),
             "weight": int((_alert_float(level.get("weight"), 1) or 1) * 40),
-        })
+            # Keep the causal zone identity intact.  The central alert gate can
+            # only accept a later completed-close/hold reclaim when the
+            # evidence names the exact zone, boundary and confirmation time.
+            "source_family": level.get("source_family"),
+            "timeframe": level.get("timeframe") or profile.get("timeframe") or "5m",
+            "profile_id": level.get("profile_id") or profile.get("profile_id"),
+            "independence_key": level.get("independence_key"),
+            "zone_id": level.get("zone_id"),
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "lower": zone_low,
+            "upper": zone_high,
+            "confirmed_at": level.get("confirmed_at"),
+            "data_cutoff_at": level.get("data_cutoff_at") or profile.get("as_of"),
+            "causal_structure_validated": level.get("causal_structure_validated") is True,
+        }
+        compact_level["reclaim_boundary"] = (
+            zone_high if price > (current or 0) else zone_low
+        )
+        levels.append(compact_level)
 
     return {
         "poc": _round_crypto_price(profile.get("poc")),
@@ -5147,6 +5298,12 @@ def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str
         "val": _round_crypto_price(profile.get("val")),
         "levels": sorted(levels, key=lambda item: item["price"]),
         "source": "exchange_vrvp_5m",
+        "timeframe": profile.get("timeframe") or "5m",
+        "profile_id": profile.get("profile_id"),
+        "profile_confirmed_at": profile.get("profile_confirmed_at"),
+        "as_of": profile.get("as_of"),
+        "causal_structure_validated": profile.get("causal_structure_validated") is True,
+        "provenance": profile.get("provenance"),
     }
 
 
@@ -5174,11 +5331,29 @@ def _annotate_early_mover_overhead_resistance(
         return
 
     rounded_price = _round_crypto_price(price)
+    zone_low = _alert_float(level.get("zone_low", level.get("lower")), price)
+    zone_high = _alert_float(level.get("zone_high", level.get("upper")), price)
     resistance = {
+        "side": "resistance",
         "price": rounded_price,
         "distance_pct": round(distance_pct, 2),
         "distance_r": round(distance_r, 2),
         "source": source,
+        "kind": level.get("kind"),
+        "timeframe": level.get("timeframe"),
+        "source_family": level.get("source_family"),
+        "profile_id": level.get("profile_id"),
+        "independence_key": level.get("independence_key"),
+        "zone_id": level.get("zone_id"),
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+        "lower": zone_low,
+        "upper": zone_high,
+        "confirmed_at": level.get("confirmed_at"),
+        "data_cutoff_at": level.get("data_cutoff_at"),
+        "causal_structure_validated": level.get("causal_structure_validated") is True,
+        "reclaim_boundary": zone_high,
+        "action": "BREAK_RECLAIM_REQUIRED",
         "message": "Nahe Resistance: erst Break/Reclaim darueber bestaetigen",
     }
 
@@ -5236,19 +5411,37 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
     if structural_levels:
         _annotate_early_mover_overhead_resistance(row, structural_levels[0], entry, risk)
 
-    valid_tp1 = [level for level in levels if (_alert_float(level.get("price")) or 0) >= min_tp1]
+    valid_tp1 = [
+        level for level in structural_levels
+        if (_alert_float(level.get("price")) or 0) >= min_tp1
+    ]
     if not valid_tp1:
         return
     tp1_level = valid_tp1[0]
     tp1 = _alert_float(tp1_level.get("price"))
 
+    tp1_independence = str(tp1_level.get("independence_key") or "").strip()
     valid_tp2 = [
-        level for level in levels
+        level for level in structural_levels
         if (_alert_float(level.get("price")) or 0) >= max(min_tp2, (tp1 or 0) + risk * 0.25)
+        and tp1_independence
+        and str(level.get("independence_key") or "").strip()
+        and str(level.get("independence_key") or "").strip() != tp1_independence
     ]
     tp2_level = valid_tp2[0] if valid_tp2 else None
     current_tp2 = _alert_float(row.get("tp2"), 0) or 0
-    tp2 = _alert_float(tp2_level.get("price")) if tp2_level else current_tp2
+    tp2_projection_fallback = False
+    if tp2_level:
+        tp2 = _alert_float(tp2_level.get("price"))
+    else:
+        tp2 = current_tp2
+        if tp2 <= (tp1 or 0):
+            tp2 = max(
+                (tp1 or entry) + max(risk * 1.2, entry * 0.035),
+                entry + risk * 2.6,
+                entry * (1 + min_tp2_pct),
+            )
+            tp2_projection_fallback = True
     if tp1 is None or tp2 is None or tp2 <= tp1:
         return
 
@@ -5268,17 +5461,37 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
 
     current_tp1 = _alert_float(row.get("tp1"), 0) or 0
     current_quality = str(row.get("target_quality") or setup.get("target_quality") or "").upper()
-    should_replace_tp1 = current_quality.startswith("WEAK") or current_tp1 <= 0 or tp1 < current_tp1 or str(row.get("tp1_source", "")).endswith("_too_close")
-    should_replace_tp2 = current_quality.startswith("WEAK") or current_tp2 <= 0 or tp2 < current_tp2 or str(row.get("tp2_source", "")).endswith("_too_close")
+    should_replace_tp1 = (
+        current_quality.startswith(("WEAK", "PROJECTION_ONLY"))
+        or bool(row.get("tp1_is_projection"))
+        or current_tp1 <= 0
+        or tp1 < current_tp1
+        or str(row.get("tp1_source", "")).endswith("_too_close")
+    )
+    should_replace_tp2 = tp2_projection_fallback or (
+        bool(tp2_level)
+        and (
+            current_quality.startswith(("WEAK", "PROJECTION_ONLY"))
+            or bool(row.get("tp2_is_projection"))
+            or current_tp2 <= 0
+            or tp2 < current_tp2
+            or str(row.get("tp2_source", "")).endswith("_too_close")
+        )
+    )
     if not should_replace_tp1 and not should_replace_tp2:
         return
 
     if should_replace_tp1:
         row["tp1"] = _round_crypto_price(tp1)
         row["tp1_source"] = tp1_level.get("source") or "vrvp_resistance"
+        row["tp1_is_projection"] = False
     if should_replace_tp2:
         row["tp2"] = _round_crypto_price(tp2)
-        row["tp2_source"] = (tp2_level or {}).get("source") or "vrvp_resistance"
+        row["tp2_source"] = (
+            (tp2_level or {}).get("source")
+            or "projection_after_first_vrvp_barrier"
+        )
+        row["tp2_is_projection"] = tp2_level is None
 
     new_tp1 = _alert_float(row.get("tp1"), tp1) or tp1
     new_tp2 = _alert_float(row.get("tp2"), tp2) or tp2
@@ -5297,12 +5510,23 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
     ) or entry
     live_geometry = trade_geometry(live_entry, stop, new_tp1, new_tp2, "LONG")
     live_rr = live_geometry.get("rr") if live_geometry.get("valid") else 0
+    tp1_projection = bool(row.get("tp1_is_projection"))
+    tp2_projection = bool(row.get("tp2_is_projection")) or tp2_level is None
+    target_quality = (
+        "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+        if tp1_projection
+        else "STRUCTURAL_TP1_PROJECTION_TP2"
+        if tp2_projection
+        else "STRUCTURAL_VRVP"
+    )
     row.update({
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "risk_reward": geometry["rr"],
         "live_rr_ratio": live_rr,
-        "target_quality": "STRUCTURAL_VRVP",
+        "target_quality": target_quality,
+        "tp1_is_projection": tp1_projection,
+        "tp2_is_projection": tp2_projection,
         "vrvp_levels": vrvp,
     })
     flags = [str(flag) for flag in (row.get("risk_flags") or []) if str(flag) != "weak_structural_targets"]
@@ -5319,6 +5543,8 @@ def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str
             "rr": row.get("risk_reward"),
             "live_rr": row.get("live_rr_ratio"),
             "target_quality": row.get("target_quality"),
+            "tp1_is_projection": row.get("tp1_is_projection"),
+            "tp2_is_projection": row.get("tp2_is_projection"),
             "vrvp_levels": vrvp,
         })
         row["trade_setup"] = setup
@@ -5381,8 +5607,15 @@ def _early_mover_target_plan_issues(row: Dict[str, Any]) -> List[str]:
     rr2 = geometry["rr_tp2"]
     if rr1 < 1.5 or rr2 < max(2.05, rr1 + 0.55):
         issues.append("targets_too_close")
+    tp1_projection = (
+        bool(row.get("tp1_is_projection"))
+        if "tp1_is_projection" in row
+        else bool(setup.get("tp1_is_projection"))
+    )
     if target_quality.startswith("WEAK"):
         issues.append("weak_structural_targets")
+    if target_quality.startswith("PROJECTION_ONLY") or tp1_projection:
+        issues.append("projection_only_tp1")
     return list(dict.fromkeys(issues))
 
 
@@ -5399,10 +5632,19 @@ def _block_early_mover_trade_on_bad_targets(row: Dict[str, Any]) -> None:
 
     _merge_flags("risk_flags")
     _merge_flags("risk_reasons")
-    row["target_quality"] = "WEAK_STRUCTURAL_TARGETS"
-    setup = row.get("trade_setup")
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    current_quality = str(
+        row.get("target_quality", setup.get("target_quality", "")) or ""
+    ).upper()
+    final_quality = (
+        "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+        if current_quality.startswith("PROJECTION_ONLY")
+        or "projection_only_tp1" in issues
+        else "WEAK_STRUCTURAL_TARGETS"
+    )
+    row["target_quality"] = final_quality
     if isinstance(setup, dict):
-        setup["target_quality"] = "WEAK_STRUCTURAL_TARGETS"
+        setup["target_quality"] = final_quality
         setup_flags = setup.get("risk_flags") if isinstance(setup.get("risk_flags"), list) else []
         setup["risk_flags"] = list(dict.fromkeys([*setup_flags, *all_issues]))
         setup_warnings = setup.get("warnings") if isinstance(setup.get("warnings"), list) else []
@@ -7017,6 +7259,12 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         seen_keys.add(identity_key)
         key = f"{identity_key}__trade"
         setup = row.get("trade_setup", {}) if isinstance(row.get("trade_setup"), dict) else {}
+
+        def _final_plan_field(name: str) -> Any:
+            # Finalized top-level telemetry is authoritative, including an
+            # explicit False/None; the nested setup is only a legacy fallback.
+            return row.get(name) if name in row else setup.get(name)
+
         btc_context = row.get("btc_context", setup.get("btc_context", {}))
         if not isinstance(btc_context, dict):
             btc_context = {}
@@ -7049,6 +7297,19 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "stop": row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop")))),
             "tp1": row.get("tp1", setup.get("tp1")),
             "tp2": row.get("tp2", setup.get("tp2")),
+            "target_quality": _final_plan_field("target_quality"),
+            "tp1_is_projection": _final_plan_field("tp1_is_projection"),
+            "tp2_is_projection": _final_plan_field("tp2_is_projection"),
+            "tp1_source": _final_plan_field("tp1_source"),
+            "tp2_source": _final_plan_field("tp2_source"),
+            "nearest_barrier": _final_plan_field("nearest_barrier"),
+            "overhead_resistance": _final_plan_field("overhead_resistance"),
+            "barrier_gate": _final_plan_field("barrier_gate"),
+            "barrier_gate_active": _final_plan_field("barrier_gate_active"),
+            "barrier_gate_reason": _final_plan_field("barrier_gate_reason"),
+            "structure_status": _final_plan_field("structure_status"),
+            "structure_reason": _final_plan_field("structure_reason"),
+            "structure_decision": _final_plan_field("structure_decision"),
             "live_rr": row.get("live_rr_ratio", setup.get("live_rr")),
             "distance_r": row.get("distance_to_entry_r", setup.get("distance_to_entry_r")),
             "change24": row.get("Change24h"),
@@ -13201,14 +13462,29 @@ def _extract_trade_barrier(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Return the nearest structural barrier from top-level or trade_setup."""
     if not isinstance(item, dict):
         return None
-    sources = [item]
+    barrier_keys = ("nearest_barrier", "overhead_resistance", "underlying_support")
+    row_exposes_barrier = any(key in item for key in barrier_keys)
+    for key in barrier_keys:
+        barrier = item.get(key)
+        barrier_price = _alert_float(barrier.get("price"), None) if isinstance(barrier, dict) else None
+        if isinstance(barrier, dict) and barrier_price is not None and barrier_price > 0:
+            extracted = dict(barrier)
+            if key == "overhead_resistance":
+                extracted.setdefault("side", "resistance")
+            elif key == "underlying_support":
+                extracted.setdefault("side", "support")
+            return extracted
+    # Key presence is deliberate: a finalized row can explicitly clear stale
+    # nested barrier state with ``None``. Only a row that exposes no barrier
+    # field at all may fall back to the older nested setup representation.
+    if row_exposes_barrier:
+        return None
     setup = item.get("trade_setup")
     if isinstance(setup, dict):
-        sources.insert(0, setup)
-    for source in sources:
-        for key in ("nearest_barrier", "overhead_resistance", "underlying_support"):
-            barrier = source.get(key)
-            if isinstance(barrier, dict) and _alert_float(barrier.get("price"), None):
+        for key in barrier_keys:
+            barrier = setup.get(key)
+            barrier_price = _alert_float(barrier.get("price"), None) if isinstance(barrier, dict) else None
+            if isinstance(barrier, dict) and barrier_price is not None and barrier_price > 0:
                 extracted = dict(barrier)
                 if key == "overhead_resistance":
                     extracted.setdefault("side", "resistance")
@@ -13218,10 +13494,125 @@ def _extract_trade_barrier(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _confirmed_break_reclaim_evidence(
+    item: Dict[str, Any], barrier: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Return only completed-close/hold reclaim evidence, never spot-price inference."""
+    setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else {}
+    candidates: List[Any] = [
+        barrier.get("break_reclaim"),
+        barrier.get("break_reclaim_evidence"),
+        item.get("break_reclaim"),
+        item.get("break_reclaim_evidence"),
+    ]
+    row_exposes_barrier = any(
+        key in item
+        for key in ("nearest_barrier", "overhead_resistance", "underlying_support")
+    )
+    row_exposes_reclaim = any(
+        key in item for key in ("break_reclaim", "break_reclaim_evidence")
+    )
+    if not row_exposes_barrier and not row_exposes_reclaim:
+        candidates.extend((
+            setup.get("break_reclaim"),
+            setup.get("break_reclaim_evidence"),
+        ))
+    barrier_zone_id = str(barrier.get("zone_id") or "").strip()
+    barrier_side = str(barrier.get("side") or "").strip().lower()
+    expected_direction = "LONG" if barrier_side == "resistance" else "SHORT" if barrier_side == "support" else ""
+    expected_boundary = _alert_float(
+        barrier.get("zone_high") if barrier_side == "resistance" else barrier.get("zone_low"),
+        None,
+    )
+    if expected_boundary is None:
+        expected_boundary = _alert_float(barrier.get("reclaim_boundary"), None)
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("model") or "") != "break_reclaim_close_hold_v1":
+            continue
+        if str(raw.get("state") or "").upper() != "RECLAIMED":
+            continue
+        if not raw.get("break_closed_at"):
+            continue
+        completed_used = _alert_float(raw.get("completed_bars_used"), None)
+        hold_required = _alert_float(raw.get("hold_bars_required"), None)
+        hold_observed = _alert_float(raw.get("hold_bars_observed"), None)
+        if (
+            completed_used is None
+            or completed_used <= 0
+            or hold_required is None
+            or hold_observed is None
+            or hold_observed < hold_required
+        ):
+            continue
+        if raw.get("retest_required") is True and raw.get("retest_observed") is not True:
+            continue
+        evidence_zone_id = str(raw.get("zone_id") or "").strip()
+        if not barrier_zone_id or evidence_zone_id != barrier_zone_id:
+            continue
+        if not expected_direction or str(raw.get("direction") or "").strip().upper() != expected_direction:
+            continue
+        evidence_boundary = _alert_float(raw.get("boundary"), None)
+        if (
+            expected_boundary is None
+            or evidence_boundary is None
+            or not math.isclose(
+                evidence_boundary,
+                expected_boundary,
+                rel_tol=1e-9,
+                abs_tol=max(1e-9, abs(expected_boundary) * 1e-9),
+            )
+        ):
+            continue
+        zone_confirmed_at = _crypto_market_timestamp_seconds(raw.get("zone_confirmed_at"))
+        barrier_confirmed_at = _crypto_market_timestamp_seconds(barrier.get("confirmed_at"))
+        break_closed_at = _crypto_market_timestamp_seconds(raw.get("break_closed_at"))
+        last_completed_at = _crypto_market_timestamp_seconds(raw.get("last_completed_at"))
+        evidence_as_of = _crypto_market_timestamp_seconds(raw.get("as_of"))
+        last_close = _alert_float(raw.get("last_completed_close"), None)
+        timeframe = str(raw.get("timeframe") or "").strip()
+        if (
+            zone_confirmed_at is None
+            or barrier_confirmed_at is None
+            or break_closed_at is None
+            or last_completed_at is None
+            or evidence_as_of is None
+            or last_close is None
+            or not timeframe
+            or not math.isclose(zone_confirmed_at, barrier_confirmed_at, abs_tol=1.0)
+            or not (zone_confirmed_at < break_closed_at <= last_completed_at <= evidence_as_of)
+            or completed_used < hold_observed + 1
+        ):
+            continue
+        timeframe_seconds = _timeframe_seconds(timeframe)
+        item_observed_at = _crypto_trade_observation_timestamp(item)
+        if (
+            not timeframe_seconds
+            or item_observed_at is None
+            # Evidence may be up to one timeframe old, but it must never come
+            # from after the row was observed. A small skew allowance covers
+            # independently sampled clocks without admitting a future bar.
+            or evidence_as_of > item_observed_at + 5.0
+            or item_observed_at - evidence_as_of > timeframe_seconds
+            or evidence_as_of - last_completed_at > timeframe_seconds * 2 + 2
+            or (expected_direction == "LONG" and last_close <= expected_boundary)
+            or (expected_direction == "SHORT" and last_close >= expected_boundary)
+        ):
+            continue
+        return dict(raw)
+    return None
+
+
 def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
     """Return a WAIT reason when a trade points directly into an unreclaimed barrier."""
     barrier = _extract_trade_barrier(item)
     if not barrier:
+        return None
+    # Canonical level planning persists the first barrier even when it is far
+    # enough to be a valid TP1.  Only an explicit break/reclaim action is a
+    # gate; mere provenance must not downgrade an accepted plan.
+    if "action" in barrier and not barrier.get("action"):
         return None
     barrier_price = _alert_float(barrier.get("price"), None)
     if barrier_price is None or barrier_price <= 0:
@@ -13237,20 +13628,17 @@ def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
     if direction not in {"LONG", "SHORT"}:
         return None
 
+    reclaim_evidence = _confirmed_break_reclaim_evidence(item, barrier)
+    barrier["reclaimed"] = reclaim_evidence is not None
+    if reclaim_evidence is not None:
+        barrier["break_reclaim"] = reclaim_evidence
+        return None
+
     current = _alert_float(_extract_alert_price(item), None)
     entry = _alert_float(levels.get("entry"), None)
     reference = current if current is not None and current > 0 else entry
     if reference is None or reference <= 0:
         return "near_structural_barrier_wait_trigger"
-
-    reclaimed = (
-        reference >= barrier_price * 1.003
-        if direction == "LONG"
-        else reference <= barrier_price * 0.997
-    )
-    barrier["reclaimed"] = reclaimed
-    if reclaimed:
-        return None
 
     risk = _alert_float(levels.get("risk"), None)
     if risk is None and entry is not None:
@@ -13293,15 +13681,92 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
     if reference is None or reference <= 0:
         reference = price
 
-    reclaimed = False
-    if side == "resistance" and reference >= price * 1.003:
-        reclaimed = True
-    elif side == "support" and reference <= price * 0.997:
-        reclaimed = True
-    barrier["reclaimed"] = reclaimed
+    setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
+
+    def _remove_barrier_wait_state(
+        container: Optional[Dict[str, Any]],
+        *,
+        accepted_status: str,
+        accepted_reason: str,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(container, dict):
+            return
+        container["barrier_gate"] = None
+        container["barrier_gate_active"] = False
+        container["structure_status"] = accepted_status
+        container["structure_reason"] = accepted_reason
+        container.pop("barrier_gate_reason", None)
+        for field, stale_values in {
+            "trade_action": {"WAIT_FOR_BREAK_RECLAIM"},
+            "entry_status": {"WAIT_FOR_BREAK_RECLAIM"},
+            "signal_quality": {"wait_trigger"},
+            "trade_decision": {"WAIT_FOR_TRIGGER"},
+            "trade_signal": {"WARTEN"},
+        }.items():
+            if str(container.get(field) or "") in stale_values:
+                container.pop(field, None)
+        label = str(container.get("signal_label") or "")
+        if label.startswith("Warten: Resistance erst") or label.startswith("Warten: Support erst"):
+            container.pop("signal_label", None)
+        container["risk_flags"] = [
+            flag for flag in (container.get("risk_flags") or [])
+            if flag not in {"near_overhead_resistance", "near_underlying_support"}
+        ]
+        decision = dict(container.get("structure_decision") or {})
+        decision.update({
+            "status": accepted_status,
+            "reason": accepted_reason,
+            "barrier_gate": None,
+        })
+        if evidence is not None:
+            decision["break_reclaim"] = evidence
+        container["structure_decision"] = decision
+
+    reclaim_evidence = _confirmed_break_reclaim_evidence(item, barrier)
+    barrier["reclaimed"] = reclaim_evidence is not None
+    if reclaim_evidence is not None:
+        barrier["break_reclaim"] = reclaim_evidence
+        barrier["action"] = None
+        item["nearest_barrier"] = barrier
+        if setup is not None:
+            setup["nearest_barrier"] = barrier
+        _remove_barrier_wait_state(
+            item,
+            accepted_status="ACCEPT_AFTER_RECLAIM",
+            accepted_reason="completed_break_close_hold_reclaim_confirmed",
+            evidence=reclaim_evidence,
+        )
+        _remove_barrier_wait_state(
+            setup,
+            accepted_status="ACCEPT_AFTER_RECLAIM",
+            accepted_reason="completed_break_close_hold_reclaim_confirmed",
+            evidence=reclaim_evidence,
+        )
+        return barrier
+
+    # Canonical planners persist the nearest barrier even when it has enough
+    # room.  ``action=None`` is an explicit ACCEPT and must clear a stale gate
+    # copied from an older scan instead of inheriting it through ``or``.
+    if "action" in barrier and not barrier.get("action"):
+        barrier["action"] = None
+        item["nearest_barrier"] = barrier
+        if setup is not None:
+            setup["nearest_barrier"] = barrier
+        _remove_barrier_wait_state(
+            item,
+            accepted_status="ACCEPT",
+            accepted_reason="first_opposing_barrier_is_tradable_tp1",
+        )
+        _remove_barrier_wait_state(
+            setup,
+            accepted_status="ACCEPT",
+            accepted_reason="first_opposing_barrier_is_tradable_tp1",
+        )
+        return barrier
 
     item["nearest_barrier"] = barrier
-    item["barrier_gate"] = barrier.get("action") or item.get("barrier_gate")
+    item["barrier_gate"] = barrier.get("action")
     item["barrier_gate_reason"] = (
         "Resistance erst brechen/reclaimen"
         if side == "resistance"
@@ -13312,7 +13777,6 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
     elif side == "support":
         item["underlying_support"] = barrier
 
-    setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
     if setup is not None:
         setup["nearest_barrier"] = barrier
         setup["barrier_gate"] = item.get("barrier_gate")
@@ -13321,6 +13785,52 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
             setup["overhead_resistance"] = barrier
         elif side == "support":
             setup["underlying_support"] = barrier
+
+    explicit_gate = str(
+        barrier.get("action")
+        or item.get("barrier_gate")
+        or (setup.get("barrier_gate") if setup is not None else "")
+        or ""
+    ).upper()
+    legacy_implicit_gate = (
+        "action" not in barrier
+        and _structural_barrier_alert_reason(item) is not None
+    )
+    if (
+        explicit_gate not in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
+        and not legacy_implicit_gate
+    ):
+        return barrier
+    if legacy_implicit_gate:
+        inferred_gate = "BREAK_RECLAIM_REQUIRED" if side == "resistance" else "BREAK_SUPPORT_REQUIRED"
+        barrier["action"] = inferred_gate
+        item["barrier_gate"] = inferred_gate
+        if setup is not None:
+            setup["barrier_gate"] = inferred_gate
+
+    gate_value = str(item.get("barrier_gate") or barrier.get("action") or "").upper()
+    structure_reason = "first_opposing_barrier_before_minimum_rr"
+    starter_fields = (
+        "starter_plan", "entry_plan_type", "starter_entry", "early_entry",
+        "starter_stop", "starter_tp1", "starter_tp2", "starter_rr",
+        "main_entry", "add_entry",
+    )
+    for container in (item, setup):
+        if not isinstance(container, dict):
+            continue
+        container["barrier_gate"] = gate_value
+        container["barrier_gate_active"] = True
+        container["structure_status"] = "WAIT_BREAK_RECLAIM"
+        container["structure_reason"] = structure_reason
+        nested_decision = dict(container.get("structure_decision") or {})
+        nested_decision.update({
+            "status": "WAIT_BREAK_RECLAIM",
+            "reason": structure_reason,
+            "barrier_gate": gate_value,
+        })
+        container["structure_decision"] = nested_decision
+        for field in starter_fields:
+            container.pop(field, None)
 
     flags = item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else []
     reasons = item.get("risk_reasons") if isinstance(item.get("risk_reasons"), list) else []
@@ -13336,9 +13846,13 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
     reason = f"Nahe {level_text} auf {tf}"
     reasons.append(reason)
     item["risk_reasons"] = list(dict.fromkeys(reasons))
-
-    if reclaimed:
-        return barrier
+    if setup is not None:
+        setup_flags = setup.get("risk_flags") if isinstance(setup.get("risk_flags"), list) else []
+        setup_flags.append(flag)
+        setup["risk_flags"] = list(dict.fromkeys(setup_flags))
+        setup_reasons = setup.get("risk_reasons") if isinstance(setup.get("risk_reasons"), list) else []
+        setup_reasons.append(reason)
+        setup["risk_reasons"] = list(dict.fromkeys(setup_reasons))
 
     if scanner_name not in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         return barrier
@@ -14767,6 +15281,7 @@ def _attach_starter_entry_plan(
     high_20d: Optional[float] = None,
     low_20d: Optional[float] = None,
     vwap: Optional[float] = None,
+    vwap_evidence_type: Optional[str] = None,
     ema20: Optional[float] = None,
     vah: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -14817,8 +15332,14 @@ def _attach_starter_entry_plan(
             return 0.0
         return val if val > 0 else 0.0
 
+    verified_vwap = (
+        _level(vwap)
+        if str(vwap_evidence_type or "").strip().lower()
+        in {"true_session_vwap", "venue_session_vwap", "tick_vwap"}
+        else 0.0
+    )
     structure_levels = [
-        (_level(vwap), "VWAP"),
+        (verified_vwap, "VWAP"),
         (_level(vah), "VAH"),
         (_level(ema20), "EMA20"),
         (_level(support_1), "Support"),
@@ -14965,39 +15486,155 @@ def _calculate_directional_fib_levels(
     timeframe: str = "1D",
     direction: Any = None,
     lookback: Optional[int] = None,
+    times: Optional[List[Any]] = None,
+    as_of: Any = None,
+    atr: Optional[float] = None,
+    timestamp_mode: str = "open",
 ) -> Dict[str, Any]:
-    """Return Fibonacci retracements/extensions from the selected timeframe and setup direction.
+    """Return projection-only Fibonacci levels for one directional swing.
 
-    Long: pullback levels are below the swing high, extensions above it.
-    Short: pullback levels are above the swing low, extensions below it.
-    Input series must be chronological (oldest -> newest).
+    Live/chart callers must supply chronological market timestamps.  In that
+    path only a confirmed Low->High (long) or High->Low (short) pivot leg made
+    from completed bars is accepted.  The timestamp-less branch remains only
+    as a labelled compatibility adapter for old internal callers/tests; it is
+    never used by the live API endpoints.
     """
-    clean = []
-    for h, l, c in zip(highs or [], lows or [], closes or []):
+    high_values = list(highs or [])
+    low_values = list(lows or [])
+    close_values = list(closes or [])
+
+    # Canonical production path: an explicit timestamp request is fail-closed.
+    # Filtering, lookback, direction and ATR all operate on the same completed
+    # prefix, so a future/open candle cannot alter any result.
+    if times is not None:
+        source_times = list(times)
+        if not (
+            len(high_values)
+            == len(low_values)
+            == len(close_values)
+            == len(source_times)
+        ):
+            return {}
+        time_key = "close_time" if str(timestamp_mode).lower() == "close" else "open_time"
+        timestamped: List[Dict[str, Any]] = []
+        for h, l, c, market_time in zip(high_values, low_values, close_values, source_times):
+            h_val = _alert_float(h)
+            l_val = _alert_float(l)
+            c_val = _alert_float(c)
+            if market_time is None:
+                return {}
+            if (
+                h_val is None
+                or l_val is None
+                or c_val is None
+                or min(h_val, l_val, c_val) <= 0
+                or h_val < max(l_val, c_val)
+                or l_val > c_val
+            ):
+                continue
+            timestamped.append({
+                time_key: market_time,
+                "open": c_val,
+                "high": h_val,
+                "low": l_val,
+                "close": c_val,
+            })
+        if len(timestamped) < 3:
+            return {}
+        cutoff = as_of or datetime.now(timezone.utc)
+        try:
+            completed = normalize_completed_bars(
+                timestamped,
+                timeframe=timeframe,
+                as_of=cutoff,
+                timestamp_mode=str(timestamp_mode).lower(),
+            )
+        except (TypeError, ValueError, OverflowError, OSError):
+            return {}
+        if len(completed) < 3:
+            return {}
+        lb = min(int(lookback or _fib_lookback_for_timeframe(timeframe)), len(completed))
+        recent_completed = completed[-lb:]
+        recent = [
+            {
+                "open_time": bar.opened_at,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in recent_completed
+        ]
+        dir_norm = _normalize_chart_direction(direction)
+        if not dir_norm:
+            first_close = recent[0]["close"]
+            last_close = recent[-1]["close"]
+            period_high = max(row["high"] for row in recent)
+            period_low = min(row["low"] for row in recent)
+            mid = period_low + (period_high - period_low) * 0.5
+            dir_norm = "long" if (last_close >= first_close or last_close >= mid) else "short"
+        atr_value = _alert_float(atr, None)
+        if atr_value is None or atr_value <= 0:
+            atr_value = calculate_wilder_atr(recent, period=14, lookback=lb)
+        leg = select_confirmed_swing_leg(
+            recent,
+            as_of=cutoff,
+            direction=dir_norm,
+            timeframe=timeframe,
+            pivot_left=2,
+            pivot_right=2,
+            minimum_move_atr=1.0 if atr_value and atr_value > 0 else 0.0,
+            atr=atr_value,
+            timestamp_mode="open",
+        )
+        if leg is None:
+            return {}
+        payload = fibonacci_payload_adapter(
+            leg,
+            lookback_bars=lb,
+            basis="confirmed_chronological_pivots_completed_bars",
+        )
+        payload["meta"]["causal_timestamps_available"] = True
+        payload["meta"]["structural_barrier"] = False
+        return payload
+
+    clean: List[tuple[float, float, float]] = []
+    for h, l, c in zip(high_values, low_values, close_values):
         h_val = _alert_float(h)
         l_val = _alert_float(l)
         c_val = _alert_float(c)
-        if h_val is None or l_val is None or c_val is None:
+        if (
+            h_val is None
+            or l_val is None
+            or c_val is None
+            or min(h_val, l_val, c_val) <= 0
+            or h_val < max(l_val, c_val)
+            or l_val > c_val
+        ):
             continue
         clean.append((h_val, l_val, c_val))
     if len(clean) < 3:
         return {}
-
     lb = min(int(lookback or _fib_lookback_for_timeframe(timeframe)), len(clean))
     recent = clean[-lb:]
+    dir_norm = _normalize_chart_direction(direction)
+    if not dir_norm:
+        first_close = recent[0][2]
+        last_close = recent[-1][2]
+        period_high = max(row[0] for row in recent)
+        period_low = min(row[1] for row in recent)
+        mid = period_low + (period_high - period_low) * 0.5
+        dir_norm = "long" if (last_close >= first_close or last_close >= mid) else "short"
+
+    # Backward-compatible mathematical adapter for timestamp-less callers.
+    # It is explicitly non-causal and projection-only, so it cannot be fed to
+    # the structural barrier engine.
     period_high = max(row[0] for row in recent)
     period_low = min(row[1] for row in recent)
     rng = period_high - period_low
     if rng <= 0:
         return {}
-
-    dir_norm = _normalize_chart_direction(direction)
-    if not dir_norm:
-        first_close = recent[0][2]
-        last_close = recent[-1][2]
-        mid = period_low + rng * 0.5
-        dir_norm = "long" if (last_close >= first_close or last_close >= mid) else "short"
-
     retracements = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     levels: Dict[str, float] = {}
     if dir_norm == "short":
@@ -15021,8 +15658,11 @@ def _calculate_directional_fib_levels(
             "lookback_bars": lb,
             "anchor_high": _round_level_price(period_high),
             "anchor_low": _round_level_price(period_low),
-            "model": "directional_retracement_v2",
-            "basis": "selected_chart_timeframe" if str(timeframe or "1D") != "1D" else "daily_detail_timeframe",
+            "model": "legacy_directional_retracement_projection_v2",
+            "basis": "ordered_series_without_market_timestamps",
+            "projection_only": True,
+            "structural_barrier": False,
+            "causal_timestamps_available": False,
         },
     }
 
@@ -15068,8 +15708,11 @@ def _build_structured_trade_setup(
     range_pos: Optional[float] = None,
     current_price: Optional[float] = None,
     vwap: Optional[float] = None,
+    vwap_evidence_type: Optional[str] = None,
     ema20: Optional[float] = None,
     vah: Optional[float] = None,
+    structure_snapshot: Optional[StructureSnapshot] = None,
+    require_causal_structure: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build realistic sidebar trade levels from invalidation and target structure.
 
@@ -15082,6 +15725,8 @@ def _build_structured_trade_setup(
     except (TypeError, ValueError):
         return None
     if side not in ("LONG", "SHORT") or entry <= 0:
+        return None
+    if require_causal_structure and not isinstance(structure_snapshot, StructureSnapshot):
         return None
 
     atr_value = float(atr or 0)
@@ -15105,6 +15750,33 @@ def _build_structured_trade_setup(
     hi20 = float(high_20d or 0)
     lo20 = float(low_20d or 0)
     range_size = hi20 - lo20 if hi20 > lo20 else 0.0
+    directional_structure = None
+    if isinstance(structure_snapshot, StructureSnapshot):
+        unavailable_flags = {
+            "no_completed_bars",
+            "no_confirmed_levels",
+            "structure_unavailable",
+        }.intersection(set(structure_snapshot.quality_flags))
+        if unavailable_flags or not structure_snapshot.zones:
+            return None
+        # A quote or planned entry crossing a known level does not prove that
+        # the level changed role. Only completed close/hold/retest evidence may
+        # release a former resistance/support gate.
+        for zone in structure_snapshot.zones:
+            if side == "LONG" and "resistance" in zone.origin_roles:
+                if entry > zone.upper and zone.break_state != "reclaimed":
+                    return None
+            elif side == "SHORT" and "support" in zone.origin_roles:
+                if entry < zone.lower and zone.break_state != "reclaimed":
+                    return None
+        try:
+            directional_structure = classify_for_trade(
+                structure_snapshot,
+                entry=entry,
+                direction=side,
+            )
+        except (TypeError, ValueError):
+            directional_structure = None
 
     def _unique_levels(levels: List[tuple[float, str]], reverse: bool = False) -> List[tuple[float, str]]:
         seen: Dict[float, str] = {}
@@ -15113,38 +15785,79 @@ def _build_structured_trade_setup(
                 seen.setdefault(round(float(price), 6), label)
         return sorted(seen.items(), reverse=reverse)
 
-    def _select_long_target(
-        candidates: List[tuple[float, str]],
-        min_reward: float,
-        fallback: float,
-        fallback_label: str,
-    ) -> tuple[float, str]:
-        valid = _unique_levels([(p, l) for p, l in candidates if p > entry])
-        structural = [(p, l) for p, l in valid if "fallback" not in l.lower() and "atr" not in l.lower()]
-        synthetic = [(p, l) for p, l in valid if (p, l) not in structural]
-        for group in (structural, synthetic):
-            for price, label in group:
-                if price - entry >= min_reward:
-                    return price, label
-        return fallback, fallback_label
+    nearest_barrier_meta: Optional[Dict[str, Any]] = None
+    structure_decision_payload: Dict[str, Any] = {}
+    barrier_gate: Optional[str] = None
 
-    def _select_short_target(
-        candidates: List[tuple[float, str]],
-        min_reward: float,
-        fallback: float,
-        fallback_label: str,
-    ) -> tuple[float, str]:
-        valid = _unique_levels([(p, l) for p, l in candidates if 0 < p < entry], reverse=True)
-        structural = [(p, l) for p, l in valid if "fallback" not in l.lower() and "atr" not in l.lower()]
-        synthetic = [(p, l) for p, l in valid if (p, l) not in structural]
-        for group in (structural, synthetic):
-            for price, label in group:
-                if entry - price >= min_reward:
-                    return price, label
-        return max(0.01, fallback), fallback_label
+    def _zone_label(zone: Any) -> str:
+        sources = " + ".join(getattr(zone, "source_names", ()) or ("confirmed level zone",))
+        timeframes = sorted({item.timeframe for item in getattr(zone, "evidence", ())})
+        return f"{sources} ({'/'.join(timeframes) or 'MTF'})"
+
+    def _structural_barrier_rows() -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        if directional_structure is not None:
+            for zone in directional_structure.opposing_barriers:
+                overlapping = bool(zone.lower <= entry <= zone.upper)
+                target_price = (
+                    zone.upper if side == "LONG" and overlapping
+                    else zone.lower if side == "LONG"
+                    else zone.lower if overlapping
+                    else zone.upper
+                )
+                if not overlapping and not (
+                    (side == "LONG" and target_price > entry)
+                    or (side == "SHORT" and 0 < target_price < entry)
+                ):
+                    continue
+                timeframes = sorted({item.timeframe for item in zone.evidence})
+                rows.append({
+                    "price": float(target_price),
+                    "room_distance": 0.0 if overlapping else abs(float(target_price) - entry),
+                    "overlapping": overlapping,
+                    "source": _zone_label(zone),
+                    "timeframe": "/".join(timeframes) or "MTF",
+                    "zone_id": zone.zone_id,
+                    "zone_low": zone.lower,
+                    "zone_high": zone.upper,
+                    "strength": zone.strength,
+                    "independent_sources": zone.independent_sources,
+                    "confirmed_at": zone.confirmed_at.isoformat().replace("+00:00", "Z"),
+                    "zone": zone,
+                })
+        # Legacy point levels lack a stable zone id/confirmation timestamp and
+        # therefore cannot support a causal break/reclaim gate. They remain a
+        # compatibility path only when no shared causal snapshot was supplied.
+        if not rows and directional_structure is None:
+            legacy = (
+                [(resistance, "confirmed R1"), (hi20, "completed 20D High")]
+                if side == "LONG"
+                else [(support, "confirmed S1"), (lo20, "completed 20D Low")]
+            )
+            for price, source in _unique_levels(legacy, reverse=side == "SHORT"):
+                if (side == "LONG" and price > entry) or (side == "SHORT" and 0 < price < entry):
+                    rows.append({
+                        "price": float(price),
+                        "room_distance": abs(float(price) - entry),
+                        "overlapping": False,
+                        "source": source,
+                        "timeframe": "1D",
+                        "zone_id": None,
+                        "zone_low": float(price),
+                        "zone_high": float(price),
+                        "strength": 1.0,
+                        "independent_sources": 1,
+                        "confirmed_at": None,
+                        "zone": None,
+                    })
+        rows.sort(key=lambda row: (float(row["room_distance"]), abs(float(row["price"]) - entry)))
+        return rows
 
     if side == "LONG":
         stop_candidates: List[tuple[float, str]] = []
+        if directional_structure is not None:
+            for zone in directional_structure.invalidation_candidates:
+                stop_candidates.append((zone.lower - buffer, f"{_zone_label(zone)} invalidation"))
         if 0 < support < entry:
             stop_candidates.append((support - buffer, "S1 invalidation"))
         if 0 < lo20 < entry:
@@ -15162,49 +15875,11 @@ def _build_structured_trade_setup(
         risk = entry - stop
         if risk <= 0:
             return None
-
-        candidates: List[tuple[float, str]] = []
-        if resistance > entry:
-            candidates.append((resistance, "R1"))
-        if hi20 > entry:
-            candidates.append((hi20, "20D High"))
-        if range_size > 0:
-            candidates.extend([
-                (hi20 + range_size * 0.272, "127% range extension"),
-                (hi20 + range_size * 0.382, "138% range extension"),
-                (hi20 + range_size * 0.618, "161% range extension"),
-            ])
-        candidates.extend([
-            (entry + atr_value * 2.0, "2 ATR"),
-            (entry + atr_value * 3.5, "3.5 ATR"),
-            (entry + risk * 1.5, "measured move 1.5R fallback"),
-            (entry + risk * 2.5, "measured move 2.5R fallback"),
-        ])
-
-        near_barriers = [
-            label for price, label in candidates
-            if price > entry and (price - entry) < risk * 1.25
-        ]
-        if near_barriers:
-            warnings.append(f"Nahe Resistance ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
-
-        min_tp1 = entry + max(risk * 1.35, atr_value * 1.10, entry * 0.03)
-        min_tp2 = entry + max(risk * 2.25, atr_value * 2.20, entry * 0.055)
-        if range_size > 0 and hi20 > entry and (hi20 - entry) < risk * 1.25:
-            min_tp1 = max(min_tp1, hi20 + range_size * 0.272)
-            min_tp2 = max(min_tp2, hi20 + range_size * 0.618)
-        tp1, tp1_source = _select_long_target(candidates, min_tp1 - entry, min_tp1, "measured move fallback")
-        tp2, tp2_source = _select_long_target(
-            [(p, l) for p, l in candidates if p > tp1 + risk * 0.25],
-            min_tp2 - entry,
-            min_tp2,
-            "measured move fallback",
-        )
-        if tp2 <= tp1:
-            tp2 = tp1 + max(risk, atr_value, entry * 0.03)
-            tp2_source = "measured move fallback"
     else:
         stop_candidates = []
+        if directional_structure is not None:
+            for zone in directional_structure.invalidation_candidates:
+                stop_candidates.append((zone.upper + buffer, f"{_zone_label(zone)} invalidation"))
         if resistance > entry:
             stop_candidates.append((resistance + buffer, "R1 invalidation"))
         if hi20 > entry:
@@ -15223,46 +15898,122 @@ def _build_structured_trade_setup(
         if risk <= 0:
             return None
 
-        candidates = []
-        if support > 0 and support < entry:
-            candidates.append((support, "S1"))
-        if lo20 > 0 and lo20 < entry:
-            candidates.append((lo20, "20D Low"))
-        if range_size > 0:
-            candidates.extend([
-                (lo20 - range_size * 0.272, "127% range extension"),
-                (lo20 - range_size * 0.382, "138% range extension"),
-                (lo20 - range_size * 0.618, "161% range extension"),
-            ])
-        candidates.extend([
-            (entry - atr_value * 2.0, "2 ATR"),
-            (entry - atr_value * 3.5, "3.5 ATR"),
-            (entry - risk * 1.5, "measured move 1.5R fallback"),
-            (entry - risk * 2.5, "measured move 2.5R fallback"),
-        ])
+    # Canonical target rule: TP1 is the first real opposing barrier.  If its
+    # room is insufficient, keep that honest low-R target and require a
+    # completed break/reclaim instead of skipping to a prettier projection.
+    barriers = _structural_barrier_rows()
+    first_barrier = barriers[0] if barriers else None
+    if first_barrier is not None:
+        tp1 = float(first_barrier["price"])
+        tp1_source = str(first_barrier["source"])
+        tp1_is_projection = False
+        barrier_distance = float(first_barrier.get("room_distance", abs(tp1 - entry)))
+        barrier_r = barrier_distance / risk
+        barrier_atr = barrier_distance / atr_value if atr_value > 0 else None
+        wait_for_reclaim = barrier_r + 1e-12 < 1.35
+        barrier_gate = (
+            "BREAK_RECLAIM_REQUIRED" if side == "LONG" else "BREAK_SUPPORT_REQUIRED"
+        ) if wait_for_reclaim else None
+        nearest_barrier_meta = {
+            "side": "resistance" if side == "LONG" else "support",
+            "price": _round_trade_price(tp1),
+            "zone_low": _round_trade_price(first_barrier["zone_low"]),
+            "zone_high": _round_trade_price(first_barrier["zone_high"]),
+            "source": first_barrier["source"],
+            "timeframe": first_barrier["timeframe"],
+            "zone_id": first_barrier["zone_id"],
+            "confirmed_at": first_barrier.get("confirmed_at"),
+            "overlapping": bool(first_barrier.get("overlapping")),
+            "reclaim_boundary": _round_trade_price(
+                first_barrier["zone_high"] if side == "LONG" else first_barrier["zone_low"]
+            ),
+            "strength": round(float(first_barrier["strength"]), 3),
+            "independent_sources": int(first_barrier["independent_sources"]),
+            "distance_r": round(barrier_r, 3),
+            "distance_atr": round(barrier_atr, 3) if barrier_atr is not None else None,
+            "reclaimed": False,
+            "action": barrier_gate,
+            "structural": True,
+        }
+        if directional_structure is not None and first_barrier.get("zone") is not None:
+            decision = select_trade_structure(
+                directional_structure,
+                stop=stop,
+                minimum_rr=1.35,
+                minimum_barrier_strength=0.0,
+                minimum_structural_sources=1,
+            )
+            structure_decision_payload = decision.to_dict()
+        else:
+            structure_decision_payload = {
+                "model": "structure_decision_v1",
+                "status": "WAIT_BREAK_RECLAIM" if wait_for_reclaim else "ACCEPT",
+                "reason": (
+                    "first_opposing_barrier_before_minimum_rr"
+                    if wait_for_reclaim
+                    else "first_opposing_barrier_is_tradable_tp1"
+                ),
+                "direction": side,
+                "entry": entry,
+                "stop": stop,
+                "risk": risk,
+                "barrier_distance": barrier_distance,
+                "barrier_r": barrier_r,
+                "target1": tp1,
+                "barrier_gate": barrier_gate,
+            }
+        if wait_for_reclaim:
+            label = "Resistance" if side == "LONG" else "Support"
+            warnings.append(
+                f"Nahe {label} bei {_round_trade_price(tp1)} ({barrier_r:.2f}R) - erst Break/Reclaim bestaetigen"
+            )
 
-        near_barriers = [
-            label for price, label in candidates
-            if price < entry and (entry - price) < risk * 1.25
+        later_barriers = [
+            row for row in barriers[1:]
+            if (side == "LONG" and float(row["price"]) > tp1)
+            or (side == "SHORT" and 0 < float(row["price"]) < tp1)
         ]
-        if near_barriers:
-            warnings.append(f"Nahe Support-Zone ({', '.join(dict.fromkeys(near_barriers))}) - TP nicht zu eng setzen")
-
-        min_tp1 = entry - max(risk * 1.35, atr_value * 1.10, entry * 0.03)
-        min_tp2 = entry - max(risk * 2.25, atr_value * 2.20, entry * 0.055)
-        if range_size > 0 and 0 < lo20 < entry and (entry - lo20) < risk * 1.25:
-            min_tp1 = min(min_tp1, lo20 - range_size * 0.272)
-            min_tp2 = min(min_tp2, lo20 - range_size * 0.618)
-        tp1, tp1_source = _select_short_target(candidates, entry - min_tp1, min_tp1, "measured move fallback")
-        tp2, tp2_source = _select_short_target(
-            [(p, l) for p, l in candidates if p < tp1 - risk * 0.25],
-            entry - min_tp2,
-            min_tp2,
-            "measured move fallback",
-        )
-        if tp2 >= tp1:
-            tp2 = max(0.01, tp1 - max(risk, atr_value, entry * 0.03))
-            tp2_source = "measured move fallback"
+        if later_barriers:
+            tp2 = float(later_barriers[0]["price"])
+            tp2_source = str(later_barriers[0]["source"])
+            tp2_is_projection = False
+        else:
+            projection_distance = max(risk * 2.5, atr_value * 2.2, entry * 0.055)
+            if side == "LONG":
+                range_projection = hi20 + range_size * 0.618 if range_size > 0 else 0.0
+                tp2 = max(entry + projection_distance, tp1 + max(risk * 0.55, entry * 0.01), range_projection)
+            else:
+                range_projection = lo20 - range_size * 0.618 if range_size > 0 else 0.0
+                tp2 = min(entry - projection_distance, tp1 - max(risk * 0.55, entry * 0.01))
+                if range_projection > 0:
+                    tp2 = min(tp2, range_projection)
+                tp2 = max(0.00000001, tp2)
+            tp2_source = "measured/range projection fallback (not structural)"
+            tp2_is_projection = True
+    else:
+        projection_1 = max(risk * 1.5, atr_value * 1.1, entry * 0.03)
+        projection_2 = max(risk * 2.5, atr_value * 2.2, entry * 0.055)
+        if side == "LONG":
+            tp1 = entry + projection_1
+            tp2 = entry + max(projection_2, projection_1 + risk * 0.55)
+        else:
+            tp1 = max(0.00000001, entry - projection_1)
+            tp2 = max(0.00000001, entry - max(projection_2, projection_1 + risk * 0.55))
+        tp1_source = "measured move projection fallback (no confirmed barrier)"
+        tp2_source = "measured move projection fallback (no confirmed barrier)"
+        tp1_is_projection = True
+        tp2_is_projection = True
+        structure_decision_payload = {
+            "model": "structure_decision_v1",
+            "status": "ACCEPT",
+            "reason": "no_confirmed_opposing_barrier",
+            "direction": side,
+            "entry": entry,
+            "stop": stop,
+            "risk": risk,
+            "nearest_barrier": None,
+            "barrier_gate": None,
+        }
 
     geometry = trade_geometry(entry, stop, tp1, tp2, side)
     if not geometry.get("valid"):
@@ -15292,15 +16043,62 @@ def _build_structured_trade_setup(
         "rr_tp2": round(rr_tp2, 2),
         "risk": _round_trade_price(risk),
         "atr": _round_trade_price(atr_value),
-        "model": "Struktur-Invalidation + Zielzonen; R:R nur Filter",
-        "level_model": "structure_first_v2",
+        "model": "Kausale Struktur-Invalidation + erste Gegenbarriere; R:R nur Filter",
+        "level_model": (
+            f"{structure_snapshot.model}+first_barrier_v1"
+            if isinstance(structure_snapshot, StructureSnapshot)
+            else "structure_first_v3_first_barrier"
+        ),
         "stop_source": stop_source,
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
+        "tp1_is_projection": tp1_is_projection,
+        "tp2_is_projection": tp2_is_projection,
+        "target_quality": (
+            "STRUCTURAL_FIRST_BARRIER"
+            if nearest_barrier_meta is not None
+            else "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+        ),
+        "structure_decision": structure_decision_payload,
+        "structure_status": structure_decision_payload.get("status"),
+        "structure_reason": structure_decision_payload.get("reason"),
+        "barrier_gate": barrier_gate,
+        "barrier_gate_active": bool(barrier_gate),
+        "nearest_barrier": nearest_barrier_meta,
+        "room_to_barrier_r": (
+            nearest_barrier_meta.get("distance_r") if nearest_barrier_meta else None
+        ),
+        "level_structure_summary": (
+            {
+                "model": structure_snapshot.model,
+                "as_of": structure_snapshot.to_dict().get("as_of"),
+                "timeframes": sorted(structure_snapshot.completed_bar_counts),
+                "completed_bar_counts": dict(structure_snapshot.completed_bar_counts),
+                "quality_flags": list(structure_snapshot.quality_flags),
+                "zone_transitions": [
+                    zone.break_reclaim_evidence.to_dict()
+                    for zone in structure_snapshot.zones
+                    if zone.break_reclaim_evidence is not None
+                ],
+            }
+            if isinstance(structure_snapshot, StructureSnapshot)
+            else {"model": "legacy_completed_structure_adapter", "timeframes": ["1D"]}
+        ),
         "warnings": warnings,
         "notes": notes,
         "direction": side,
     }
+    if nearest_barrier_meta is not None:
+        barrier_key = "overhead_resistance" if side == "LONG" else "underlying_support"
+        result[barrier_key] = nearest_barrier_meta
+    if barrier_gate:
+        result["entry_status"] = "WAIT_FOR_BREAK_RECLAIM"
+        result["trade_action"] = "WAIT_FOR_BREAK_RECLAIM"
+        result["signal_quality"] = "wait_trigger"
+        result["notes"].append(
+            "Kein Starter-Entry vor bestaetigtem Break/Reclaim der ersten Gegenbarriere"
+        )
+        return result
     return _attach_starter_entry_plan(
         result,
         current_price=current_price,
@@ -15309,6 +16107,7 @@ def _build_structured_trade_setup(
         high_20d=hi20,
         low_20d=lo20,
         vwap=vwap,
+        vwap_evidence_type=vwap_evidence_type,
         ema20=ema20,
         vah=vah,
     )
@@ -15607,6 +16406,271 @@ def _fetch_strategy_daily_history(
     return daily_bars
 
 
+def _level_timestamp_seconds(value: Any) -> Optional[float]:
+    """Normalize common epoch units for local level-bar adapters."""
+    parsed = _alert_float(value, None)
+    if parsed is None or parsed <= 0:
+        return None
+    magnitude = abs(parsed)
+    if magnitude >= 1e18:
+        parsed /= 1_000_000_000.0
+    elif magnitude >= 1e15:
+        parsed /= 1_000_000.0
+    elif magnitude >= 1e12:
+        parsed /= 1_000.0
+    return parsed
+
+
+def _daily_level_bars(
+    daily_bars: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Adapt US-stock daily OHLCV to explicit regular-session timestamps."""
+    adapted: List[Dict[str, Any]] = []
+    for raw in daily_bars or []:
+        if not isinstance(raw, dict):
+            continue
+        open_time: Any = None
+        close_time: Any = None
+        raw_date = str(raw.get("date") or "").strip()
+        if raw_date:
+            try:
+                from zoneinfo import ZoneInfo
+
+                session_date = datetime.fromisoformat(raw_date[:10]).date()
+                timezone_et = ZoneInfo("America/New_York")
+                open_time = datetime(
+                    session_date.year, session_date.month, session_date.day,
+                    9, 30, tzinfo=timezone_et,
+                ).astimezone(timezone.utc)
+                close_time = datetime(
+                    session_date.year, session_date.month, session_date.day,
+                    16, 0, tzinfo=timezone_et,
+                ).astimezone(timezone.utc)
+            except (ValueError, ImportError):
+                open_time = None
+        if open_time is None:
+            raw_time = next(
+                (
+                    raw.get(key)
+                    for key in ("open_time", "timestamp", "time", "t")
+                    if raw.get(key) is not None
+                ),
+                None,
+            )
+            seconds = _level_timestamp_seconds(raw_time)
+            if seconds is not None:
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    raw_datetime = datetime.fromtimestamp(seconds, tz=timezone.utc)
+                    timezone_et = ZoneInfo("America/New_York")
+                    session_date = raw_datetime.astimezone(timezone_et).date()
+                    open_time = datetime(
+                        session_date.year, session_date.month, session_date.day,
+                        9, 30, tzinfo=timezone_et,
+                    ).astimezone(timezone.utc)
+                    close_time = datetime(
+                        session_date.year, session_date.month, session_date.day,
+                        16, 0, tzinfo=timezone_et,
+                    ).astimezone(timezone.utc)
+                except (OSError, OverflowError, ValueError, ImportError):
+                    open_time = None
+        if open_time is None:
+            continue
+        adapted.append({
+            "open_time": open_time,
+            "close_time": close_time,
+            "open": raw.get("open", raw.get("o")),
+            "high": raw.get("high", raw.get("h")),
+            "low": raw.get("low", raw.get("l")),
+            "close": raw.get("close", raw.get("c")),
+            "volume": raw.get("volume", raw.get("v", 0)),
+        })
+    return adapted
+
+
+def _completed_stock_daily_atr(
+    daily_bars: List[Dict[str, Any]],
+    *,
+    as_of: datetime,
+    period: int = 14,
+    lookback: int = 90,
+) -> float:
+    """Calculate ATR from the same causally completed US-session prefix as VRVP."""
+    completed = normalize_completed_bars(
+        _daily_level_bars(daily_bars),
+        timeframe="1D",
+        as_of=as_of,
+        timestamp_mode="open",
+    )
+    atr_bars = [
+        {"high": bar.high, "low": bar.low, "close": bar.close}
+        for bar in completed
+    ]
+    return calculate_wilder_atr(atr_bars, period=period, lookback=lookback)
+
+
+def _completed_weekly_level_bars(
+    daily_bars: List[Dict[str, Any]],
+    *,
+    as_of: datetime,
+) -> List[Dict[str, Any]]:
+    """Aggregate only verifiably completed daily bars into completed weeks."""
+    completed = normalize_completed_bars(
+        _daily_level_bars(daily_bars),
+        timeframe="1D",
+        as_of=as_of,
+        timestamp_mode="open",
+    )
+    grouped: Dict[tuple[int, int], List[Any]] = {}
+    for bar in completed:
+        iso = bar.opened_at.isocalendar()
+        grouped.setdefault((iso.year, iso.week), []).append(bar)
+
+    current_iso = as_of.isocalendar()
+    current_key = (current_iso.year, current_iso.week)
+    weekly: List[Dict[str, Any]] = []
+    for key in sorted(grouped):
+        # During Monday-Friday the active ISO week is incomplete.  It becomes
+        # eligible on the weekend only after its last daily bar has closed.
+        if key == current_key and as_of.weekday() < 5:
+            continue
+        chunk = sorted(grouped[key], key=lambda item: item.closed_at)
+        if not chunk:
+            continue
+        weekly.append({
+            "open_time": chunk[0].opened_at,
+            "close_time": chunk[-1].closed_at,
+            "open": chunk[0].open,
+            "high": max(item.high for item in chunk),
+            "low": min(item.low for item in chunk),
+            "close": chunk[-1].close,
+            "volume": sum(item.volume for item in chunk),
+            "is_closed": True,
+        })
+    return weekly
+
+
+def _completed_four_hour_level_bars(
+    bars: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Attach exact aggregate close times and remove partial 4H source bars."""
+    completed: List[Dict[str, Any]] = []
+    for raw in bars or []:
+        if not isinstance(raw, dict) or bool(raw.get("partial_source_bar", raw.get("partial", False))):
+            continue
+        raw_time = next(
+            (
+                raw.get(key)
+                for key in ("open_time", "timestamp", "time", "t")
+                if raw.get(key) is not None
+            ),
+            None,
+        )
+        seconds = _level_timestamp_seconds(raw_time)
+        source_count = int(_alert_float(raw.get("source_bar_count"), 0) or 0)
+        if seconds is None or source_count <= 0:
+            continue
+        try:
+            opened_at = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            continue
+        completed.append({
+            "open_time": opened_at,
+            "close_time": opened_at + timedelta(minutes=30 * source_count),
+            "open": raw.get("open", raw.get("o")),
+            "high": raw.get("high", raw.get("h")),
+            "low": raw.get("low", raw.get("l")),
+            "close": raw.get("close", raw.get("c")),
+            "volume": raw.get("volume", raw.get("v", 0)),
+            "is_closed": True,
+        })
+    return completed
+
+
+def _build_stock_level_snapshot(
+    daily_bars: List[Dict[str, Any]],
+    *,
+    symbol: str,
+    current_price: float,
+    direction: str,
+    atr14: Optional[float],
+    as_of: Optional[datetime] = None,
+    four_hour_bars: Optional[List[Dict[str, Any]]] = None,
+    spread: Optional[float] = None,
+) -> Optional[StructureSnapshot]:
+    """Build the shared causal D/W/4H structure snapshot for stock swings."""
+    cutoff = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    daily = _daily_level_bars(daily_bars)
+    weekly = _completed_weekly_level_bars(daily_bars, as_of=cutoff)
+    four_hour_candidates = _completed_four_hour_level_bars(four_hour_bars)
+    completed_four_hour = normalize_completed_bars(
+        four_hour_candidates,
+        timeframe="4H",
+        as_of=cutoff,
+        timestamp_mode="open",
+    )
+    # Keep the execution-timeframe ATR and the level builder on one immutable
+    # causal prefix.  In particular, a partial or future aggregate must not
+    # widen zones through ATR even though the snapshot builder itself would
+    # later reject that candle as incomplete.
+    four_hour = [
+        {
+            "open_time": bar.opened_at,
+            "close_time": bar.closed_at,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+            "is_closed": True,
+        }
+        for bar in completed_four_hour
+    ]
+    bars_by_timeframe: Dict[str, List[Dict[str, Any]]] = {}
+    if daily:
+        bars_by_timeframe["1D"] = daily
+    if weekly:
+        bars_by_timeframe["1W"] = weekly
+    if four_hour:
+        bars_by_timeframe["4H"] = four_hour
+    if not bars_by_timeframe or current_price <= 0:
+        return None
+
+    atr_map: Dict[str, float] = {}
+    daily_atr = _alert_float(atr14, None)
+    if daily_atr is not None and daily_atr > 0:
+        atr_map["1D"] = daily_atr
+    four_hour_atr = calculate_wilder_atr(four_hour, period=14, lookback=40) if len(four_hour) >= 15 else 0.0
+    if four_hour_atr and four_hour_atr > 0:
+        atr_map["4H"] = four_hour_atr
+
+    try:
+        snapshot = build_structure_snapshot(
+            bars_by_timeframe,
+            symbol=symbol,
+            asset_class="stock",
+            horizon="swing",
+            as_of=cutoff,
+            current_price=current_price,
+            tick_size=0.01 if current_price >= 1.0 else 0.0001,
+            spread=spread if spread and spread > 0 else None,
+            atr_by_timeframe=atr_map,
+            pivot_left=2,
+            pivot_right=2,
+            timestamp_mode="open",
+            include_session_levels=True,
+        )
+        # Validate direction while the data is still local.  Invalid direction
+        # must not turn into an optimistic level fallback.
+        classify_for_trade(snapshot, entry=current_price, direction=direction)
+        return snapshot
+    except (TypeError, ValueError):
+        return None
+
+
 def _strategy_daily_history_metrics(
     daily_bars: List[Dict[str, Any]],
     *,
@@ -15616,37 +16680,63 @@ def _strategy_daily_history_metrics(
     day_low: float,
     day_volume: float,
     now_utc: Optional[datetime] = None,
+    symbol: str = "",
+    direction: str = "LONG",
+    spread: Optional[float] = None,
+    four_hour_bars: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Return swing-quality metrics from completed daily bars.
 
     Snapshot data is fast, but not enough for swing scans. These metrics make
     strategy scores and levels use the same 20D/50D structure a trader sees.
     """
-    parsed: List[Dict[str, float]] = []
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for bar in daily_bars or []:
-        try:
-            close = float(bar.get("close", bar.get("c", 0)) or 0)
-            high = float(bar.get("high", bar.get("h", close)) or close)
-            low = float(bar.get("low", bar.get("l", close)) or close)
-            open_ = float(bar.get("open", bar.get("o", close)) or close)
-            volume = float(bar.get("volume", bar.get("v", 0)) or 0)
-            date = str(bar.get("date", "") or "")
-        except (TypeError, ValueError):
-            continue
-        if close <= 0 or high <= 0 or low <= 0 or high < low:
-            continue
-        parsed.append({"open": open_, "high": high, "low": low, "close": close, "volume": volume, "date": date})
+    cutoff_utc = now_utc or datetime.now(timezone.utc)
+    if cutoff_utc.tzinfo is None:
+        cutoff_utc = cutoff_utc.replace(tzinfo=timezone.utc)
+    cutoff_utc = cutoff_utc.astimezone(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
 
+        today_str = cutoff_utc.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        today_str = cutoff_utc.strftime("%Y-%m-%d")
+    causal_completed = normalize_completed_bars(
+        _daily_level_bars(daily_bars),
+        timeframe="1D",
+        as_of=cutoff_utc,
+        timestamp_mode="open",
+    )
+    # One canonical completed prefix drives every historical metric. The
+    # normalizer sorts unordered input, drops future/open sessions, deduplicates
+    # exact copies and drops an entire close instant when duplicate OHLCV rows
+    # conflict, rather than choosing a potentially future-contaminated winner.
+    parsed: List[Dict[str, Any]] = [
+        {
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+            "date": bar.opened_at.strftime("%Y-%m-%d"),
+        }
+        for bar in causal_completed
+    ]
     completed = parsed
-    if completed and completed[-1].get("date") == today_str:
-        completed = completed[:-1]
+    current_session_completed = any(
+        bar.get("date") == today_str for bar in completed
+    )
 
-    vols20 = [b["volume"] for b in completed[-20:]]
+    # The current session is the RVOL/breakout numerator, never part of its
+    # own historical denominator.  This remains true after the closing bell.
+    baseline_completed = [
+        bar for bar in completed if bar.get("date") != today_str
+    ]
+
+    vols20 = [b["volume"] for b in baseline_completed[-20:]]
     avg_vol20 = historical_volume_baseline(vols20, lookback=20, minimum_periods=10) or 0.0
     dollar_vols20 = [
         b["close"] * b["volume"]
-        for b in completed[-20:]
+        for b in baseline_completed[-20:]
         if b.get("close", 0) > 0 and b.get("volume", 0) > 0
     ]
     median_dollar_vol20 = historical_volume_baseline(
@@ -15665,11 +16755,11 @@ def _strategy_daily_history_metrics(
     )
     rvol_source = "20D_intraday_time_adjusted" if volume_fraction < 1.0 else "20D_completed_session"
 
-    highs10 = [b["high"] for b in completed[-10:] if b.get("high", 0) > 0]
-    highs20 = [b["high"] for b in completed[-20:] if b.get("high", 0) > 0]
-    lows20 = [b["low"] for b in completed[-20:] if b.get("low", 0) > 0]
-    highs50 = [b["high"] for b in completed[-50:] if b.get("high", 0) > 0]
-    lows50 = [b["low"] for b in completed[-50:] if b.get("low", 0) > 0]
+    highs10 = [b["high"] for b in baseline_completed[-10:] if b.get("high", 0) > 0]
+    highs20 = [b["high"] for b in baseline_completed[-20:] if b.get("high", 0) > 0]
+    lows20 = [b["low"] for b in baseline_completed[-20:] if b.get("low", 0) > 0]
+    highs50 = [b["high"] for b in baseline_completed[-50:] if b.get("high", 0) > 0]
+    lows50 = [b["low"] for b in baseline_completed[-50:] if b.get("low", 0) > 0]
     high_10d = max(highs10) if highs10 else float(day_high or price or 0)
     high_20d = max(highs20) if highs20 else float(day_high or price or 0)
     low_20d = min(lows20) if lows20 else float(day_low or price or 0)
@@ -15681,19 +16771,46 @@ def _strategy_daily_history_metrics(
         atr14 = max(float(price or 0) * 0.03, 0.01)
     atr_pct = max(0.1, atr14 / price * 100) if price > 0 else 2.5
 
-    support_candidates = [float(day_low or 0)] + [b["low"] for b in completed[-50:]]
-    resistance_candidates = [float(day_high or 0)] + [b["high"] for b in completed[-50:]]
+    # Running-session extremes are observations, not confirmed horizontal
+    # structure.  Use completed bars only; the live day remains available for
+    # execution/chase checks elsewhere.
+    support_candidates = [b["low"] for b in baseline_completed[-50:]]
+    resistance_candidates = [b["high"] for b in baseline_completed[-50:]]
     support_candidates = [level for level in support_candidates if 0 < level < price]
     resistance_candidates = [level for level in resistance_candidates if level > price]
-    support_1 = max(support_candidates) if support_candidates else low_20d
-    resistance_1 = min(resistance_candidates) if resistance_candidates else high_20d
+    support_1 = max(support_candidates) if support_candidates else (low_20d if 0 < low_20d < price else None)
+    resistance_1 = min(resistance_candidates) if resistance_candidates else (high_20d if high_20d > price else None)
+
+    level_snapshot = _build_stock_level_snapshot(
+        parsed,
+        symbol=symbol,
+        current_price=price,
+        direction=str(direction or "LONG").upper(),
+        atr14=atr14,
+        as_of=cutoff_utc,
+        four_hour_bars=four_hour_bars,
+        spread=spread,
+    )
+    level_structure: Optional[Dict[str, Any]] = None
+    level_legacy: Optional[Dict[str, Any]] = None
+    if level_snapshot is not None:
+        level_structure = level_snapshot.to_dict()
+        level_legacy = legacy_level_adapter(
+            level_snapshot,
+            entry=price,
+            direction=str(direction or "LONG").upper(),
+        )
+        if level_legacy.get("supports"):
+            support_1 = float(level_legacy["supports"][0]["price"])
+        if level_legacy.get("resistances"):
+            resistance_1 = float(level_legacy["resistances"][0]["price"])
 
     swing_high = max(high_50d, high_20d, float(day_high or 0), price)
     swing_low = min(level for level in [low_50d, low_20d, float(day_low or price), price] if level > 0)
     range_pos = ((price - swing_low) / (swing_high - swing_low) * 100) if swing_high > swing_low else 50.0
 
     active_bars = list(completed)
-    if price > 0:
+    if price > 0 and not current_session_completed:
         active_bars.append({
             "open": float(day_open or price),
             "high": max(float(day_high or price), price),
@@ -15730,7 +16847,7 @@ def _strategy_daily_history_metrics(
     ema50_distance_pct = ((price - ema50) / ema50 * 100) if ema50 and ema50 > 0 else None
 
     return {
-        "history_ok": len(completed) >= 20,
+        "history_ok": len(baseline_completed) >= 20,
         "avg_vol20": avg_vol20,
         "median_dollar_vol20": median_dollar_vol20,
         "rvol20": rvol20,
@@ -15749,6 +16866,7 @@ def _strategy_daily_history_metrics(
         "resistance_1": resistance_1,
         "range_pos": _clamp_float(range_pos, 0.0, 100.0, 50.0),
         "completed_bars": len(completed),
+        "baseline_bars": len(baseline_completed),
         "ema20": ema20,
         "ema50": ema50,
         "ema200": ema200,
@@ -15760,6 +16878,9 @@ def _strategy_daily_history_metrics(
         "breakout_50d_pct": breakout_50d_pct,
         "ema20_distance_pct": ema20_distance_pct,
         "ema50_distance_pct": ema50_distance_pct,
+        "level_model": level_snapshot.model if level_snapshot is not None else "completed_daily_extrema_fallback",
+        "level_structure": level_structure,
+        "level_legacy": level_legacy,
     }
 
 
@@ -17187,6 +18308,26 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
             if range_10d_pct and range_10d_pct > 0:
                 atr = max(atr, price * min(max(range_10d_pct / 300, 0.025), 0.08))
 
+        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+        daily_bars = _fetch_strategy_daily_history(ticker, 90, history_cache) if ticker else []
+        biotech_snapshot = _build_stock_level_snapshot(
+            daily_bars,
+            symbol=ticker,
+            current_price=price,
+            direction="LONG",
+            atr14=atr,
+        ) if daily_bars else None
+        if biotech_snapshot is not None:
+            biotech_legacy = legacy_level_adapter(
+                biotech_snapshot,
+                entry=price,
+                direction="LONG",
+            )
+            if biotech_legacy.get("supports"):
+                support = biotech_legacy["supports"][0]["price"]
+            if biotech_legacy.get("resistances"):
+                resistance = biotech_legacy["resistances"][0]["price"]
+
         setup = _build_structured_trade_setup(
             "LONG",
             price,
@@ -17196,13 +18337,22 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
             high_90d,
             low_90d,
             tech.get("pos_90d"),
+            structure_snapshot=biotech_snapshot,
+            require_causal_structure=True,
         )
         if not setup:
             continue
-        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
         if ticker:
-            daily_bars = _fetch_strategy_daily_history(ticker, 90, history_cache)
-            vrvp_atr = calculate_wilder_atr(daily_bars, period=14, lookback=90) or atr
+            vrvp_as_of = datetime.now(timezone.utc)
+            vrvp_atr = (
+                _completed_stock_daily_atr(
+                    daily_bars,
+                    as_of=vrvp_as_of,
+                    period=14,
+                    lookback=90,
+                )
+                or atr
+            )
             vrvp = build_vrvp_structure(
                 daily_bars,
                 price,
@@ -17211,6 +18361,8 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
                 num_bins=24,
                 min_bars=30,
                 lookback=90,
+                as_of=vrvp_as_of,
+                date_session_context="us_equity_regular",
             )
             setup = apply_vrvp_to_trade_setup(
                 setup,
@@ -17228,6 +18380,11 @@ def _enrich_biotech_alert_trade_levels() -> Dict[str, int]:
         row["TP2"] = setup["tp2"]
         row["trade_setup"] = setup
         row["Trade_Setup_Source"] = "biotech_daily_vrvp_structure" if setup.get("vrvp_applied") else "biotech_daily_structure"
+        row["level_model"] = setup.get("level_model")
+        row["structure_status"] = setup.get("structure_status")
+        row["nearest_barrier"] = setup.get("nearest_barrier")
+        row["barrier_gate"] = setup.get("barrier_gate")
+        row["target_quality"] = setup.get("target_quality")
         # AUDIT M-4 (10.06.2026): ehrliche Klassifizierung — diese Level sind
         # SYNTHETISCH (ATR/Support-Struktur, nicht Scanner-nativ). Das Flag
         # treibt levels['synthetic'] in normalize_alert_trade_levels und das
@@ -17495,6 +18652,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
+                    _history_direction = _infer_strategy_direction(strategy_name, filters).upper()
                     history_metrics = _strategy_daily_history_metrics(
                         daily_bars,
                         price=price,
@@ -17503,6 +18661,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         day_low=day_low,
                         day_volume=volume,
                         now_utc=scan_now_utc,
+                        symbol=ticker,
+                        direction=_history_direction,
+                        spread=(ask - bid) if ask > bid > 0 else None,
                     )
                     rvol = history_metrics.get("rvol20")
                     rvol_source = str(history_metrics.get("rvol_source") or "20D_completed_session")
@@ -17741,8 +18902,14 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Low_20D": _round_trade_price(history_metrics.get("low_20d") or day_low),
                         "High_50D": _round_trade_price(history_metrics.get("high_50d") or day_high),
                         "Low_50D": _round_trade_price(history_metrics.get("low_50d") or day_low),
-                        "Support_1": _round_trade_price(history_metrics.get("support_1") or day_low),
-                        "Resistance_1": _round_trade_price(history_metrics.get("resistance_1") or day_high),
+                        "Support_1": (
+                            _round_trade_price(history_metrics.get("support_1"))
+                            if history_metrics.get("support_1") else None
+                        ),
+                        "Resistance_1": (
+                            _round_trade_price(history_metrics.get("resistance_1"))
+                            if history_metrics.get("resistance_1") else None
+                        ),
                         "Close_Position": round(close_pos, 2),
                         "close_pos": round(close_pos, 2),
                         "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
@@ -17754,6 +18921,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Swing_Range_Pos": round(history_metrics.get("range_pos") or close_pos * 100.0, 1),
                         "History_Bars": history_metrics.get("completed_bars"),
                         "History_OK": bool(history_metrics.get("history_ok")),
+                        "Level_Model": history_metrics.get("level_model"),
+                        "level_model": history_metrics.get("level_model"),
+                        "Level_Structure": history_metrics.get("level_structure"),
+                        "level_structure": history_metrics.get("level_structure"),
+                        "Level_Legacy": history_metrics.get("level_legacy"),
                         "RSI": history_metrics.get("rsi14"),
                         "EMA20": _round_trade_price(history_metrics.get("ema20")) if history_metrics.get("ema20") else None,
                         "EMA50": _round_trade_price(history_metrics.get("ema50")) if history_metrics.get("ema50") else None,
@@ -17826,17 +18998,53 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     _strat_grade = str(strategy_row.get("grade") or _strat_grade)
                     _setup_direction = str(_score_meta.get("direction") or "").upper()
                     if _setup_direction in ("LONG", "SHORT"):
+                        # Fetch 4H only for candidates that survived all broad
+                        # filters.  This keeps the universe scan efficient while
+                        # giving the actual trade plan D/W + execution-TF zones.
+                        _level_4h_bars = _fetch_recent_stock_4h_bars(ticker, limit=40)
+                        _level_snapshot = _build_stock_level_snapshot(
+                            daily_bars,
+                            symbol=ticker,
+                            current_price=price,
+                            direction=_setup_direction,
+                            atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                            as_of=scan_now_utc,
+                            four_hour_bars=_level_4h_bars,
+                            spread=(ask - bid) if ask > bid > 0 else None,
+                        )
+                        if _level_snapshot is not None:
+                            _level_legacy = legacy_level_adapter(
+                                _level_snapshot,
+                                entry=price,
+                                direction=_setup_direction,
+                            )
+                            strategy_row["Level_Model"] = _level_snapshot.model
+                            strategy_row["level_model"] = _level_snapshot.model
+                            strategy_row["Level_Structure"] = _level_snapshot.to_dict()
+                            strategy_row["level_structure"] = _level_snapshot.to_dict()
+                            strategy_row["Level_Legacy"] = _level_legacy
+                            if _level_legacy.get("supports"):
+                                strategy_row["Support_1"] = _round_trade_price(
+                                    _level_legacy["supports"][0]["price"]
+                                )
+                            if _level_legacy.get("resistances"):
+                                strategy_row["Resistance_1"] = _round_trade_price(
+                                    _level_legacy["resistances"][0]["price"]
+                                )
                         _trade_setup = _build_structured_trade_setup(
                             _setup_direction,
                             price,
                             float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                            float(history_metrics.get("support_1") or day_low),
-                            float(history_metrics.get("resistance_1") or day_high),
+                            float(strategy_row.get("Support_1") or history_metrics.get("support_1") or 0.0),
+                            float(strategy_row.get("Resistance_1") or history_metrics.get("resistance_1") or 0.0),
                             float(history_metrics.get("high_20d") or day_high),
                             float(history_metrics.get("low_20d") or day_low),
                             float(history_metrics.get("range_pos") or close_pos * 100.0),
+                            structure_snapshot=_level_snapshot,
+                            require_causal_structure=True,
                         )
                         if _trade_setup:
+                            _vrvp_as_of = scan_now_utc
                             _vrvp = build_vrvp_structure(
                                 daily_bars,
                                 price,
@@ -17845,9 +19053,16 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 num_bins=24,
                                 min_bars=30,
                                 lookback=90,
+                                as_of=_vrvp_as_of,
+                                date_session_context="us_equity_regular",
                             )
                             _vrvp_atr = (
-                                calculate_wilder_atr(daily_bars, period=14, lookback=90)
+                                _completed_stock_daily_atr(
+                                    daily_bars,
+                                    as_of=_vrvp_as_of,
+                                    period=14,
+                                    lookback=90,
+                                )
                                 or float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0))
                             )
                             _trade_setup = apply_vrvp_to_trade_setup(
@@ -17868,6 +19083,14 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                                 "tp2": _trade_setup["tp2"],
                                 "trade_setup": _trade_setup,
                                 "Trade_Setup_Source": "stock_strategy_20d_vrvp_structure" if _trade_setup.get("vrvp_applied") else "stock_strategy_20d_structure",
+                                "level_model": _trade_setup.get("level_model"),
+                                "structure_status": _trade_setup.get("structure_status"),
+                                "structure_reason": _trade_setup.get("structure_reason"),
+                                "structure_decision": _trade_setup.get("structure_decision"),
+                                "nearest_barrier": _trade_setup.get("nearest_barrier"),
+                                "barrier_gate": _trade_setup.get("barrier_gate"),
+                                "barrier_gate_active": bool(_trade_setup.get("barrier_gate")),
+                                "target_quality": _trade_setup.get("target_quality"),
                                 "VRVP_POC": _trade_setup.get("vrvp_poc"),
                                 "VRVP_VAH": _trade_setup.get("vrvp_vah"),
                                 "VRVP_VAL": _trade_setup.get("vrvp_val"),
@@ -18830,6 +20053,7 @@ def _bear_scan_wrapper() -> None:
                             change_pct=chg_pct,
                         )
                         if trade_setup:
+                            bear_vrvp_as_of = datetime.now(timezone.utc)
                             bear_vrvp = build_vrvp_structure(
                                 history_bars,
                                 price,
@@ -18838,9 +20062,16 @@ def _bear_scan_wrapper() -> None:
                                 num_bins=24,
                                 min_bars=30,
                                 lookback=60,
+                                as_of=bear_vrvp_as_of,
+                                date_session_context="us_equity_regular",
                             )
                             bear_atr = (
-                                calculate_wilder_atr(history_bars, period=14, lookback=60)
+                                _completed_stock_daily_atr(
+                                    history_bars,
+                                    as_of=bear_vrvp_as_of,
+                                    period=14,
+                                    lookback=60,
+                                )
                                 or max(day_high - day_low, price * 0.025)
                             )
                             trade_setup = apply_vrvp_to_trade_setup(
@@ -22087,10 +23318,63 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         low_20d = round(min(lows[:20]), 2) if len(lows) >= 20 else round(min(lows), 2)
         range_pos = round((close - low_20d) / (high_20d - low_20d) * 100, 1) if high_20d != low_20d else 50
 
-        # Support/Resistance (simple pivot)
-        pivot = round((high + low + close) / 3, 2)
-        support_1 = round(2 * pivot - high, 2)
-        resist_1 = round(2 * pivot - low, 2)
+        # Legacy pivot display, now anchored to the latest completed daily
+        # session.  The running aggregate must never redefine PDH/PDL/S1/R1.
+        _detail_level_input = _daily_level_bars(list(reversed(bars)))
+        _detail_cutoff = datetime.now(timezone.utc)
+        _detail_completed_daily = normalize_completed_bars(
+            _detail_level_input,
+            timeframe="1D",
+            as_of=_detail_cutoff,
+            timestamp_mode="open",
+        )
+        try:
+            from zoneinfo import ZoneInfo
+
+            _detail_today = _detail_cutoff.astimezone(
+                ZoneInfo("America/New_York")
+            ).date()
+            _detail_baseline_daily = [
+                bar for bar in _detail_completed_daily
+                if bar.opened_at.astimezone(ZoneInfo("America/New_York")).date()
+                != _detail_today
+            ]
+        except (ImportError, ValueError):
+            _detail_today = _detail_cutoff.date()
+            _detail_baseline_daily = [
+                bar for bar in _detail_completed_daily
+                if bar.opened_at.date() != _detail_today
+            ]
+        _detail_baseline_20 = _detail_baseline_daily[-20:]
+        if _detail_baseline_20:
+            high_20d = round(max(bar.high for bar in _detail_baseline_20), 2)
+            low_20d = round(min(bar.low for bar in _detail_baseline_20), 2)
+            range_pos = round(
+                (close - low_20d) / (high_20d - low_20d) * 100,
+                1,
+            ) if high_20d != low_20d else 50
+        else:
+            # No historical denominator: keep display geometry neutral and
+            # let the required causal snapshot fail closed for trade planning.
+            high_20d = round(close, 2)
+            low_20d = round(close, 2)
+            range_pos = 50
+        if _detail_completed_daily:
+            _pivot_session = _detail_completed_daily[-1]
+            pivot = round(
+                (_pivot_session.high + _pivot_session.low + _pivot_session.close) / 3,
+                2,
+            )
+            support_1 = round(2 * pivot - _pivot_session.high, 2)
+            resist_1 = round(2 * pivot - _pivot_session.low, 2)
+            pivot_source = "latest_completed_daily_session"
+            pivot_session_closed_at = _pivot_session.closed_at.isoformat()
+        else:
+            pivot = round(close, 2)
+            support_1 = low_20d
+            resist_1 = high_20d
+            pivot_source = "unavailable_completed_session_range_fallback"
+            pivot_session_closed_at = None
 
         # ========== MASSIVE EXPANSION STARTS HERE ==========
 
@@ -22113,12 +23397,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         ema100 = calculate_ema(closes, 100)
         ema200 = calculate_ema(closes, 200)
 
-        # 2. VWAP (V3.4 FIX: nur heutiger Tag, nicht kumulativ über alle Bars)
-        # TradingView resettet VWAP täglich um Market Open
+        # 2. Daily HLC3 proxy.  A daily aggregate has no intraday price path,
+        # so this must never be presented as exchange/session VWAP.  Keep the
+        # legacy ``vwap`` response key for clients, but label the evidence
+        # truthfully in signals and metadata below.
         vwap = None
         if len(bars) >= 2:
-            # bars[0] = heute (newest), nur heutigen Bar für Intraday-VWAP
-            # Bei Daily-Bars: VWAP = Typical Price des heutigen Tages
+            # bars[0] = newest daily aggregate; HLC3 = typical price proxy.
             today_bar = bars[0]
             tp_today = (today_bar["h"] + today_bar["l"] + today_bar["c"]) / 3
             vol_today = today_bar.get("v", 0)
@@ -22173,26 +23458,55 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         fib_levels = {}
         fib_meta = {}
         if len(bars) >= 20:
+            _fib_daily_bars = _daily_level_bars(list(reversed(bars[:60])))
             fib_payload = _calculate_directional_fib_levels(
-                list(reversed(highs[:60])),
-                list(reversed(lows[:60])),
-                list(reversed(closes[:60])),
+                [b["high"] for b in _fib_daily_bars],
+                [b["low"] for b in _fib_daily_bars],
+                [b["close"] for b in _fib_daily_bars],
                 timeframe="1D",
                 direction=None,
-                lookback=min(60, len(bars)),
+                lookback=min(60, len(_fib_daily_bars)),
+                times=[b.get("close_time") for b in _fib_daily_bars],
+                as_of=_detail_cutoff,
+                timestamp_mode="close",
             )
             fib_levels = fib_payload.get("levels", {}) if fib_payload else {}
             fib_meta = fib_payload.get("meta", {}) if fib_payload else {}
 
         # 6. ATR (Average True Range, 14-period, Wilder's Smoothing)
-        # V3.4 FIX: Vorher simpler Durchschnitt, jetzt korrekt Wilder's wie TradingView
+        # Use the same causally completed US-session prefix as the structure
+        # snapshot.  Polygon's newest daily aggregate can still be running and
+        # must not redefine volatility, zone width, or a trade plan intraday.
         atr = None
         if len(bars) >= 15:
-            # bars sind DESCENDING → reversed = chronologisch
-            chronological_bars = list(reversed(bars[:60]))
-            atr_value = calculate_wilder_atr(chronological_bars, period=14)
+            atr_value = _completed_stock_daily_atr(
+                list(reversed(bars)),
+                as_of=_detail_cutoff,
+                period=14,
+                lookback=60,
+            )
             if atr_value > 0:
                 atr = round(atr_value, 2)
+
+        detail_level_snapshot = _build_stock_level_snapshot(
+            list(reversed(bars)),
+            symbol=ticker,
+            current_price=float(close),
+            direction="LONG",
+            atr14=atr,
+            as_of=_detail_cutoff,
+        )
+        detail_level_legacy = None
+        if detail_level_snapshot is not None:
+            detail_level_legacy = legacy_level_adapter(
+                detail_level_snapshot,
+                entry=close,
+                direction="LONG",
+            )
+            if detail_level_legacy.get("supports"):
+                support_1 = _round_trade_price(detail_level_legacy["supports"][0]["price"])
+            if detail_level_legacy.get("resistances"):
+                resist_1 = _round_trade_price(detail_level_legacy["resistances"][0]["price"])
 
         # 7. Signal Scoring (10-factor system)
         signals = []
@@ -22272,13 +23586,13 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                 signals.append({"name": "Volatility", "status": "neutral", "detail": f"Normal ATR ({atr_pct:.1f}%)", "points": 1})
                 score += 1
 
-        # 7. Price vs VWAP
+        # 7. Price vs daily HLC3 proxy (not true intraday/session VWAP)
         if vwap is not None:
             if close > vwap:
-                signals.append({"name": "VWAP", "status": "bullish", "detail": f"Price above VWAP", "points": 2})
+                signals.append({"name": "Daily HLC3", "status": "bullish", "detail": "Price above daily HLC3 proxy", "points": 2})
                 score += 2
             else:
-                signals.append({"name": "VWAP", "status": "bearish", "detail": f"Price below VWAP", "points": 0})
+                signals.append({"name": "Daily HLC3", "status": "bearish", "detail": "Price below daily HLC3 proxy", "points": 0})
 
         # 8. Support/Resistance proximity
         dist_to_support = close - support_1
@@ -22335,12 +23649,16 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             if confluence_direction == "LONG":
                 trade_setup = _build_structured_trade_setup(
                     "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
-                    current_price=close, vwap=vwap, ema20=ema20
+                    current_price=close, vwap=None, ema20=ema20,
+                    structure_snapshot=detail_level_snapshot,
+                    require_causal_structure=True,
                 )
             else:  # SHORT
                 trade_setup = _build_structured_trade_setup(
                     "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
-                    current_price=close, vwap=vwap, ema20=ema20
+                    current_price=close, vwap=None, ema20=ema20,
+                    structure_snapshot=detail_level_snapshot,
+                    require_causal_structure=True,
                 )
 
         # 10. Candlestick data for chart (last 60 bars, reversed to chronological, with EMA overlays)
@@ -22393,6 +23711,14 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                                 "tp2": item.get("tp2"),
                                 "risk_reward": item.get("risk_reward"),
                                 "rvol": item.get("rvol"),
+                                "trade_setup": dict(item.get("trade_setup") or {})
+                                if isinstance(item.get("trade_setup"), dict) else None,
+                                "barrier_gate": item.get("barrier_gate"),
+                                "barrier_gate_active": item.get("barrier_gate_active"),
+                                "structure_status": item.get("structure_status"),
+                                "structure_reason": item.get("structure_reason"),
+                                "target_quality": item.get("target_quality"),
+                                "nearest_barrier": item.get("nearest_barrier"),
                             }
                             break
                 if bi_scanner:
@@ -22419,36 +23745,61 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             confluence = {**confluence, "direction": confluence_direction}
             # Trade Setup vom BI Scanner übernehmen wenn vorhanden
             if bi_scanner.get("entry") is not None and bi_scanner.get("stop_loss") is not None:
-                trade_setup = {
-                    "entry": bi_scanner["entry"],
-                    "stop": bi_scanner["stop_loss"],
-                    "stop_loss": bi_scanner["stop_loss"],
-                    "tp1": bi_scanner.get("tp1"),
-                    "tp2": bi_scanner.get("tp2"),
-                    "rr": bi_scanner.get("risk_reward"),
-                    "direction": bi_scanner["direction"],
-                }
-                trade_setup = _attach_starter_entry_plan(
-                    trade_setup,
-                    current_price=close,
-                    atr=atr,
-                    support_1=support_1,
-                    high_20d=high_20d,
-                    low_20d=low_20d,
-                    vwap=vwap,
-                    ema20=ema20,
-                )
+                cached_setup = bi_scanner.get("trade_setup")
+                trade_setup = dict(cached_setup) if isinstance(cached_setup, dict) else {}
+                trade_setup.setdefault("entry", bi_scanner["entry"])
+                trade_setup.setdefault("stop", bi_scanner["stop_loss"])
+                trade_setup.setdefault("stop_loss", bi_scanner["stop_loss"])
+                trade_setup.setdefault("tp1", bi_scanner.get("tp1"))
+                trade_setup.setdefault("tp2", bi_scanner.get("tp2"))
+                trade_setup.setdefault("rr", bi_scanner.get("risk_reward"))
+                trade_setup.setdefault("direction", bi_scanner["direction"])
+                for key in (
+                    "barrier_gate", "barrier_gate_active", "structure_status",
+                    "structure_reason", "target_quality", "nearest_barrier",
+                ):
+                    if trade_setup.get(key) is None and bi_scanner.get(key) is not None:
+                        trade_setup[key] = bi_scanner.get(key)
+                cached_gate = str(trade_setup.get("barrier_gate") or "").upper()
+                cached_wait = str(trade_setup.get("structure_status") or "").upper() == "WAIT_BREAK_RECLAIM"
+                if cached_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"} or cached_wait:
+                    trade_setup["structure_status"] = "WAIT_BREAK_RECLAIM"
+                    trade_setup["barrier_gate_active"] = True
+                    trade_setup["entry_status"] = "WAIT_FOR_BREAK_RECLAIM"
+                    trade_setup["trade_action"] = "WAIT_FOR_BREAK_RECLAIM"
+                    trade_setup["signal_quality"] = "wait_trigger"
+                    for key in (
+                        "starter_plan", "entry_plan_type", "starter_entry", "early_entry",
+                        "starter_stop", "starter_tp1", "starter_tp2", "starter_rr",
+                        "main_entry", "add_entry",
+                    ):
+                        trade_setup.pop(key, None)
+                elif not cached_setup:
+                    trade_setup = _attach_starter_entry_plan(
+                        trade_setup,
+                        current_price=close,
+                        atr=atr,
+                        support_1=support_1,
+                        high_20d=high_20d,
+                        low_20d=low_20d,
+                        vwap=None,
+                        ema20=ema20,
+                    )
             # V3.1: Trade Setup generieren falls BI Scanner keins hat aber Grade S/A/B
             elif not trade_setup and signal_grade in ['S', 'A', 'B'] and confluence_direction != "NEUTRAL":
                 if confluence_direction == "LONG":
                     trade_setup = _build_structured_trade_setup(
                         "LONG", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
-                        current_price=close, vwap=vwap, ema20=ema20
+                        current_price=close, vwap=None, ema20=ema20,
+                        structure_snapshot=detail_level_snapshot,
+                        require_causal_structure=True,
                     )
                 else:  # SHORT
                     trade_setup = _build_structured_trade_setup(
                         "SHORT", close, atr, support_1, resist_1, high_20d, low_20d, range_pos,
-                        current_price=close, vwap=vwap, ema20=ema20
+                        current_price=close, vwap=None, ema20=ema20,
+                        structure_snapshot=detail_level_snapshot,
+                        require_causal_structure=True,
                     )
 
         # V3.2: Extension-Score — wie weit ist Preis von MA20/VWAP entfernt
@@ -22476,10 +23827,20 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             "ma20": ma20, "ma50": ma50, "rvol": rvol, "rsi": rsi,
             "high_20d": high_20d, "low_20d": low_20d, "range_position": range_pos,
             "pivot": pivot, "support_1": support_1, "resistance_1": resist_1,
+            "pivot_source": pivot_source,
+            "pivot_session_closed_at": pivot_session_closed_at,
+            "level_model": detail_level_snapshot.model if detail_level_snapshot is not None else "completed_session_range_fallback",
+            "level_structure": detail_level_snapshot.to_dict() if detail_level_snapshot is not None else None,
+            "level_legacy": detail_level_legacy,
             "avg_volume": round(avg_vol),
             # New fields
             "ema9": ema9, "ema20": ema20, "ema50": ema50, "ema100": ema100, "ema200": ema200,
             "vwap": vwap,
+            "vwap_meta": {
+                "model": "daily_typical_price_proxy",
+                "true_intraday_vwap": False,
+                "warning": "Daily aggregate has no tick path; value is HLC3, not exchange VWAP",
+            },
             "ext_ma20": ext_ma20, "ext_vwap": ext_vwap, "ext_warning": ext_warning, "ext_level": ext_level,
             "macd": macd, "macd_signal": macd_signal, "macd_histogram": macd_histogram,
             "bb_upper": bb_upper, "bb_lower": bb_lower,
@@ -22579,7 +23940,9 @@ def get_chart_data(
             result["ema"] = ema_overlays
             result["ema_meta"] = ema_meta
 
-        # VWAP V4.0: Intraday (5m/15m/1H) = Daily Reset, Higher TF (4H/1D/1W) = Session VWAP
+        # Bar-derived typical-price/volume approximation. This is not tick
+        # VWAP; higher timeframes are anchored to the returned lookback and
+        # intraday reset currently follows the provider's UTC calendar day.
         if "vwap" in overlay_list and len(ohlcv) >= 10:
             try:
                 vwap_data = []
@@ -22605,6 +23968,20 @@ def get_chart_data(
                     if cum_vol > 0:
                         vwap_data.append({"time": bar["time"], "value": round(cum_tp_vol / cum_vol, 2)})
                 result["vwap"] = vwap_data
+                result["vwap_meta"] = {
+                    "model": (
+                        "calendar_day_reset_bar_vwap_approx"
+                        if use_daily_reset
+                        else "anchored_lookback_bar_vwap_approx"
+                    ),
+                    "label": "Bar-VWAP approx.",
+                    "true_intraday_vwap": False,
+                    "reset": "UTC calendar day" if use_daily_reset else "selected lookback start",
+                    "warning": (
+                        "Calculated from candle HLC3 x volume, not trades/ticks; "
+                        "do not use as sole entry evidence"
+                    ),
+                }
             except Exception as e:
                 print(f"[Warning] Error calculating VWAP: {e}")
 
@@ -22616,7 +23993,14 @@ def get_chart_data(
                     # Convert to format expected by calculate_sr_from_historical
                     # It expects: [(date, open, high, low, close, volume), ...]
                     ohlc_tuples = [(b["time"], b["open"], b["high"], b["low"], b["close"], b.get("volume", 0)) for b in ohlcv]
-                    sr_result = calculate_sr_from_historical(ohlc_tuples, current_price)
+                    sr_input = _daily_level_bars(ohlcv) if timeframe == "1D" else ohlc_tuples
+                    sr_result = calculate_sr_from_historical(
+                        sr_input,
+                        current_price,
+                        timeframe=timeframe,
+                        as_of=datetime.now(timezone.utc),
+                        direction=fib_direction or "LONG",
+                    )
                     # sr_result returns: ((supports_prices, resistances_prices), fib_info)
                     # fib_info has: supports_detail [{price, type, strength}], resistances_detail [{price, type, strength}]
                     if sr_result and isinstance(sr_result, tuple) and len(sr_result) == 2:
@@ -22635,24 +24019,24 @@ def get_chart_data(
                             "period_low": fib_info.get("period_low") if isinstance(fib_info, dict) else None,
                             "pdh": fib_info.get("prev_day_high") if isinstance(fib_info, dict) else None,
                             "pdl": fib_info.get("prev_day_low") if isinstance(fib_info, dict) else None,
+                            "pdc": fib_info.get("prev_day_close") if isinstance(fib_info, dict) else None,
+                            "session_levels": fib_info.get("session_levels") if isinstance(fib_info, dict) else {},
+                            "session_level_reason": fib_info.get("session_level_reason") if isinstance(fib_info, dict) else None,
+                            "zones": fib_info.get("zones") if isinstance(fib_info, dict) else [],
+                            "overlapping_zones": fib_info.get("overlapping_zones") if isinstance(fib_info, dict) else [],
+                            "zone_model": fib_info.get("zone_model") if isinstance(fib_info, dict) else None,
+                            "provenance": fib_info.get("zone_provenance") if isinstance(fib_info, dict) else None,
                         }
                     else:
                         result["sr"] = {"support_levels": [], "resistance_levels": []}
                 else:
-                    # Simple fallback
-                    last = ohlcv[-1]
-                    h, l, c = last["high"], last["low"], last["close"]
-                    pivot = round((h + l + c) / 3, 2)
+                    # Fail closed: a running candle must not be converted into
+                    # authoritative pivot S/R when the causal engine is absent.
                     result["sr"] = {
-                        "support_levels": [
-                            {"price": round(2 * pivot - h, 2), "strength": 3, "type": "Pivot S1"},
-                            {"price": round(pivot - (h - l), 2), "strength": 2, "type": "Pivot S2"},
-                        ],
-                        "resistance_levels": [
-                            {"price": round(2 * pivot - l, 2), "strength": 3, "type": "Pivot R1"},
-                            {"price": round(pivot + (h - l), 2), "strength": 2, "type": "Pivot R2"},
-                        ],
-                        "pivot": pivot,
+                        "support_levels": [],
+                        "resistance_levels": [],
+                        "availability": "unavailable",
+                        "reason": "causal_level_engine_or_completed_history_unavailable",
                     }
             except Exception as e:
                 print(f"S/R error: {e}")
@@ -22765,6 +24149,13 @@ def get_chart_data(
                         "bins": [{"low": round(b["low"], 2), "high": round(b["high"], 2), "mid": round(b["mid"], 2), "volume": int(b["volume"])} for b in vp["bins"]],
                         "hvns": [{"mid": round(h["mid"], 2), "volume": int(h["volume"])} for h in (vp.get("hvns") or [])],
                         "lvns": [{"mid": round(l["mid"], 2), "volume": int(l["volume"])} for l in (vp.get("lvns") or [])],
+                        "approximation": vp.get("approximation", True),
+                        "tick_data_used": vp.get("tick_data_used", False),
+                        "profile_method": vp.get("profile_method", vp.get("method")),
+                        "data_quality": vp.get("data_quality"),
+                        "input_data_quality": vp.get("input_data_quality", []),
+                        "source_timeframes": vp.get("source_timeframes", [timeframe]),
+                        "volume_is_estimate": vp.get("volume_is_estimate", True),
                     }
                     # Also find volume voids
                     voids = find_volume_voids(closes[-1], vp)
@@ -22776,12 +24167,26 @@ def get_chart_data(
         # Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
+                if timeframe == "1D":
+                    _fib_chart_bars = _daily_level_bars(ohlcv)
+                    _fib_highs = [bar["high"] for bar in _fib_chart_bars]
+                    _fib_lows = [bar["low"] for bar in _fib_chart_bars]
+                    _fib_closes = [bar["close"] for bar in _fib_chart_bars]
+                    _fib_times = [bar.get("close_time") for bar in _fib_chart_bars]
+                    _fib_timestamp_mode = "close"
+                else:
+                    _fib_highs, _fib_lows, _fib_closes = highs, lows, closes
+                    _fib_times = times
+                    _fib_timestamp_mode = "open"
                 fib_payload = _calculate_directional_fib_levels(
-                    highs,
-                    lows,
-                    closes,
+                    _fib_highs,
+                    _fib_lows,
+                    _fib_closes,
                     timeframe=timeframe,
                     direction=fib_direction,
+                    times=_fib_times,
+                    as_of=datetime.now(timezone.utc),
+                    timestamp_mode=_fib_timestamp_mode,
                 )
                 if fib_payload:
                     result["fib"] = fib_payload["levels"]
@@ -24408,30 +25813,43 @@ def _build_early_mover_long_setup(
 
     target_candidates = []
     if high_24h > setup_entry:
-        target_candidates.append((high_24h, "24h_high_liquidity"))
+        target_candidates.append((high_24h, "observed_24h_high_liquidity", False))
     target_candidates.extend([
-        (low_24h + range_24h * 1.272, "127_2_range_extension"),
-        (low_24h + range_24h * 1.618, "161_8_range_extension"),
-        (low_24h + range_24h * 2.000, "200_0_range_extension"),
-        (low_24h + range_24h * 2.618, "261_8_range_extension"),
-        (high_24h + range_24h * 0.272, "breakout_measured_move_127"),
-        (high_24h + range_24h * 0.618, "breakout_measured_move_161"),
-        (high_24h + range_24h * 1.000, "breakout_measured_move_200"),
-        (high_24h + range_24h * 1.618, "breakout_measured_move_261"),
+        (low_24h + range_24h * 1.272, "127_2_range_projection", True),
+        (low_24h + range_24h * 1.618, "161_8_range_projection", True),
+        (low_24h + range_24h * 2.000, "200_0_range_projection", True),
+        (low_24h + range_24h * 2.618, "261_8_range_projection", True),
+        (high_24h + range_24h * 0.272, "breakout_measured_move_127_projection", True),
+        (high_24h + range_24h * 0.618, "breakout_measured_move_161_projection", True),
+        (high_24h + range_24h * 1.000, "breakout_measured_move_200_projection", True),
+        (high_24h + range_24h * 1.618, "breakout_measured_move_261_projection", True),
     ])
 
-    unique_targets = sorted({round(p, 10): l for p, l in target_candidates if p > setup_entry}.items())
+    unique_target_map: Dict[float, tuple[str, bool]] = {}
+    for candidate_price, candidate_label, is_projection in target_candidates:
+        if candidate_price <= setup_entry:
+            continue
+        key = round(candidate_price, 10)
+        previous = unique_target_map.get(key)
+        if previous is None or (previous[1] and not is_projection):
+            unique_target_map[key] = (candidate_label, is_projection)
+    unique_targets = [
+        (level, label, is_projection)
+        for level, (label, is_projection) in sorted(unique_target_map.items())
+    ]
 
-    def _pick_structural_crypto_long_target(min_rr: float, min_pct: float, min_above: float) -> tuple[float, str, bool]:
+    def _pick_crypto_long_target(
+        min_rr: float, min_pct: float, min_above: float
+    ) -> tuple[float, str, bool, bool]:
         min_price = max(setup_entry + risk * min_rr, setup_entry * (1 + min_pct))
-        candidates = [(level, label) for level, label in unique_targets if level > min_above]
-        for level, label in candidates:
+        candidates = [row for row in unique_targets if row[0] > min_above]
+        for level, label, is_projection in candidates:
             if level >= min_price:
-                return level, label, True
+                return level, label, True, is_projection
         if candidates:
-            level, label = candidates[-1]
-            return level, f"{label}_too_close", False
-        return setup_entry, "no_structural_target", False
+            level, label, is_projection = candidates[-1]
+            return level, f"{label}_too_close", False, is_projection
+        return setup_entry, "no_confirmed_target", False, True
 
     min_tp1_pct = 0.055 if phase == 1 else 0.045
     min_tp2_pct = 0.095 if phase == 1 else 0.075
@@ -24442,9 +25860,13 @@ def _build_early_mover_long_setup(
         min_tp1_pct = max(min_tp1_pct, 0.06)
         min_tp2_pct = max(min_tp2_pct, 0.10)
 
-    tp1, tp1_source, tp1_structural_ok = _pick_structural_crypto_long_target(1.35, min_tp1_pct, setup_entry)
+    tp1, tp1_source, tp1_distance_ok, tp1_is_projection = _pick_crypto_long_target(
+        1.35, min_tp1_pct, setup_entry
+    )
     tp2_floor_rr = 2.6 if phase == 1 else 2.25
-    tp2, tp2_source, tp2_structural_ok = _pick_structural_crypto_long_target(tp2_floor_rr, min_tp2_pct, tp1 + risk * 0.25)
+    tp2, tp2_source, tp2_distance_ok, tp2_is_projection = _pick_crypto_long_target(
+        tp2_floor_rr, min_tp2_pct, tp1 + risk * 0.25
+    )
     min_tp2_gap = max(setup_entry * 0.018, risk * 0.45)
     if tp2 <= tp1 + min_tp2_gap:
         projected_extension = max(
@@ -24454,11 +25876,19 @@ def _build_early_mover_long_setup(
         )
         tp2 = projected_extension
         tp2_source = f"{tp2_source}_projected_extension_no_clean_structure"
-        tp2_structural_ok = False
+        tp2_distance_ok = False
+        tp2_is_projection = True
 
-    target_quality = "STRUCTURAL" if tp1_structural_ok and tp2_structural_ok else "WEAK_STRUCTURAL_TARGETS"
-    if target_quality != "STRUCTURAL":
-        warnings.append("Strukturziele zu eng/fehlend - kein sauberer Early-Mover-Tradeplan")
+    if not tp1_distance_ok or not tp2_distance_ok:
+        target_quality = "WEAK_STRUCTURAL_TARGETS"
+    elif tp1_is_projection:
+        target_quality = "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    elif tp2_is_projection:
+        target_quality = "STRUCTURAL_TP1_PROJECTION_TP2"
+    else:
+        target_quality = "STRUCTURAL"
+    if target_quality.startswith(("WEAK_", "PROJECTION_ONLY")):
+        warnings.append("Kein ausreichend entferntes bestaetigtes TP1 - nur Projektion/Watchlist")
         if trade_action == "LONG_TRIGGER":
             trade_action = "WAIT_FOR_RETEST"
             entry_status = "WAIT_FOR_RETEST"
@@ -24511,8 +25941,10 @@ def _build_early_mover_long_setup(
         risk_flags.extend(["turnover_without_alpha", "extreme_turnover_churn"])
     if vol_mcap > 100:
         risk_flags.append("very_high_volume_turnover")
-    if target_quality != "STRUCTURAL":
+    if target_quality.startswith("WEAK_"):
         risk_flags.append("weak_structural_targets")
+    if tp1_is_projection:
+        risk_flags.append("projection_only_tp1")
     if entry.get("data_warning"):
         risk_flags.append("data_warning")
     risk_flags.extend(liquidity.get("flags") or [])
@@ -24544,6 +25976,8 @@ def _build_early_mover_long_setup(
         "stop_source": stop_source,
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
+        "tp1_is_projection": tp1_is_projection,
+        "tp2_is_projection": tp2_is_projection,
         "target_quality": target_quality,
         "target_min_pct_required": {
             "tp1": round(min_tp1_pct * 100, 2),
@@ -24864,6 +26298,12 @@ def fetch_multi_exchange_perps():
             "best_contract_symbol": best_contract,
             "best_chart_exchange": best_chart_exchange,
             "funding_rate": best_fr,
+            "funding_rate_fraction": best_fr,
+            "funding_rate_pct": (_alert_float(best_fr, 0.0) or 0.0) * 100.0,
+            "funding_rate_raw": best_fr,
+            "funding_rate_unit": "fraction",
+            "funding_interval_hours": best_data.get("funding_interval_hours") or 8.0,
+            "funding_source": f"{best_chart_exchange}:perpetual_funding",
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
             "volume24_usdt": max(mexc_vol, bitget_vol, binance_vol),
@@ -25092,6 +26532,12 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 "Change30d": round(change_30d, 2),
                 "VolMCapRatio": round(vol_mcap_ratio, 2),
                 "HasPerp": has_perp, "FundingRate": funding_rate,
+                "funding_rate_fraction": funding_rate,
+                "funding_rate_pct": (_alert_float(funding_rate, 0.0) or 0.0) * 100.0,
+                "funding_rate_raw": funding_rate,
+                "funding_rate_unit": "fraction",
+                "funding_interval_hours": perp_info.get("funding_interval_hours", 8.0) if perp_info else 8.0,
+                "funding_source": perp_info.get("funding_source") if perp_info else None,
                 "OI_Ratio": oi_ratio,
                 "PerpVolume24h": perp_info.get("volume24_usdt", 0) if perp_info else 0,
                 "PerpOI": perp_info.get("oi_usdt", 0) if perp_info else 0,
@@ -25737,6 +27183,8 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
             "tp1_source": setup.get("tp1_source"),
             "tp2_source": setup.get("tp2_source"),
             "target_quality": setup.get("target_quality"),
+            "tp1_is_projection": bool(setup.get("tp1_is_projection")),
+            "tp2_is_projection": bool(setup.get("tp2_is_projection")),
             "live_rr_ratio": setup.get("live_rr"),
             "distance_to_entry_r": setup.get("distance_to_entry_r"),
             "late_to_tp1": setup.get("late_to_tp1"),
@@ -26147,6 +27595,11 @@ def _ce_normalized_row(
         "low_24h": low,
         "open_interest": _ce_float(open_interest),
         "funding_rate": _ce_float(funding_rate),
+        "funding_rate_pct": _ce_float(funding_rate),
+        "funding_rate_raw": _ce_float(funding_rate),
+        "funding_rate_unit": "percent",
+        "funding_interval_hours": 8.0,
+        "funding_source": f"{exchange}:perpetual_funding",
         "spread_pct": _ce_float(spread_pct, 0.0) if spread_pct is not None else None,
         "_cheap_rank": cheap_rank,
         "range_position_24h": round(range_pos, 3),
@@ -26507,11 +27960,18 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         return None
 
     measured_move = breakout_level - range_low
-    raw_tp1 = max(
-        entry + risk * 1.8,
-        breakout_level + max(measured_move * 0.272, entry * 0.025),
-        high_24h if high_24h > entry * 1.025 else 0,
-    )
+    observed_24h_barrier = high_24h if high_24h > entry else 0.0
+    if observed_24h_barrier:
+        raw_tp1 = observed_24h_barrier
+        raw_tp1_source = "observed_24h_high_liquidity"
+        raw_tp1_is_projection = False
+    else:
+        raw_tp1 = max(
+            entry + risk * 1.8,
+            breakout_level + max(measured_move * 0.272, entry * 0.025),
+        )
+        raw_tp1_source = "range_measured_move_projection"
+        raw_tp1_is_projection = True
     raw_tp2 = max(raw_tp1 + risk * 0.9, breakout_level + max(measured_move * 0.618, entry * 0.045), entry + risk * 2.7)
     setup = {
         "direction": "LONG",
@@ -26520,8 +27980,15 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "tp1": raw_tp1,
         "tp2": raw_tp2,
         "level_model": "breakout_structure_v1",
-        "tp1_source": "range/24h-high structure",
-        "tp2_source": "measured move structure",
+        "tp1_source": raw_tp1_source,
+        "tp2_source": "measured_move_projection",
+        "tp1_is_projection": raw_tp1_is_projection,
+        "tp2_is_projection": True,
+        "target_quality": (
+            "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+            if raw_tp1_is_projection
+            else "STRUCTURAL_TP1_PROJECTION_TP2"
+        ),
         "stop_source": "nearest support/VRVP invalidation",
     }
     vrvp_atr = calculate_wilder_atr(bars4h[-60:] or bars15[-96:], period=14) or atr5
@@ -26540,7 +28007,24 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     if rr < 1.45:
         return None
 
-    trade_signal = "JETZT_TRADEN" if trigger_ok else "EXPLOSION_ARMED"
+    target_quality = str(
+        setup.get("target_quality") or "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    ).upper()
+    tp1_is_projection = bool(setup.get("tp1_is_projection"))
+    barrier_gate = str(setup.get("barrier_gate") or "").upper()
+    structure_status = str(setup.get("structure_status") or "").upper()
+    barrier_gate_active = bool(
+        barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
+        or structure_status == "WAIT_BREAK_RECLAIM"
+    )
+    target_tradeable = bool(
+        not tp1_is_projection
+        and not target_quality.startswith("PROJECTION_ONLY")
+        and not target_quality.startswith("WEAK_")
+        and rr_tp1 + 1e-12 >= 1.35
+    )
+    trigger_tradeable = bool(trigger_ok and target_tradeable and not barrier_gate_active)
+    trade_signal = "JETZT_TRADEN" if trigger_tradeable else "EXPLOSION_ARMED"
     risk_level = "LOW"
     risk_reasons = []
     if turnover < 5_000_000:
@@ -26560,6 +28044,13 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         risk_reasons.append("funding crowded")
     if not trigger_ok:
         risk_reasons.append("wait for 5m breakout confirmation")
+    if barrier_gate_active:
+        risk_reasons.append("first VRVP barrier requires completed break/reclaim")
+    if not target_tradeable:
+        if tp1_is_projection or target_quality.startswith("PROJECTION_ONLY"):
+            risk_reasons.append("TP1 is projection-only; confirmed opposing barrier missing")
+        elif rr_tp1 < 1.35:
+            risk_reasons.append("first confirmed TP1 is below the 1.35R minimum")
 
     # Zentrale Leiter statt Inline-Duplikat (S≥88/A≥80/B≥65...) — identisch im
     # erreichbaren Bereich, da explosion_score < 70 oben bereits None liefert.
@@ -26577,10 +28068,32 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "setup_score": explosion_score,
         "entry_score": entry_score,
         "trade_signal": trade_signal,
-        "trade_action": "LONG_NOW" if trigger_ok else "WAIT_FOR_BREAKOUT",
-        "trade_decision": "TRADEABLE" if trigger_ok else "WAIT_FOR_TRIGGER",
-        "trade_decision_label": "5m Breakout bestaetigt" if trigger_ok else "5m Breakout/Reclaim abwarten",
-        "signal_label": "Frischer 5m Breakout bestaetigt" if trigger_ok else "Kurz vor Ausbruch; kein Market-Buy vor 5m Breakout",
+        "trade_action": (
+            "WAIT_FOR_BREAK_RECLAIM"
+            if barrier_gate_active
+            else "LONG_NOW" if trigger_tradeable else "WAIT_FOR_BREAKOUT"
+        ),
+        "trade_decision": (
+            "TRADEABLE"
+            if trigger_tradeable
+            else "WAIT_FOR_BREAK_RECLAIM" if barrier_gate_active
+            else "WAIT_FOR_CONFIRMED_TARGET" if trigger_ok and not target_tradeable
+            else "WAIT_FOR_TRIGGER"
+        ),
+        "trade_decision_label": (
+            "5m Breakout und Struktur bestaetigt"
+            if trigger_tradeable
+            else "Erste VRVP-Barriere erst brechen/reclaimen"
+            if barrier_gate_active
+            else "Bestaetigtes TP1 fehlt; Projektion ist nicht alertbar"
+            if trigger_ok and not target_tradeable
+            else "5m Breakout/Reclaim abwarten"
+        ),
+        "signal_label": (
+            "Frischer 5m Breakout mit bestaetigtem Strukturziel"
+            if trigger_tradeable
+            else "Setup bleibt Watchlist bis Trigger und Struktur-Gate bestaetigt sind"
+        ),
         "phase": 2 if trigger_ok else 1,
         "phase_label": "Breakout confirmed" if trigger_ok else "Compression/coil near breakout",
         "entry": _ce_round_price(entry),
@@ -26610,7 +28123,9 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "risk_reasons": risk_reasons,
         "risk_flags": risk_reasons,
         "btc_context": btc_context,
-        "target_quality": setup.get("target_quality", "STRUCTURAL"),
+        "target_quality": target_quality,
+        "tp1_is_projection": tp1_is_projection,
+        "tp2_is_projection": bool(setup.get("tp2_is_projection")),
         "tp1_source": setup.get("tp1_source"),
         "tp2_source": setup.get("tp2_source"),
         "stop_source": setup.get("stop_source"),
@@ -26620,13 +28135,20 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "vrvp_poc": setup.get("vrvp_poc"),
         "vrvp_vah": setup.get("vrvp_vah"),
         "vrvp_val": setup.get("vrvp_val"),
+        "trade_setup": setup,
+        "nearest_barrier": setup.get("nearest_barrier"),
+        "overhead_resistance": setup.get("overhead_resistance"),
+        "barrier_gate": barrier_gate or None,
+        "barrier_gate_active": barrier_gate_active,
+        "structure_status": setup.get("structure_status"),
+        "structure_decision": setup.get("structure_decision"),
         "reasons": [
             f"5m volume {vol_ratio:.2f}x vs median",
             f"price {'reclaimed' if trigger_ok else 'near'} breakout level {breakout_level:.6g}",
             f"compression range {compression_range_pct:.1f}%",
         ],
         "warnings": risk_reasons,
-        "alertable_crypto": bool(trigger_ok and risk_level != "HIGH" and rr >= 1.5),
+        "alertable_crypto": bool(trigger_tradeable and risk_level != "HIGH" and rr >= 1.5),
         "execution_trigger_ok": bool(trigger_ok),
     }
 
@@ -26948,6 +28470,12 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "exchange": exchange,
                 "best_exchange": perp_lookup.get("best_exchange", ""),
                 "funding_rate": perp_lookup.get("funding_rate", 0),
+                "funding_rate_fraction": perp_lookup.get("funding_rate_fraction", perp_lookup.get("funding_rate", 0)),
+                "funding_rate_pct": perp_lookup.get("funding_rate_pct"),
+                "funding_rate_raw": perp_lookup.get("funding_rate_raw", perp_lookup.get("funding_rate", 0)),
+                "funding_rate_unit": perp_lookup.get("funding_rate_unit", "fraction"),
+                "funding_interval_hours": perp_lookup.get("funding_interval_hours", 8.0),
+                "funding_source": perp_lookup.get("funding_source"),
                 "oi_ratio": perp_lookup.get("oi_ratio", 0),
                 "score": score,
                 "grade": "S" if score >= 85 else "A" if score >= 75 else "B" if score >= 60 else "C" if score >= 45 else "D",
@@ -27604,6 +29132,15 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
     def _append_signal(entry: Dict[str, Any], bucket: str) -> None:
         sig = entry.get("signal", {}) or {}
         pump = sig.get("pump_data", {}) or {}
+        setup = sig.get("trade_setup") if isinstance(sig.get("trade_setup"), dict) else {}
+
+        def _signal_field(key: str, default: Any = None) -> Any:
+            if key in sig:
+                return sig.get(key)
+            if key in setup:
+                return setup.get(key)
+            return default
+
         raw_symbol = entry.get("symbol") or sig.get("symbol") or ""
         display_symbol = _display_crypto_contract_symbol(raw_symbol)
         timing = sig.get("timing", "")
@@ -27636,6 +29173,24 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "stop": sig.get("stop_loss", sig.get("stop", 0)),
             "tp1": sig.get("tp1", 0),
             "tp2": sig.get("tp2", 0),
+            # Preserve the native target contract through the UI flattener.
+            # A watch/projection row must never be relabelled as STRUCTURAL
+            # merely because this adapter discarded its provenance.
+            "tp1_source": _signal_field("tp1_source") or "ath_dump_projection",
+            "tp2_source": _signal_field("tp2_source") or "ath_dump_projection",
+            "tp1_is_projection": _signal_field("tp1_is_projection", True) is not False,
+            "tp2_is_projection": _signal_field("tp2_is_projection", True) is not False,
+            "tp1_structure": _signal_field("tp1_structure"),
+            "tp2_structure": _signal_field("tp2_structure"),
+            "target_quality": _signal_field("target_quality")
+            or "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+            "trade_setup": setup,
+            "nearest_barrier": _signal_field("nearest_barrier"),
+            "barrier_gate": _signal_field("barrier_gate"),
+            "barrier_gate_active": _signal_field("barrier_gate_active", False) is True,
+            "structure_status": _signal_field("structure_status"),
+            "structure_reason": _signal_field("structure_reason"),
+            "structure_decision": _signal_field("structure_decision"),
             "confirmations": 0,
             "listing_date": entry.get("detected_at", ""),
             "hours_tracked": pump.get("hours_tracked", 0),
@@ -27649,6 +29204,11 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "signal_label": "Jetzt shorten" if bucket == "signals" and sig.get("listing_trade_ok") else "Achtung beobachten",
             "vol_ratio": pump.get("vol_ratio", 0),
             "funding_rate": pump.get("funding_rate", 0),
+            "funding_rate_pct": pump.get("funding_rate_pct", pump.get("funding_rate", 0)),
+            "funding_rate_raw": pump.get("funding_rate_raw", pump.get("funding_rate", 0)),
+            "funding_rate_unit": pump.get("funding_rate_unit", "percent"),
+            "funding_interval_hours": pump.get("funding_interval_hours", 8.0),
+            "funding_source": f"{entry.get('exchange', '')}:perpetual_funding",
             "long_pct": pump.get("long_pct", 0),
             "red_streak": pump.get("red_streak", 0),
             "btc_divergence": pump.get("btc_divergence", 0),
@@ -27710,6 +29270,11 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "exhaustion_score": item.get("exh_score", 0),
             "signal": item.get("timing", "MONITOR"),
             "funding_rate": item.get("funding_rate", 0),
+            "funding_rate_pct": item.get("funding_rate_pct", item.get("funding_rate", 0)),
+            "funding_rate_raw": item.get("funding_rate_raw", item.get("funding_rate", 0)),
+            "funding_rate_unit": item.get("funding_rate_unit", "percent"),
+            "funding_interval_hours": item.get("funding_interval_hours", 8.0),
+            "funding_source": f"{item.get('exchange', '')}:perpetual_funding",
             "grade": item.get("grade", ""),
             "hours_tracked": item.get("hours_tracked", 0),
             "listing_age_hours": item.get("listing_age_hours"),
@@ -27744,6 +29309,20 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "continuation_risk": item.get("continuation_risk", False),
             "signal_quality": item.get("signal_quality", ""),
             "risk_flags": item.get("risk_flags", []),
+            "tp1_source": item.get("tp1_source") or "ath_dump_projection",
+            "tp2_source": item.get("tp2_source") or "ath_dump_projection",
+            "tp1_is_projection": item.get("tp1_is_projection") is not False,
+            "tp2_is_projection": item.get("tp2_is_projection") is not False,
+            "tp1_structure": item.get("tp1_structure"),
+            "tp2_structure": item.get("tp2_structure"),
+            "target_quality": item.get("target_quality") or "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+            "trade_setup": item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else {},
+            "nearest_barrier": item.get("nearest_barrier"),
+            "barrier_gate": item.get("barrier_gate"),
+            "barrier_gate_active": item.get("barrier_gate_active") is True,
+            "structure_status": item.get("structure_status"),
+            "structure_reason": item.get("structure_reason"),
+            "structure_decision": item.get("structure_decision"),
             "source": "monitoring",
         })
 
@@ -28050,6 +29629,94 @@ def _crypto_trade_max_cached_at(*values: Optional[str]) -> Optional[str]:
     return max(parsed, key=lambda item: item[0])[1]
 
 
+def _crypto_structure_block_reason(row: Dict[str, Any]) -> Optional[str]:
+    """Return why a cached crypto row cannot be promoted to trade-now."""
+    if not isinstance(row, dict):
+        return "invalid_structure_payload"
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+
+    if "barrier_gate" in row:
+        gate_raw = row.get("barrier_gate")
+        gate_active = (
+            row.get("barrier_gate_active") is True
+            if "barrier_gate_active" in row
+            else bool(gate_raw)
+        )
+    else:
+        gate_raw = setup.get("barrier_gate")
+        gate_active = (
+            row.get("barrier_gate_active") is True
+            if "barrier_gate_active" in row
+            else setup.get("barrier_gate_active") is True or bool(gate_raw)
+        )
+    gate = str(gate_raw or "").strip().upper()
+    if gate_active or gate not in {"", "NONE", "NULL", "CLEARED"}:
+        return "active_structural_barrier_gate"
+
+    if "structure_status" in row:
+        status_raw = row.get("structure_status")
+        decision_raw = row.get("structure_decision") if "structure_decision" in row else None
+    else:
+        status_raw = setup.get("structure_status")
+        decision_raw = (
+            row.get("structure_decision")
+            if "structure_decision" in row
+            else setup.get("structure_decision")
+        )
+    status = str(status_raw or "").strip().upper()
+    decision_status = str(
+        decision_raw.get("status") if isinstance(decision_raw, dict) else ""
+    ).strip().upper()
+    for candidate in (status, decision_status):
+        if "WAIT" in candidate:
+            return "structure_wait"
+        if candidate.startswith("REJECT") or candidate in {"STRUCTURE_UNAVAILABLE", "NO_TRADE"}:
+            return "structure_rejected"
+
+    if "target_quality" in row:
+        quality_raw = row.get("target_quality")
+        tp1_projection = (
+            row.get("tp1_is_projection") is True
+            if "tp1_is_projection" in row
+            else False
+        )
+    else:
+        quality_raw = setup.get("target_quality")
+        tp1_projection = (
+            row.get("tp1_is_projection") is True
+            if "tp1_is_projection" in row
+            else setup.get("tp1_is_projection") is True
+        )
+    quality = str(quality_raw or "").strip().upper()
+    if tp1_projection or quality.startswith("PROJECTION_ONLY"):
+        return "projection_only_tp1"
+    return None
+
+
+def _enforce_crypto_structure_wait(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Defense-in-depth: a structural blocker always wins over cached NOW."""
+    reason = _crypto_structure_block_reason(row)
+    action = str(row.get("trade_action") or row.get("decision") or "").upper()
+    if not reason or action not in {"JETZT_LONG", "JETZT_SHORT"}:
+        return row
+    downgraded = dict(row)
+    direction = str(downgraded.get("direction") or "").upper()
+    wait_action = "SHORT_WATCH" if direction == "SHORT" else "LONG_ARMED"
+    downgraded.update({
+        "trade_action": wait_action,
+        "trade_signal": "WARTEN",
+        "decision": wait_action,
+        "alertable_crypto": False,
+        "structure_trade_block_reason": reason,
+        "signal_label": (
+            "Short vorbereitet: Strukturbarriere/Ziel bestaetigen"
+            if direction == "SHORT"
+            else "Long vorbereitet: Strukturbarriere/Ziel bestaetigen"
+        ),
+    })
+    return downgraded
+
+
 def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(row, dict):
         return None
@@ -28062,14 +29729,16 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
     score = _crypto_trade_to_float(row.get("explosion_score", row.get("score")), 0)
     entry_score = _crypto_trade_to_float(row.get("entry_score"), score)
     execution_age = _crypto_trade_to_float(row.get("execution_data_age_seconds"), -1)
+    structure_block_reason = _crypto_structure_block_reason(row)
     live_trigger_ok = bool(
         signal == "JETZT_TRADEN"
         and row.get("execution_trigger_ok") is True
         and 0 <= execution_age <= 600
+        and structure_block_reason is None
     )
     action = "JETZT_LONG" if live_trigger_ok else "LONG_ARMED"
     price = _crypto_trade_to_float(row.get("Price", row.get("price")), 0)
-    return {
+    normalized = {
         **row,
         "Symbol": symbol,
         "symbol": symbol,
@@ -28093,6 +29762,10 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
         "isCrypto": True,
         "isExchangeCrypto": True,
     }
+    if structure_block_reason:
+        normalized["structure_trade_block_reason"] = structure_block_reason
+        normalized["alertable_crypto"] = False
+    return normalized
 
 
 def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -28107,12 +29780,14 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
         str(row.get("trade_signal") or "").upper() == "JETZT_TRADEN" and category == "NEW_LISTING_DUMP"
     )
     micro_age = _crypto_trade_to_float(row.get("micro_data_age_seconds"), -1)
+    structure_block_reason = _crypto_structure_block_reason(row)
     is_short_now = bool(
         requested_short_now
         and row.get("micro_trigger_ok") is True
         and row.get("safety_ok") is True
         and row.get("listing_trade_ok") is True
         and 0 <= micro_age <= 600
+        and structure_block_reason is None
     )
     useful_short_watch = category in {"NEW_LISTING_DUMP", "EXHAUSTION_WATCH", "PUMP_RUNNING_WATCH", "ACTIVE_PUMP_WATCH"}
     if not is_short_now and not useful_short_watch:
@@ -28121,7 +29796,7 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
     entry_score = _crypto_trade_to_float(row.get("timing_quality", row.get("micro_score")), score)
     action = "JETZT_SHORT" if is_short_now else "SHORT_WATCH"
     price = _crypto_trade_to_float(row.get("price", row.get("micro_current_price")), 0)
-    return {
+    normalized = {
         **row,
         "Symbol": symbol,
         "symbol": symbol,
@@ -28159,6 +29834,10 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
         "isCrypto": True,
         "isExchangeCrypto": True,
     }
+    if structure_block_reason:
+        normalized["structure_trade_block_reason"] = structure_block_reason
+        normalized["alertable_crypto"] = False
+    return normalized
 
 
 def _crypto_trade_action_rank(row: Dict[str, Any]) -> int:
@@ -28206,11 +29885,11 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
     for row in long_rows or []:
         normalized = _normalize_crypto_long_signal(row)
         if normalized:
-            candidates.append(normalized)
+            candidates.append(_enforce_crypto_structure_wait(normalized))
     for row in short_rows or []:
         normalized = _normalize_crypto_short_signal(row)
         if normalized:
-            candidates.append(normalized)
+            candidates.append(_enforce_crypto_structure_wait(normalized))
     selected: Dict[str, Dict[str, Any]] = {}
     suppressed_by_symbol: Dict[str, List[str]] = {}
     for candidate in candidates:
@@ -29304,6 +30983,7 @@ def _penny_vrvp_resistances(
     price: float,
 ) -> List[Dict[str, Any]]:
     levels: List[Dict[str, Any]] = []
+    vrvp_as_of = datetime.now(timezone.utc)
     for bars, timeframe, min_bars, lookback in (
         (bars_5m, "5m", 20, 60),
         (daily_bars, "1D", 20, 120),
@@ -29316,6 +30996,11 @@ def _penny_vrvp_resistances(
                 timeframe=timeframe,
                 min_bars=min_bars,
                 lookback=lookback,
+                as_of=vrvp_as_of,
+                date_session_context=(
+                    "us_equity_regular" if timeframe == "1D"
+                    else "conservative_calendar_day"
+                ),
             )
         except Exception as exc:
             print(f"[Penny] VRVP {timeframe} error: {exc}")
@@ -35042,7 +36727,7 @@ def _indicator_entry_on_next_open(signal_index, dates, opens, direction="long"):
     fill_price = float(opens[fill_index])
     if not math.isfinite(fill_price) or fill_price <= 0:
         return None
-    return {
+    normalized = {
         "signal_date": dates[signal_index],
         "entry_date": dates[fill_index],
         "entry_price": fill_price,
@@ -35050,6 +36735,7 @@ def _indicator_entry_on_next_open(signal_index, dates, opens, direction="long"):
         "bar_idx": fill_index,
         "fill_model": "next_session_open_after_close_signal",
     }
+    return normalized
 
 
 def _indicator_exit_on_next_open(position, signal_index, dates, opens):
@@ -35081,7 +36767,7 @@ def _indicator_exit_on_next_open(position, signal_index, dates, opens):
 def _indicator_unresolved_trade(position, dates):
     """Represent an actually filled but still-open trade without inventing an exit."""
     direction = str(position.get("dir") or "long").upper()
-    return {
+    normalized = {
         "entry_date": position.get("entry_date"),
         "entry_price": round(float(position.get("entry_price") or 0.0), 6),
         "entry_signal_date": position.get("signal_date"),
@@ -35094,6 +36780,7 @@ def _indicator_unresolved_trade(position, dates):
         "last_data_date": dates[-1] if dates else None,
         "fill_model": position.get("fill_model") or "next_session_open_after_close_signal",
     }
+    return normalized
 
 
 def _backtest_stats(trades, ticker, strategy, months):

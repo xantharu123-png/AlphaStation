@@ -84,7 +84,7 @@ def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
     assert scored["risk_reward"] >= 1.45
 
 
-def test_crypto_explosion_confirmed_breakout_has_valid_plan(monkeypatch):
+def test_crypto_explosion_near_observed_high_waits_for_first_barrier_reclaim(monkeypatch):
     monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change))
     bars5 = _bars(90, start=9.50, step=0.004, volume=1000, last={
         "open": 10.00,
@@ -105,10 +105,57 @@ def test_crypto_explosion_confirmed_breakout_has_valid_plan(monkeypatch):
     scored = api._score_crypto_explosion_candidate(_candidate(price=10.12, change=8.0), bars5, bars15, bars4h)
 
     assert scored is not None
-    assert scored["trade_signal"] == "JETZT_TRADEN"
+    assert scored["trade_signal"] == "EXPLOSION_ARMED"
     assert scored["execution_trigger_ok"] is True
     assert scored["entry_score"] >= 80
     assert scored["tp2"] > scored["tp1"] > scored["entry"] > scored["stop"]
+    assert scored["alertable_crypto"] is False
+
+
+def test_crypto_explosion_projection_only_tp1_cannot_become_trade_now(monkeypatch):
+    monkeypatch.setattr(api, "_get_crypto_btc_context", lambda symbol, change: _btc_context(change))
+    bars5 = _bars(90, start=9.50, step=0.004, volume=1000, last={
+        "open": 10.00,
+        "high": 10.14,
+        "low": 9.98,
+        "close": 10.12,
+        "volume": 3200,
+    })
+    bars15 = _bars(60, start=9.42, step=0.009, volume=3000, interval=900, last={
+        "open": 9.95,
+        "high": 10.02,
+        "low": 9.91,
+        "close": 9.98,
+        "volume": 3000,
+    })
+    bars4h = _bars(60, start=9.4, step=0.006, volume=5000, interval=14400)
+    candidate = _candidate(price=10.12, change=8.0)
+    candidate["high_24h"] = 10.0
+
+    scored = api._score_crypto_explosion_candidate(candidate, bars5, bars15, bars4h)
+
+    assert scored is not None
+    assert scored["execution_trigger_ok"] is True
+    assert scored["trade_signal"] == "EXPLOSION_ARMED"
+    assert scored["target_quality"].startswith("PROJECTION_ONLY")
+    assert scored["tp1_is_projection"] is True
+    assert scored["alertable_crypto"] is False
+    assert api._alert_trade_plan_ok(scored, require_native_levels=False) is False
+
+
+def test_crypto_explosion_funding_is_explicitly_percent_qualified():
+    row = api._ce_normalized_row(
+        exchange="bybit",
+        contract="TESTUSDT",
+        price=10.0,
+        change_24h=4.0,
+        turnover_usd=60_000_000,
+        funding_rate=0.1,
+    )
+
+    assert row["funding_rate_pct"] == 0.1
+    assert row["funding_rate_raw"] == 0.1
+    assert row["funding_rate_unit"] == "percent"
 
 
 def test_crypto_explosion_rejects_late_parabolic_move(monkeypatch):

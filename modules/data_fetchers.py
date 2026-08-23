@@ -1264,14 +1264,23 @@ def get_ticker_news(poly_key, ticker, limit=3):
 # ── get_ticker_details (originally line 10514) ──
 def get_ticker_details(poly_key, ticker):
     """
-    Holt Ticker Details: Shares Outstanding, Market Cap, etc.
-    Returns: dict mit shares_outstanding, market_cap, float_category
+    Holt Ticker Details: Shares Outstanding, Market Cap, SIC/Industrie, etc.
+    Returns: dict mit shares_outstanding, market_cap, float_category und
+    den von Polygon gelieferten Klassifikationsfeldern.
     """
     try:
         url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
         _resp = rate_limited_get(url, params={"apiKey": poly_key}, timeout=5)
         if _resp.status_code != 200:
-            return {"shares_outstanding": 0, "market_cap": 0, "float_category": "unknown", "cik": ""}
+            return {
+                "shares_outstanding": 0,
+                "market_cap": 0,
+                "float_category": "unknown",
+                "cik": "",
+                "sic_code": "",
+                "sic_description": "",
+                "industry": "",
+            }
         resp = _resp.json()
         results = resp.get("results", {})
         
@@ -1308,6 +1317,14 @@ def get_ticker_details(poly_key, ticker):
             "name": results.get("name", ""),
             "description": results.get("description", "")[:100] if results.get("description") else "",
             "cik": str(results.get("cik") or "").strip(),
+            "sic_code": str(results.get("sic_code") or "").strip(),
+            "sic_description": str(results.get("sic_description") or "").strip(),
+            # Polygon currently exposes the industry primarily through its SIC
+            # description. Keep a stable consumer-facing alias without
+            # discarding a future explicit ``industry`` field.
+            "industry": str(
+                results.get("industry") or results.get("sic_description") or ""
+            ).strip(),
         }
     except Exception as e:
         return {
@@ -1320,6 +1337,9 @@ def get_ticker_details(poly_key, ticker):
             "name": "",
             "description": "",
             "cik": "",
+            "sic_code": "",
+            "sic_description": "",
+            "industry": "",
         }
 
 

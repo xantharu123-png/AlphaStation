@@ -6,6 +6,14 @@ Volume Profile, Volume Voids, VWAP-basierte Analysen.
 import math
 
 
+# This is intentionally not named "tick" or "market profile": the function
+# only knows each bar's high, low and total volume. It allocates that volume
+# uniformly by price-range overlap and therefore remains an OHLCV approximation.
+OHLCV_VOLUME_PROFILE_METHOD = "proportional_bar_volume_by_price_overlap"
+OHLCV_VOLUME_PROFILE_ASSUMPTION = "uniform_volume_density_within_bar_high_low"
+OHLCV_VOLUME_PROFILE_SOURCE = "ohlcv_volume_profile"
+
+
 def merge_lvn_bins(lvns):
     """Merge adjacent low-volume bins into continuous volume-void zones."""
     parsed = []
@@ -49,9 +57,13 @@ def merge_lvn_bins(lvns):
     return zones
 
 
-def calculate_volume_profile(ohlcv_data, num_bins=20):
+def calculate_volume_profile(ohlcv_data, num_bins=20, *, timeframe=None):
     """
-    Berechnet Volume Profile aus historischen OHLCV Daten.
+    Berechnet ein approximatives Volume Profile aus historischen OHLCV-Daten.
+
+    Das Bar-Volumen wird proportional zur High/Low-Ueberlappung auf Preis-Bins
+    verteilt. Die additiven Provenienzfelder verhindern, dass dieses Ergebnis
+    als tickbasiertes Volume-at-Price missverstanden wird.
     """
     if not ohlcv_data or len(ohlcv_data) < 20:  # Mind. 20 Bars für sinnvolles Profile
         return None
@@ -86,6 +98,7 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
         
         # Verteile Volumen auf Bins
         # Für jeden Tag: Verteile das Tagesvolumen proportional auf die Bins die der Tag berührt
+        contributing_bar_count = 0
         for day in ohlcv_data:
             day_high = day.get('high', 0)
             day_low = day.get('low', 0)
@@ -93,6 +106,8 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
             
             if day_high <= 0 or day_low <= 0 or day_vol <= 0:
                 continue
+
+            contributing_bar_count += 1
             
             day_range = day_high - day_low
             if day_range <= 0:
@@ -189,6 +204,27 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
                     'volume_pct': (bin['volume'] / avg_volume * 100) if avg_volume > 0 else 0
                 })
         
+        input_quality_labels = sorted({
+            str(day.get("data_quality") or "").strip()
+            for day in ohlcv_data
+            if isinstance(day, dict) and str(day.get("data_quality") or "").strip()
+        })
+        source_timeframes = sorted({
+            str(day.get("source_timeframe") or "").strip()
+            for day in ohlcv_data
+            if isinstance(day, dict) and str(day.get("source_timeframe") or "").strip()
+        })
+        volume_is_estimate = any(
+            day.get("volume_is_estimate") is True
+            for day in ohlcv_data
+            if isinstance(day, dict)
+        )
+        data_quality = (
+            "estimated_ohlcv_bar_approximation"
+            if volume_is_estimate
+            else "ohlcv_bar_approximation"
+        )
+
         return {
             'bins': bins,
             'poc': poc,
@@ -199,7 +235,25 @@ def calculate_volume_profile(ohlcv_data, num_bins=20):
             'hvns': hvns,
             'range_high': range_high,
             'range_low': range_low,
-            'avg_volume': avg_volume
+            'avg_volume': avg_volume,
+            # Additive provenance; all legacy fields above remain unchanged.
+            'source': OHLCV_VOLUME_PROFILE_SOURCE,
+            'approximation': True,
+            'tick_data_used': False,
+            'method': OHLCV_VOLUME_PROFILE_METHOD,
+            'volume_allocation_assumption': OHLCV_VOLUME_PROFILE_ASSUMPTION,
+            'timeframe': str(timeframe).strip() if timeframe not in (None, "") else None,
+            'bin_count': num_bins,
+            'bin_width': bin_size,
+            'input_bar_count': len(ohlcv_data),
+            'contributing_bar_count': contributing_bar_count,
+            'volume_coverage_ratio': (
+                contributing_bar_count / len(ohlcv_data) if ohlcv_data else 0.0
+            ),
+            'data_quality': data_quality,
+            'input_data_quality': input_quality_labels,
+            'source_timeframes': source_timeframes,
+            'volume_is_estimate': volume_is_estimate,
         }
         
     except Exception as e:

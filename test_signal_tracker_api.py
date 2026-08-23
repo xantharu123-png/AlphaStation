@@ -25,6 +25,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -102,6 +103,16 @@ def _biotech_cache(tmp_path):
 
 def _early_mover_row(**overrides):
     """Handelbares Crypto-Swing-Setup (Spiegel test_mail_class_api.py)."""
+    checked_at = time.time()
+    intraday_trigger = {
+        "ok": True,
+        "timeframe": "5m",
+        "checked_at": checked_at,
+        "last_candle_closed_at": checked_at - 60.0,
+        "execution_data_age_seconds": 60.0,
+        "reason": "5m_breakout_volume_confirmed",
+        "volume_ratio": 1.6,
+    }
     row = {
         "Symbol": "EMO",
         "Name": "Early Mover",
@@ -116,11 +127,17 @@ def _early_mover_row(**overrides):
         "entry_status": "CONDITIONAL_LONG",
         "entry_quality": "GOOD",
         "execution_trigger_ok": True,
+        "intraday_trigger": intraday_trigger,
         "signal_quality": "conditional_long_setup",
         "entry": 1.25,
         "stop_loss": 1.15,
         "tp1": 1.43,
         "tp2": 1.57,
+        "tp1_source": "confirmed_4h_resistance",
+        "tp2_source": "risk_projection_after_first_barrier",
+        "tp1_is_projection": False,
+        "tp2_is_projection": True,
+        "target_quality": "STRUCTURAL_TP1_PROJECTION_TP2",
         "live_rr_ratio": 2.4,
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
@@ -132,6 +149,13 @@ def _early_mover_row(**overrides):
             "stop_loss": 1.15,
             "tp1": 1.43,
             "tp2": 1.57,
+            "tp1_source": "confirmed_4h_resistance",
+            "tp2_source": "risk_projection_after_first_barrier",
+            "tp1_is_projection": False,
+            "tp2_is_projection": True,
+            "target_quality": "STRUCTURAL_TP1_PROJECTION_TP2",
+            "execution_trigger_ok": True,
+            "intraday_trigger": dict(intraday_trigger),
             "live_rr": 2.4,
             "distance_to_entry_r": 0,
             "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},

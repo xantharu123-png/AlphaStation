@@ -183,7 +183,8 @@ def test_live_scanner_and_chart_paths_share_canonical_wilder_atr():
     assert "or (bars[-1]" not in bi_source
     assert "calculate_atr_14(ohlcv_data)" in wyckoff_source
     assert "atr_vals" not in wyckoff_source
-    assert "calculate_wilder_atr(chronological_bars, period=14)" in detail_source
+    assert "_completed_stock_daily_atr(" in detail_source
+    assert "as_of=_detail_cutoff" in detail_source
     assert "tr_values" not in detail_source
     assert "calculate_atr_14(bars[:idx])" in short_bonus_source
     assert "bars[k][\"high\"] - bars[k][\"low\"]" not in short_bonus_source

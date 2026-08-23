@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from configparser import ConfigParser
 from pathlib import Path
 
@@ -945,7 +946,10 @@ def test_health_check_binds_api_health_to_checkout_and_frontend_bundle(
             APP_DIR=str(app),
             GIT_BIN=str(fake_bin / "git"),
             CURL_BIN=str(fake_curl),
-            PYTHON_BIN=str(ROOT / ".venv" / "Scripts" / "python.exe"),
+            # Use the interpreter running pytest. A copied virtualenv launcher
+            # can retain an absolute reference to a Python installation from
+            # another PC and silently break this shell-level health probe.
+            PYTHON_BIN=sys.executable,
             FAKE_GIT_CALLS=str(calls),
         ),
     )

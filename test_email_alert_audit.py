@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -254,6 +254,31 @@ def test_email_alert_audit_summary_explains_blockers(tmp_path, monkeypatch):
 def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BIOA"}, "unit"))
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    closes = [11.0, 11.3, 11.7, 12.1, 12.5, 13.0, 12.5, 12.1, 11.7, 11.3]
+    daily_bars = [
+        {
+            "date": (base + timedelta(days=index)).date().isoformat(),
+            "open": closes[index % len(closes)] - 0.05,
+            "high": closes[index % len(closes)] + 0.18,
+            "low": closes[index % len(closes)] - 0.18,
+            "close": closes[index % len(closes)],
+            "volume": 100_000 + index * 100,
+        }
+        for index in range(90)
+    ]
+    daily_bars.append({
+        "date": (base + timedelta(days=90)).date().isoformat(),
+        "open": 11.8,
+        "high": 13.6,
+        "low": 11.3,
+        "close": 13.2,
+        "volume": 120_000,
+    })
+    monkeypatch.setattr(api, "_fetch_strategy_daily_history", lambda *args, **kwargs: daily_bars)
+    # VRVP-Auswahl ist separat getestet. Dieser Test isoliert die kausale
+    # Level-Anreicherung und darf daher kein zufaelliges Histogramm-Gate erben.
+    monkeypatch.setattr(api, "build_vrvp_structure", lambda *args, **kwargs: None)
     cache_file = tmp_path / "biotech.json"
     monkeypatch.setattr(api, "BIOTECH_CACHE", str(cache_file))
     cache_file.write_text(json.dumps({
@@ -2274,6 +2299,16 @@ def _early_mover_row(**overrides):
     # max(entry_score, 80)-Floor (der schwache Entries kuenstlich auf 80 hob)
     # ist entfernt. Ohne Feld ergibt _early_mover_entry_score(row) hier 48 und
     # die Row waere korrekt nicht mailbar.
+    checked_at = time.time()
+    intraday_trigger = {
+        "ok": True,
+        "timeframe": "5m",
+        "checked_at": checked_at,
+        "last_candle_closed_at": checked_at - 60.0,
+        "execution_data_age_seconds": 60.0,
+        "reason": "5m_breakout_volume_confirmed",
+        "volume_ratio": 1.6,
+    }
     row = {
         "Symbol": "EMO",
         "Name": "Early Mover",
@@ -2288,11 +2323,17 @@ def _early_mover_row(**overrides):
         "entry_status": "CONDITIONAL_LONG",
         "entry_quality": "GOOD",
         "execution_trigger_ok": True,
+        "intraday_trigger": intraday_trigger,
         "signal_quality": "conditional_long_setup",
         "entry": 1.25,
         "stop_loss": 1.15,
         "tp1": 1.43,
         "tp2": 1.57,
+        "tp1_source": "confirmed_4h_resistance",
+        "tp2_source": "risk_projection_after_first_barrier",
+        "tp1_is_projection": False,
+        "tp2_is_projection": True,
+        "target_quality": "STRUCTURAL_TP1_PROJECTION_TP2",
         "live_rr_ratio": 2.4,
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
@@ -2304,6 +2345,13 @@ def _early_mover_row(**overrides):
             "stop_loss": 1.15,
             "tp1": 1.43,
             "tp2": 1.57,
+            "tp1_source": "confirmed_4h_resistance",
+            "tp2_source": "risk_projection_after_first_barrier",
+            "tp1_is_projection": False,
+            "tp2_is_projection": True,
+            "target_quality": "STRUCTURAL_TP1_PROJECTION_TP2",
+            "execution_trigger_ok": True,
+            "intraday_trigger": dict(intraday_trigger),
             "live_rr": 2.4,
             "distance_to_entry_r": 0,
             "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
@@ -2727,9 +2775,14 @@ def test_early_mover_email_checks_realtime_trigger_when_cache_unconfirmed(tmp_pa
     _allow_final_early_mover_revalidation(monkeypatch)
     monkeypatch.setattr(api, "_DEFAULT_TRADE_HORIZON", "intraday")
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
+    checked_at = time.time()
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
         "reason": "5m_breakout_volume_confirmed",
+        "timeframe": "5m",
+        "checked_at": checked_at,
+        "last_candle_closed_at": checked_at - 60.0,
+        "execution_data_age_seconds": 60.0,
         "volume_ratio": 1.8,
     })
     sent = []

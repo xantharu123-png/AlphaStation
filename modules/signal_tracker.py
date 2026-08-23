@@ -84,7 +84,9 @@ __all__ = [
     "SIGNAL_DB_PATH",
     "SIGNAL_DELIVERY_JOURNAL_DB_PATH",
     "CRYPTO_SCANNERS",
+    "EXECUTION_CONTEXT_SCHEMA_VERSION",
     "extract_signal_fields",
+    "extract_execution_context",
     "is_valid_public_signal_ref",
     "normalize_origin_evidence",
     "record_alert_signals",
@@ -146,6 +148,11 @@ CRYPTO_SCANNERS = {
     "btc_divergenz",
     "crypto_strategy",
 }
+
+# Additive tracker telemetry contract.  This version belongs to the JSON
+# payload, independently of the SQLite schema, so future producers can evolve
+# the context without rewriting historical rows.
+EXECUTION_CONTEXT_SCHEMA_VERSION = 2
 
 STATUS_OPEN = "OPEN"
 STATUS_STOP = "STOP_HIT"
@@ -588,6 +595,584 @@ def extract_signal_fields(row: Any) -> Dict[str, Any]:
     return out
 
 
+# ── Versioned execution-context telemetry ───────────────────────────────────
+_CONTEXT_MISSING = object()
+
+
+def _context_sources(row: Any, *, setup_first: bool = False) -> List[Mapping[str, Any]]:
+    """Return deterministic row/setup lookup order without mutating either."""
+    if not isinstance(row, Mapping):
+        return []
+    setup = row.get("trade_setup")
+    sources: List[Mapping[str, Any]] = [row]
+    if isinstance(setup, Mapping):
+        sources = [setup, row] if setup_first else [row, setup]
+    return sources
+
+
+def _context_raw(
+    sources: Iterable[Mapping[str, Any]], aliases: Iterable[str]
+) -> Tuple[Any, Optional[str]]:
+    """Return the first explicitly supplied, non-empty alias and its name."""
+    for source in sources:
+        supplied_in_source = False
+        for alias in aliases:
+            if alias not in source:
+                continue
+            supplied_in_source = True
+            value = source.get(alias)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value, alias
+        # The final row is the first source. An explicit null/empty value is a
+        # deliberate clear and must mask a stale nested setup copy.
+        if supplied_in_source:
+            return _CONTEXT_MISSING, None
+    return _CONTEXT_MISSING, None
+
+
+def _context_text(value: Any, *, limit: int = 240) -> Optional[str]:
+    if value is _CONTEXT_MISSING or value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        return None
+    text = " ".join(str(value).strip().split())
+    return text[:limit] or None
+
+
+def _context_bool(value: Any) -> Any:
+    """Normalize only explicit booleans; unknown tokens stay omitted."""
+    if value is _CONTEXT_MISSING or value is None:
+        return _CONTEXT_MISSING
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = _to_float(value)
+        if number in (0.0, 1.0):
+            return bool(number)
+        return _CONTEXT_MISSING
+    token = str(value).strip().lower()
+    if token in {"true", "yes", "y", "1"}:
+        return True
+    if token in {"false", "no", "n", "0"}:
+        return False
+    return _CONTEXT_MISSING
+
+
+def _context_number(value: Any) -> Any:
+    number = _to_float(value)
+    return number if number is not None else _CONTEXT_MISSING
+
+
+def _context_section(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "availability": "available" if payload else "unavailable",
+        **payload,
+    }
+
+
+def _context_put_text(
+    payload: Dict[str, Any],
+    target: str,
+    sources: Iterable[Mapping[str, Any]],
+    aliases: Iterable[str],
+    *,
+    limit: int = 240,
+) -> Optional[str]:
+    raw, alias = _context_raw(sources, aliases)
+    value = _context_text(raw, limit=limit)
+    if value is not None:
+        payload[target] = value
+        return alias
+    return None
+
+
+def _context_put_number(
+    payload: Dict[str, Any],
+    target: str,
+    sources: Iterable[Mapping[str, Any]],
+    aliases: Iterable[str],
+) -> Optional[str]:
+    raw, alias = _context_raw(sources, aliases)
+    value = _context_number(raw)
+    if value is not _CONTEXT_MISSING:
+        payload[target] = value
+        return alias
+    return None
+
+
+def _context_put_bool(
+    payload: Dict[str, Any],
+    target: str,
+    sources: Iterable[Mapping[str, Any]],
+    aliases: Iterable[str],
+) -> Optional[str]:
+    raw, alias = _context_raw(sources, aliases)
+    value = _context_bool(raw)
+    if value is not _CONTEXT_MISSING:
+        payload[target] = value
+        return alias
+    return None
+
+
+def _execution_level_context(row: Any) -> Dict[str, Any]:
+    # Final row-level quality/status overrides stale nested scanner cache data.
+    sources = _context_sources(row, setup_first=False)
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("level_model", ("level_model", "LevelModel")),
+        ("stop_source", ("stop_source", "StopSource")),
+        ("tp1_source", ("tp1_source", "TP1Source")),
+        ("tp2_source", ("tp2_source", "TP2Source")),
+        ("target_quality", ("target_quality", "TargetQuality")),
+        ("structure_confidence", ("structure_confidence", "StructureConfidence")),
+    ):
+        _context_put_text(payload, target, sources, aliases)
+    return _context_section(payload)
+
+
+def _reachability_payload(row: Any) -> Optional[Mapping[str, Any]]:
+    if not isinstance(row, Mapping):
+        return None
+    setup = row.get("trade_setup")
+    trade_health = row.get("trade_health")
+    candidates = [
+        row.get("target_reachability"),
+        trade_health.get("target_reachability")
+        if isinstance(trade_health, Mapping)
+        else None,
+        setup.get("target_reachability") if isinstance(setup, Mapping) else None,
+    ]
+    return next((value for value in candidates if isinstance(value, Mapping)), None)
+
+
+def _execution_reachability_context(row: Any) -> Dict[str, Any]:
+    raw = _reachability_payload(row)
+    if raw is None:
+        return _context_section({})
+    sources = [raw]
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("horizon", ("horizon",)),
+        ("level_provenance", ("level_provenance", "provenance")),
+    ):
+        _context_put_text(payload, target, sources, aliases)
+    for target, aliases in (
+        ("atr", ("atr",)),
+        ("atr_budget", ("atr_budget", "configured_budget_atr", "budget_atr")),
+        ("stop_distance_atr", ("stop_distance_atr",)),
+        ("tp1_distance_atr", ("tp1_distance_atr",)),
+        ("tp2_distance_atr", ("tp2_distance_atr",)),
+    ):
+        _context_put_number(payload, target, sources, aliases)
+    data_available = _context_bool(raw.get("data_available", _CONTEXT_MISSING))
+    for target, aliases in (
+        ("budget_configured", ("budget_configured",)),
+        ("within_budget", ("within_budget",)),
+    ):
+        _context_put_bool(payload, target, sources, aliases)
+    issues = raw.get("issues")
+    if isinstance(issues, (list, tuple)):
+        normalized_issues = []
+        for issue in issues[:20]:
+            text = _context_text(issue, limit=160)
+            if text and text not in normalized_issues:
+                normalized_issues.append(text)
+        if normalized_issues:
+            payload["issues"] = normalized_issues
+    if data_available is not _CONTEXT_MISSING:
+        payload["data_available"] = data_available
+        availability = "available" if data_available else "unavailable"
+    else:
+        availability = "available" if payload else "unavailable"
+    return {"availability": availability, **payload}
+
+
+def _barrier_payload(row: Any) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    # The finalized row is canonical. Nested setup data may be a stale cache
+    # copy from before the final barrier/reclaim gate was normalized.
+    for source in _context_sources(row, setup_first=False):
+        supplied_in_source = False
+        for key in ("nearest_barrier", "overhead_resistance", "underlying_support"):
+            if key in source:
+                supplied_in_source = True
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                return value, key
+        if supplied_in_source:
+            return None, None
+    return None, None
+
+
+def _execution_barrier_context(row: Any) -> Dict[str, Any]:
+    raw, carrier = _barrier_payload(row)
+    if raw is None:
+        return _context_section({})
+    sources = [raw]
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("price", ("price", "level")),
+        ("distance_r", ("distance_r", "r_distance")),
+        ("distance_atr", ("distance_atr", "atr_distance")),
+        ("distance_pct", ("distance_pct",)),
+        ("strength", ("strength", "weight")),
+        ("touches", ("touches", "touch_count")),
+    ):
+        _context_put_number(payload, target, sources, aliases)
+    for target, aliases, limit in (
+        ("side", ("side",), 40),
+        ("source", ("source",), 200),
+        ("timeframe", ("timeframe", "source_timeframe", "level_timeframe", "vrvp_timeframe"), 40),
+        ("zone_id", ("zone_id", "level_zone_id", "barrier_id", "level_id", "id"), 160),
+        ("action", ("action", "gate", "required_action"), 120),
+        ("state", ("state", "status"), 80),
+    ):
+        _context_put_text(payload, target, sources, aliases, limit=limit)
+    if "side" not in payload:
+        if carrier == "overhead_resistance":
+            payload["side"] = "resistance"
+        elif carrier == "underlying_support":
+            payload["side"] = "support"
+    _context_put_bool(payload, "reclaimed", sources, ("reclaimed",))
+    if payload:
+        payload = {"kind": str(carrier), **payload}
+    return _context_section(payload)
+
+
+def _execution_confirmation_context(row: Any) -> Dict[str, Any]:
+    sources = _context_sources(row)
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("execution_trigger_ok", ("execution_trigger_ok", "crypto_entry_ok")),
+        ("breakout_confirmed", ("breakout_confirmed",)),
+        ("retest_confirmed", ("retest_confirmed",)),
+        ("reclaim_confirmed", ("reclaim_confirmed", "reclaimed_confirmed")),
+        ("trigger_confirmed", ("trigger_confirmed",)),
+        ("volume_confirmed", ("vol_confirmed", "volume_confirmed")),
+    ):
+        _context_put_bool(payload, target, sources, aliases)
+    _context_put_bool(payload, "alertable_crypto", sources, ("alertable_crypto",))
+    for target, aliases, limit in (
+        ("entry_confirmation_type", ("entry_confirmation_type", "confirmation_type", "trigger_type"), 100),
+        ("breakout_freshness_status", ("breakout_freshness_status",), 100),
+        ("trigger_reason", ("trigger_reason", "execution_trigger_reason"), 240),
+    ):
+        _context_put_text(payload, target, sources, aliases, limit=limit)
+
+    trigger = next(
+        (
+            source.get("intraday_trigger")
+            for source in sources
+            if isinstance(source.get("intraday_trigger"), Mapping)
+        ),
+        None,
+    )
+    if isinstance(trigger, Mapping):
+        trigger_payload: Dict[str, Any] = {}
+        _context_put_bool(trigger_payload, "matched", [trigger], ("matched", "ok", "confirmed"))
+        for target, aliases, limit in (
+            ("reason", ("reason",), 240),
+            ("type", ("type", "trigger_type"), 100),
+            ("timeframe", ("timeframe",), 40),
+            ("checked_at", ("checked_at",), 80),
+            ("last_candle_closed_at", ("last_candle_closed_at",), 80),
+        ):
+            _context_put_text(trigger_payload, target, [trigger], aliases, limit=limit)
+        if trigger_payload:
+            payload["intraday_trigger"] = trigger_payload
+    return _context_section(payload)
+
+
+def _event_days_from_nested_lists(row: Mapping[str, Any]) -> Tuple[Any, Optional[str]]:
+    best: Optional[float] = None
+    best_source: Optional[str] = None
+    for list_key in (
+        "Readout_Details", "readout_details", "BPIQ_Catalysts", "bpiq_catalysts",
+    ):
+        items = row.get(list_key)
+        if not isinstance(items, (list, tuple)):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            for key in ("days_until_readout", "days_until"):
+                value = _context_number(item.get(key))
+                if (
+                    value is not _CONTEXT_MISSING
+                    and value >= 0
+                    and (best is None or value < best)
+                ):
+                    best = float(value)
+                    best_source = f"{list_key}.{key}"
+    return (best, best_source) if best is not None else (_CONTEXT_MISSING, None)
+
+
+def _execution_event_context(row: Any) -> Dict[str, Any]:
+    sources = _context_sources(row)
+    payload: Dict[str, Any] = {}
+    for target, aliases, limit in (
+        ("status", ("event_status", "binary_event_status", "earnings_status", "Bio_Trade_Mode", "bio_trade_mode", "Event_Result"), 120),
+        ("type", ("event_type", "binary_event_type", "Catalyst_Keyword", "catalyst_keyword"), 160),
+        ("date", ("event_date", "binary_event_date", "earnings_date", "next_earnings_date", "Catalyst_Date", "catalyst_date"), 80),
+        ("source", ("event_source", "catalyst_source", "earnings_source"), 160),
+        ("data_status", ("event_data_status", "catalyst_data_status", "earnings_data_status"), 100),
+    ):
+        _context_put_text(payload, target, sources, aliases, limit=limit)
+    _context_put_bool(
+        payload,
+        "near_binary_event",
+        sources,
+        ("near_binary_event", "Near_Binary_Event"),
+    )
+    days_alias = _context_put_number(
+        payload,
+        "days_to_event",
+        sources,
+        (
+            "days_to_event", "event_days", "days_until", "Days_Until",
+            "Catalyst_Days", "catalyst_days", "days_until_readout",
+            "days_to_earnings", "earnings_days", "DaysToEarnings",
+        ),
+    )
+    if days_alias:
+        payload["days_source"] = days_alias
+    else:
+        best_days: Optional[float] = None
+        best_source: Optional[str] = None
+        for index, source in enumerate(sources):
+            nested_days, nested_source = _event_days_from_nested_lists(source)
+            if (
+                nested_days is not _CONTEXT_MISSING
+                and (best_days is None or nested_days < best_days)
+            ):
+                best_days = float(nested_days)
+                best_source = (
+                    nested_source if index == 0 else f"trade_setup.{nested_source}"
+                )
+        if best_days is not None:
+            payload["days_to_event"] = best_days
+            payload["days_source"] = best_source
+    return _context_section(payload)
+
+
+def _execution_liquidity_context(row: Any) -> Dict[str, Any]:
+    sources = _context_sources(row)
+    nested_sources: List[Mapping[str, Any]] = []
+    for source in sources:
+        for key in ("execution_liquidity", "liquidity", "final_quote"):
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                nested_sources.append(value)
+    all_sources = [*sources, *nested_sources]
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("bid", ("final_quote_bid", "bid")),
+        ("ask", ("final_quote_ask", "ask")),
+        ("spread_bps", ("final_quote_spread_bps", "spread_bps")),
+        ("spread_pct", ("final_quote_spread_pct", "spread_pct", "SpreadPct")),
+        ("spread_to_risk_r", ("spread_to_risk_r", "spread_r", "spread_risk_ratio", "spread_to_risk")),
+        ("spread_to_risk_pct", ("spread_to_risk_pct",)),
+        ("orderbook_depth_10bps_min_usd", ("final_quote_depth_10bps_min_usd", "depth_10bps_min_usd")),
+        ("orderbook_depth_25bps_min_usd", ("final_quote_depth_25bps_min_usd", "depth_25bps_min_usd")),
+        ("orderbook_depth_50bps_min_usd", ("final_quote_depth_50bps_min_usd", "depth_50bps_min_usd")),
+        ("median_dollar_volume_20d", ("MedianDollarVol20", "median_dollar_volume_20d", "median_dollar_volume_20d_usd")),
+        ("dollar_volume", ("Dollar_Volume", "dollar_volume", "dollar_volume_usd")),
+        ("perp_volume_24h", ("PerpVolume24h", "perp_volume_24h", "volume24_usdt")),
+        ("open_interest", ("PerpOI", "open_interest", "oi_usdt")),
+        ("oi_change_pct", ("OI_ChangePct", "oi_change_pct")),
+        ("oi_history_age_seconds", ("OI_HistoryAgeSeconds", "oi_history_age_seconds")),
+        ("oi_ratio", ("OI_Ratio", "oi_ratio")),
+        ("turnover_intensity", ("turnover_intensity",)),
+    ):
+        _context_put_number(payload, target, all_sources, aliases)
+
+    # Funding producers historically mixed exchange fractions (0.001) and
+    # already-converted percentages (0.1) in the same key. Persist a canonical
+    # percentage only when the producer declares its unit. Legacy ambiguous
+    # values remain available as raw evidence but cannot pollute calibration.
+    pct_raw, pct_alias = _context_raw(
+        all_sources, ("funding_rate_pct", "FundingRatePct")
+    )
+    fraction_raw, fraction_alias = _context_raw(
+        all_sources, ("funding_rate_fraction", "FundingRateFraction")
+    )
+    explicit_raw, _ = _context_raw(all_sources, ("funding_rate_raw", "FundingRateRaw"))
+    explicit_unit, _ = _context_raw(all_sources, ("funding_rate_unit", "FundingRateUnit"))
+    interval_raw, _ = _context_raw(
+        all_sources, ("funding_interval_hours", "FundingIntervalHours")
+    )
+    source_raw, _ = _context_raw(all_sources, ("funding_source", "FundingSource"))
+
+    pct_value = _context_number(pct_raw)
+    fraction_value = _context_number(fraction_raw)
+    raw_value = _context_number(explicit_raw)
+    unit_value = _context_text(explicit_unit, limit=40)
+    if pct_value is not _CONTEXT_MISSING:
+        payload["funding_rate_pct"] = float(pct_value)
+        payload["funding_rate_raw"] = (
+            float(raw_value) if raw_value is not _CONTEXT_MISSING else float(pct_value)
+        )
+        payload["funding_rate_unit"] = unit_value or "percent"
+        payload["funding_rate_source_field"] = str(pct_alias)
+    elif fraction_value is not _CONTEXT_MISSING:
+        payload["funding_rate_pct"] = float(fraction_value) * 100.0
+        payload["funding_rate_raw"] = (
+            float(raw_value) if raw_value is not _CONTEXT_MISSING else float(fraction_value)
+        )
+        payload["funding_rate_unit"] = unit_value or "fraction"
+        payload["funding_rate_source_field"] = str(fraction_alias)
+    else:
+        legacy_raw, legacy_alias = _context_raw(
+            all_sources, ("FundingRate", "funding_rate")
+        )
+        legacy_value = _context_number(legacy_raw)
+        if legacy_value is not _CONTEXT_MISSING:
+            payload["funding_rate_raw"] = float(legacy_value)
+            payload["funding_rate_unit"] = unit_value or "unknown_legacy"
+            payload["funding_rate_source_field"] = str(legacy_alias)
+    interval_value = _context_number(interval_raw)
+    if interval_value is not _CONTEXT_MISSING and float(interval_value) > 0:
+        payload["funding_interval_hours"] = float(interval_value)
+    source_value = _context_text(source_raw, limit=160)
+    if source_value:
+        payload["funding_source"] = source_value
+    _context_put_bool(payload, "funding_available", all_sources, ("funding_available",))
+    _context_put_bool(payload, "oi_snapshot_only", all_sources, ("oi_snapshot_only",))
+    _context_put_text(payload, "volume_model", all_sources, ("volume_model",), limit=160)
+
+    # A bid/ask spread divided by the explicitly persisted plan risk is an
+    # auditable unit conversion, not a market estimate.  Label the derivation
+    # and omit it whenever one of the four inputs is unavailable.
+    if "spread_to_risk_r" not in payload:
+        bid = _context_number(payload.get("bid"))
+        ask = _context_number(payload.get("ask"))
+        fields = extract_signal_fields(row)
+        entry = _context_number(fields.get("entry"))
+        stop = _context_number(fields.get("stop"))
+        if all(value is not _CONTEXT_MISSING for value in (bid, ask, entry, stop)):
+            risk = abs(float(entry) - float(stop))
+            spread = float(ask) - float(bid)
+            if float(bid) > 0 and float(ask) > 0 and risk > 0 and spread >= 0:
+                payload["spread_to_risk_r"] = spread / risk
+                payload["spread_to_risk_pct"] = (spread / risk) * 100.0
+                payload["spread_to_risk_source"] = "derived_bid_ask_over_planned_risk"
+    return _context_section(payload)
+
+
+def _execution_grouping_context(row: Any) -> Dict[str, Any]:
+    sources = _context_sources(row)
+    payload: Dict[str, Any] = {}
+    for target, aliases in (
+        ("sector", ("sector", "Sector")),
+        ("industry", ("industry", "Industry")),
+        ("group_key", ("group_key", "GroupKey", "sector_group", "asset_group")),
+    ):
+        _context_put_text(payload, target, sources, aliases, limit=160)
+    _context_put_bool(payload, "group_verified", sources, ("group_verified", "GroupVerified"))
+    return _context_section(payload)
+
+
+def _execution_experiment_context(row: Any) -> Dict[str, Any]:
+    sources = _context_sources(row)
+    nested: List[Mapping[str, Any]] = []
+    for source in sources:
+        for key in ("experiment_context", "shadow_experiment", "experiment"):
+            value = source.get(key)
+            if isinstance(value, Mapping):
+                nested.append(value)
+    all_sources = [*sources, *nested]
+    payload: Dict[str, Any] = {}
+    _context_put_text(
+        payload,
+        "experiment_id",
+        all_sources,
+        ("experiment_id", "ExperimentId", "shadow_experiment_id"),
+        limit=160,
+    )
+    if "experiment_id" not in payload:
+        for source in sources:
+            value = source.get("experiment", _CONTEXT_MISSING)
+            if isinstance(value, Mapping):
+                continue
+            text = _context_text(value, limit=160)
+            if text:
+                payload["experiment_id"] = text
+                break
+    _context_put_text(
+        payload,
+        "variant_id",
+        all_sources,
+        (
+            "variant_id", "VariantId", "experiment_variant_id", "experiment_variant",
+            "shadow_variant", "level_variant", "variant",
+        ),
+        limit=160,
+    )
+    _context_put_text(
+        payload,
+        "experiment_name",
+        all_sources,
+        ("experiment_name", "ExperimentName"),
+        limit=200,
+    )
+    _context_put_text(
+        payload,
+        "variant_name",
+        all_sources,
+        ("variant_name", "VariantName"),
+        limit=200,
+    )
+    return _context_section(payload)
+
+
+def extract_execution_context(row: Any) -> Dict[str, Any]:
+    """Return a deterministic, versioned execution-evidence snapshot.
+
+    Only explicitly supplied row/trade-setup evidence is normalized.  Missing
+    sections are represented as ``availability='unavailable'`` and missing
+    individual measurements are omitted; the extractor never supplies a
+    favourable default.  The sole derived value is labelled bid/ask spread in
+    planned-R units when all required prices are explicit.
+    """
+    try:
+        return {
+            "schema_version": EXECUTION_CONTEXT_SCHEMA_VERSION,
+            "levels": _execution_level_context(row),
+            "target_reachability": _execution_reachability_context(row),
+            "nearest_barrier": _execution_barrier_context(row),
+            "confirmation": _execution_confirmation_context(row),
+            "event": _execution_event_context(row),
+            "liquidity": _execution_liquidity_context(row),
+            "grouping": _execution_grouping_context(row),
+            "experiment": _execution_experiment_context(row),
+        }
+    except Exception as exc:  # pragma: no cover - hard fail-open boundary
+        logger.warning("Execution-Kontext konnte nicht extrahiert werden: %s", exc)
+        unavailable = {"availability": "unavailable"}
+        return {
+            "schema_version": EXECUTION_CONTEXT_SCHEMA_VERSION,
+            "levels": dict(unavailable),
+            "target_reachability": dict(unavailable),
+            "nearest_barrier": dict(unavailable),
+            "confirmation": dict(unavailable),
+            "event": dict(unavailable),
+            "liquidity": dict(unavailable),
+            "grouping": dict(unavailable),
+            "experiment": dict(unavailable),
+        }
+
+
+def _execution_context_json(row: Any) -> str:
+    return json.dumps(
+        extract_execution_context(row),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
 # ── DB-Plumbing ──────────────────────────────────────────────────────────────
 def _db_path() -> str:
     """Aktuellen DB-Pfad lesen — immer frisch, damit er patchbar bleibt."""
@@ -720,6 +1305,7 @@ CREATE TABLE IF NOT EXISTS signals (
     ,delivery_attempted_at TEXT
     ,public_signal_ref TEXT
     ,origin_evidence TEXT
+    ,execution_context_json TEXT
 )
 """
 
@@ -756,6 +1342,7 @@ _SCHEMA_MIGRATIONS = {
     "delivery_attempted_at": "TEXT",
     "public_signal_ref": "TEXT",
     "origin_evidence": "TEXT",
+    "execution_context_json": "TEXT",
     "price_observed_at": "TEXT",
     "price_source": "TEXT",
     "fill_evidence_verified": "INTEGER NOT NULL DEFAULT 0",
@@ -1819,8 +2406,9 @@ def record_alert_signals(
                                 code_revision, fill_evidence_mode,
                                 delivery_intent_key, delivery_state,
                                 delivery_prepared_at, delivery_accepted_at,
-                                mail_channel, public_signal_ref, origin_evidence
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                mail_channel, public_signal_ref, origin_evidence,
+                                execution_context_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 now_iso, scanner, ticker, asset_class, direction,
@@ -1842,6 +2430,7 @@ def record_alert_signals(
                                 row_intent_key, delivery_state,
                                 delivery_prepared_at, delivery_accepted_at,
                                 mail_channel_norm, public_signal_ref, origin_evidence,
+                                _execution_context_json(row),
                             ),
                         )
                         inserted += 1

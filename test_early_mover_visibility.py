@@ -1,4 +1,17 @@
+import time
+
 import api
+
+
+def _fresh_5m_trigger():
+    checked = time.time()
+    return {
+        "ok": True,
+        "timeframe": "5m",
+        "checked_at": checked,
+        "last_candle_closed_at": checked - 60,
+        "execution_data_age_seconds": 60,
+    }
 
 
 def _candidate(symbol="COIN", score=86, entry_score=76, action="LONG_TRIGGER", signal="WARTEN"):
@@ -14,6 +27,7 @@ def _candidate(symbol="COIN", score=86, entry_score=76, action="LONG_TRIGGER", s
         "signal_quality": "wait_trigger" if signal == "WARTEN" else "tradeable",
         "risk_level": "LOW",
         "risk_flags": [],
+        "intraday_trigger": _fresh_5m_trigger(),
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.18,
         "btc_context": {

@@ -1,6 +1,7 @@
 import time
 from datetime import datetime, timedelta, timezone
 
+import api
 import modules.new_listing_scanner as new_listing_scanner
 from modules.new_listing_scanner import (
     _attach_announcement_contracts,
@@ -13,6 +14,7 @@ from modules.new_listing_scanner import (
     _parse_mexc_listing_announcements_html,
     _pump_base_symbol,
     add_to_monitoring,
+    calculate_listing_exhaustion,
     calculate_micro_crack_trigger,
     check_safety,
     cleanup_monitoring,
@@ -69,6 +71,121 @@ def _micro_crack_candles():
         {"timestamp": start_ts + 22 * 300, "open": 115, "high": 117, "low": 113, "close": 114.5, "volume_usd": 520_000},
     ])
     return rows
+
+
+def _completed_listing_vrvp_bars(as_of):
+    rows = []
+    for index in range(36):
+        base = (88.0 + (index % 3) * 0.25) if index < 18 else (104.0 + (index % 4) * 0.3)
+        rows.append({
+            "timestamp": int((as_of - timedelta(hours=37 - index)).timestamp()),
+            "open": base,
+            "high": base + 0.6,
+            "low": base - 0.6,
+            "close": base + (0.1 if index % 2 else -0.1),
+            "volume": 100_000 + (index % 4) * 20_000,
+        })
+    return rows
+
+
+def _listing_signal_pump_data(as_of, bars):
+    return {
+        "ath": 110.0,
+        "current_price": 97.0,
+        "pump_pct": 80.0,
+        "from_ath_pct": 11.8,
+        "momentum_recent": -1.0,
+        "current_red_streak": 2,
+        "avg_upper_wick_pct": 30.0,
+        "micro_trigger_ok": True,
+        "micro_score": 80,
+        "micro_stop_loss": 101.0,
+        "listing_source": "new_listing",
+        "listing_age_hours": 24,
+        "vrvp_as_of": as_of.isoformat(),
+        "vrvp_bars": bars,
+    }
+
+
+def _with_causal_listing_vrvp(pump_data):
+    as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    return {
+        **pump_data,
+        "vrvp_as_of": as_of.isoformat(),
+        "vrvp_bars": _completed_listing_vrvp_bars(as_of),
+    }
+
+
+def test_new_listing_flattener_preserves_projection_and_structure_provenance():
+    setup = {
+        "tp1_source": "ath_dump_projection",
+        "tp2_source": "ath_dump_projection",
+        "tp1_is_projection": True,
+        "tp2_is_projection": True,
+        "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+        "barrier_gate": "STRUCTURAL_TP1_REQUIRED",
+        "barrier_gate_active": True,
+        "structure_status": "REJECT",
+        "structure_reason": "confirmed_structural_tp1_required",
+    }
+    payload = {
+        "watchlist": [{
+            "symbol": "PROJUSDT",
+            "exchange": "mexc",
+            "signal": {
+                "symbol": "PROJUSDT",
+                "timing": "STRUCTURE_WAIT",
+                "trade_category": "EXHAUSTION_WATCH",
+                "listing_trade_ok": False,
+                "entry": 1.0,
+                "stop_loss": 1.1,
+                "tp1": 0.85,
+                "tp2": 0.7,
+                "trade_setup": setup,
+                "pump_data": {
+                    "current_price": 1.0,
+                    "funding_rate": 0.02,
+                    "funding_rate_pct": 0.02,
+                    "funding_rate_raw": 0.0002,
+                    "funding_rate_unit": "fraction",
+                    "funding_interval_hours": 8.0,
+                },
+            },
+        }],
+        "monitoring": [{
+            "symbol": "LEGACYUSDT",
+            "exchange": "binance",
+            "price": 1.0,
+            "trade_category": "EXHAUSTION_WATCH",
+        }],
+    }
+
+    rows = api._flatten_new_listing_pipeline_results(payload)
+    projection = next(row for row in rows if row["symbol"] == "PROJ")
+    legacy_watch = next(row for row in rows if row["symbol"] == "LEGACY")
+
+    assert projection["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert projection["tp1_source"] == "ath_dump_projection"
+    assert projection["tp1_is_projection"] is True
+    assert projection["barrier_gate"] == "STRUCTURAL_TP1_REQUIRED"
+    assert projection["structure_status"] == "REJECT"
+    assert projection["funding_rate_raw"] == 0.0002
+    assert projection["funding_rate_pct"] == 0.02
+    assert projection["funding_rate_unit"] == "fraction"
+
+    normalized = api._normalize_crypto_short_signal(projection)
+    assert normalized is not None
+    assert normalized["trade_action"] == "SHORT_WATCH"
+    assert normalized["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert normalized["tp1_source"] == "ath_dump_projection"
+    assert normalized["tp1_is_projection"] is True
+    assert normalized["structure_trade_block_reason"] == "active_structural_barrier_gate"
+
+    # Legacy monitoring rows without target proof also remain fail-closed;
+    # absence of provenance must never be upgraded to STRUCTURAL.
+    assert legacy_watch["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert legacy_watch["tp1_source"] == "ath_dump_projection"
+    assert legacy_watch["tp1_is_projection"] is True
 
 
 def test_monitor_key_keeps_same_symbol_separate_by_exchange():
@@ -232,6 +349,229 @@ def test_safety_requires_fresh_ticker_candles_and_orderbook():
     assert any("Ticker stale" in warning for warning in warnings)
 
 
+def test_listing_exhaustion_preserves_exchange_open_times_for_causal_vrvp(monkeypatch):
+    as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    candles = _completed_listing_vrvp_bars(as_of)
+    for candle in candles:
+        candle["volume_usd"] = candle["volume"]
+    monkeypatch.setattr(new_listing_scanner, "fetch_binance_candles", lambda *_args, **_kwargs: [])
+
+    _score, _details, pump_data = calculate_listing_exhaustion(
+        candles,
+        {},
+        listing_age_hours=24,
+        as_of=as_of,
+    )
+
+    assert pump_data["vrvp_timeframe"] == "1H"
+    assert pump_data["vrvp_as_of"] == as_of.isoformat()
+    assert [row["timestamp"] for row in pump_data["vrvp_bars"]] == [
+        row["timestamp"] for row in candles
+    ]
+    assert [row["open_time"] for row in pump_data["vrvp_bars"]] == [
+        row["timestamp"] for row in candles
+    ]
+
+
+def test_listing_vrvp_setup_is_invariant_to_open_and_future_extreme_bars():
+    as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    completed = _completed_listing_vrvp_bars(as_of)
+    baseline = generate_short_signal(
+        "CAUSALUSDT",
+        _listing_signal_pump_data(as_of, completed),
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+    open_extreme = {
+        "timestamp": int(as_of.replace(minute=0, second=0, microsecond=0).timestamp()),
+        "open": 2_000.0,
+        "high": 5_000.0,
+        "low": 1_000.0,
+        "close": 4_500.0,
+        "volume": 900_000_000_000,
+    }
+    future_extreme = {
+        "timestamp": int((as_of + timedelta(hours=2)).timestamp()),
+        "open": 0.03,
+        "high": 9_000.0,
+        "low": 0.01,
+        "close": 8_000.0,
+        "volume": 990_000_000_000,
+    }
+    augmented = generate_short_signal(
+        "CAUSALUSDT",
+        _listing_signal_pump_data(as_of, completed + [open_extreme, future_extreme]),
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert baseline is not None
+    assert augmented is not None
+    assert baseline["vrvp_applied"] is True
+    assert augmented["vrvp_applied"] is True
+    for key in (
+        "entry", "stop_loss", "tp1", "tp2", "vrvp_poc", "vrvp_vah", "vrvp_val",
+        "vrvp_atr", "vrvp_atr_source", "vrvp_completed_bar_count",
+    ):
+        assert augmented[key] == baseline[key]
+    assert baseline["vrvp_completion_verified"] is True
+    assert augmented["vrvp_completion_verified"] is True
+    assert baseline["vrvp_completed_bar_count"] == len(completed)
+    assert augmented["vrvp_completed_bar_count"] == len(completed)
+    assert augmented["vrvp_raw_bar_count"] == len(completed) + 2
+    assert augmented["vrvp_timeframe"] == "1H"
+
+
+def test_listing_vrvp_is_not_applied_without_confirmable_bar_timestamps():
+    as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    unverified = [
+        {key: value for key, value in row.items() if key != "timestamp"}
+        for row in _completed_listing_vrvp_bars(as_of)
+    ]
+
+    signal = generate_short_signal(
+        "UNVERIFIEDUSDT",
+        _listing_signal_pump_data(as_of, unverified),
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal is not None
+    assert signal["vrvp_applied"] is False
+    assert signal["vrvp_completion_verified"] is False
+    assert signal["vrvp_completed_bar_count"] == 0
+    assert signal["vrvp_completion_reason"] == "unverified_vrvp_bar_timestamp"
+    assert signal["vrvp_atr_source"] == "bounded_volatility_fallback"
+    assert signal["trade_setup"]["tp1_is_projection"] is True
+    assert signal["trade_setup"]["target_quality"] == "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+    assert signal["tp1_is_projection"] is True
+    assert signal["target_quality"] == signal["trade_setup"]["target_quality"]
+    assert signal["barrier_gate"] == "STRUCTURAL_TP1_REQUIRED"
+    assert signal["structure_status"] == "REJECT"
+    assert signal["trade_signal"] != "JETZT_TRADEN"
+    assert _is_tradeable_short_signal(signal) is False
+
+
+def test_nested_structure_gate_blocks_native_short_tradeability():
+    signal = {
+        "direction": "SHORT",
+        "timing_quality": 5,
+        "grade": "S",
+        "safety_ok": True,
+        "confirmation_ok": True,
+        "btc_context_ok": True,
+        "micro_required": False,
+        "continuation_risk": False,
+        "tp1_missed": False,
+        "tp2_missed": False,
+        "rr_effective": 3.0,
+        "risk_pct": 2.0,
+        "listing_trade_ok": True,
+        "trade_setup": {
+            "tp1_is_projection": False,
+            "barrier_gate": "BREAK_SUPPORT_REQUIRED",
+            "barrier_gate_active": True,
+            "structure_status": "WAIT_BREAK_RECLAIM",
+        },
+    }
+
+    assert _is_tradeable_short_signal(signal) is False
+
+
+def test_generate_short_signal_propagates_nested_structure_wait(monkeypatch):
+    def gated_setup(setup, *_args, **_kwargs):
+        return {
+            **setup,
+            "tp1": 90.0,
+            "tp2": 82.0,
+            "tp1_is_projection": False,
+            "tp2_is_projection": True,
+            "target_quality": "STRUCTURAL_FIRST_BARRIER",
+            "barrier_gate": "BREAK_SUPPORT_REQUIRED",
+            "barrier_gate_active": True,
+            "structure_status": "WAIT_BREAK_RECLAIM",
+            "structure_reason": "first_opposing_barrier_before_minimum_reward",
+            "structure_decision": {
+                "status": "WAIT_BREAK_RECLAIM",
+                "barrier_gate": "BREAK_SUPPORT_REQUIRED",
+            },
+        }
+
+    monkeypatch.setattr(new_listing_scanner, "apply_vrvp_to_trade_setup", gated_setup)
+    signal = generate_short_signal(
+        "GATEDUSDT",
+        {
+            "ath": 110.0,
+            "current_price": 97.0,
+            "pump_pct": 80.0,
+            "from_ath_pct": 11.8,
+            "momentum_recent": -1.0,
+            "current_red_streak": 2,
+            "avg_upper_wick_pct": 30.0,
+            "micro_trigger_ok": True,
+            "micro_score": 80,
+            "micro_stop_loss": 101.0,
+            "listing_source": "new_listing",
+            "listing_age_hours": 24,
+        },
+        exh_score=85,
+        exh_details=[],
+        safety_ok=True,
+        safety_warnings=[],
+    )
+
+    assert signal is not None
+    assert signal["barrier_gate"] == "BREAK_SUPPORT_REQUIRED"
+    assert signal["structure_status"] == "WAIT_BREAK_RECLAIM"
+    assert signal["tp1_is_projection"] is False
+    assert signal["target_quality"] == "STRUCTURAL_FIRST_BARRIER"
+    assert signal["trade_setup"]["structure_status"] == signal["structure_status"]
+    assert signal["trade_signal"] == "WARTEN"
+    assert signal["trade_action"] == "WARTEN"
+    assert signal["trade_category"] == "STRUCTURE_WAIT"
+    assert signal["grade"] not in {"S", "A", "A+"}
+    assert _is_tradeable_short_signal(signal) is False
+
+
+def test_funding_telemetry_declares_raw_fraction_and_canonical_percent():
+    as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    candles = _completed_listing_vrvp_bars(as_of)[-12:]
+    _score, _details, pump_data = calculate_listing_exhaustion(
+        candles,
+        {
+            "funding_rate": 0.001,
+            "funding_available": True,
+            "funding_interval_hours": 4.0,
+        },
+        as_of=as_of,
+    )
+
+    assert pump_data["funding_rate_raw"] == 0.001
+    assert pump_data["funding_rate_pct"] == 0.2
+    assert pump_data["funding_rate"] == pump_data["funding_rate_pct"]
+    assert pump_data["funding_rate_unit"] == "fraction"
+    assert pump_data["funding_interval_hours"] == 8.0
+    assert pump_data["funding_source_interval_hours"] == 4.0
+
+    _score, _details, default_interval = calculate_listing_exhaustion(
+        candles,
+        {"funding_rate": 0.001, "funding_available": True},
+        as_of=as_of,
+    )
+    assert default_interval["funding_rate_raw"] == 0.001
+    assert default_interval["funding_rate_pct"] == 0.1
+    assert default_interval["funding_rate"] == default_interval["funding_rate_pct"]
+    assert default_interval["funding_rate_unit"] == "fraction"
+    assert default_interval["funding_interval_hours"] == 8.0
+    assert default_interval["funding_source_interval_hours"] == 8.0
+
+
 def test_pump_still_running_is_watch_not_tradeable_short():
     signal = generate_short_signal(
         "MOONUSDT",
@@ -259,7 +599,7 @@ def test_pump_still_running_is_watch_not_tradeable_short():
 def test_confirmed_first_crack_with_rr_is_tradeable_short():
     signal = generate_short_signal(
         "CRACKUSDT",
-        {
+        _with_causal_listing_vrvp({
             "ath": 100,
             "current_price": 97,
             "pump_pct": 80,
@@ -272,7 +612,7 @@ def test_confirmed_first_crack_with_rr_is_tradeable_short():
             "micro_stop_loss": 101,
             "listing_source": "new_listing",
             "listing_age_hours": 24,
-        },
+        }),
         exh_score=85,
         exh_details=[],
         safety_ok=True,
@@ -442,7 +782,7 @@ def test_new_listing_age_window_required_for_short_mail_quality():
     )
     valid = generate_short_signal(
         "NEWUSDT",
-        {
+        _with_causal_listing_vrvp({
             "ath": 100,
             "current_price": 97,
             "pump_pct": 80,
@@ -455,7 +795,7 @@ def test_new_listing_age_window_required_for_short_mail_quality():
             "micro_stop_loss": 101,
             "listing_source": "new_listing",
             "listing_age_hours": 24,
-        },
+        }),
         exh_score=85,
         exh_details=[],
         safety_ok=True,
@@ -474,7 +814,7 @@ def test_new_listing_age_window_required_for_short_mail_quality():
 def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gate():
     signal = generate_short_signal(
         "EARLYUSDT",
-        {
+        _with_causal_listing_vrvp({
             "ath": 100,
             "current_price": 96,
             "pump_pct": 70,
@@ -491,7 +831,7 @@ def test_early_crack_uses_local_rejection_stop_and_can_trade_below_old_score_gat
             "micro_stop_loss": 100,
             "listing_source": "new_listing",
             "listing_age_hours": 24,
-        },
+        }),
         exh_score=50,
         exh_details=[],
         safety_ok=True,
@@ -537,7 +877,7 @@ def test_early_crack_without_micro_trigger_stays_watchlist_only():
     assert _is_tradeable_short_signal(signal) is False
 
 
-def test_micro_crack_trigger_can_create_tradeable_signal():
+def test_micro_crack_waits_when_first_vrvp_barrier_is_below_minimum_reward():
     pump_data = {
         "ath": 130,
         "current_price": _micro_crack_candles()[-1]["close"],
@@ -551,6 +891,7 @@ def test_micro_crack_trigger_can_create_tradeable_signal():
     }
     micro = calculate_micro_crack_trigger(_micro_crack_candles(), pump_data)
     pump_data.update(micro)
+    pump_data = _with_causal_listing_vrvp(pump_data)
     signal = generate_short_signal(
         "MICROUSDT",
         pump_data,
@@ -561,10 +902,14 @@ def test_micro_crack_trigger_can_create_tradeable_signal():
     )
 
     assert micro["micro_trigger_ok"] is True
-    assert signal["setup_type"] == "early_crack"
+    assert signal["setup_type"] == "watch"
     assert signal["stop_model"] == "micro_crack_stop"
-    assert signal["signal_quality"] == "tradeable"
-    assert _is_tradeable_short_signal(signal) is True
+    assert signal["trade_setup"]["tp1_is_projection"] is False
+    assert signal["trade_setup"]["nearest_barrier"]["distance_r"] < 1.5
+    assert signal["barrier_gate"] == "BREAK_SUPPORT_REQUIRED"
+    assert signal["structure_status"] == "WAIT_BREAK_RECLAIM"
+    assert signal["signal_quality"] == "watch_or_blocked"
+    assert _is_tradeable_short_signal(signal) is False
 
 
 def test_ultra_early_1m_crack_is_disabled():
