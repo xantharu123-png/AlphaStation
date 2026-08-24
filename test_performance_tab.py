@@ -19,6 +19,9 @@ Frontend (frontend/index.html, String-Pins wie test_frontend_unit_labels):
   403-Zustand "Performance-Ansicht benötigt Pro-Plan".
 - AUDIT 2026-07-24: Ø R 50/50 (Managed-R), Wilson-KI an der Hit-Rate,
   Stichproben-Warnung (<30 entschieden) und 50/50-R bei letzten Signalen.
+- Shadow-Analyse laedt die Gegenprobe separat und fehlertolerant, vergleicht
+  denselben Kohortenmodus nur deskriptiv und zeigt Gründe, Scanner-/Modell-
+  Buckets, Outcome/R sowie Level-/Barriere-/Experimentkontext.
 """
 import inspect
 import json
@@ -76,6 +79,56 @@ def _evaluate_model_cell_evidence(segment: dict) -> dict:
         f"{match.group(1)}\n"
         "process.stdout.write(JSON.stringify("
         f"modelCellEvidence({json.dumps(segment)})));"
+    )
+    completed = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def _evaluate_shadow_helpers() -> dict:
+    """Execute the plain-JS Shadow normalizers used by the real frontend."""
+    source = _frontend_source()
+    match = re.search(
+        r"// SHADOW PERFORMANCE HELPERS.*?\r?\n(.*?)\r?\n// END SHADOW PERFORMANCE HELPERS",
+        source,
+        flags=re.DOTALL,
+    )
+    assert match is not None, "Shadow performance helpers not found"
+    payload = {
+        "per_reason": {"swing_extended_wait_retest": 3},
+        "breakdowns": {
+            "direction": {
+                "LONG": {
+                    "signals": 4,
+                    "open": 1,
+                    "decided_signals": 3,
+                    "wins": 2,
+                    "win_rate_pct": 66.7,
+                    "avg_r": 0.5,
+                    "sum_r": 1.5,
+                    "sample_reliable": False,
+                }
+            }
+        },
+    }
+    script = (
+        f"{match.group(1)}\n"
+        f"const payload = {json.dumps(payload)};\n"
+        "process.stdout.write(JSON.stringify({"
+        "reason: humanizeShadowCode('swing_extended_wait_retest'),"
+        "legacy: normalizeShadowBreakdown(payload, 'block_reason'),"
+        "direction: normalizeShadowBreakdown(payload, 'direction'),"
+        "context: compactShadowContext({availability: 'available', level_model: 'volume_profile', timeframe: '1d', source: 'vrvp'}),"
+        "valid: isValidShadowPerformancePayload({total: {signals: 0, open: 0, decided_signals: 0, wins: 0, sample_reliable: false}, cohort: {}, breakdowns: {}, recent: []}),"
+        "invalidNull: isValidShadowPerformancePayload(null),"
+        "invalidEmpty: isValidShadowPerformancePayload({}),"
+        "invalidRecent: isValidShadowPerformancePayload({total: {signals: 0, open: 0, decided_signals: 0, wins: 0, sample_reliable: false}, cohort: {}, breakdowns: {}, recent: [null]})"
+        "}));"
     )
     completed = subprocess.run(
         ["node", "-e", script],
@@ -292,6 +345,102 @@ def test_frontend_signal_performance_tab_registered():
     assert "Performance pro kausaler Modellzelle" in source
     assert "Horizont / Regime" in source
     assert "fill_evidence_mode" in source
+
+
+def test_frontend_shadow_analysis_is_independent_and_uses_same_cohort_mode():
+    source = _frontend_source()
+
+    assert "const [shadowPerf, setShadowPerf] = useState(null);" in source
+    assert "const [shadowError, setShadowError] = useState('');" in source
+    assert "const [shadowLoading, setShadowLoading] = useState(true);" in source
+    assert (
+        "`${API}/api/signal-performance/shadow?days=${days}&mature_only=${matureOnly}`"
+        in source
+    )
+    assert "}, [days, matureOnly]);" in source
+    assert "Shadow-Analyse derzeit nicht verfügbar" in source
+    assert "Die Trade-Performance oben bleibt davon unbeeinträchtigt." in source
+    assert "{perf && (" in source
+    assert "Der Trade-vs-Shadow-Vergleich erscheint erst" in source
+    assert "setShadowPerf(null);" in source
+    # The official trade payload has its own state and remains rendered even
+    # when the optional Shadow request returns an error.
+    assert "setPerf(await res.json());" in source
+    assert "{perf && !forbidden && hasSignals && (" in source
+
+
+def test_frontend_shadow_analysis_copy_breakdowns_and_context_are_visible():
+    source = _frontend_source()
+
+    for wording in (
+        "Shadow-Analyse",
+        "Deskriptiver Vergleich gleicher Moduswahl",
+        "Modellierte Gegenfaktik, keine Echtgeld-Performance",
+        "Versendete Trade-Signale",
+        "Shadow-Gegenfaktik",
+        "Shadow-Evidenz noch nicht belastbar",
+        "nicht aufgelöste Ergebnisse",
+        "Shadow-Aufschlüsselung",
+        "Letzte Shadow-Signale",
+        "Fehlende Gruppen bedeuten „nicht gemessen“, nicht 0R.",
+    ):
+        assert wording in source
+
+    for dimension in (
+        "block_reason", "scanner", "strategy", "direction", "horizon",
+        "asset_class", "market_regime", "code_revision", "level_model",
+        "barrier_side", "barrier_timeframe", "barrier_source",
+        "barrier_action", "target_quality", "stop_source", "tp1_source",
+        "tp2_source", "experiment_variant",
+    ):
+        assert f"key: '{dimension}'" in source
+
+    for column in (
+        ">Signale</th>", ">Offen</th>", ">Entschieden</th>",
+        ">Nicht aufgel.</th>", ">Kein Fill</th>",
+        ">Gewinner</th>", ">Hit-Rate</th>", ">Ø R</th>", ">Σ R</th>",
+        ">Evidenz</th>",
+    ):
+        assert column in source
+
+    assert "compactShadowContext(sig.context?.levels ?? sig.level_context)" in source
+    assert "compactShadowContext(sig.context?.barrier ?? sig.barrier_context)" in source
+    assert "compactShadowContext(sig.context?.experiment ?? sig.experiment_context)" in source
+    assert "overflow-x-auto" in source
+    assert "style={{minWidth: '1080px'}}" in source
+    assert "Farbe und Vorzeichen sind keine automatische Gate-Wertung." in source
+    assert 'role="alert"' in source
+    assert 'aria-live="polite"' in source
+    assert "ungültige Serverantwort" in source
+    assert "sig.control_resolution === 'unresolved'" in source
+    assert "Gemeldeter Status:" in source
+    assert "${bucketDecided}/30 klein" not in source
+
+
+def test_frontend_shadow_helpers_humanize_and_normalize_legacy_payloads():
+    result = _evaluate_shadow_helpers()
+
+    assert result["reason"].endswith("Retest abwarten")
+    assert "swing_extended_wait_retest" not in result["reason"]
+    assert result["legacy"] == [
+        {
+            "key": "swing_extended_wait_retest",
+            "signals": 3,
+            "metrics_available": False,
+        }
+    ]
+    assert result["direction"][0]["key"] == "LONG"
+    assert result["direction"][0]["metrics_available"] is True
+    assert result["direction"][0]["decided_signals"] == 3
+    assert result["direction"][0]["avg_r"] == 0.5
+    assert "Level Model: volume_profile" in result["context"]
+    assert "Timeframe: 1d" in result["context"]
+    assert "Source: vrvp" in result["context"]
+    assert "Availability" not in result["context"]
+    assert result["valid"] is True
+    assert result["invalidNull"] is False
+    assert result["invalidEmpty"] is False
+    assert result["invalidRecent"] is False
 
 
 def test_frontend_all_public_copy_is_paper_only():

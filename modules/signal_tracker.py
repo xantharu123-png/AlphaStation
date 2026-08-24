@@ -108,6 +108,7 @@ __all__ = [
     "load_pending_terminal_updates",
     "mark_terminal_updates_sent",
     "load_performance_summary",
+    "shadow_summary",
     "load_breaker_recovery_summary",
     "build_calibration_cell_identity",
     "get_signal_count",
@@ -4215,14 +4216,17 @@ def _control_population_resolution(
     as_of: datetime,
     *,
     allow_shadow_counterfactual: bool = False,
+    require_mature: bool = True,
 ) -> Optional[str]:
-    """Classify one mature, qualified control-population observation.
+    """Classify one qualified control-population observation.
 
     Terminal labels are outcome claims and therefore remain in the denominator
     even when their fill or Level-R evidence is corrupt.  Conversely, a
     non-terminal row joins the control population only when it carries a fill
     claim.  A clean, explicitly closed ``NO_FILL`` remains visible as a
-    non-trade instead of being counted as either a winner or a loser.
+    non-trade instead of being counted as either a winner or a loser. Maturity
+    remains fail-closed by default; diagnostic callers may disable only that
+    check while retaining provenance, fill and terminal validation.
     """
     materialized = dict(row)
     if (
@@ -4230,7 +4234,10 @@ def _control_population_resolution(
             materialized,
             allow_shadow_counterfactual=allow_shadow_counterfactual,
         )
-        or not _signal_has_full_observation_window(materialized, as_of)
+        or (
+            require_mature
+            and not _signal_has_full_observation_window(materialized, as_of)
+        )
     ):
         return None
 
@@ -4247,6 +4254,11 @@ def _control_population_resolution(
     fill_price = _to_float(fill_price_raw)
     causal_start = _signal_causal_start(materialized)
     closed_at = _parse_utc_datetime(materialized.get("closed_at"))
+    closure_observed = bool(closed_at is not None and closed_at <= as_of)
+    # Vorhandene Closure-Evidenz darf nicht aus der Zukunft stammen. Historische
+    # Terminalzeilen ohne closed_at behalten den bestehenden Legacy-Vertrag;
+    # NO_FILL verlangt weiterhin immer einen kausalen Abschlusszeitpunkt.
+    terminal_closure_not_future = bool(closed_at is None or closure_observed)
     fill_evidence_valid = bool(
         fill_at is not None
         and fill_price is not None
@@ -4260,7 +4272,7 @@ def _control_population_resolution(
         explicit_no_fill = bool(
             not fill_claimed
             and not realized_claimed
-            and closed_at is not None
+            and closure_observed
             and str(materialized.get("outcome_detail") or "").strip()
         )
         return "no_fill" if explicit_no_fill else "unresolved"
@@ -4270,7 +4282,11 @@ def _control_population_resolution(
             return "unresolved"
         return (
             "resolved"
-            if fill_evidence_valid and _to_float(realized_raw) is not None
+            if (
+                fill_evidence_valid
+                and terminal_closure_not_future
+                and _to_float(realized_raw) is not None
+            )
             else "unresolved"
         )
 
@@ -4284,6 +4300,7 @@ def _control_population_counts(
     as_of: datetime,
     *,
     allow_shadow_counterfactual: bool = False,
+    require_mature: bool = True,
 ) -> Dict[str, int]:
     counts = {
         "eligible": 0,
@@ -4297,6 +4314,7 @@ def _control_population_counts(
             row,
             as_of,
             allow_shadow_counterfactual=allow_shadow_counterfactual,
+            require_mature=require_mature,
         )
         if resolution is None:
             continue
@@ -7893,7 +7911,304 @@ def load_breaker_recovery_summary(
     return summary
 
 
-def shadow_summary(days: int = 90) -> dict:
+_SHADOW_BREAKDOWN_DIMENSIONS = (
+    "block_reason",
+    "scanner",
+    "asset_class",
+    "strategy",
+    "direction",
+    "horizon",
+    "market_regime",
+    "code_revision",
+    "level_model",
+    "target_quality",
+    "stop_source",
+    "tp1_source",
+    "tp2_source",
+    "barrier_side",
+    "barrier_timeframe",
+    "barrier_source",
+    "barrier_action",
+    "experiment_variant",
+)
+
+
+def _shadow_dimension_token(value: Any, missing: str) -> str:
+    """Return one bounded, non-empty grouping token without inventing context."""
+    if isinstance(value, (Mapping, list, tuple, set)):
+        return missing
+    if isinstance(value, float) and not math.isfinite(value):
+        return missing
+    text = str(value or "").strip()
+    return text[:240] if text else missing
+
+
+def _shadow_execution_context(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Defensively decode the immutable row context used by shadow breakdowns."""
+    raw = row.get("execution_context_json")
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(decoded) if isinstance(decoded, Mapping) else {}
+
+
+def _shadow_context_section_value(
+    context: Mapping[str, Any], section_name: str, field_name: str
+) -> str:
+    section = context.get(section_name)
+    if not isinstance(section, Mapping):
+        return "unavailable"
+    if str(section.get("availability") or "").strip().lower() == "unavailable":
+        return "unavailable"
+    return _shadow_dimension_token(section.get(field_name), "unavailable")
+
+
+def _shadow_dimension_values(row: Mapping[str, Any]) -> Dict[str, List[str]]:
+    context = _shadow_execution_context(row)
+    reasons = []
+    for raw_reason in str(row.get("block_reasons") or "").split(","):
+        reason = _shadow_dimension_token(raw_reason, "legacy_unknown")
+        if reason != "legacy_unknown" and reason not in reasons:
+            reasons.append(reason)
+    if not reasons:
+        reasons = ["legacy_unknown"]
+
+    direction = _shadow_dimension_token(row.get("direction"), "legacy_unknown")
+    if direction != "legacy_unknown":
+        direction = direction.upper()
+    experiment_id = _shadow_context_section_value(
+        context, "experiment", "experiment_id"
+    )
+    variant_id = _shadow_context_section_value(context, "experiment", "variant_id")
+    experiment_variant = (
+        "unavailable"
+        if experiment_id == "unavailable" and variant_id == "unavailable"
+        else f"{experiment_id} / {variant_id}"
+    )
+    return {
+        "block_reason": reasons,
+        "scanner": [_shadow_dimension_token(row.get("scanner"), "legacy_unknown")],
+        "asset_class": [
+            _shadow_dimension_token(row.get("asset_class"), "legacy_unknown")
+        ],
+        "strategy": [_shadow_dimension_token(row.get("strategy"), "legacy_unknown")],
+        "direction": [direction],
+        "horizon": [
+            _shadow_dimension_token(row.get("trade_horizon"), "legacy_unknown")
+        ],
+        "market_regime": [
+            _shadow_dimension_token(row.get("market_regime"), "legacy_unknown")
+        ],
+        "code_revision": [
+            _shadow_dimension_token(row.get("code_revision"), "legacy_unknown")
+        ],
+        "level_model": [
+            _shadow_context_section_value(context, "levels", "level_model")
+        ],
+        "target_quality": [
+            _shadow_context_section_value(context, "levels", "target_quality")
+        ],
+        "stop_source": [
+            _shadow_context_section_value(context, "levels", "stop_source")
+        ],
+        "tp1_source": [
+            _shadow_context_section_value(context, "levels", "tp1_source")
+        ],
+        "tp2_source": [
+            _shadow_context_section_value(context, "levels", "tp2_source")
+        ],
+        "barrier_side": [
+            _shadow_context_section_value(context, "nearest_barrier", "side")
+        ],
+        "barrier_timeframe": [
+            _shadow_context_section_value(context, "nearest_barrier", "timeframe")
+        ],
+        "barrier_source": [
+            _shadow_context_section_value(context, "nearest_barrier", "source")
+        ],
+        "barrier_action": [
+            _shadow_context_section_value(context, "nearest_barrier", "action")
+        ],
+        "experiment_variant": [experiment_variant],
+    }
+
+
+def _shadow_breakdown_bucket() -> Dict[str, Any]:
+    return {
+        "signals": 0,
+        "open": 0,
+        "eligible": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "no_fill": 0,
+        "ambiguity_unresolved": 0,
+        "decided": 0,
+        "decided_signals": 0,
+        "wins": 0,
+        "win_rate_pct": None,
+        "win_rate_wilson_95": None,
+        "avg_r": None,
+        "sum_r": 0.0,
+        "sample_reliable": False,
+        "_r_values": [],
+    }
+
+
+def _shadow_r_aggregate(r_values: Iterable[float]) -> Tuple[Optional[float], Optional[float]]:
+    """Return finite avg/sum R or an unavailable pair on numeric overflow."""
+    values = list(r_values)
+    if not values:
+        return None, 0.0
+    try:
+        total = math.fsum(values)
+    except (OverflowError, ValueError):
+        return None, None
+    if not math.isfinite(total):
+        return None, None
+    average = total / len(values)
+    if not math.isfinite(average):
+        return None, None
+    return round(average, 3), round(total, 3)
+
+
+def _accumulate_shadow_breakdown(
+    bucket: Dict[str, Any],
+    row: Mapping[str, Any],
+    resolution: Optional[str],
+) -> None:
+    bucket["signals"] += 1
+    if str(row.get("status") or "") == STATUS_OPEN:
+        bucket["open"] += 1
+    if resolution is None:
+        return
+    bucket["eligible"] += 1
+    bucket[resolution] += 1
+    if resolution == "unresolved" and _legacy_ambiguous_upper_is_unresolved(row):
+        bucket["ambiguity_unresolved"] += 1
+    r_value = _to_float(row.get("r_realized")) if resolution == "resolved" else None
+    if r_value is not None:
+        bucket["_r_values"].append(float(r_value))
+
+
+def _finalize_shadow_breakdown(bucket: Dict[str, Any]) -> None:
+    r_values = list(bucket.pop("_r_values", []))
+    decided = len(r_values)
+    wins = sum(1 for value in r_values if value > 0.0)
+    avg_r, sum_r = _shadow_r_aggregate(r_values)
+    bucket["decided"] = decided
+    bucket["decided_signals"] = decided
+    bucket["wins"] = wins
+    bucket["win_rate_pct"] = (
+        round(100.0 * wins / decided, 1) if decided else None
+    )
+    bucket["win_rate_wilson_95"] = _wilson_interval_95(wins, decided)
+    bucket["avg_r"] = avg_r
+    bucket["sum_r"] = sum_r
+    bucket["sample_reliable"] = bool(
+        decided >= 30
+        and bucket["unresolved"] == 0
+        and bucket["ambiguity_unresolved"] == 0
+        and avg_r is not None
+        and sum_r is not None
+    )
+
+
+def _shadow_json_safe_scalar(value: Any) -> Any:
+    """Bound one context value to strict-JSON-safe scalar data."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:500]
+    return None
+
+
+def _compact_shadow_context(row: Mapping[str, Any]) -> Dict[str, Any]:
+    context = _shadow_execution_context(row)
+
+    def compact(section_name: str, fields: Tuple[str, ...]) -> Dict[str, Any]:
+        section = context.get(section_name)
+        if not isinstance(section, Mapping):
+            return {"availability": "unavailable"}
+        availability = str(section.get("availability") or "").strip().lower()
+        if availability != "available":
+            return {"availability": "unavailable"}
+        payload = {}
+        for field in fields:
+            safe_value = _shadow_json_safe_scalar(section.get(field))
+            if safe_value not in (None, ""):
+                payload[field] = safe_value
+        return {"availability": "available", **payload}
+
+    return {
+        "levels": compact(
+            "levels",
+            (
+                "level_model", "stop_source", "tp1_source", "tp2_source",
+                "target_quality", "structure_confidence",
+            ),
+        ),
+        "barrier": compact(
+            "nearest_barrier",
+            (
+                "side", "source", "timeframe", "zone_id", "distance_r",
+                "distance_atr", "strength", "touches", "action", "state",
+            ),
+        ),
+        "experiment": compact(
+            "experiment",
+            ("experiment_id", "variant_id", "experiment_name", "variant_name"),
+        ),
+    }
+
+
+def _shadow_recent_entry(
+    row: Mapping[str, Any], control_resolution: Optional[str]
+) -> Dict[str, Any]:
+    compact_context = _compact_shadow_context(row)
+    display_resolution = control_resolution or (
+        "open" if str(row.get("status") or "") == STATUS_OPEN else "not_eligible"
+    )
+    realized_r = (
+        _to_float(row.get("r_realized"))
+        if control_resolution == "resolved"
+        else None
+    )
+    return {
+        "id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "scanner": row.get("scanner"),
+        "ticker": row.get("ticker"),
+        "direction": row.get("direction"),
+        "strategy": row.get("strategy") or "legacy_unknown",
+        "horizon": row.get("trade_horizon") or "legacy_unknown",
+        "market_regime": row.get("market_regime") or "legacy_unknown",
+        "code_revision": row.get("code_revision") or "legacy_unknown",
+        "status": row.get("status"),
+        "r_realized": realized_r,
+        "control_resolution": display_resolution,
+        "block_reasons": row.get("block_reasons") or "",
+        "maturity_at": row.get("maturity_at"),
+        "context": compact_context,
+        "level_context": compact_context["levels"],
+        "barrier_context": compact_context["barrier"],
+        "experiment_context": compact_context["experiment"],
+    }
+
+
+def shadow_summary(
+    days: int = 90,
+    mature_only: bool = False,
+    as_of: Any = None,
+) -> dict:
     """Shadow-Messung (AUDIT 2026-07-31): geblockte Signale separat auswerten.
 
     Loesung des Selektionsproblems der Chase-Gates: Signale, die die
@@ -7904,12 +8219,20 @@ def shadow_summary(days: int = 90) -> dict:
     Vergleich geblockt-vs-gemailt belastbar (gleiche Kalibrier-Regel wie im
     Wochenreport).
 
+    ``mature_only=True`` verwendet dieselbe konservative Reife- und
+    Fensterselektion wie der Trade-Track-Record. Die robusten Breakdown-
+    Outcomes zaehlen nur kausal qualifizierte, aufgeloeste Shadow-Fills;
+    unaufgeloeste Terminalbehauptungen und explizite NO_FILLs bleiben separat
+    sichtbar. Der Default bleibt fuer bestehende Wochenreports unveraendert.
+
     Returns:
         {'generated_at', 'window_days',
          'total': {'signals', 'open', 'decided_signals', 'wins',
                    'win_rate_pct', 'avg_r', 'sum_r'},
          'per_reason': {block_reason: anzahl_signale},
          'per_scanner': {scanner: anzahl_signale},
+         'breakdowns': {dimension: {wert: robuste_metriken}},
+         'cohort': {Auswahl- und Reifezaehler},
          'recent': [letzte 10 Shadow-Signale kompakt]}
         Wirft nie (bei Fehler leere Struktur).
     """
@@ -7917,35 +8240,110 @@ def shadow_summary(days: int = 90) -> dict:
         window = max(1, int(days))
     except (TypeError, ValueError):
         window = 90
+    if isinstance(as_of, datetime):
+        as_of_dt = _coerce_now(as_of)
+    elif as_of is not None:
+        as_of_dt = _parse_utc_datetime(as_of) or _utc_now()
+    else:
+        as_of_dt = _utc_now()
     summary: Dict[str, Any] = {
-        "generated_at": _utc_iso(),
+        "generated_at": as_of_dt.isoformat(),
         "window_days": window,
+        "cohort_mode": "fully_observed" if mature_only else "created_in_window",
+        "cohort_selection_basis": (
+            "matured_in_window" if mature_only else "created_in_window"
+        ),
+        "as_of": as_of_dt.isoformat(),
+        "excluded_not_mature": 0,
         "total": {
-            "signals": 0, "open": 0, "decided_signals": 0, "wins": 0,
-            "win_rate_pct": None, "avg_r": None, "sum_r": 0.0,
+            "signals": 0, "open": 0, "decided": 0, "decided_signals": 0,
+            "wins": 0, "win_rate_pct": None, "win_rate_wilson_95": None,
+            "avg_r": None, "sum_r": 0.0, "sample_reliable": False,
+            "control_eligible_signals": 0, "control_resolved_signals": 0,
+            "control_unresolved": 0, "control_no_fill": 0,
+            "ambiguity_unresolved": 0,
         },
         "per_reason": {},
         "per_scanner": {},
+        "breakdowns": {
+            dimension: {} for dimension in _SHADOW_BREAKDOWN_DIMENSIONS
+        },
+        "breakdown_dimensions": list(_SHADOW_BREAKDOWN_DIMENSIONS),
+        "cohort": {
+            "mode": "fully_observed" if mature_only else "created_in_window",
+            "selection_basis": (
+                "matured_in_window" if mature_only else "created_in_window"
+            ),
+            "mature_only": bool(mature_only),
+            "created_in_window": 0,
+            "matured_in_window": 0,
+            "included_signals": 0,
+            "excluded_not_mature": 0,
+        },
         "recent": [],
     }
     try:
-        cutoff_iso = (_utc_now() - timedelta(days=window)).isoformat()
+        cutoff_dt = as_of_dt - timedelta(days=window)
+        query_cutoff = (
+            cutoff_dt - timedelta(days=_MAX_PERFORMANCE_MATURITY_LOOKBACK_DAYS)
+            if mature_only
+            else cutoff_dt
+        )
         with _DB_LOCK:
             with _db_connection() as conn:
-                rows = [
+                candidate_rows = [
                     dict(row)
                     for row in conn.execute(
-                        "SELECT * FROM signals WHERE created_at >= ? "
+                        "SELECT * FROM signals "
+                        "WHERE COALESCE(delivery_accepted_at, created_at) >= ? "
+                        "AND COALESCE(delivery_accepted_at, created_at) <= ? "
                         "AND mail_class = 'shadow' "
                         "ORDER BY created_at DESC, id DESC",
-                        (cutoff_iso,),
+                        (query_cutoff.isoformat(), as_of_dt.isoformat()),
                     ).fetchall()
                 ]
+        created_rows = [
+            row
+            for row in candidate_rows
+            if (
+                _signal_causal_start(row)
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ) >= cutoff_dt
+        ]
+        created_in_window = len(created_rows)
+        if mature_only:
+            rows = []
+            for row in candidate_rows:
+                maturity_at = _signal_maturity_at(row)
+                if maturity_at is not None and cutoff_dt <= maturity_at <= as_of_dt:
+                    row = dict(row)
+                    row["maturity_at"] = maturity_at.isoformat()
+                    rows.append(row)
+            summary["excluded_not_mature"] = sum(
+                1
+                for row in created_rows
+                if (
+                    _signal_maturity_at(row) is None
+                    or _signal_maturity_at(row) > as_of_dt
+                )
+            )
+        else:
+            rows = created_rows
+        summary["cohort"].update({
+            "created_in_window": created_in_window,
+            "matured_in_window": len(rows) if mature_only else sum(
+                1
+                for row in created_rows
+                if _signal_has_full_observation_window(row, as_of_dt)
+            ),
+            "included_signals": len(rows),
+            "excluded_not_mature": summary["excluded_not_mature"],
+        })
         r_values: List[float] = []
-        wins = 0
         open_count = 0
         per_reason: Dict[str, int] = {}
         per_scanner: Dict[str, int] = {}
+        recent_entries: List[Dict[str, Any]] = []
         for row in rows:
             scanner = str(row.get("scanner") or "unknown")
             per_scanner[scanner] = per_scanner.get(scanner, 0) + 1
@@ -7953,22 +8351,64 @@ def shadow_summary(days: int = 90) -> dict:
                 reason = reason.strip()
                 if reason:
                     per_reason[reason] = per_reason.get(reason, 0) + 1
+            dimensions = _shadow_dimension_values(row)
+            control_resolution = _control_population_resolution(
+                row,
+                as_of_dt,
+                allow_shadow_counterfactual=True,
+                require_mature=bool(mature_only),
+            )
+            if len(recent_entries) < 10:
+                recent_entries.append(
+                    _shadow_recent_entry(row, control_resolution)
+                )
+            for dimension, tokens in dimensions.items():
+                dimension_buckets = summary["breakdowns"][dimension]
+                for token in tokens:
+                    bucket = dimension_buckets.setdefault(
+                        token, _shadow_breakdown_bucket()
+                    )
+                    _accumulate_shadow_breakdown(bucket, row, control_resolution)
             if str(row.get("status") or "") == STATUS_OPEN:
                 open_count += 1
-            r_value = _to_float(row.get("r_realized"))
+            r_value = (
+                _to_float(row.get("r_realized"))
+                if control_resolution == "resolved"
+                else None
+            )
             if r_value is not None:
                 r_values.append(float(r_value))
-                if float(r_value) > 0:
-                    wins += 1
         decided = len(r_values)
+        wins = sum(1 for value in r_values if value > 0.0)
+        avg_r, sum_r = _shadow_r_aggregate(r_values)
+        control_counts = _control_population_counts(
+            rows,
+            as_of_dt,
+            allow_shadow_counterfactual=True,
+            require_mature=bool(mature_only),
+        )
         summary["total"] = {
             "signals": len(rows),
             "open": open_count,
+            "decided": decided,
             "decided_signals": decided,
             "wins": wins,
             "win_rate_pct": round(100.0 * wins / decided, 1) if decided else None,
-            "avg_r": round(sum(r_values) / decided, 3) if decided else None,
-            "sum_r": round(sum(r_values), 3),
+            "win_rate_wilson_95": _wilson_interval_95(wins, decided),
+            "avg_r": avg_r,
+            "sum_r": sum_r,
+            "sample_reliable": bool(
+                decided >= 30
+                and control_counts["unresolved"] == 0
+                and control_counts["ambiguity_unresolved"] == 0
+                and avg_r is not None
+                and sum_r is not None
+            ),
+            "control_eligible_signals": control_counts["eligible"],
+            "control_resolved_signals": control_counts["resolved"],
+            "control_unresolved": control_counts["unresolved"],
+            "control_no_fill": control_counts["no_fill"],
+            "ambiguity_unresolved": control_counts["ambiguity_unresolved"],
         }
         summary["per_reason"] = dict(
             sorted(per_reason.items(), key=lambda item: item[1], reverse=True)
@@ -7976,19 +8416,16 @@ def shadow_summary(days: int = 90) -> dict:
         summary["per_scanner"] = dict(
             sorted(per_scanner.items(), key=lambda item: item[1], reverse=True)
         )
-        summary["recent"] = [
-            {
-                "id": row.get("id"),
-                "created_at": row.get("created_at"),
-                "scanner": row.get("scanner"),
-                "ticker": row.get("ticker"),
-                "direction": row.get("direction"),
-                "status": row.get("status"),
-                "r_realized": row.get("r_realized"),
-                "block_reasons": row.get("block_reasons") or "",
-            }
-            for row in rows[:10]
-        ]
+        for dimension, dimension_buckets in list(summary["breakdowns"].items()):
+            for bucket in dimension_buckets.values():
+                _finalize_shadow_breakdown(bucket)
+            summary["breakdowns"][dimension] = dict(
+                sorted(
+                    dimension_buckets.items(),
+                    key=lambda item: (-int(item[1]["signals"]), item[0]),
+                )
+            )
+        summary["recent"] = recent_entries
     except Exception as exc:
         logger.warning("shadow_summary fehlgeschlagen: %s", exc)
     return summary

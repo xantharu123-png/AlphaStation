@@ -244,6 +244,15 @@ except ImportError as _sig_track_err:
     validate_fill_quality = None
     print(f"[Warning] signal_tracker module not loaded: {_sig_track_err}")
 
+# Shadow ist eine additive Diagnoseflaeche. Ein Versionsversatz, bei dem ein
+# aelterer Tracker diese Funktion noch nicht exportiert, darf weder Trade-
+# Tracking noch den offiziellen Performance-Endpunkt deaktivieren.
+try:
+    from modules.signal_tracker import shadow_summary
+except ImportError as _shadow_summary_err:
+    shadow_summary = None
+    print(f"[Warning] signal_tracker shadow summary not loaded: {_shadow_summary_err}")
+
 try:
     from modules.notify_telegram import (
         is_telegram_configured,
@@ -22423,6 +22432,48 @@ def api_signal_performance(
         days_clamped = 30  # direkter Funktionsaufruf ohne FastAPI-Parsing
     days_clamped = max(1, min(365, days_clamped))
     return load_performance_summary(
+        days=days_clamped,
+        mature_only=bool(mature_only),
+    )
+
+
+@app.get("/api/signal-performance/shadow")
+def api_shadow_signal_performance(
+    days: int = Query(30),
+    mature_only: bool = Query(True),
+    authorization: Optional[str] = Header(None),
+):
+    """Counterfactual outcomes for blocked signals, separate from trade KPIs.
+
+    Access and plan gating intentionally mirror ``/api/signal-performance``.
+    The fully-observed default prevents young fast stops from being compared
+    with cohorts whose potential winners have not reached their full horizon.
+    """
+    try:
+        _require_admin(authorization)
+    except HTTPException:
+        token = _token_from_authorization(authorization)
+        payload = verify_token(token) if (HAS_AUTH and token) else None
+        if not payload:
+            raise HTTPException(
+                status_code=403,
+                detail="Login erforderlich — die Performance-Ansicht ist Teil von Pro/Elite",
+            )
+    if not shadow_summary:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "signal_tracker shadow summary not available — "
+                "Shadow-Performance ist erst nach Deployment der aktuellen "
+                "modules/signal_tracker.py abrufbar"
+            ),
+        )
+    try:
+        days_clamped = int(days)
+    except (TypeError, ValueError):
+        days_clamped = 30
+    days_clamped = max(1, min(365, days_clamped))
+    return shadow_summary(
         days=days_clamped,
         mature_only=bool(mature_only),
     )

@@ -667,6 +667,19 @@ und ersetzt nicht den mehrtaegigen DU-Paper-Soak.
   keine Metrikfamilien und wertet STOP/EXPIRED nach TP1 nicht als positiven
   Terminalfall. CTA-IDs sind stabil; sicheres Scrollen und das Boot-Overlay
   duerfen eine bereits erfolgreich gerenderte Anwendung nicht verdecken.
+- Shadow-Auswertungen bleiben technisch und visuell strikt von den KPIs
+  tatsaechlich versendeter Trade-Signale getrennt. Sie sind modellierte
+  Gegenfakten aus gespeicherter Plan-Geometrie, keine Fill-, Slippage-, Konto-
+  oder Profitabilitaetsevidenz. Ein Shadow-Fehler darf den Trade-Track-Record
+  weder verdecken noch veraendern. Verglichen werden nur identischer Zeitraum
+  und Kohortenmodus; junge Kohorten sind als vorlaeufig zu kennzeichnen und
+  fehlende Gruppen bedeuten `nicht gemessen` statt 0R.
+- Jede Shadow-Oberflaeche nennt ihre tatsaechlich instrumentierten Producer und
+  Ausschluesse. Der aktuell belastbar interpretierbare Scope umfasst explizit
+  erfasste Aktien-Swing-Timing- und Regime-Gates. Es besteht kein Krypto-
+  Vollshadow; Base-/Qualitaets-, Daten-, Plan-Geometrie- und Cooldown-/Dedupe-
+  Gates duerfen ohne eigene kausale Erfassung nicht aus der Shadow-Ansicht
+  beurteilt werden.
 
 ### 15.5 Grade-Kalibrierung und unveraenderte Grenzen
 

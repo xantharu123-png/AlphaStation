@@ -1715,3 +1715,46 @@ Trading-Schwellen abgeleitet. Server und Live-System blieben unveraendert; es
 gab keinen Commit und keinen Push. Reale TWS/Gateway-/DU-Soaks, Deployment,
 visueller Browser-Smoke der letzten UI-Aenderungen und jede Live-Freigabe
 bleiben offen.
+
+### 10.10 24. August 2026 – Separate Shadow-Analyse im Performance-Dashboard
+
+Lokal wurde eine vom offiziellen Trade-Track-Record getrennte Shadow-Analyse
+implementiert. Der neue geschuetzte Endpunkt
+`/api/signal-performance/shadow` verwendet dieselbe Zeitfenster- und
+`mature_only`-Auswahl wie die Trade-Ansicht; Standard ist die vollstaendig
+beobachtete Kohorte. Ein Fehler, eine ungueltige Payload oder ein leeres
+Ergebnis der optionalen Shadow-Abfrage verdeckt und veraendert die versendeten
+Trade-KPIs nicht.
+
+Die Auswertung zaehlt R nur fuer kausal qualifizierte, aufgeloeste Shadow-Fills.
+NO_FILL, offene, unaufgeloeste und mehrdeutige Faelle bleiben separat sichtbar;
+vorhandene Abschlusszeitpunkte nach einem historischen `as_of` werden nicht
+rueckwirkend als Ergebnis verwendet. Nicht-finite Kontext-/R-Werte und
+Aggregat-Overflow werden als nicht verfuegbar behandelt, sodass der Endpunkt
+strict-JSON-faehig und fail-closed bleibt. Das Dashboard zeigt Stichprobe,
+Wilson-Intervall, Hit-Rate, Durchschnitts-/Summen-R sowie Aufschluesselungen
+nach Blockgrund, Scanner, Assetklasse, Strategie, Richtung, Horizont, Regime,
+Code-Revision, Level-, Barriere-, Ziel- und Experimentkontext. Legacy-Zahlen
+ohne Outcome-Metriken erscheinen als unbekannt statt als erfundene Null.
+
+Die Ansicht ist eine deskriptive, modellierte Gegenfaktik aus gespeicherter
+Entry-/Stop-/Ziel-Geometrie, keine Ausfuehrungs-, Slippage-, Konto- oder
+Profitabilitaetsevidenz. Der belastbar interpretierbare Erfassungsscope bleibt
+bei den explizit geloggten Aktien-Swing-Timing- und Regime-Gates. Es besteht
+kein Krypto-Vollshadow; Base-/Qualitaets-, Daten-, Plan-Geometrie- und
+Cooldown-/Dedupe-Gates duerfen daraus nicht pauschal beurteilt werden.
+
+Lokale Abnahme: 2623 Pytest-Faelle bestanden, 4 uebersprungen; die kombinierte
+Signaltracker-/Shadow-/Frontend-Regression bestand mit 239/239 Faellen. Das
+Frontend-Bundle wurde aus der Quelle neu gebaut und mit Quellhash
+`787d07f17223` verifiziert; SHA-256 von `frontend/app.bundle.js` ist
+`c90f5e466a871ae93d2276dd2ba7b7091f6f3caf786d4e2ab77f67b8667f6a2e`.
+Die Browser-QA bestaetigte bei 1440 px und 390 px keinen Seiten-Overflow und
+keine Konsolenfehler; Tabelle, Fehlerisolation und unaufgeloeste
+Terminalevidenz wurden interaktiv geprueft.
+
+Dieser Stand ist lokal implementiert und getestet, aber noch nicht als
+Deployment auf dem Hetzner-VPS verifiziert. Bis Server-HEAD, API-Revision,
+Bundle-Hash, aktive Services, Health und ein authentifizierter Endpoint-/
+Browser-Smoke denselben Commit belegen, ist dies kein Produktions- oder
+Performance-Nachweis.

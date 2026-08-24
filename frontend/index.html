@@ -6888,6 +6888,155 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
 // Daten: GET /api/signal-performance?days=N (Pro/Elite via Tab-Gate,
 // Admin immer). Buckets siehe modules/signal_tracker.load_performance_summary.
 // ══════════════════════════════════════════════════════════════
+
+// SHADOW PERFORMANCE HELPERS — plain JS for focused Node regression tests.
+const SHADOW_BREAKDOWN_OPTIONS = [
+    { key: 'block_reason', label: 'Gründe' },
+    { key: 'scanner', label: 'Scanner' },
+    { key: 'strategy', label: 'Strategie' },
+    { key: 'asset_class', label: 'Assetklasse' },
+    { key: 'direction', label: 'Richtung' },
+    { key: 'horizon', label: 'Horizont' },
+    { key: 'market_regime', label: 'Marktregime' },
+    { key: 'code_revision', label: 'Code-Revision' },
+    { key: 'level_model', label: 'Levelmodell' },
+    { key: 'barrier_side', label: 'Barriere: Seite' },
+    { key: 'barrier_timeframe', label: 'Barriere: Zeitebene' },
+    { key: 'barrier_source', label: 'Barriere: Quelle' },
+    { key: 'barrier_action', label: 'Barriere: Aktion' },
+    { key: 'target_quality', label: 'Zielqualität' },
+    { key: 'stop_source', label: 'Stop-Quelle' },
+    { key: 'tp1_source', label: 'TP1-Quelle' },
+    { key: 'tp2_source', label: 'TP2-Quelle' },
+    { key: 'experiment_variant', label: 'Experiment' },
+];
+
+const SHADOW_REASON_LABELS = {
+    swing_hard_extended_no_chase: 'Stark überdehnt – nicht nachlaufen',
+    swing_extended_wait_retest: 'Überdehnt – Retest abwarten',
+    swing_extended_without_volume_wait_retest: 'Überdehnt ohne Volumen – Retest abwarten',
+    swing_day_move_exhausted_no_chase: 'Tagesbewegung ausgereizt – nicht nachlaufen',
+    swing_day_move_extended_wait_retest: 'Tagesbewegung überdehnt – Retest abwarten',
+    swing_multi_day_exhausted_no_chase: 'Mehrtagesbewegung ausgereizt – nicht nachlaufen',
+    swing_multi_day_extended_wait_retest: 'Mehrtagesbewegung überdehnt – Retest abwarten',
+    swing_prevday_run_top_entry_wait_retest: 'Vortageslauf nahe Hoch – Retest abwarten',
+    swing_top_entry_extended_wait_retest: 'Einstieg nahe Hoch überdehnt – Retest abwarten',
+    swing_gap_done_premarket_wait_retest: 'Gap bereits im Premarket gelaufen – Retest abwarten',
+    swing_current_candle_fading: 'Aktuelle Kerze verliert Momentum',
+    swing_not_holding_highs_after_move: 'Hochs nach dem Move nicht gehalten',
+    swing_gap_not_holding_open_wait_retest: 'Gap hält Eröffnung nicht – Retest abwarten',
+    swing_gap_not_holding_upper_range_wait_retest: 'Gap hält obere Range nicht – Retest abwarten',
+    swing_gap_wick_rejection_wait_retest: 'Gap mit Docht-Ablehnung – Retest abwarten',
+    swing_momentum_trend_reclaim_gap_wait_retest: 'Trend-Reclaim mit Gap – Retest abwarten',
+    swing_momentum_not_holding_open_wait_retest: 'Momentum hält Eröffnung nicht – Retest abwarten',
+    swing_momentum_not_holding_upper_range_wait_retest: 'Momentum hält obere Range nicht – Retest abwarten',
+    swing_momentum_wick_rejection_wait_retest: 'Momentum mit Docht-Ablehnung – Retest abwarten',
+    swing_momentum_breakout_quality_wait_retest: 'Breakout-Qualität noch nicht bestätigt – Retest abwarten',
+    swing_4h_extended_run_wait_retest: '4h-Lauf überdehnt – Retest abwarten',
+    swing_4h_rejection_wait_reclaim: '4h-Ablehnung – Reclaim abwarten',
+    swing_4h_state_missing_wait_trigger: '4h-Zustand fehlt – Trigger abwarten',
+    swing_short_drop_too_extended_no_chase: 'Short-Drop stark überdehnt – nicht nachlaufen',
+    swing_short_extended_wait_retest: 'Short-Setup überdehnt – Retest abwarten',
+    swing_short_drop_extended_wait_failed_reclaim: 'Short-Drop überdehnt – gescheiterten Reclaim abwarten',
+    swing_short_day_move_exhausted_no_chase: 'Short-Tagesbewegung ausgereizt – nicht nachlaufen',
+    swing_short_day_move_extended_wait_retest: 'Short-Tagesbewegung überdehnt – Retest abwarten',
+    swing_short_multi_day_exhausted_no_chase: 'Short-Mehrtagesbewegung ausgereizt – nicht nachlaufen',
+    swing_short_multi_day_extended_wait_retest: 'Short-Mehrtagesbewegung überdehnt – Retest abwarten',
+    swing_short_prevday_run_bottom_entry_wait_retest: 'Vortages-Drop nahe Tief – Retest abwarten',
+    swing_short_bottom_entry_extended_wait_retest: 'Short-Einstieg nahe Tief überdehnt – Retest abwarten',
+    swing_short_current_candle_reclaim: 'Aktuelle Kerze reclaimt – Short abwarten',
+    swing_short_not_closing_weak: 'Short schließt nicht schwach genug',
+    swing_short_4h_wait_breakdown: '4h-Breakdown abwarten',
+    swing_short_4h_wait_failed_reclaim: 'Gescheiterten 4h-Reclaim abwarten',
+    swing_short_4h_state_missing_wait_trigger: '4h-Short-Zustand fehlt – Trigger abwarten',
+    market_regime_red: 'Marktregime Rot – Long nur beobachten',
+    market_regime_yellow: 'Marktregime Gelb – Auswahl verschärft',
+    breaker_cooldown: 'Scanner-Breaker aktiv',
+    regime_cooldown: 'Regime-/Breaker-Cooldown aktiv',
+};
+
+const humanizeShadowCode = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return 'Unbekannt';
+    if (SHADOW_REASON_LABELS[raw]) return SHADOW_REASON_LABELS[raw];
+    const upperLabels = {
+        LONG: 'Long', SHORT: 'Short', UNKNOWN: 'Unbekannt',
+        RISK_ON: 'Risk-on', RISK_OFF: 'Risk-off', NEUTRAL: 'Neutral',
+        SUPPORT: 'Support', RESISTANCE: 'Resistance',
+    };
+    if (upperLabels[raw.toUpperCase()]) return upperLabels[raw.toUpperCase()];
+    return raw
+        .replace(/[_-]+/g, ' ')
+        .replace(/\b\w/g, char => char.toUpperCase());
+};
+
+const normalizeShadowBreakdown = (shadowPayload, dimension) => {
+    const payload = shadowPayload && typeof shadowPayload === 'object' ? shadowPayload : {};
+    const breakdowns = payload.breakdowns && typeof payload.breakdowns === 'object'
+        ? payload.breakdowns
+        : {};
+    let raw = breakdowns[dimension];
+    if ((!raw || typeof raw !== 'object') && dimension === 'block_reason') raw = payload.per_reason;
+    if ((!raw || typeof raw !== 'object') && dimension === 'scanner') raw = payload.per_scanner;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    return Object.entries(raw).map(([key, value]) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return {
+                key,
+                signals: Number.isFinite(Number(value)) ? Number(value) : 0,
+                metrics_available: false,
+            };
+        }
+        const metricsAvailable = typeof value.decided_signals === 'number'
+            && Number.isFinite(value.decided_signals)
+            && typeof value.wins === 'number'
+            && Number.isFinite(value.wins);
+        return { key, ...value, metrics_available: metricsAvailable };
+    }).sort((left, right) =>
+        Number(right.signals || 0) - Number(left.signals || 0)
+        || String(left.key).localeCompare(String(right.key))
+    );
+};
+
+const isValidShadowPerformancePayload = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    if (!value.total || typeof value.total !== 'object' || Array.isArray(value.total)) return false;
+    if (!value.cohort || typeof value.cohort !== 'object' || Array.isArray(value.cohort)) return false;
+    if (!value.breakdowns || typeof value.breakdowns !== 'object' || Array.isArray(value.breakdowns)) return false;
+    if (!Array.isArray(value.recent) || !value.recent.every(
+        entry => entry && typeof entry === 'object' && !Array.isArray(entry)
+    )) return false;
+    for (const field of ['signals', 'open', 'decided_signals', 'wins']) {
+        if (typeof value.total[field] !== 'number' || !Number.isFinite(value.total[field]) || value.total[field] < 0) return false;
+    }
+    return typeof value.total.sample_reliable === 'boolean';
+};
+
+const compactShadowContext = (value) => {
+    if (value === null || value === undefined || value === '') return '';
+    let parsed = value;
+    if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch (error) { return parsed.slice(0, 180); }
+    }
+    if (Array.isArray(parsed)) return parsed.filter(Boolean).slice(0, 4).map(String).join(' · ');
+    if (!parsed || typeof parsed !== 'object') return String(parsed).slice(0, 180);
+    const preferred = [
+        'model', 'model_id', 'level_model', 'side', 'timeframe', 'source',
+        'experiment_id', 'variant_id', 'variant', 'distance_atr', 'distance_pct',
+    ];
+    const entries = [];
+    const seen = new Set();
+    for (const key of [...preferred, ...Object.keys(parsed)]) {
+        if (key === 'availability' || seen.has(key) || parsed[key] === null || parsed[key] === undefined || parsed[key] === '') continue;
+        if (typeof parsed[key] === 'object') continue;
+        seen.add(key);
+        entries.push(`${humanizeShadowCode(key)}: ${String(parsed[key])}`);
+        if (entries.length >= 4) break;
+    }
+    return entries.join(' · ');
+};
+// END SHADOW PERFORMANCE HELPERS
+
 function SignalPerformanceTab() {
     const [days, setDays] = useState(30);
     const [matureOnly, setMatureOnly] = useState(true);
@@ -6895,6 +7044,10 @@ function SignalPerformanceTab() {
     const [perfError, setPerfError] = useState('');
     const [forbidden, setForbidden] = useState(false);
     const [loading, setLoading] = useState(true);
+    const [shadowPerf, setShadowPerf] = useState(null);
+    const [shadowError, setShadowError] = useState('');
+    const [shadowLoading, setShadowLoading] = useState(true);
+    const [shadowBreakdown, setShadowBreakdown] = useState('block_reason');
 
     useEffect(() => {
         let cancelled = false;
@@ -6929,12 +7082,54 @@ function SignalPerformanceTab() {
         return () => { cancelled = true; };
     }, [days, matureOnly]);
 
+    // Separater Request: Ein Fehler der diagnostischen Shadow-Gegenprobe darf
+    // den offiziellen Track-Record der versendeten Signale nie verdecken.
+    useEffect(() => {
+        let cancelled = false;
+        const loadShadowPerformance = async () => {
+            setShadowLoading(true);
+            setShadowError('');
+            try {
+                const res = await fetch(`${API}/api/signal-performance/shadow?days=${days}&mature_only=${matureOnly}`);
+                if (cancelled) return;
+                if (res.ok) {
+                    const payload = await res.json();
+                    if (isValidShadowPerformancePayload(payload)) {
+                        setShadowPerf(payload);
+                    } else {
+                        setShadowPerf(null);
+                        setShadowError('Shadow-Daten konnten nicht geladen werden: ungültige Serverantwort.');
+                    }
+                } else {
+                    let detail = '';
+                    try { detail = (await res.json()).detail || ''; } catch (error) {}
+                    setShadowPerf(null);
+                    setShadowError(`Shadow-Daten konnten nicht geladen werden (${res.status})${detail ? `: ${detail}` : ''}`);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setShadowPerf(null);
+                    setShadowError('Shadow-Daten konnten nicht geladen werden (Netzwerkfehler).');
+                }
+            }
+            if (!cancelled) setShadowLoading(false);
+        };
+        loadShadowPerformance();
+        return () => { cancelled = true; };
+    }, [days, matureOnly]);
+
     const fmtR = (v) => (v === null || v === undefined) ? '—' : `${Number(v) > 0 ? '+' : ''}${Number(v).toFixed(2)}R`;
     const fmtPct = (v) => (v === null || v === undefined) ? '—' : `${Number(v).toFixed(1)}%`;
     const rTone = (v) => (v ?? 0) > 0 ? 'text-green-600' : (v ?? 0) < 0 ? 'text-red-600' : 'text-gray-600';
     const statusBadge = (sig) => {
         const status = sig.status || 'OPEN';
         const progressLabel = sig.tp1_hit_at ? 'TP1 zuvor erreicht' : null;
+        if (sig.control_resolution === 'unresolved') {
+            return { label: 'UNAUFGELÖST', cls: 'bg-amber-100 text-amber-800', progressLabel: `Gemeldeter Status: ${status}` };
+        }
+        if (sig.control_resolution === 'not_eligible' && status !== 'OPEN') {
+            return { label: 'NICHT QUALIFIZIERT', cls: 'bg-gray-100 text-gray-700', progressLabel: `Gemeldeter Status: ${status}` };
+        }
         if (status === 'STOP_HIT') return { label: 'STOP', cls: 'bg-red-100 text-red-700', progressLabel };
         if (status === 'TP2_HIT') return { label: 'TP2', cls: 'bg-green-100 text-green-700' };
         if (status === 'TP1_HIT_OPEN') return { label: 'TP1 · OPEN', cls: 'bg-blue-100 text-blue-700' };
@@ -7044,6 +7239,47 @@ function SignalPerformanceTab() {
     const recent = perf?.recent || [];
     const hasSignals = (total.signals || 0) > 0;
     const hasCreatedSignals = (cohort.created_in_window || 0) > 0;
+    const shadowTotal = shadowPerf?.total || {};
+    const shadowCohort = shadowPerf?.cohort || {};
+    const shadowRecent = Array.isArray(shadowPerf?.recent) ? shadowPerf.recent : [];
+    const shadowRows = normalizeShadowBreakdown(shadowPerf, shadowBreakdown);
+    const shadowDimension = SHADOW_BREAKDOWN_OPTIONS.find(option => option.key === shadowBreakdown)
+        || SHADOW_BREAKDOWN_OPTIONS[0];
+    const finiteShadowMetric = (value) => (
+        typeof value === 'number' && Number.isFinite(value) ? value : null
+    );
+    const finiteShadowCount = (value) => {
+        const parsed = finiteShadowMetric(value);
+        return parsed !== null && parsed >= 0 ? Math.trunc(parsed) : null;
+    };
+    const shadowSignals = finiteShadowCount(shadowTotal.signals) ?? 0;
+    const shadowDecided = finiteShadowCount(shadowTotal.decided_signals) ?? 0;
+    const shadowUnresolved = finiteShadowCount(shadowTotal.control_unresolved) ?? 0;
+    const shadowAmbiguous = finiteShadowCount(shadowTotal.ambiguity_unresolved) ?? 0;
+    const shadowAggregateUnavailable = shadowDecided > 0 && (
+        finiteShadowMetric(shadowTotal.avg_r) === null
+        || finiteShadowMetric(shadowTotal.sum_r) === null
+    );
+    const shadowReliabilityIssues = [
+        ...(shadowDecided < 30 ? [`${shadowDecided}/30 entschiedene Gegenfakten`] : []),
+        ...(shadowUnresolved > 0 ? [`${shadowUnresolved} nicht aufgelöste Ergebnisse`] : []),
+        ...(shadowAmbiguous > 0 ? [`${shadowAmbiguous} Intrabar-Reihenfolge(n) mehrdeutig`] : []),
+        ...(shadowAggregateUnavailable ? ['R-Aggregat nicht verfügbar'] : []),
+    ];
+    if (shadowTotal.sample_reliable !== true && shadowReliabilityIssues.length === 0) {
+        shadowReliabilityIssues.push('Serverseitige Evidenzfreigabe fehlt');
+    }
+    const shadowEvidenceUnreliable = shadowTotal.sample_reliable !== true;
+    const tradeWinRate = finiteShadowMetric(total.win_rate_pct);
+    const shadowWinRate = finiteShadowMetric(shadowTotal.win_rate_pct);
+    const tradeAvgR = finiteShadowMetric(total.avg_r);
+    const shadowAvgR = finiteShadowMetric(shadowTotal.avg_r);
+    const winRateDelta = tradeWinRate !== null && shadowWinRate !== null
+        ? shadowWinRate - tradeWinRate
+        : null;
+    const avgRDelta = tradeAvgR !== null && shadowAvgR !== null
+        ? shadowAvgR - tradeAvgR
+        : null;
 
     // AUDIT 2026-07-24 (T1 + Kalibrier-Loop): Managed-R (50/50), Wilson-KI
     // der Trefferquote und Stichproben-Reliability sichtbar machen.
@@ -7297,6 +7533,258 @@ function SignalPerformanceTab() {
                         </div>
                     </div>
                 </>
+            )}
+
+            {!forbidden && (
+                <section aria-labelledby="shadow-analysis-title" className="space-y-4 border-t border-indigo-200 pt-6">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                            <h2 id="shadow-analysis-title" className="text-lg font-bold text-gray-900">Shadow-Analyse</h2>
+                            <div className="text-xs text-gray-500">
+                                Deskriptiver Vergleich gleicher Moduswahl: versendete Signale gegen regelkonform geblockte Setups.
+                            </div>
+                        </div>
+                        <span className={`text-xs px-3 py-1 rounded-full font-semibold ${matureOnly ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                            {matureOnly ? 'Reife Kohorte' : 'Alle vorläufig'} · {days} Tage
+                        </span>
+                    </div>
+
+                    <div className="card border border-indigo-200 bg-indigo-50 text-indigo-950 px-4 py-3 rounded-lg text-sm">
+                        <b>Modellierte Gegenfaktik, keine Echtgeld-Performance:</b> Shadow fragt, wie ein Setup mit der gespeicherten
+                        Entry-/Stop-/Ziel-Geometrie verlaufen wäre, obwohl kein Trade-Signal versendet wurde. Das belegt weder Ausführung,
+                        Slippage noch Kontogewinn. Scope: aktuell aufgezeichnete Aktien-Swing-Timing- und Regime-Gates; Krypto sowie
+                        Qualitäts-, Daten- und Plan-Gates sind nicht automatisch enthalten. Fehlende Gruppen bedeuten „nicht gemessen“, nicht 0R.
+                    </div>
+
+                    {shadowLoading && (
+                        <div role="status" aria-live="polite" className="card border border-gray-200 p-6 rounded-lg text-center text-gray-500 animate-pulse">
+                            Lade Shadow-Gegenprobe…
+                        </div>
+                    )}
+
+                    {shadowError && !shadowLoading && (
+                        <div role="alert" className="card border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 rounded-lg text-sm">
+                            <div className="font-semibold">Shadow-Analyse derzeit nicht verfügbar</div>
+                            <div>{shadowError}</div>
+                            <div className="mt-1 text-xs">Die Trade-Performance oben bleibt davon unbeeinträchtigt.</div>
+                        </div>
+                    )}
+
+                    {shadowPerf && !shadowLoading && shadowSignals === 0 && (
+                        <div role="status" aria-live="polite" className="card border border-gray-200 p-6 rounded-lg text-center text-gray-500">
+                            <div className="font-semibold text-gray-700">Keine Shadow-Signale in dieser Kohorte</div>
+                            <div className="text-sm mt-1">Im gewählten Zeitraum und Kohortenmodus wurde kein regelkonform geblocktes Setup erfasst.</div>
+                        </div>
+                    )}
+
+                    {shadowPerf && !shadowLoading && shadowSignals > 0 && (
+                        <>
+                            <div className={`card border px-4 py-3 rounded-lg text-sm ${matureOnly ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+                                {matureOnly ? (
+                                    <>
+                                        <b>Ausgereifte Shadow-Kohorte:</b> {shadowCohort.matured_in_window ?? shadowCohort.included_signals ?? shadowSignals} Signale haben ihr konservatives Beobachtungsfenster vollständig durchlaufen.
+                                        {(shadowCohort.excluded_not_mature ?? 0) > 0 && <> {shadowCohort.excluded_not_mature} jüngere Shadow-Signale bleiben ausgeschlossen.</>}
+                                    </>
+                                ) : (
+                                    <>
+                                        <b>Vorläufige Shadow-Kohorte:</b> Junge offene Gegenfakten sind enthalten. Daraus keine Gate- oder Schwellenentscheidung ableiten.
+                                    </>
+                                )}
+                            </div>
+
+                            {shadowEvidenceUnreliable && (
+                                <div role="status" aria-live="polite" className="card border border-amber-300 bg-amber-50 text-amber-950 px-4 py-3 rounded-lg text-sm">
+                                    <b>Shadow-Evidenz noch nicht belastbar:</b> {shadowReliabilityIssues.join(' · ')}.
+                                    {' '}Trefferquote und R-Abstand sind explorativ und dürfen die Gates noch nicht lockern oder verschärfen.
+                                </div>
+                            )}
+
+                            {perf && (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="card border border-blue-200 bg-blue-50 rounded-lg p-4">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">Versendete Trade-Signale</div>
+                                    <div className="text-2xl font-bold text-gray-900 mt-1">{total.signals ?? 0}</div>
+                                    <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                                        <div><span className="text-gray-500">Entschieden</span><div className="font-semibold">{total.decided_signals ?? 0}</div></div>
+                                        <div><span className="text-gray-500">Treffer</span><div className="font-semibold">{fmtPct(total.win_rate_pct)}</div></div>
+                                        <div><span className="text-gray-500">Ø R</span><div className={`font-semibold ${rTone(total.avg_r)}`}>{fmtR(total.avg_r)}</div></div>
+                                    </div>
+                                </div>
+                                <div className="card border border-indigo-200 bg-indigo-50 rounded-lg p-4">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Shadow-Gegenfaktik</div>
+                                    <div className="text-2xl font-bold text-gray-900 mt-1">{shadowSignals}</div>
+                                    <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                                        <div><span className="text-gray-500">Entschieden</span><div className="font-semibold">{shadowDecided}</div></div>
+                                        <div><span className="text-gray-500">Treffer</span><div className="font-semibold">{fmtPct(shadowTotal.win_rate_pct)}</div></div>
+                                        <div><span className="text-gray-500">Ø R</span><div className={`font-semibold ${rTone(shadowTotal.avg_r)}`}>{fmtR(shadowTotal.avg_r)}</div></div>
+                                    </div>
+                                </div>
+                                <div className="card border border-gray-200 rounded-lg p-4">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-600">Deskriptiver Abstand</div>
+                                    <div className="grid grid-cols-2 gap-3 mt-3">
+                                        <div>
+                                            <div className="text-xs text-gray-500">Treffer Shadow − Trade</div>
+                                            <div className="text-lg font-bold text-indigo-700">{winRateDelta === null ? '—' : `${winRateDelta > 0 ? '+' : ''}${winRateDelta.toFixed(1)} pp`}</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-xs text-gray-500">Ø R Shadow − Trade</div>
+                                            <div className="text-lg font-bold text-indigo-700">{avgRDelta === null ? '—' : fmtR(avgRDelta)}</div>
+                                        </div>
+                                    </div>
+                                    <div className="text-xs text-gray-600 mt-2">Gleicher Zeitraum und Kohortenmodus, aber unterschiedliche Selektionspopulationen. Farbe und Vorzeichen sind keine automatische Gate-Wertung.</div>
+                                </div>
+                            </div>
+                            )}
+
+                            {!perf && (
+                                <div className="card border border-gray-200 bg-gray-50 px-4 py-3 rounded-lg text-sm text-gray-600">
+                                    Der Trade-vs-Shadow-Vergleich erscheint erst, wenn auch der Trade-Track-Record erfolgreich geladen wurde.
+                                </div>
+                            )}
+
+                            <div className="card border border-gray-200 p-4 md:p-6 rounded-lg">
+                                <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                                    <div>
+                                        <h3 className="font-semibold text-gray-900">Shadow-Aufschlüsselung</h3>
+                                        <div className="text-xs text-gray-500">Ausgänge und R-Metriken je gemessener Gruppe; kleine Buckets bleiben unzuverlässig.</div>
+                                    </div>
+                                    <label className="text-xs text-gray-600">
+                                        Gruppieren nach
+                                        <select value={shadowBreakdown} onChange={event => setShadowBreakdown(event.target.value)}
+                                            className="ml-2 border border-gray-300 rounded-lg bg-white px-3 py-2 text-sm text-gray-800">
+                                            {SHADOW_BREAKDOWN_OPTIONS.map(option => (
+                                                <option key={option.key} value={option.key}>{option.label}</option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                </div>
+                                {shadowRows.length === 0 ? (
+                                    <div className="text-sm text-gray-400 py-4">Für „{shadowDimension.label}“ liefert diese Kohorte keine Aufschlüsselung.</div>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm" style={{minWidth: '1080px'}}>
+                                            <thead className="border-b border-gray-200 text-gray-500">
+                                                <tr>
+                                                    <th className="text-left py-2 px-1">{shadowDimension.label}</th>
+                                                    <th className="text-right py-2 px-1">Signale</th>
+                                                    <th className="text-right py-2 px-1">Offen</th>
+                                                    <th className="text-right py-2 px-1">Entschieden</th>
+                                                    <th className="text-right py-2 px-1">Nicht aufgel.</th>
+                                                    <th className="text-right py-2 px-1">Kein Fill</th>
+                                                    <th className="text-right py-2 px-1">Gewinner</th>
+                                                    <th className="text-right py-2 px-1">Hit-Rate</th>
+                                                    <th className="text-right py-2 px-1">Ø R</th>
+                                                    <th className="text-right py-2 px-1">Σ R</th>
+                                                    <th className="text-right py-2 px-1">Evidenz</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {shadowRows.map(bucket => {
+                                                    const label = humanizeShadowCode(bucket.key);
+                                                    const metricsAvailable = bucket.metrics_available === true;
+                                                    const bucketOpen = metricsAvailable ? finiteShadowCount(bucket.open) : null;
+                                                    const bucketDecided = metricsAvailable ? finiteShadowCount(bucket.decided_signals) : null;
+                                                    const bucketUnresolved = metricsAvailable ? finiteShadowCount(bucket.unresolved) : null;
+                                                    const bucketNoFill = metricsAvailable ? finiteShadowCount(bucket.no_fill) : null;
+                                                    const bucketAmbiguous = metricsAvailable ? finiteShadowCount(bucket.ambiguity_unresolved) : null;
+                                                    const reliable = metricsAvailable && bucket.sample_reliable === true;
+                                                    const evidenceLabel = !metricsAvailable
+                                                        ? 'Nicht verfügbar'
+                                                        : (reliable
+                                                            ? 'Belastbar'
+                                                            : [
+                                                                bucketDecided !== null && bucketDecided < 30 ? `${bucketDecided}/30 entschieden` : null,
+                                                                bucketUnresolved > 0 ? `${bucketUnresolved} nicht aufgelöst` : null,
+                                                                bucketAmbiguous > 0 ? `${bucketAmbiguous} mehrdeutig` : null,
+                                                                bucketDecided > 0 && (finiteShadowMetric(bucket.avg_r) === null || finiteShadowMetric(bucket.sum_r) === null) ? 'R-Metrik nicht verfügbar' : null,
+                                                            ].filter(Boolean).join(' · ') || 'Nicht freigegeben');
+                                                    return (
+                                                        <tr key={`${shadowBreakdown}-${bucket.key}`} className={`border-b border-gray-100 ${(bucket.sum_r ?? 0) > 0 ? 'bg-green-50' : (bucket.sum_r ?? 0) < 0 ? 'bg-red-50' : ''}`}>
+                                                            <td className="py-2 px-1 text-gray-900">
+                                                                <div className="font-medium">{label}</div>
+                                                                {label !== String(bucket.key) && <div className="text-xs text-gray-500 break-all">{bucket.key}</div>}
+                                                            </td>
+                                                            <td className="py-2 px-1 text-right">{bucket.signals ?? 0}</td>
+                                                            <td className="py-2 px-1 text-right text-blue-600">{bucketOpen ?? '—'}</td>
+                                                            <td className="py-2 px-1 text-right">{bucketDecided ?? '—'}</td>
+                                                            <td className="py-2 px-1 text-right text-amber-700">{bucketUnresolved ?? '—'}</td>
+                                                            <td className="py-2 px-1 text-right text-gray-600">{bucketNoFill ?? '—'}</td>
+                                                            <td className="py-2 px-1 text-right text-green-700">{metricsAvailable ? (bucket.wins ?? '—') : '—'}</td>
+                                                            <td className="py-2 px-1 text-right">
+                                                                {metricsAvailable ? fmtPct(bucket.win_rate_pct) : '—'}
+                                                                {metricsAvailable && bucket.win_rate_wilson_95 && (
+                                                                    <div className="text-xs text-gray-500">KI {Number(bucket.win_rate_wilson_95.lower_pct).toFixed(0)}–{Number(bucket.win_rate_wilson_95.upper_pct).toFixed(0)}%</div>
+                                                                )}
+                                                            </td>
+                                                            <td className={`py-2 px-1 text-right ${rTone(bucket.avg_r)}`}>{metricsAvailable ? fmtR(bucket.avg_r) : '—'}</td>
+                                                            <td className={`py-2 px-1 text-right font-semibold ${rTone(bucket.sum_r)}`}>{metricsAvailable ? fmtR(bucket.sum_r) : '—'}</td>
+                                                            <td className="py-2 px-1 text-right">
+                                                                <span className={`text-xs px-2 py-1 rounded-full ${!metricsAvailable ? 'bg-gray-100 text-gray-700' : (reliable ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800')}`}>
+                                                                    {evidenceLabel}
+                                                                </span>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="card border border-gray-200 p-4 md:p-6 rounded-lg">
+                                <h3 className="font-semibold text-gray-900 mb-1">Letzte Shadow-Signale</h3>
+                                <div className="text-xs text-gray-500 mb-3">Warum geblockt, wie ausgegangen und mit welchem Level-/Barriere-/Experimentkontext.</div>
+                                {shadowRecent.length === 0 && <div className="text-sm text-gray-400">Keine Shadow-Signale im Zeitfenster.</div>}
+                                <div className="divide-y divide-gray-100">
+                                    {shadowRecent.map((sig, index) => {
+                                        const badge = statusBadge(sig);
+                                        const reasons = (Array.isArray(sig.block_reasons)
+                                            ? sig.block_reasons
+                                            : String(sig.block_reasons || '').split(','))
+                                            .map(reason => String(reason).trim()).filter(Boolean);
+                                        const contexts = [
+                                            ['Level', compactShadowContext(sig.context?.levels ?? sig.level_context)],
+                                            ['Barriere', compactShadowContext(sig.context?.barrier ?? sig.barrier_context)],
+                                            ['Experiment', compactShadowContext(sig.context?.experiment ?? sig.experiment_context)],
+                                        ].filter(([, value]) => value);
+                                        return (
+                                            <div key={sig.id ?? `${sig.ticker}-${sig.created_at}-${index}`} className="py-3 text-sm">
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <span className="text-xs text-gray-400">{String(sig.created_at || '').slice(0, 10)}</span>
+                                                    <span className="font-semibold text-gray-900">{sig.ticker || '—'}</span>
+                                                    <span className="text-xs text-gray-500 flex-1 min-w-[100px]">{sig.scanner || 'unknown'}</span>
+                                                    <span className={`text-xs px-2 py-0.5 rounded font-medium ${String(sig.direction).toLowerCase() === 'short' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700'}`}>{String(sig.direction || 'unknown').toUpperCase()}</span>
+                                                    <span className={`text-xs px-2 py-0.5 rounded font-semibold ${badge.cls}`}>{badge.label}</span>
+                                                    {badge.progressLabel && <span className="text-xs text-gray-600">{badge.progressLabel}</span>}
+                                                    <span className={`font-semibold ${rTone(sig.r_realized)}`}>{fmtR(sig.r_realized)}</span>
+                                                </div>
+                                                {reasons.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1 mt-2">
+                                                        {reasons.map(reason => (
+                                                            <span key={reason} title={reason} className="text-xs bg-indigo-100 text-indigo-800 rounded-full px-2 py-1">
+                                                                {humanizeShadowCode(reason)}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {contexts.length > 0 && (
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2">
+                                                        {contexts.map(([label, value]) => (
+                                                            <div key={label} className="rounded bg-gray-50 px-2 py-1 text-xs text-gray-700 break-words">
+                                                                <b>{label}:</b> {value}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </section>
             )}
 
             {!forbidden && (

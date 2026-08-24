@@ -14,11 +14,14 @@ Komplett offline: tmp-SQLite via SIGNAL_DB_PATH-Monkeypatch, Fake-Fetcher,
 gestubbte Pipeline-/Mail-Funktionen (Muster test_signal_tracker.py /
 test_exit_update_mails.py / test_email_alert_audit.py).
 """
+import ast
 import inspect
+import json
 import os
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -211,7 +214,15 @@ def test_shadow_summary_aggregates(tracker):
 
     result = tracker.evaluate_open_signals(stock_daily_fetcher=fetcher)
     assert result["evaluated"] == 3  # beide Shadow + das Trade-Signal
-    summary = tracker.shadow_summary(days=90)
+    # Der Fake-Fetcher liefert bewusst Folge-Sessions nach der Test-Uhr. Setze
+    # deshalb auch den terminalen Evidenzzeitpunkt kausal hinter den Fill.
+    summary_as_of = f"{sessions[-1].isoformat()}T23:59:59+00:00"
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET closed_at=? WHERE ticker='SH1'",
+            (summary_as_of,),
+        )
+    summary = tracker.shadow_summary(days=90, as_of=summary_as_of)
     total = summary["total"]
     assert total["signals"] == 2
     assert total["open"] == 1
@@ -231,6 +242,385 @@ def test_shadow_summary_empty_is_neutral(tracker):
     assert summary["total"]["avg_r"] is None
     assert summary["per_reason"] == {}
     assert summary["recent"] == []
+
+
+def test_shadow_summary_adds_context_breakdowns_without_changing_legacy_keys(tracker):
+    rich = _base_row(
+        Ticker="RICH",
+        strategy="breakout_retest",
+        trade_horizon="swing",
+        market_regime="RISK_ON",
+        block_reasons="swing_4h_rejection_wait_reclaim,market_regime_yellow",
+        level_model="confluence_v2",
+        target_quality="strong",
+        stop_source="support_zone",
+        tp1_source="resistance_zone",
+        tp2_source="fibonacci_extension",
+        nearest_barrier={
+            "side": "resistance",
+            "source": "vrvp_poc",
+            "timeframe": "4h",
+            "distance_r": 1.25,
+            "action": "wait_reclaim",
+        },
+        experiment_context={
+            "experiment_id": "level-shadow-2026-08",
+            "variant_id": "wait-retest",
+        },
+    )
+    assert tracker.record_alert_signals(
+        "stock_strategy", [rich], mail_class="shadow"
+    ) == 1
+    assert tracker.record_alert_signals(
+        "strategy_scan",
+        [_base_row(Ticker="LEGACY", block_reasons="")],
+        mail_class="shadow",
+    ) == 1
+
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET status='TP2_HIT', r_realized=2.0, "
+            "code_revision='abc123def456', evaluation_horizon_bars=1, "
+            "created_at='2026-08-10T12:00:00+00:00', "
+            "entry_filled_at='2026-08-10T12:05:00+00:00', "
+            "entry_fill_price=100.0, closed_at='2026-08-14T12:00:00+00:00' "
+            "WHERE ticker='RICH'"
+        )
+        conn.execute(
+            "UPDATE signals SET status='STOP_HIT', r_realized=-1.0, "
+            "strategy=NULL, trade_horizon=NULL, market_regime=NULL, "
+            "code_revision=NULL, execution_context_json='not-json', "
+            "evaluation_horizon_bars=1, "
+            "created_at='2026-08-11T12:00:00+00:00', "
+            "entry_filled_at=NULL, entry_fill_price=NULL, "
+            "closed_at='2026-08-15T12:00:00+00:00' "
+            "WHERE ticker='LEGACY'"
+        )
+
+    summary = tracker.shadow_summary(
+        days=90,
+        as_of=datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+    )
+
+    # Bestehender Vertrag bleibt erhalten.
+    assert summary["total"]["signals"] == 2
+    assert summary["total"]["decided_signals"] == 1
+    assert summary["total"]["wins"] == 1
+    assert summary["total"]["win_rate_pct"] == 100.0
+    assert summary["total"]["avg_r"] == 2.0
+    assert summary["total"]["sum_r"] == 2.0
+    assert summary["per_scanner"] == {
+        "stock_strategy": 1,
+        "strategy_scan": 1,
+    }
+    assert summary["per_reason"]["swing_4h_rejection_wait_reclaim"] == 1
+
+    breakdowns = summary["breakdowns"]
+    assert set(summary["breakdown_dimensions"]) == {
+        "block_reason", "scanner", "asset_class", "strategy", "direction",
+        "horizon", "market_regime", "code_revision", "level_model",
+        "target_quality", "stop_source", "tp1_source", "tp2_source",
+        "barrier_side", "barrier_timeframe", "barrier_source",
+        "barrier_action", "experiment_variant",
+    }
+    rich_bucket = breakdowns["experiment_variant"][
+        "level-shadow-2026-08 / wait-retest"
+    ]
+    assert rich_bucket["signals"] == 1
+    assert rich_bucket["decided"] == 1
+    assert rich_bucket["wins"] == 1
+    assert rich_bucket["avg_r"] == pytest.approx(2.0)
+    assert rich_bucket["win_rate_wilson_95"] is not None
+    assert rich_bucket["sample_reliable"] is False
+    assert breakdowns["level_model"]["confluence_v2"]["sum_r"] == 2.0
+    assert breakdowns["asset_class"]["stock"]["signals"] == 2
+    assert breakdowns["target_quality"]["strong"]["signals"] == 1
+    assert breakdowns["stop_source"]["support_zone"]["signals"] == 1
+    assert breakdowns["tp1_source"]["resistance_zone"]["signals"] == 1
+    assert breakdowns["tp2_source"]["fibonacci_extension"]["signals"] == 1
+    assert breakdowns["barrier_side"]["resistance"]["signals"] == 1
+    assert breakdowns["barrier_timeframe"]["4h"]["signals"] == 1
+    assert breakdowns["barrier_source"]["vrvp_poc"]["signals"] == 1
+    assert breakdowns["barrier_action"]["wait_reclaim"]["signals"] == 1
+
+    # Fehlende Legacy-Spalten und defektes JSON werden sichtbar, nie positiv
+    # aufgefuellt oder unter einem guenstigen Kontext einsortiert.
+    assert breakdowns["block_reason"]["legacy_unknown"]["signals"] == 1
+    assert breakdowns["strategy"]["legacy_unknown"]["signals"] == 1
+    assert breakdowns["horizon"]["legacy_unknown"]["signals"] == 1
+    assert breakdowns["market_regime"]["legacy_unknown"]["signals"] == 1
+    assert breakdowns["code_revision"]["legacy_unknown"]["signals"] == 1
+    assert breakdowns["level_model"]["unavailable"]["signals"] == 1
+    assert breakdowns["target_quality"]["unavailable"]["signals"] == 1
+    assert breakdowns["barrier_side"]["unavailable"]["signals"] == 1
+    assert breakdowns["experiment_variant"]["unavailable"]["signals"] == 1
+    assert breakdowns["strategy"]["legacy_unknown"]["unresolved"] == 1
+    assert breakdowns["strategy"]["legacy_unknown"]["decided"] == 0
+    assert breakdowns["strategy"]["legacy_unknown"]["avg_r"] is None
+    assert summary["total"]["control_resolved_signals"] == 1
+    assert summary["total"]["control_unresolved"] == 1
+    assert summary["total"]["sample_reliable"] is False
+
+    recent = {row["ticker"]: row for row in summary["recent"]}
+    assert recent["RICH"]["strategy"] == "breakout_retest"
+    assert recent["RICH"]["horizon"] == "swing"
+    assert recent["RICH"]["market_regime"] == "RISK_ON"
+    assert recent["RICH"]["code_revision"] == "abc123def456"
+    assert recent["RICH"]["context"]["levels"]["level_model"] == "confluence_v2"
+    assert recent["RICH"]["context"]["barrier"]["side"] == "resistance"
+    assert recent["RICH"]["context"]["experiment"]["variant_id"] == "wait-retest"
+    assert recent["RICH"]["control_resolution"] == "resolved"
+    assert recent["RICH"]["r_realized"] == 2.0
+    assert recent["LEGACY"]["context"]["levels"] == {
+        "availability": "unavailable"
+    }
+    assert recent["LEGACY"]["control_resolution"] == "unresolved"
+    assert recent["LEGACY"]["r_realized"] is None
+
+
+def test_shadow_summary_mature_only_uses_fully_observed_cohort(tracker):
+    assert tracker.record_alert_signals(
+        "crypto_strategy",
+        [
+            _base_row(Ticker="MATURE", block_reasons="regime_cooldown"),
+            _base_row(Ticker="YOUNG", block_reasons="regime_cooldown"),
+        ],
+        mail_class="shadow",
+    ) == 2
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET created_at='2026-08-10T12:00:00+00:00', "
+            "entry_filled_at='2026-08-10T12:05:00+00:00', "
+            "entry_fill_price=100.0, closed_at='2026-08-16T12:00:00+00:00', "
+            "status='TP2_HIT', r_realized=2.0 WHERE ticker='MATURE'"
+        )
+        conn.execute(
+            "UPDATE signals SET created_at='2026-08-23T12:00:00+00:00', "
+            "entry_filled_at='2026-08-23T12:05:00+00:00', "
+            "entry_fill_price=100.0, closed_at='2026-08-23T13:00:00+00:00', "
+            "status='STOP_HIT', r_realized=-1.0 WHERE ticker='YOUNG'"
+        )
+
+    as_of = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
+    diagnostic = tracker.shadow_summary(days=30, mature_only=False, as_of=as_of)
+    mature = tracker.shadow_summary(days=30, mature_only=True, as_of=as_of)
+
+    assert diagnostic["cohort_mode"] == "created_in_window"
+    assert diagnostic["total"]["signals"] == 2
+    assert mature["cohort_mode"] == "fully_observed"
+    assert mature["cohort"] == {
+        "mode": "fully_observed",
+        "selection_basis": "matured_in_window",
+        "mature_only": True,
+        "created_in_window": 2,
+        "matured_in_window": 1,
+        "included_signals": 1,
+        "excluded_not_mature": 1,
+    }
+    assert mature["total"]["signals"] == 1
+    assert [row["ticker"] for row in mature["recent"]] == ["MATURE"]
+
+
+def test_shadow_summary_historical_as_of_never_uses_later_closure(tracker):
+    assert tracker.record_alert_signals(
+        "stock_strategy",
+        [_base_row(Ticker="FUTURE", block_reasons="swing_extended_wait_retest")],
+        mail_class="shadow",
+    ) == 1
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE signals SET created_at='2026-08-10T12:00:00+00:00', "
+            "entry_filled_at='2026-08-10T12:05:00+00:00', "
+            "entry_fill_price=100.0, status='TP2_HIT', r_realized=2.0, "
+            "closed_at='2026-08-25T12:00:00+00:00' WHERE ticker='FUTURE'"
+        )
+
+    summary = tracker.shadow_summary(
+        days=30,
+        mature_only=False,
+        as_of=datetime(2026, 8, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert summary["total"]["decided_signals"] == 0
+    assert summary["total"]["control_unresolved"] == 1
+    assert summary["recent"][0]["control_resolution"] == "unresolved"
+    assert summary["recent"][0]["r_realized"] is None
+
+
+def test_shadow_summary_is_strict_json_safe_for_nonfinite_context_and_overflow(tracker):
+    assert tracker.record_alert_signals(
+        "stock_strategy",
+        [
+            _base_row(
+                Ticker="HUGE1",
+                block_reasons="swing_extended_wait_retest",
+                nearest_barrier={
+                    "side": "resistance",
+                    "source": "vrvp_poc",
+                    "timeframe": "4h",
+                    "distance_atr": float("nan"),
+                },
+            ),
+            _base_row(
+                Ticker="HUGE2",
+                block_reasons="swing_extended_wait_retest",
+                nearest_barrier={
+                    "side": "resistance",
+                    "source": "vrvp_poc",
+                    "timeframe": "4h",
+                    "distance_atr": float("inf"),
+                },
+            ),
+        ],
+        mail_class="shadow",
+    ) == 2
+    with sqlite3.connect(tracker.SIGNAL_DB_PATH) as conn:
+        for ticker in ("HUGE1", "HUGE2"):
+            conn.execute(
+                "UPDATE signals SET created_at='2026-08-10T12:00:00+00:00', "
+                "entry_filled_at='2026-08-10T12:05:00+00:00', "
+                "entry_fill_price=100.0, status='TP2_HIT', r_realized=1e308, "
+                "closed_at='2026-08-15T12:00:00+00:00' WHERE ticker=?",
+                (ticker,),
+            )
+
+    summary = tracker.shadow_summary(
+        days=30,
+        mature_only=False,
+        as_of=datetime(2026, 8, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert summary["total"]["decided_signals"] == 2
+    assert summary["total"]["avg_r"] is None
+    assert summary["total"]["sum_r"] is None
+    assert summary["total"]["sample_reliable"] is False
+    assert all(
+        "distance_atr" not in row["context"]["barrier"]
+        for row in summary["recent"]
+    )
+    json.dumps(summary, allow_nan=False)
+
+
+def test_shadow_experiment_breakdown_preserves_long_and_partial_identity(tracker):
+    experiment_id = "experiment-" + ("x" * 149)
+    first_variant = "variant-" + ("a" * 150)
+    second_variant = "variant-" + ("a" * 149) + "b"
+    rows = [
+        _base_row(
+            Ticker="EXP1",
+            block_reasons="swing_extended_wait_retest",
+            experiment_context={
+                "experiment_id": experiment_id,
+                "variant_id": first_variant,
+            },
+        ),
+        _base_row(
+            Ticker="EXP2",
+            block_reasons="swing_extended_wait_retest",
+            experiment_context={
+                "experiment_id": experiment_id,
+                "variant_id": second_variant,
+            },
+        ),
+        _base_row(
+            Ticker="EXP3",
+            block_reasons="swing_extended_wait_retest",
+            experiment_context={"experiment_id": "known-experiment"},
+        ),
+    ]
+    assert tracker.record_alert_signals(
+        "stock_strategy", rows, mail_class="shadow"
+    ) == 3
+
+    summary = tracker.shadow_summary(
+        days=30,
+        mature_only=False,
+        as_of=datetime.now(timezone.utc),
+    )
+    keys = set(summary["breakdowns"]["experiment_variant"])
+
+    assert f"{experiment_id} / {first_variant}" in keys
+    assert f"{experiment_id} / {second_variant}" in keys
+    assert "known-experiment / unavailable" in keys
+
+
+def test_shadow_summary_import_is_additive_and_isolated():
+    tree = ast.parse(inspect.getsource(api))
+    imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "modules.signal_tracker"
+    ]
+    shadow_imports = [
+        node for node in imports if any(alias.name == "shadow_summary" for alias in node.names)
+    ]
+
+    assert len(shadow_imports) == 1
+    assert [alias.name for alias in shadow_imports[0].names] == ["shadow_summary"]
+
+
+def test_shadow_performance_api_clamps_days_and_defaults_to_mature(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        api,
+        "_require_admin",
+        lambda authorization: ({"email": "admin@example.com"}, "admin@example.com"),
+    )
+    monkeypatch.setattr(
+        api,
+        "shadow_summary",
+        lambda days=90, mature_only=False: captured.append((days, mature_only))
+        or {"window_days": days, "cohort_mode": "fully_observed"},
+    )
+
+    api.api_shadow_signal_performance(days=0, authorization="Bearer admin")
+    api.api_shadow_signal_performance(days=9999, authorization="Bearer admin")
+    api.api_shadow_signal_performance(
+        days=7, mature_only=False, authorization="Bearer admin"
+    )
+    api.api_shadow_signal_performance(authorization="Bearer admin")
+
+    assert captured == [(1, True), (365, True), (7, False), (30, True)]
+    signature = inspect.signature(api.api_shadow_signal_performance)
+    assert signature.parameters["days"].default.default == 30
+    assert signature.parameters["mature_only"].default.default is True
+    assert dict(api._TAB_GATES)["/api/signal-performance"] == "signal-performance"
+
+
+def test_shadow_performance_api_matches_login_and_availability_contract(monkeypatch):
+    monkeypatch.setattr(api, "HAS_AUTH", True)
+    monkeypatch.setattr(
+        api,
+        "verify_token",
+        lambda token: {"email": "pro@example.com", "plan": "pro"}
+        if token == "pro-token"
+        else None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        api,
+        "shadow_summary",
+        lambda days=90, mature_only=False: {"window_days": days},
+    )
+
+    assert api.api_shadow_signal_performance(
+        days=30, authorization="Bearer pro-token"
+    )["window_days"] == 30
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.api_shadow_signal_performance(days=30, authorization=None)
+    assert exc_info.value.status_code == 403
+
+    monkeypatch.setattr(
+        api,
+        "_require_admin",
+        lambda authorization: ({"email": "admin@example.com"}, "admin@example.com"),
+    )
+    monkeypatch.setattr(api, "shadow_summary", None)
+    with pytest.raises(api.HTTPException) as unavailable:
+        api.api_shadow_signal_performance(
+            days=30, authorization="Bearer admin-token"
+        )
+    assert unavailable.value.status_code == 503
 
 
 def test_shadow_transitions_and_be_carry_mail_class(tracker):
