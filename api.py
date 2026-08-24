@@ -10460,14 +10460,24 @@ def _send_email_alert(
         and str(mail_class or "").strip().lower() not in {"trade", "swing_trade"}
     ):
         try:
+            queued_delivery_keys = sorted({
+                str(value).strip()[:240]
+                for value in (delivery_dedupe_keys or [])
+                if str(value).strip() and "@" not in str(value)
+            })
             _ob_id = _mail_outbox.enqueue(
                 subject,
                 branded_body_html,
                 recipients,
                 mail_class=mail_class,
                 telegram_text=telegram_text or "",
+                delivery_dedupe_keys=queued_delivery_keys,
             )
             if _ob_id:
+                queued_at = time.time()
+                for dedupe_key in queued_delivery_keys:
+                    _email_dedupe_mark(dedupe_key, now=queued_at)
+                _set_last_delivery_outcome("outbox_queued")
                 _record_email_event(subject, "outbox_queued", f"id={_ob_id}")
         except Exception as _ob_exc:
             try:
@@ -28599,6 +28609,13 @@ NARRATIVE_PULSE_FREQUENCIES = {
     "twice_daily": {"label": "2x taeglich", "ttl": 13 * 60 * 60},
     "weekly": {"label": "Woechentlich", "ttl": 8 * 24 * 60 * 60},
 }
+_NARRATIVE_PULSE_NON_RETRYABLE_OUTCOMES = {
+    "unknown",
+    "partial_unknown",
+    "accepted_unjournaled",
+    "partial_unknown_unjournaled",
+    "outbox_queued",
+}
 
 SECTOR_ETFS = {
     "XLK": "Technologie", "XLF": "Finanzen", "XLV": "Gesundheit",
@@ -28941,6 +28958,19 @@ def _narrative_pulse_recipients(frequency: str) -> List[str]:
     return sorted(set(addr.strip().lower() for addr in recipients if str(addr).strip() and "@" in str(addr)))
 
 
+def _finalize_narrative_pulse_dedupe(
+    dedupe_key: str,
+    *,
+    sent: bool,
+    claimed_at: float,
+) -> None:
+    """Consume ambiguous/info-outbox deliveries; retry only definite failures."""
+    if sent or _last_delivery_outcome() in _NARRATIVE_PULSE_NON_RETRYABLE_OUTCOMES:
+        _email_dedupe_mark(dedupe_key, now=claimed_at)
+    else:
+        _email_dedupe_release(dedupe_key, claimed_at=claimed_at)
+
+
 def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = None) -> bool:
     now = now or time.time()
     utc_now = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -28985,16 +29015,28 @@ def _send_narrative_pulse_email(payload: Dict[str, Any], now: Optional[float] = 
             _record_email_event(f"Narrative Pulse {frequency}", "skipped", "frequency_dedupe_active")
             continue
         subject = f"Narrative Pulse ({cfg['label']}): Bullisch {top_bull} | Bearisch {top_bear}"
-        sent = _send_email_alert(
-            subject,
-            body,
-            recipient_emails=recipients,
-            trade_horizon="swing",
-            mail_class="info",
-            rendered_at=utc_now,
-        )  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
-        if not sent:
-            _email_dedupe_release(dedupe_key, claimed_at=now)
+        try:
+            sent = _send_email_alert(
+                subject,
+                body,
+                recipient_emails=recipients,
+                trade_horizon="swing",
+                mail_class="info",
+                delivery_dedupe_keys=[dedupe_key],
+                rendered_at=utc_now,
+            )  # AUDIT H-3 / H-2 (eigenes Narrative-Opt-in bleibt unveraendert; nur Praefix)
+        except Exception:
+            _finalize_narrative_pulse_dedupe(
+                dedupe_key,
+                sent=False,
+                claimed_at=now,
+            )
+            raise
+        _finalize_narrative_pulse_dedupe(
+            dedupe_key,
+            sent=bool(sent),
+            claimed_at=now,
+        )
         sent_any = bool(sent) or sent_any
 
     if not had_recipients:

@@ -1,6 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import api
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_email_dedupe(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email-dedupe.json"))
+    monkeypatch.setattr(api, "_mail_outbox", None)
 
 
 def _row(name, ticker, c1, c5, c20, rvol=1.0, cmf=0.0, obv=0.0):
@@ -36,14 +44,17 @@ def test_narrative_pulse_email_is_daily_and_does_not_use_etf_word(monkeypatch):
     monkeypatch.setattr(api, "_email_dedupe_claim", lambda *args, **kwargs: True)
     monkeypatch.setattr(api, "_narrative_pulse_recipients", lambda frequency: ["narrative@example.com"] if frequency == "daily" else [])
     sent = {}
+    marked = []
 
     def fake_send(subject, body, *args, **kwargs):
         sent["subject"] = subject
         sent["body"] = body
         sent["recipients"] = kwargs.get("recipient_emails")
+        sent["delivery_dedupe_keys"] = kwargs.get("delivery_dedupe_keys")
         return True
 
     monkeypatch.setattr(api, "_send_email_alert", fake_send)
+    monkeypatch.setattr(api, "_email_dedupe_mark", lambda key, now=None: marked.append((key, now)))
     payload = {
         "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
         "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
@@ -55,6 +66,174 @@ def test_narrative_pulse_email_is_daily_and_does_not_use_etf_word(monkeypatch):
     assert "Regional Banks" in sent["body"]
     assert "ETF" not in sent["body"].upper()
     assert sent["recipients"] == ["narrative@example.com"]
+    assert sent["delivery_dedupe_keys"] == [marked[0][0]]
+    assert marked[0][0].startswith("narrative_pulse_daily_")
+
+
+def test_narrative_pulse_success_blocks_later_hourly_run_in_same_daily_bucket(monkeypatch, tmp_path):
+    rendered_at = datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)
+    sent = []
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email-dedupe.json"))
+    monkeypatch.setattr(api, "_mail_outbox", None)
+    monkeypatch.setattr(
+        api,
+        "_narrative_pulse_recipients",
+        lambda frequency: ["narrative@example.com"] if frequency == "daily" else [],
+    )
+
+    def fake_send(subject, body, **kwargs):
+        sent.append((subject, kwargs))
+        return True
+
+    monkeypatch.setattr(api, "_send_email_alert", fake_send)
+    payload = {
+        "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
+        "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
+    }
+
+    first = rendered_at.timestamp()
+    assert api._send_narrative_pulse_email(payload, now=first) is True
+    assert api._send_narrative_pulse_email(payload, now=first + 3600) is False
+    assert len(sent) == 1
+    assert sent[0][1]["delivery_dedupe_keys"] == ["narrative_pulse_daily_20260824"]
+
+    assert api._send_narrative_pulse_email(payload, now=first + 86400) is True
+    assert len(sent) == 2
+
+
+def test_parallel_narrative_pulse_runs_send_only_once(monkeypatch):
+    rendered_at = datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)
+    sent = []
+    monkeypatch.setattr(
+        api,
+        "_narrative_pulse_recipients",
+        lambda frequency: ["narrative@example.com"] if frequency == "daily" else [],
+    )
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: sent.append(subject) or True,
+    )
+    payload = {
+        "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
+        "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
+    }
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda _: api._send_narrative_pulse_email(payload, now=rendered_at.timestamp()),
+            range(8),
+        ))
+
+    assert results.count(True) == 1
+    assert len(sent) == 1
+
+
+def test_narrative_pulse_unknown_smtp_outcome_stays_fail_closed(monkeypatch):
+    rendered_at = datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)
+    attempts = []
+    monkeypatch.setattr(
+        api,
+        "_narrative_pulse_recipients",
+        lambda frequency: ["narrative@example.com"] if frequency == "daily" else [],
+    )
+
+    def fake_send(subject, body, **kwargs):
+        attempts.append(subject)
+        api._set_last_delivery_outcome("unknown")
+        return False
+
+    monkeypatch.setattr(api, "_send_email_alert", fake_send)
+    payload = {
+        "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
+        "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
+    }
+
+    first = rendered_at.timestamp()
+    assert api._send_narrative_pulse_email(payload, now=first) is False
+    assert api._send_narrative_pulse_email(payload, now=first + 3600) is False
+    assert len(attempts) == 1
+
+
+def test_narrative_pulse_definite_pre_data_failure_releases_claim(monkeypatch):
+    rendered_at = datetime(2026, 8, 24, 8, 0, tzinfo=timezone.utc)
+    attempts = []
+    monkeypatch.setattr(
+        api,
+        "_narrative_pulse_recipients",
+        lambda frequency: ["narrative@example.com"] if frequency == "daily" else [],
+    )
+
+    def fake_send(subject, body, **kwargs):
+        attempts.append(subject)
+        api._set_last_delivery_outcome("failed")
+        return False
+
+    monkeypatch.setattr(api, "_send_email_alert", fake_send)
+    payload = {
+        "bullish": [_row("Semiconductors", "SMH", 2.0, 8.0, 15.0)],
+        "bearish": [_row("Regional Banks", "KRE", -1.5, -7.0, -12.0)],
+    }
+
+    first = rendered_at.timestamp()
+    assert api._send_narrative_pulse_email(payload, now=first) is False
+    assert api._send_narrative_pulse_email(payload, now=first + 1) is False
+    assert len(attempts) == 2
+
+
+def test_info_outbox_owns_delivery_dedupe_key_after_safe_smtp_failure(monkeypatch):
+    queued = []
+
+    class _RejectedSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self, context=None):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, sender, recipients, message):
+            raise api.smtplib.SMTPRecipientsRefused({
+                recipients[0]: (550, b"recipient rejected"),
+            })
+
+        def quit(self):
+            pass
+
+    class _Outbox:
+        @staticmethod
+        def enqueue(*args, **kwargs):
+            queued.append((args, kwargs))
+            return 41
+
+    monkeypatch.setattr(api.smtplib, "SMTP", _RejectedSMTP)
+    monkeypatch.setattr(api, "_mail_outbox", _Outbox())
+    monkeypatch.setattr(api, "_SECRETS", {
+        "GMAIL_USER": "sender@example.com",
+        "GMAIL_APP_PASSWORD": "password",
+        "ALERT_EMAIL": "owner@example.com",
+    })
+    monkeypatch.setattr(api, "ALERT_SEND_TO_SUBSCRIBERS", False)
+
+    key = "narrative_pulse_daily_20260824"
+    assert api._send_email_alert(
+        "Narrative Pulse",
+        "<p>context</p>",
+        bypass_startup_cooldown=True,
+        recipient_emails=["owner@example.com"],
+        mail_class="info",
+        delivery_dedupe_keys=[key],
+    ) is False
+
+    assert len(queued) == 1
+    assert queued[0][1]["delivery_dedupe_keys"] == [key]
+    assert api._last_delivery_outcome() == "outbox_queued"
+    assert api._email_dedupe_remaining(key, api.NARRATIVE_PULSE_DEDUPE_SEC) > 0
 
 
 def test_narrative_pulse_body_and_send_share_one_render_time(monkeypatch):
