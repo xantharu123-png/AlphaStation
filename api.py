@@ -29,6 +29,7 @@ import smtplib
 import ssl
 import threading
 import html
+import inspect
 import uuid
 import hashlib
 import tempfile  # AUDIT H-10: atomare Cache-Writes
@@ -145,6 +146,12 @@ from modules.email_dedupe import (
     load_email_dedupe as _shared_load_email_dedupe,
     save_email_dedupe as _shared_save_email_dedupe,
 )
+from modules.cup_handle_watch_queue import (
+    claim_for_session as _claim_cup_handle_watches,
+    finish_claim as _finish_cup_handle_watch_claim,
+    prune_for_session as _prune_cup_handle_watches,
+    upsert_watch as _upsert_cup_handle_watch,
+)
 try:
     from modules.watchdog_log import log_watchdog_event as _log_watchdog_event
 except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
@@ -252,6 +259,26 @@ try:
 except ImportError as _shadow_summary_err:
     shadow_summary = None
     print(f"[Warning] signal_tracker shadow summary not loaded: {_shadow_summary_err}")
+
+# Additive, privacy-safe suppression counters.  Telemetry is deliberately
+# independent from the signal tracker: rejected candidates are not trades and
+# must never contaminate performance KPIs.
+try:
+    from modules.suppression_telemetry import (
+        ALLOWED_SUPPRESSION_REASONS,
+        ALLOWED_SUPPRESSION_SCANNERS,
+        load_suppression_summary,
+        record_suppressions,
+    )
+except ImportError as _suppression_telemetry_err:
+    ALLOWED_SUPPRESSION_REASONS = frozenset()
+    ALLOWED_SUPPRESSION_SCANNERS = frozenset()
+    load_suppression_summary = None
+    record_suppressions = None
+    print(
+        "[Warning] suppression telemetry not loaded: "
+        f"{_suppression_telemetry_err}"
+    )
 
 try:
     from modules.notify_telegram import (
@@ -393,6 +420,9 @@ _AUTO_STOCK_ALERT_STRATEGIES = [
     "Momentum Breakout Long",
     "Gap Momentum Long",
     "Gap Momentum Short",
+    # Hourly discovery owner for durable next-session Cup watches.  The
+    # separate five-minute monitor evaluates only this small persisted queue.
+    "Cup and Handle Breakout",
 ]
 
 STOCK_STRATEGY_ALIASES = {
@@ -1555,12 +1585,83 @@ _STOCK_FINAL_REVALIDATION_MAX_LOOKBACK_SECONDS = 12 * 3600.0
 _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS = 5.0
 _STOCK_FINAL_REGULAR_MAX_SPREAD_PCT = 2.0
 _STOCK_FINAL_PRICE_SOURCE = "polygon_snapshot_revalidated"
+_STOCK_FINAL_MAX_PATH_ROUNDS = 2
+_STOCK_QUOTE_CAPABILITY_TTL_SECONDS = 900
+_STOCK_QUOTE_CAPABILITY_ENDPOINT = "polygon_stocks_single_ticker_snapshot_v2"
+_STOCK_QUOTE_CAPABILITY_PATH = (
+    "/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
+)
+_STOCK_TRADE_REPLAY_CAPABILITY_ENDPOINT = "polygon_stocks_trades_v3_bounded_replay"
+_STOCK_TRADE_REPLAY_CAPABILITY_PATH = "/v3/trades/{ticker}"
+_STOCK_AGGREGATE_CAPABILITY_ENDPOINT = "polygon_stocks_aggregates_v2_bounded_1m"
+_STOCK_AGGREGATE_CAPABILITY_PATH = "/v2/aggs/ticker/{ticker}/range/1/minute/{from}/{to}"
 _STOCK_QUOTE_CAPABILITY_LOCK = threading.Lock()
+_STOCK_QUOTE_CAPABILITY_PROBE_SEQUENCE = 0
+_STOCK_QUOTE_CAPABILITY_COMPOSITE_SEQUENCE = 0
 _STOCK_QUOTE_CAPABILITY: Dict[str, Any] = {
     "status": "unverified",
+    "applicable": None,
+    "market_session": "UNKNOWN",
     "checked_at": None,
     "quote_age_seconds": None,
     "reason": "no_runtime_quote_probe_yet",
+    "endpoint": {
+        "name": _STOCK_QUOTE_CAPABILITY_ENDPOINT,
+        "path": _STOCK_QUOTE_CAPABILITY_PATH,
+        "access": "unverified",
+        "checked_at": None,
+        "reason": "no_runtime_quote_probe_yet",
+        "http_status": None,
+    },
+    "provider_entitlement": "unknown",
+    "trade_replay_endpoint": {
+        "name": _STOCK_TRADE_REPLAY_CAPABILITY_ENDPOINT,
+        "path": _STOCK_TRADE_REPLAY_CAPABILITY_PATH,
+        "access": "unverified",
+        "checked_at": None,
+        "reason": "no_runtime_trade_replay_probe_yet",
+        "http_status": None,
+    },
+    "aggregate_endpoint": {
+        "name": _STOCK_AGGREGATE_CAPABILITY_ENDPOINT,
+        "path": _STOCK_AGGREGATE_CAPABILITY_PATH,
+        "access": "unverified",
+        "checked_at": None,
+        "reason": "no_runtime_aggregate_probe_yet",
+        "http_status": None,
+    },
+    "control_quote": {
+        "status": "unverified",
+        "generation": None,
+        "market_session": "UNKNOWN",
+        "checked_at": None,
+        "observed_ts": None,
+        "quote_age_seconds": None,
+        "quote_probe_id": None,
+        "endpoint_access": "unverified",
+        "reason": "no_runtime_control_quote_yet",
+    },
+    "last_verified_trade_replay_at": None,
+    "last_verified_trade_replay_market_timestamp": None,
+    "last_verified_trade_replay_generation": None,
+    "last_verified_trade_replay_session": None,
+    "last_verified_aggregate_at": None,
+    "last_verified_aggregate_generation": None,
+    "last_verified_aggregate_session": None,
+    "composite_probe": {
+        "generation": 0,
+        "status": "unverified",
+        "market_session": "UNKNOWN",
+        "started_at": None,
+        "checked_at": None,
+        "quote_probe_id": None,
+        "reason": "no_runtime_composite_probe_yet",
+    },
+    "last_verified_composite_at": None,
+    "last_verified_composite_generation": None,
+    "last_verified_composite_session": None,
+    "latest_probe": None,
+    "last_verified_realtime_quote_at": None,
 }
 _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
     "bi_long", "bi_short", "biotech", "bear", "orb", "stock_strategy",
@@ -1606,6 +1707,16 @@ _EARLY_MOVER_TRIGGER_TTL = 180
 # AUDIT Q-2: 15-Min-Frische-Gate fuer JETZT-Trade-Mails. Trigger/Scan-Zustand
 # aelter als 900s darf keine sofort handelbare Mail mehr ausloesen.
 _MAIL_TRIGGER_MAX_AGE_SEC = 900
+_CUP_HANDLE_WATCH_MONITOR_INTERVAL_MIN = 5
+_CUP_HANDLE_WATCH_QUEUE_PATH = Path(
+    os.environ.get(
+        "CUP_HANDLE_WATCH_QUEUE_PATH",
+        str(
+            Path(os.environ.get("ALPHA_DATA_DIR", Path(__file__).parent / "data_cache"))
+            / "cup_handle_watch_queue.json"
+        ),
+    )
+)
 _EARLY_MOVER_MARKET_PAGES = 4  # 4 * 250 = Top-1000 CoinGecko universe
 _EARLY_MOVER_TRIGGER_SCAN_LIMIT = 1000
 _EARLY_MOVER_MAX_DISPLAY = 160
@@ -2124,6 +2235,111 @@ def _record_email_event(subject: str, status: str, reason: str = "") -> None:
         _EMAIL_SEND_LOG.append(event)
         if len(_EMAIL_SEND_LOG) > 50:
             del _EMAIL_SEND_LOG[:-50]
+
+
+def _stable_suppression_reason(raw_reason: Any) -> str:
+    """Map code-family variants to reviewed IDs without retaining raw text."""
+    token = str(raw_reason or "").strip()
+    if token in ALLOWED_SUPPRESSION_REASONS:
+        return token
+    if token != token.lower():
+        return "unclassified_code_reason"
+
+    stable_families = (
+        (("incremental_market_path_bounds_missing", "incremental_market_path_start_gap", "incremental_market_path_end_gap", "incremental_market_path_unavailable", "incremental_quote_older_than_market_path"), "final_incremental_gap"),
+        (("last_trade_after_quote_timestamp", "last_trade_after_quote_watermark", "last_trade_timestamp_invalid", "quote_older_than_market_path", "quote_precedes_source_observation", "market_path_not_realtime"), "final_watermark_invalid"),
+        (("handshake_last_trade_timestamp_missing", "handshake_quote_timestamp_missing", "handshake_quote_timestamp_regressed", "handshake_quote_unavailable", "handshake_snapshot_unavailable"), "final_handshake_invalid"),
+        (("stop_already_breached", "tp1_already_reached"), "final_already_touched"),
+        (("final_live_trade_",), "final_live_geometry_invalid"),
+        (("round_limit", "rounds_exhausted"), "final_round_limit_reached"),
+        (("advance_failed", "advance_not_possible", "unbounded_trade_advance"), "final_advance_failed"),
+    )
+    for markers, stable_reason in stable_families:
+        if any(marker in token for marker in markers):
+            return stable_reason
+
+    family_rules = {
+        "final_market_path_": (
+            (("auth", "forbidden", "entitlement", "access_denied", "401", "403"), "final_market_path_access_denied"),
+            (("rate", "429", "throttle"), "final_market_path_rate_limited"),
+            (("http", "status"), "final_market_path_http_error"),
+            (("fetch", "network", "timeout", "connection"), "final_market_path_fetch_failed"),
+            (("payload", "json", "malformed", "decode"), "final_market_path_payload_invalid"),
+            (("trailing_", "end_gap"), "final_market_path_end_gap"),
+            (("leading_gap", "start_gap"), "final_market_path_start_gap"),
+            (("gap",), "final_market_path_internal_gap"),
+        ),
+        "final_snapshot_": (
+            (("auth", "forbidden", "entitlement", "access_denied", "401", "403"), "final_snapshot_access_denied"),
+            (("rate", "429", "throttle"), "final_snapshot_rate_limited"),
+            (("http", "status"), "final_snapshot_http_error"),
+            (("fetch", "network", "timeout", "connection"), "final_snapshot_fetch_failed"),
+            (("payload", "json", "malformed", "decode"), "final_snapshot_payload_invalid"),
+            (("missing", "unavailable"), "final_snapshot_unavailable"),
+        ),
+    }
+    for prefix, rules in family_rules.items():
+        if not token.startswith(prefix):
+            continue
+        suffix = token[len(prefix):]
+        for markers, stable_reason in rules:
+            if any(marker in suffix for marker in markers):
+                return stable_reason
+        return (
+            "final_market_path_other"
+            if prefix == "final_market_path_"
+            else "final_snapshot_other"
+        )
+    return "unclassified_code_reason"
+
+
+def _record_suppression_counts(scanner: str, reasons: Any) -> int:
+    """Persist only aggregate code-owned suppression identifiers.
+
+    The storage module rejects free-form values.  This wrapper is an
+    additional failure boundary so observability can never alter scan, dedupe
+    or delivery behavior.
+    """
+    if not record_suppressions:
+        return 0
+    try:
+        scanner_token = str(scanner or "").strip().lower()
+        if scanner_token not in ALLOWED_SUPPRESSION_SCANNERS:
+            scanner_token = "unclassified_scanner"
+
+        if isinstance(reasons, str):
+            raw_counts: Dict[Any, Any] = {reasons: 1}
+        elif isinstance(reasons, dict):
+            raw_counts = reasons
+        else:
+            raw_counts = {}
+            for reason in reasons or ():
+                raw_counts[reason] = raw_counts.get(reason, 0) + 1
+
+        stable_counts: Dict[str, int] = {}
+        for raw_reason, raw_count in raw_counts.items():
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if count <= 0:
+                continue
+            reason_token = _stable_suppression_reason(raw_reason)
+            stable_counts[reason_token] = (
+                stable_counts.get(reason_token, 0) + count
+            )
+        if not stable_counts:
+            return 0
+        return int(
+            record_suppressions(
+                scanner_token,
+                stable_counts,
+                code_revision=BUILD_REVISION,
+            )
+            or 0
+        )
+    except Exception:
+        return 0
 
 
 def _public_email_event(event: Any) -> Optional[Dict[str, Any]]:
@@ -7350,6 +7566,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         )
 
     if not candidates:
+        _record_suppression_counts("early_movers", suppressed)
         if suppressed:
             _record_email_event("Crypto Early Mover LONG Alert", "skipped", f"no_active_long_setups:{suppressed}")
         _send_early_mover_watch_alerts(watch_rows, now=now)  # AUDIT Q-1
@@ -7466,6 +7683,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "skipped",
             f"no_finally_executable_setups:{suppressed}",
         )
+    _record_suppression_counts("early_movers", suppressed)
     return sent_any
 
 
@@ -7479,6 +7697,10 @@ def _send_early_mover_armed_alerts(payload: Dict[str, Any]) -> bool:
         "Crypto Explosion Armed Alert",
         "skipped",
         "armed_watch_mail_hard_disabled_trade_signals_only",
+    )
+    _record_suppression_counts(
+        "early_movers",
+        {"armed_watch_mail_hard_disabled": 1},
     )
     return False
 
@@ -9973,16 +10195,25 @@ def _send_email_alert(
     rendered_at = _normalize_mail_rendered_at(rendered_at)
     _set_last_delivery_recipients(())
     _set_last_delivery_outcome("not_attempted")
+    telemetry_scanner = str(
+        tracking_scanner or mail_channel or "mail_pipeline"
+    ).strip().lower()
+
+    def _mail_suppressed(reason: str) -> None:
+        _record_suppression_counts(telemetry_scanner, {reason: 1})
+
     # AUDIT H-2: Betreff traegt immer das Klassen-Praefix (auch in Logs).
     subject = _apply_mail_class_subject(subject, mail_class, trade_horizon=trade_horizon)
     if _email_has_blocked_etf_content(subject, body_html):
         print(f"[Alert] SKIP (ETF/ETP-Inhalt blockiert): {subject}")
         _record_email_event(subject, "skipped", "blocked_etf_content")
+        _mail_suppressed("blocked_etf_content")
         return False
     # V2.6b: Nach Restart 5 Min warten (alte Cache-Daten erzeugen Phantom-Alerts)
     if not bypass_startup_cooldown and time.time() - _EMAIL_STARTUP_TIME < _EMAIL_STARTUP_DELAY:
         print(f"[Alert] SKIP (Startup-Cooldown): {subject}")
         _record_email_event(subject, "skipped", "startup_cooldown")
+        _mail_suppressed("startup_cooldown")
         return False
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
@@ -9990,6 +10221,7 @@ def _send_email_alert(
     if not gmail_user or not gmail_pass:
         print("[Alert] SKIP: GMAIL_USER oder GMAIL_APP_PASSWORD fehlt")
         _record_email_event(subject, "skipped", "missing_gmail_config")
+        _mail_suppressed("missing_gmail_config")
         return False
     recipients = _resolve_email_alert_recipients(
         recipient_emails=recipient_emails,
@@ -10000,6 +10232,7 @@ def _send_email_alert(
     if not recipients:
         print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
         _record_email_event(subject, "skipped", "missing_recipient")
+        _mail_suppressed("missing_recipient")
         return False
     prepared_recipient_keys = sorted({
         key for key in (_recipient_delivery_key(value) for value in recipients) if key
@@ -10025,6 +10258,7 @@ def _send_email_alert(
             )
         ):
             _record_email_event(subject, "skipped", "tracker_delivery_contract_unavailable")
+            _mail_suppressed("tracker_delivery_contract_unavailable")
             return False
         intent_key = build_alert_delivery_intent_key(
             tracking_scanner,
@@ -10044,6 +10278,8 @@ def _send_email_alert(
         if not prepared.get("send_allowed"):
             reason = str(prepared.get("intent_state") or "not_prepared").lower()
             _record_email_event(subject, "skipped", f"tracker_delivery_intent_{reason}")
+            # Intent state is external data; persist one stable code reason.
+            _mail_suppressed("tracker_delivery_intent_not_sendable")
             return False
         persisted_signals = list(prepared.get("signals") or [])
         public_refs = [row.get("public_signal_ref") for row in persisted_signals]
@@ -10053,6 +10289,7 @@ def _send_email_alert(
             or any(not is_valid_public_signal_ref(value) for value in public_refs)
         ):
             _record_email_event(subject, "skipped", "tracker_public_signal_ref_invalid")
+            _mail_suppressed("tracker_public_signal_ref_invalid")
             return False
         plan_lines = []
         for signal, public_ref in zip(persisted_signals, public_refs):
@@ -10068,6 +10305,7 @@ def _send_email_alert(
                 or any(value is None for value in plan_values)
             ):
                 _record_email_event(subject, "skipped", "tracker_public_signal_plan_invalid")
+                _mail_suppressed("tracker_public_signal_plan_invalid")
                 return False
             entry, stop, tp1, tp2 = (float(value) for value in plan_values)
             plan_lines.append(
@@ -10119,6 +10357,7 @@ def _send_email_alert(
                 "skipped",
                 "tracker_recipient_authorization_changed",
             )
+            _mail_suppressed("tracker_recipient_authorization_changed")
             return False
 
     # Cross-process compare-and-set immediately before the external side
@@ -10139,6 +10378,7 @@ def _send_email_alert(
                 "skipped",
                 "tracker_delivery_attempt_not_owned",
             )
+            _mail_suppressed("tracker_delivery_attempt_not_owned")
             return False
 
     accepted_recipients: List[str] = []
@@ -10428,6 +10668,11 @@ def _send_email_alert(
         "error",
         f"{error_kind}:{'outcome_unknown' if delivery_outcome_unknown else 'not_delivered'}",
     )
+    _mail_suppressed(
+        "smtp_delivery_outcome_unknown"
+        if delivery_outcome_unknown
+        else "smtp_delivery_failed"
+    )
     if intent_key and not delivery_outcome_unknown:
         try:
             cancel_alert_delivery_intent(
@@ -10590,6 +10835,14 @@ def _check_and_alert(scanner_name, cache_file):
         if scanner_name in _STOCK_ALERT_SCANNERS:
             allowed, _reason = _stock_trade_email_allowed(scanner_name)
             if not allowed:
+                candidate_count = sum(
+                    1 for row in results if isinstance(row, dict)
+                )
+                if candidate_count:
+                    _record_suppression_counts(
+                        scanner_name,
+                        {"stock_session_not_executable": candidate_count},
+                    )
                 return
             _load_common_stock_universe(require_names=True)
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
@@ -10629,11 +10882,17 @@ def _check_and_alert(scanner_name, cache_file):
             # Breakout-Pfade, AUDIT S-1) — Sicherheitsnetz
             if scanner_name in _ALERT_RVOL_GUARD_SCANNERS and grade in ("S", "A", "A+") and _rvol_check < _alert_min_rvol_for_row(scanner_name, r):
                 grade = "B"  # Downgrade — kein Alert
+                suppressed["rvol_below_alert_threshold"] = (
+                    suppressed.get("rvol_below_alert_threshold", 0) + 1
+                )
             if grade not in _alert_grades:
                 continue
             ck = str(state.get("cooldown_key") or "")
             ck_ttl = _alert_dedupe_ttl_seconds(scanner_name)
             if ck in _EMAIL_COOLDOWN and now - _EMAIL_COOLDOWN[ck] < ck_ttl:
+                suppressed["cooldown_active"] = (
+                    suppressed.get("cooldown_active", 0) + 1
+                )
                 continue
             alerts.append({"ticker": ticker, "grade": grade, "score": score,
                            "price": _extract_alert_price(r),
@@ -10643,6 +10902,7 @@ def _check_and_alert(scanner_name, cache_file):
                            "trade_plan_html": _format_alert_plan_html(r),
                            "source_row": r,  # Signal-Tracking: Row mit Entry/StopLoss/TP-Feldern
                            "cooldown_key": ck})
+        _record_suppression_counts(scanner_name, suppressed)
         if not alerts:
             # Log warum keine Alerts
             all_grades = [_extract_alert_grade(r) or "?" for r in results if isinstance(r, dict)]
@@ -10664,12 +10924,16 @@ def _check_and_alert(scanner_name, cache_file):
             unique_alerts.append(alert)
         alerts = unique_alerts
         if equivalent_count:
+            _record_suppression_counts(
+                scanner_name, {"open_equivalent_trade": equivalent_count}
+            )
             print(
                 f"[Alert] {scanner_name}: {equivalent_count} wirtschaftlich gleiche "
                 "offene Setups scanneruebergreifend unterdrueckt"
             )
         if not alerts:
             return
+        claim_candidate_count = len(alerts)
         claimed_alerts = [
             alert for alert in alerts
             if _email_dedupe_claim(
@@ -10678,11 +10942,21 @@ def _check_and_alert(scanner_name, cache_file):
                 now=now,
             )
         ]
+        unclaimed_count = claim_candidate_count - len(claimed_alerts)
+        if unclaimed_count:
+            _record_suppression_counts(
+                scanner_name,
+                {"dedupe_claim_not_owned": unclaimed_count},
+            )
         alerts = claimed_alerts
         if not alerts:
             return
         if scanner_name in _STOCK_ALERT_SCANNERS:
             if len(alerts) > 1:
+                _record_suppression_counts(
+                    scanner_name,
+                    {"mail_adjacent_single_candidate_deferred": len(alerts) - 1},
+                )
                 for deferred in alerts[1:]:
                     _email_dedupe_release(
                         deferred["cooldown_key"], claimed_at=now
@@ -10722,6 +10996,7 @@ def _check_and_alert(scanner_name, cache_file):
             alerts = revalidated_alerts
             claimed_alerts = revalidated_alerts
             if revalidation_reasons:
+                _record_suppression_counts(scanner_name, revalidation_reasons)
                 _record_email_event(
                     f"{scanner_name} Stock Alert",
                     "skipped" if not alerts else "suppressed",
@@ -10817,13 +11092,11 @@ def _daily_bar_date_str(bar: Dict[str, Any]) -> str:
 
 
 def _strategy_rows_daily_close_confirmed(results: List[Dict[str, Any]]) -> bool:
-    """AUDIT K-2b: Eng begrenzte Daily-Close-Ausnahme vom Session-Mail-Gate.
+    """Return whether all rows are fresh daily-close *watch* confirmations.
 
-    True NUR wenn ALLE Rows (a) entry_status == BREAKOUT_CONFIRMED tragen und
-    (b) ihre letzte Daily-Kerze der HEUTIGE US-Handelstag ist (ET). Damit gehen
-    nach Boersenschluss ausschliesslich frisch per Tagesschluss bestaetigte
-    Daily-Breakouts (z.B. Cup & Handle) raus — kein Wochenend-/Feiertags-Stale,
-    keine Mischung mit unbestaetigten Rows.
+    This does not authorize an after-hours entry mail.  It only distinguishes a
+    fresh, completed daily pattern from stale/weekend data so the caller can
+    record an explicit watch-only suppression reason.
     """
     rows = [row for row in results if isinstance(row, dict)]
     if not rows:
@@ -10838,11 +11111,54 @@ def _strategy_rows_daily_close_confirmed(results: List[Dict[str, Any]]) -> bool:
     except Exception:
         return False
     for row in rows:
-        if str(row.get("entry_status", "") or "").strip().upper() != "BREAKOUT_CONFIRMED":
+        if not bool(row.get("daily_close_confirmed")):
+            return False
+        if (
+            str(row.get("entry_status", "") or "").strip().upper()
+            != "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+        ):
             return False
         if str(row.get("last_daily_bar_date", "") or "")[:10] != today_str:
             return False
     return True
+
+
+def _strategy_row_previous_close_watch_only(row: Dict[str, Any]) -> bool:
+    """Return whether one row is a prior-close watch for today's session."""
+    if not isinstance(row, dict):
+        return False
+    try:
+        today = _current_us_market_date_str()
+        previous = _previous_us_exchange_trading_date_str(today)
+    except Exception:
+        return False
+    if not today or not previous:
+        return False
+    confirmation = str(
+        row.get("daily_close_confirmation_date")
+        or row.get("last_daily_bar_date")
+        or ""
+    )[:10]
+    return bool(row.get("daily_close_confirmed")) and (
+        str(row.get("entry_status", "") or "").strip().upper()
+        == "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+    ) and confirmation == previous
+
+
+def _strategy_rows_previous_close_watch_only(
+    results: List[Dict[str, Any]],
+) -> bool:
+    """Return whether every row is a prior-close watch for today's session.
+
+    Premarket rows legitimately carry the immediately preceding exchange
+    session's daily-bar date.  Keep those code-owned watch rows out of the
+    looser premarket-radar path; they may only be promoted by the dedicated
+    completed-5m trigger monitor during the regular session.
+    """
+    rows = [row for row in results if isinstance(row, dict)]
+    if not rows:
+        return False
+    return all(_strategy_row_previous_close_watch_only(row) for row in rows)
 
 
 def _shadow_trackable_reasons(
@@ -10907,6 +11223,11 @@ def _stock_market_timestamp_from(
         if timestamp is not None:
             return timestamp
     return None
+
+
+def _stock_market_timestamp_order_ns(timestamp: float) -> int:
+    """Return the provider-time ordering key without float epsilon grants."""
+    return int(round(float(timestamp) * 1_000_000_000))
 
 
 def _stock_market_timestamp_iso(timestamp: float) -> str:
@@ -11020,12 +11341,18 @@ def _fetch_stock_revalidation_market_path(
     observed_ts: float,
     *,
     now_ts: Optional[float] = None,
+    last_trade_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Load Polygon 1m highs/lows since the scan observation.
 
     The first overlapping minute is intentionally included. If a stop/TP1
     touch happened before the exact observation inside that same OHLC minute,
     its ordering is unknowable; the caller therefore blocks conservatively.
+
+    Massive may omit an aggregate even though raw executions exist. Every
+    positive leading/internal/trailing hole is therefore covered by one bounded
+    raw replay (or an earlier snapshot last-trade watermark for a strictly later
+    trailing no-trade interval). No flat candle or price is synthesized.
     """
     symbol = str(ticker or "").upper().strip()
     now_value = float(now_ts if now_ts is not None else time.time())
@@ -11033,6 +11360,21 @@ def _fetch_stock_revalidation_market_path(
         return {"ok": False, "reason": "final_ticker_missing"}
     if not POLYGON_KEY:
         return {"ok": False, "reason": "final_polygon_key_missing"}
+    if (
+        not math.isfinite(now_value)
+        or not math.isfinite(float(observed_ts))
+        or float(observed_ts) <= 0
+        or now_value < float(observed_ts)
+    ):
+        return {"ok": False, "reason": "final_market_path_bounds_invalid"}
+    latest_trade_ts = _stock_market_timestamp_seconds(last_trade_ts)
+    if last_trade_ts not in (None, "") and latest_trade_ts is None:
+        return {"ok": False, "reason": "final_last_trade_timestamp_invalid"}
+    if (
+        latest_trade_ts is not None
+        and latest_trade_ts > now_value
+    ):
+        return {"ok": False, "reason": "final_last_trade_after_quote_watermark"}
     try:
         from zoneinfo import ZoneInfo
 
@@ -11064,43 +11406,346 @@ def _fetch_stock_revalidation_market_path(
         payload = response.json()
     except Exception:
         return {"ok": False, "reason": "final_market_path_payload_invalid"}
-    raw_bars = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return {"ok": False, "reason": "final_market_path_payload_invalid"}
+    if payload.get("next_url"):
+        # The request covers at most the 12-hour final-validation window, well
+        # below the 5,000 base-bar limit.  Pagination here therefore means the
+        # evidence is not complete enough to authorize a trade instruction.
+        return {"ok": False, "reason": "final_market_path_truncated"}
+    payload_status = str(payload.get("status") or "").strip().upper()
+    if payload_status != "OK":
+        return {"ok": False, "reason": "final_market_path_not_realtime"}
+    # Massive documents ``results`` as optional when no qualifying trade
+    # exists.  Missing/None therefore means an explicitly empty aggregate
+    # response, while any other non-list shape is malformed.
+    raw_bars_value = payload.get("results")
+    raw_bars = [] if raw_bars_value is None else raw_bars_value
     if not isinstance(raw_bars, list):
         return {"ok": False, "reason": "final_market_path_payload_invalid"}
+    if len(raw_bars) >= 5000:
+        # At most ~721 one-minute bars fit in the 12-hour validation window.
+        # Hitting the provider limit without a cursor is still not complete
+        # enough evidence to authorize a trade instruction.
+        return {"ok": False, "reason": "final_market_path_result_limit_reached"}
 
     bars: List[Dict[str, Any]] = []
-    previous_bar_ts: Optional[float] = None
+    previous_response_bar_ts: Optional[float] = None
+    quote_minute_start = math.floor(now_value / 60.0) * 60.0
     for raw in raw_bars:
         if not isinstance(raw, dict):
             return {"ok": False, "reason": "final_market_path_bar_invalid"}
         bar_ts = _stock_market_timestamp_from(raw, ("t", "timestamp", "time"))
         if bar_ts is None:
             return {"ok": False, "reason": "final_market_path_timestamp_missing"}
-        # Polygon timestamps are minute starts. Keep the overlapping minute to
-        # avoid inventing an intraminute order around the scan observation.
-        if bar_ts + 60.0 < observed_ts or bar_ts > now_value + 60.0:
-            continue
-        if previous_bar_ts is not None and bar_ts <= previous_bar_ts:
+        if (
+            previous_response_bar_ts is not None
+            and bar_ts <= previous_response_bar_ts
+        ):
             return {"ok": False, "reason": "final_market_path_order_invalid"}
-        if previous_bar_ts is not None and bar_ts - previous_bar_ts > 61.0:
-            # Polygon emits one-minute bars at minute starts.  A missing
-            # internal minute leaves stop/TP ordering unobservable and must
-            # never be bridged by interpolation.
-            return {"ok": False, "reason": "final_market_path_internal_gap"}
+        previous_response_bar_ts = bar_ts
+        # Polygon timestamps are minute starts. Keep the overlapping minute to
+        # avoid inventing an intraminute order around the scan observation. A
+        # current-minute bar is also retained: this request starts after the
+        # quote snapshot, so its real emitted high/low conservatively covers
+        # the quote watermark (and may include a few later trades).
+        if bar_ts + 60.0 < observed_ts or bar_ts > quote_minute_start + 1.0:
+            continue
         high = _alert_float(raw.get("h", raw.get("high")), None)
         low = _alert_float(raw.get("l", raw.get("low")), None)
         if high is None or low is None or high <= 0 or low <= 0 or high < low:
             return {"ok": False, "reason": "final_market_path_ohlc_invalid"}
         bars.append({"timestamp": bar_ts, "high": high, "low": low})
-        previous_bar_ts = bar_ts
+
+    aggregate_current_minute_present = bool(
+        bars
+        and abs(float(bars[-1]["timestamp"]) - quote_minute_start) <= 1.0
+    )
+    if aggregate_current_minute_present:
+        trailing_evidence_start = max(float(observed_ts), quote_minute_start)
+    elif bars:
+        trailing_evidence_start = max(
+            float(observed_ts), float(bars[-1]["timestamp"]) + 60.0
+        )
+    else:
+        trailing_evidence_start = float(observed_ts)
+
+    # A missing v2 aggregate is not itself proof that no execution occurred.
+    # Build one bounded replay window starting at the earliest leading/internal
+    # hole; the same request also covers any partial trailing interval. Genuine
+    # raw prices are reconstructed below, while a complete empty response is
+    # the only way a hole remains provider-empty.
+    aggregate_gap_starts: List[float] = []
+    if bars:
+        first_aggregate_ts = float(bars[0]["timestamp"])
+        if first_aggregate_ts > float(observed_ts):
+            aggregate_gap_starts.append(float(observed_ts))
+        for aggregate_left, aggregate_right in zip(bars, bars[1:]):
+            aggregate_gap_start = float(aggregate_left["timestamp"]) + 60.0
+            if float(aggregate_right["timestamp"]) > aggregate_gap_start:
+                aggregate_gap_starts.append(aggregate_gap_start)
+    replay_evidence_start: Optional[float] = (
+        min(aggregate_gap_starts) if aggregate_gap_starts else None
+    )
+
+    trailing_raw_trade_count = 0
+    trailing_raw_trade_evidence_used = False
+    if now_value > trailing_evidence_start:
+        if latest_trade_ts is None and replay_evidence_start is None:
+            return {
+                "ok": False,
+                "reason": "final_market_path_trailing_gap_unverified",
+            }
+        if latest_trade_ts is not None and latest_trade_ts >= trailing_evidence_start:
+            replay_evidence_start = (
+                trailing_evidence_start
+                if replay_evidence_start is None
+                else min(replay_evidence_start, trailing_evidence_start)
+            )
+    if replay_evidence_start is not None:
+            # One bounded request covers all missing intervals and any lagging
+            # current aggregate. It must reach the atomic snapshot watermark
+            # whenever that watermark lies inside the requested interval.
+            trailing_trade_limit = 50_000
+            try:
+                trade_response = rate_limited_get(
+                    f"https://api.polygon.io/v3/trades/{symbol}",
+                    params={
+                        "apiKey": POLYGON_KEY,
+                        "timestamp.gte": int(
+                            math.ceil(replay_evidence_start * 1_000_000_000)
+                        ),
+                        "timestamp.lte": int(
+                            math.floor(now_value * 1_000_000_000)
+                        ),
+                        "sort": "timestamp",
+                        "order": "asc",
+                        "limit": trailing_trade_limit,
+                    },
+                    timeout=10,
+                )
+            except Exception as exc:
+                print(
+                    f"[Alert] final stock trailing trades error {symbol}: "
+                    f"{redact_sensitive_query_values(exc)}"
+                )
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_fetch_error",
+                }
+            if trade_response.status_code != 200:
+                return {
+                    "ok": False,
+                    "reason": (
+                        "final_market_path_trailing_trades_http_"
+                        f"{trade_response.status_code}"
+                    ),
+                }
+            try:
+                trade_payload = trade_response.json()
+            except Exception:
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_payload_invalid",
+                }
+            if not isinstance(trade_payload, dict):
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_payload_invalid",
+                }
+            if trade_payload.get("next_url"):
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_truncated",
+                }
+            if str(trade_payload.get("status") or "").strip().upper() != "OK":
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_not_realtime",
+                }
+            raw_trades_value = trade_payload.get("results")
+            raw_trades = [] if raw_trades_value is None else raw_trades_value
+            if not isinstance(raw_trades, list):
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_payload_invalid",
+                }
+            if len(raw_trades) >= trailing_trade_limit:
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_trades_result_limit_reached",
+                }
+
+            minute_trade_prices: Dict[float, List[float]] = {}
+            previous_trade_ts: Optional[float] = None
+            latest_raw_trade_ts: Optional[float] = None
+            for raw_trade in raw_trades:
+                if not isinstance(raw_trade, dict):
+                    return {
+                        "ok": False,
+                        "reason": "final_market_path_trailing_trade_invalid",
+                    }
+                trade_ts = _stock_market_timestamp_from(
+                    raw_trade,
+                    ("sip_timestamp", "participant_timestamp", "timestamp", "t"),
+                )
+                trade_price = _alert_float(
+                    raw_trade.get("price", raw_trade.get("p")), None
+                )
+                if trade_ts is None:
+                    return {
+                        "ok": False,
+                        "reason": "final_market_path_trailing_trade_timestamp_missing",
+                    }
+                trade_order_ns = _stock_market_timestamp_order_ns(trade_ts)
+                if (
+                    trade_order_ns
+                    < _stock_market_timestamp_order_ns(replay_evidence_start)
+                    or trade_order_ns
+                    > _stock_market_timestamp_order_ns(now_value)
+                ):
+                    return {
+                        "ok": False,
+                        "reason": "final_market_path_trailing_trade_bounds_invalid",
+                    }
+                if previous_trade_ts is not None and trade_ts < previous_trade_ts:
+                    return {
+                        "ok": False,
+                        "reason": "final_market_path_trailing_trade_order_invalid",
+                    }
+                if trade_price is None or trade_price <= 0:
+                    return {
+                        "ok": False,
+                        "reason": "final_market_path_trailing_trade_price_invalid",
+                    }
+                minute_ts = math.floor(trade_ts / 60.0) * 60.0
+                minute_trade_prices.setdefault(minute_ts, []).append(trade_price)
+                previous_trade_ts = trade_ts
+                latest_raw_trade_ts = trade_ts
+
+            if (
+                latest_trade_ts is not None
+                and latest_trade_ts >= replay_evidence_start
+                and (
+                    latest_raw_trade_ts is None
+                    or _stock_market_timestamp_order_ns(latest_raw_trade_ts)
+                    < _stock_market_timestamp_order_ns(latest_trade_ts)
+                )
+            ):
+                return {
+                    "ok": False,
+                    "reason": (
+                        "final_market_path_trailing_trade_watermark_not_reached"
+                    ),
+                }
+
+            raw_minute_bars = [
+                {
+                    "timestamp": minute_ts,
+                    "high": max(prices),
+                    "low": min(prices),
+                    "evidence_source": "polygon_bounded_trades",
+                    "trade_count": len(prices),
+                }
+                for minute_ts, prices in sorted(minute_trade_prices.items())
+            ]
+            raw_minutes = {bar["timestamp"] for bar in raw_minute_bars}
+            bars = [
+                bar for bar in bars if float(bar["timestamp"]) not in raw_minutes
+            ]
+            bars.extend(raw_minute_bars)
+            bars.sort(key=lambda bar: float(bar["timestamp"]))
+            trailing_raw_trade_count = len(raw_trades)
+            trailing_raw_trade_evidence_used = True
+            aggregate_current_minute_present = bool(
+                aggregate_current_minute_present
+                and quote_minute_start not in raw_minutes
+            )
+
+    provider_empty_intervals: List[Dict[str, Any]] = []
+    trailing_no_trade_evidence: Optional[Dict[str, Any]] = None
     if not bars:
-        return {"ok": False, "reason": "final_market_path_missing"}
+        if now_value > observed_ts:
+            if latest_trade_ts is None or latest_trade_ts >= observed_ts:
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_gap_unverified",
+                }
+            trailing_no_trade_evidence = {
+                "start_timestamp": observed_ts,
+                "end_timestamp": now_value,
+                "proof": "snapshot_last_trade_before_observation",
+                "last_trade_timestamp": latest_trade_ts,
+            }
+    else:
+        first_bar_ts = float(bars[0]["timestamp"])
+        if first_bar_ts + 60.0 < observed_ts:
+            return {"ok": False, "reason": "final_market_path_start_gap"}
+        if first_bar_ts > observed_ts:
+            # The complete bounded raw replay, not aggregate absence, proves
+            # that this leading interval had no execution.
+            provider_empty_intervals.append({
+                "start_timestamp": float(observed_ts),
+                "end_timestamp": first_bar_ts,
+                "proof": "bounded_trade_replay_no_trade",
+            })
+        for left, right in zip(bars, bars[1:]):
+            gap_start = float(left["timestamp"]) + 60.0
+            gap_end = float(right["timestamp"])
+            if gap_end > gap_start:
+                provider_empty_intervals.append({
+                    "start_timestamp": gap_start,
+                    "end_timestamp": gap_end,
+                    "proof": "bounded_trade_replay_no_trade",
+                })
+        last_bar_ts = float(bars[-1]["timestamp"])
+        current_minute_covered = abs(last_bar_ts - quote_minute_start) <= 1.0
+        trailing_start = now_value if current_minute_covered else last_bar_ts + 60.0
+        if now_value > trailing_start:
+            if latest_trade_ts is None or latest_trade_ts >= trailing_start:
+                return {
+                    "ok": False,
+                    "reason": "final_market_path_trailing_gap_unverified",
+                }
+            trailing_no_trade_evidence = {
+                "start_timestamp": trailing_start,
+                "end_timestamp": now_value,
+                "proof": "snapshot_last_trade_before_trailing_gap",
+                "last_trade_timestamp": latest_trade_ts,
+            }
+
+    if trailing_raw_trade_evidence_used:
+        path_source = (
+            "polygon_1m_aggs_with_provider_empty_intervals_and_bounded_trailing_trades"
+            if provider_empty_intervals
+            else "polygon_1m_aggs_with_bounded_trailing_trades"
+        )
+    elif provider_empty_intervals and trailing_no_trade_evidence:
+        path_source = (
+            "polygon_1m_aggs_with_provider_empty_intervals_and_snapshot_trailing_gap"
+        )
+    elif provider_empty_intervals:
+        path_source = "polygon_1m_aggs_with_provider_empty_intervals"
+    elif trailing_no_trade_evidence:
+        path_source = "polygon_1m_aggs_with_snapshot_trailing_gap"
+    else:
+        path_source = "polygon_1m_aggs"
+
     return {
         "ok": True,
         "bars": bars,
-        "source": "polygon_1m_aggs",
-        "first_timestamp": bars[0]["timestamp"],
-        "last_timestamp": bars[-1]["timestamp"],
+        "source": path_source,
+        "first_timestamp": bars[0]["timestamp"] if bars else None,
+        "last_timestamp": bars[-1]["timestamp"] if bars else None,
+        "coverage_verified": True,
+        "coverage_start_timestamp": observed_ts,
+        "coverage_end_timestamp": now_value,
+        "provider_empty_aggregate_intervals": provider_empty_intervals,
+        "provider_empty_aggregate_interval_count": len(provider_empty_intervals),
+        "trailing_no_trade_evidence": trailing_no_trade_evidence,
+        "current_minute_aggregate_used": aggregate_current_minute_present,
+        "trailing_raw_trade_evidence_used": trailing_raw_trade_evidence_used,
+        "trailing_raw_trade_count": trailing_raw_trade_count,
     }
 
 
@@ -11113,16 +11758,112 @@ def _fetch_stock_revalidation_snapshot(
     symbol = str(ticker or "").upper().strip()
     requested_now = float(now_ts if now_ts is not None else time.time())
 
-    def _finish(result: Dict[str, Any]) -> Dict[str, Any]:
+    global _STOCK_QUOTE_CAPABILITY_PROBE_SEQUENCE
+    with _STOCK_QUOTE_CAPABILITY_LOCK:
+        _STOCK_QUOTE_CAPABILITY_PROBE_SEQUENCE += 1
+        probe_id = _STOCK_QUOTE_CAPABILITY_PROBE_SEQUENCE
+    probe_started_at = datetime.now(timezone.utc).isoformat()
+
+    def _endpoint_diagnosis(http_status: Optional[int], reason: str) -> Tuple[str, str]:
+        """Describe endpoint access without guessing the customer's Polygon plan."""
+        if http_status == 200:
+            return "accessible", "endpoint_access_confirmed"
+        if http_status == 401:
+            return "authentication_failed", "authentication_failed"
+        if http_status == 403:
+            # A 403 can be a plan restriction, account policy or provider-side
+            # authorization rule.  Never turn that into an invented plan name.
+            return "forbidden", "forbidden_or_plan_restricted"
+        if http_status == 429:
+            return "rate_limited", "unknown_rate_limited"
+        if http_status is not None:
+            return "http_error", "unknown_http_error"
+        if reason == "final_polygon_key_missing":
+            return "not_configured", "unknown_not_configured"
+        if reason == "final_ticker_missing":
+            return "not_requested", "unknown_not_requested"
+        return "transport_or_local_error", "unknown_transport_or_local_error"
+
+    def _finish(
+        result: Dict[str, Any],
+        *,
+        http_status: Optional[int] = None,
+    ) -> Dict[str, Any]:
         reason = str(result.get("reason") or "")
-        status = "verified_realtime_quote" if result.get("ok") else "blocked"
+        completed_at = datetime.now(timezone.utc).isoformat()
+        endpoint_access, entitlement = _endpoint_diagnosis(http_status, reason)
+        quote_status = (
+            "verified_realtime_quote"
+            if result.get("ok")
+            else (
+                "stale_quote_observed"
+                if reason == "final_quote_stale"
+                else "realtime_quote_not_verified"
+            )
+        )
+        probe = {
+            "probe_id": probe_id,
+            "started_at": probe_started_at,
+            "checked_at": completed_at,
+            "endpoint": _STOCK_QUOTE_CAPABILITY_ENDPOINT,
+            "http_status": http_status,
+            "endpoint_access": endpoint_access,
+            "provider_entitlement": entitlement,
+            "quote_status": quote_status,
+            "quote_age_seconds": result.get("age_seconds"),
+            "reason": reason or None,
+        }
         with _STOCK_QUOTE_CAPABILITY_LOCK:
-            _STOCK_QUOTE_CAPABILITY.update({
-                "status": status,
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-                "quote_age_seconds": result.get("age_seconds"),
-                "reason": reason or None,
-            })
+            is_latest_probe = (
+                probe_id == _STOCK_QUOTE_CAPABILITY_PROBE_SEQUENCE
+            )
+            # Start order, not completion order, defines "latest".  A slow old
+            # request must not publish while a newer probe is still in flight.
+            if is_latest_probe:
+                _STOCK_QUOTE_CAPABILITY.update({
+                    "checked_at": completed_at,
+                    "quote_age_seconds": result.get("age_seconds"),
+                    "reason": reason or None,
+                    "endpoint": {
+                        "name": _STOCK_QUOTE_CAPABILITY_ENDPOINT,
+                        "path": _STOCK_QUOTE_CAPABILITY_PATH,
+                        "access": endpoint_access,
+                        "checked_at": completed_at,
+                        "reason": reason or None,
+                        "http_status": http_status,
+                    },
+                    "provider_entitlement": entitlement,
+                    "latest_probe": probe,
+                })
+            if result.get("ok") and is_latest_probe:
+                observed_ts = _stock_market_timestamp_seconds(
+                    result.get("observed_ts")
+                )
+                previous_observed_ts = _stock_market_timestamp_seconds(
+                    _STOCK_QUOTE_CAPABILITY.get(
+                        "last_verified_quote_observed_at"
+                    )
+                )
+                if (
+                    observed_ts is not None
+                    and (
+                        previous_observed_ts is None
+                        or observed_ts >= previous_observed_ts
+                    )
+                ):
+                    _STOCK_QUOTE_CAPABILITY.update({
+                        "last_verified_realtime_quote_at": completed_at,
+                        "last_verified_quote_observed_at": observed_ts,
+                        "last_verified_quote_age_seconds": result.get(
+                            "age_seconds"
+                        ),
+                    })
+        if result.get("ok"):
+            # The scheduler's quote+trade capability handshake must bind the
+            # replay result to this exact snapshot generation. Keep the id
+            # internal; public health exposes only composite diagnostics.
+            result = dict(result)
+            result["_capability_probe_id"] = probe_id
         return result
 
     if not symbol:
@@ -11142,15 +11883,25 @@ def _fetch_stock_revalidation_snapshot(
         )
         return _finish({"ok": False, "reason": "final_snapshot_fetch_error"})
     if response.status_code != 200:
-        return _finish({"ok": False, "reason": f"final_snapshot_http_{response.status_code}"})
+        return _finish(
+            {"ok": False, "reason": f"final_snapshot_http_{response.status_code}"},
+            http_status=response.status_code,
+        )
     try:
         payload = response.json()
     except Exception:
-        return _finish({"ok": False, "reason": "final_snapshot_payload_invalid"})
+        return _finish(
+            {"ok": False, "reason": "final_snapshot_payload_invalid"},
+            http_status=200,
+        )
     raw = payload.get("ticker") if isinstance(payload, dict) else None
     if not isinstance(raw, dict):
-        return _finish({"ok": False, "reason": "final_snapshot_payload_invalid"})
+        return _finish(
+            {"ok": False, "reason": "final_snapshot_payload_invalid"},
+            http_status=200,
+        )
     quote = raw.get("lastQuote") if isinstance(raw.get("lastQuote"), dict) else {}
+    last_trade = raw.get("lastTrade") if isinstance(raw.get("lastTrade"), dict) else {}
     bid = _alert_float(
         quote.get("p", quote.get("bid_price", quote.get("bid"))),
         None,
@@ -11163,19 +11914,51 @@ def _fetch_stock_revalidation_snapshot(
         quote,
         ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
     )
+    last_trade_price = _alert_float(
+        last_trade.get("p", last_trade.get("price")),
+        None,
+    )
+    last_trade_ts = _stock_market_timestamp_from(
+        last_trade,
+        ("t", "sip_timestamp", "participant_timestamp", "timestamp"),
+    )
     if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
-        return _finish({"ok": False, "reason": "final_quote_invalid"})
+        return _finish(
+            {"ok": False, "reason": "final_quote_invalid"},
+            http_status=200,
+        )
     if observed_ts is None:
-        return _finish({"ok": False, "reason": "final_quote_timestamp_missing"})
+        return _finish(
+            {"ok": False, "reason": "final_quote_timestamp_missing"},
+            http_status=200,
+        )
+    if last_trade_ts is not None and last_trade_ts > observed_ts:
+        # A path bounded by the quote watermark can never prove a later trade.
+        # Block this internally inconsistent snapshot instead of constructing
+        # an unreachable replay requirement.
+        return _finish(
+            {"ok": False, "reason": "final_last_trade_after_quote_timestamp"},
+            http_status=200,
+        )
     # Network time belongs to the request, not to the quote. Compare Polygon's
     # timestamp with the actual receipt clock so a quote produced while the
     # preceding path request was in flight is not mislabeled as "future".
     receipt_now = max(requested_now, time.time())
     if observed_ts > receipt_now + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
-        return _finish({"ok": False, "reason": "final_quote_timestamp_in_future"})
+        return _finish(
+            {"ok": False, "reason": "final_quote_timestamp_in_future"},
+            http_status=200,
+        )
     age_seconds = max(0.0, receipt_now - observed_ts)
     if age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
-        return _finish({"ok": False, "reason": "final_quote_stale"})
+        return _finish(
+            {
+                "ok": False,
+                "reason": "final_quote_stale",
+                "age_seconds": round(age_seconds, 3),
+            },
+            http_status=200,
+        )
     return _finish({
         "ok": True,
         "bid": bid,
@@ -11184,7 +11967,11 @@ def _fetch_stock_revalidation_snapshot(
         "receipt_ts": receipt_now,
         "age_seconds": round(age_seconds, 3),
         "source": _STOCK_FINAL_PRICE_SOURCE,
-    })
+        # Optional trade watermark for conservative no-trade-gap proof.  It is
+        # evidence only; the executable entry remains the fresh bid/ask.
+        "last_trade_price": last_trade_price,
+        "last_trade_ts": last_trade_ts,
+    }, http_status=200)
 
 
 def _revalidate_stock_strategy_mail_candidate(
@@ -11269,6 +12056,7 @@ def _revalidate_stock_strategy_mail_candidate(
         ticker,
         scan_observed_ts,
         now_ts=quote_ts,
+        last_trade_ts=snapshot.get("last_trade_ts"),
     )
     path_elapsed_seconds = max(0.0, time.monotonic() - path_started_monotonic)
     if not path.get("ok"):
@@ -11289,24 +12077,236 @@ def _revalidate_stock_strategy_mail_candidate(
     if quote_ts > post_path_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
         return {"ok": False, "reason": "final_quote_timestamp_in_future_after_path"}
     final_quote_age_seconds = max(0.0, post_path_receipt_ts - quote_ts)
-    if final_quote_age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
-        return {"ok": False, "reason": "final_quote_stale_after_path"}
+    coverage_verified = path.get("coverage_verified") is True
     first_path_ts = _stock_market_timestamp_seconds(path.get("first_timestamp"))
     last_path_ts = _stock_market_timestamp_seconds(path.get("last_timestamp"))
-    if first_path_ts is None or last_path_ts is None:
-        return {"ok": False, "reason": "final_market_path_bounds_missing"}
-    # Polygon labels one-minute aggregates with the minute start.  The first
-    # aggregate must overlap the scan instant; otherwise an early stop/TP touch
-    # could be hidden by a truncated response.  At the other edge we permit a
-    # short no-trade gap, but never accept a materially stale/truncated path.
-    if first_path_ts > scan_observed_ts or first_path_ts + 60.0 < scan_observed_ts:
-        return {"ok": False, "reason": "final_market_path_start_gap"}
-    if last_path_ts > quote_ts:
-        return {"ok": False, "reason": "final_quote_older_than_market_path"}
-    # Polygon labels a 1m aggregate by its start. The quote must lie inside the
-    # final returned aggregate; any gap after its end is unobserved and blocks.
-    if quote_ts >= last_path_ts + 60.0:
-        return {"ok": False, "reason": "final_market_path_end_gap"}
+    if coverage_verified:
+        coverage_start_ts = _stock_market_timestamp_seconds(
+            path.get("coverage_start_timestamp")
+        )
+        coverage_end_ts = _stock_market_timestamp_seconds(
+            path.get("coverage_end_timestamp")
+        )
+        if coverage_start_ts is None or coverage_end_ts is None:
+            return {"ok": False, "reason": "final_market_path_bounds_missing"}
+        if coverage_start_ts > scan_observed_ts:
+            return {"ok": False, "reason": "final_market_path_start_gap"}
+        if coverage_end_ts < quote_ts:
+            return {"ok": False, "reason": "final_market_path_end_gap"}
+        if any(
+            (_stock_market_timestamp_seconds(bar.get("timestamp")) or float("inf"))
+            > quote_ts
+            for bar in path.get("bars") or []
+            if isinstance(bar, dict)
+        ):
+            return {"ok": False, "reason": "final_quote_older_than_market_path"}
+    else:
+        # Backward-compatible defensive boundary for injected/legacy path
+        # providers that cannot prove raw-trade-empty intervals.
+        if first_path_ts is None or last_path_ts is None:
+            return {"ok": False, "reason": "final_market_path_bounds_missing"}
+        if first_path_ts > scan_observed_ts or first_path_ts + 60.0 < scan_observed_ts:
+            return {"ok": False, "reason": "final_market_path_start_gap"}
+        if last_path_ts > quote_ts:
+            return {"ok": False, "reason": "final_quote_older_than_market_path"}
+        if quote_ts >= last_path_ts + 60.0:
+            return {"ok": False, "reason": "final_market_path_end_gap"}
+
+    proven_path_end_ts = (
+        coverage_end_ts if coverage_verified else quote_ts
+    )
+    path_round_count = 1
+    handshake_receipt_floor_ts = post_path_receipt_ts
+
+    # Q2 closes the quote->path TOCTOU window. The final instruction price is
+    # always taken from this later snapshot (or Qfinal below), never from Q1.
+    next_snapshot = _fetch_stock_revalidation_snapshot(
+        ticker,
+        now_ts=post_path_receipt_ts,
+    )
+    if not next_snapshot.get("ok"):
+        return {
+            "ok": False,
+            "reason": str(
+                next_snapshot.get("reason") or "final_handshake_snapshot_unavailable"
+            ),
+        }
+    next_quote_ts = _stock_market_timestamp_seconds(
+        next_snapshot.get("observed_ts")
+    )
+    next_last_trade_ts = _stock_market_timestamp_seconds(
+        next_snapshot.get("last_trade_ts")
+    )
+    if next_quote_ts is None:
+        return {"ok": False, "reason": "final_handshake_quote_timestamp_missing"}
+    if next_quote_ts < quote_ts:
+        return {"ok": False, "reason": "final_handshake_quote_timestamp_regressed"}
+    if next_last_trade_ts is None:
+        return {
+            "ok": False,
+            "reason": "final_handshake_last_trade_timestamp_missing",
+        }
+    if (
+        next_last_trade_ts > next_quote_ts
+    ):
+        return {"ok": False, "reason": "final_last_trade_after_quote_timestamp"}
+
+    if (
+        next_last_trade_ts > proven_path_end_ts
+    ):
+        if path_round_count >= _STOCK_FINAL_MAX_PATH_ROUNDS:
+            return {
+                "ok": False,
+                "reason": "final_market_path_handshake_round_limit_reached",
+            }
+        incremental_started_monotonic = time.monotonic()
+        incremental_path = _fetch_stock_revalidation_market_path(
+            ticker,
+            proven_path_end_ts,
+            now_ts=next_quote_ts,
+            last_trade_ts=next_last_trade_ts,
+        )
+        incremental_elapsed_seconds = max(
+            0.0, time.monotonic() - incremental_started_monotonic
+        )
+        if not incremental_path.get("ok"):
+            return {
+                "ok": False,
+                "reason": str(
+                    incremental_path.get("reason")
+                    or "final_incremental_market_path_unavailable"
+                ),
+            }
+        incremental_coverage_start = _stock_market_timestamp_seconds(
+            incremental_path.get("coverage_start_timestamp")
+        )
+        incremental_coverage_end = _stock_market_timestamp_seconds(
+            incremental_path.get("coverage_end_timestamp")
+        )
+        if (
+            incremental_path.get("coverage_verified") is not True
+            or incremental_coverage_start is None
+            or incremental_coverage_end is None
+        ):
+            return {
+                "ok": False,
+                "reason": "final_incremental_market_path_bounds_missing",
+            }
+        if incremental_coverage_start > proven_path_end_ts:
+            return {
+                "ok": False,
+                "reason": "final_incremental_market_path_start_gap",
+            }
+        if incremental_coverage_end < next_quote_ts:
+            return {
+                "ok": False,
+                "reason": "final_incremental_market_path_end_gap",
+            }
+        if any(
+            (_stock_market_timestamp_seconds(bar.get("timestamp")) or float("inf"))
+            > next_quote_ts
+            for bar in incremental_path.get("bars") or []
+            if isinstance(bar, dict)
+        ):
+            return {
+                "ok": False,
+                "reason": "final_incremental_quote_older_than_market_path",
+            }
+
+        path["bars"] = list(path.get("bars") or []) + list(
+            incremental_path.get("bars") or []
+        )
+        path["source"] = (
+            f"{path.get('source') or 'polygon_market_path'}+"
+            f"{incremental_path.get('source') or 'polygon_incremental_market_path'}"
+        )
+        path["last_timestamp"] = incremental_path.get("last_timestamp")
+        path["coverage_end_timestamp"] = incremental_coverage_end
+        path["provider_empty_aggregate_interval_count"] = int(
+            path.get("provider_empty_aggregate_interval_count") or 0
+        ) + int(
+            incremental_path.get("provider_empty_aggregate_interval_count") or 0
+        )
+        path["trailing_raw_trade_count"] = int(
+            path.get("trailing_raw_trade_count") or 0
+        ) + int(incremental_path.get("trailing_raw_trade_count") or 0)
+        path["trailing_raw_trade_evidence_used"] = bool(
+            path.get("trailing_raw_trade_evidence_used")
+            or incremental_path.get("trailing_raw_trade_evidence_used")
+        )
+        path["current_minute_aggregate_used"] = bool(
+            path.get("current_minute_aggregate_used")
+            or incremental_path.get("current_minute_aggregate_used")
+        )
+        proven_path_end_ts = incremental_coverage_end
+        path_round_count += 1
+
+        next_receipt_ts = _stock_market_timestamp_seconds(
+            next_snapshot.get("receipt_ts")
+        )
+        incremental_receipt_ts = (
+            next_receipt_ts
+            if next_receipt_ts is not None
+            else post_path_receipt_ts
+        ) + incremental_elapsed_seconds
+        handshake_receipt_floor_ts = incremental_receipt_ts
+        final_snapshot = _fetch_stock_revalidation_snapshot(
+            ticker,
+            now_ts=incremental_receipt_ts,
+        )
+        if not final_snapshot.get("ok"):
+            return {
+                "ok": False,
+                "reason": str(
+                    final_snapshot.get("reason")
+                    or "final_handshake_snapshot_unavailable"
+                ),
+            }
+        final_quote_ts = _stock_market_timestamp_seconds(
+            final_snapshot.get("observed_ts")
+        )
+        final_last_trade_ts = _stock_market_timestamp_seconds(
+            final_snapshot.get("last_trade_ts")
+        )
+        if final_quote_ts is None:
+            return {"ok": False, "reason": "final_handshake_quote_timestamp_missing"}
+        if final_quote_ts < next_quote_ts:
+            return {"ok": False, "reason": "final_handshake_quote_timestamp_regressed"}
+        if final_last_trade_ts is None:
+            return {
+                "ok": False,
+                "reason": "final_handshake_last_trade_timestamp_missing",
+            }
+        if (
+            final_last_trade_ts > final_quote_ts
+        ):
+            return {"ok": False, "reason": "final_last_trade_after_quote_timestamp"}
+        if (
+            final_last_trade_ts > proven_path_end_ts
+        ):
+            return {
+                "ok": False,
+                "reason": "final_market_path_handshake_unbounded_trade_advance",
+            }
+        snapshot = final_snapshot
+        quote_ts = final_quote_ts
+    else:
+        snapshot = next_snapshot
+        quote_ts = next_quote_ts
+
+    final_snapshot_receipt_ts = _stock_market_timestamp_seconds(
+        snapshot.get("receipt_ts")
+    )
+    post_path_receipt_ts = (
+        max(final_snapshot_receipt_ts, handshake_receipt_floor_ts)
+        if final_snapshot_receipt_ts is not None
+        else handshake_receipt_floor_ts
+    )
+    if quote_ts > post_path_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return {"ok": False, "reason": "final_quote_timestamp_in_future_after_handshake"}
+    final_quote_age_seconds = max(0.0, post_path_receipt_ts - quote_ts)
+    if final_quote_age_seconds > _STOCK_FINAL_QUOTE_MAX_AGE_SECONDS:
+        return {"ok": False, "reason": "final_quote_stale_after_path"}
 
     stop_touched = False
     tp1_touched = False
@@ -11391,9 +12391,7 @@ def _revalidate_stock_strategy_mail_candidate(
 
     # The returned candidate must still be executable after every local path
     # and geometry check, not merely at the first instruction after I/O.
-    return_receipt_ts = receipt_base_ts + max(
-        0.0, time.monotonic() - path_started_monotonic
-    )
+    return_receipt_ts = post_path_receipt_ts
     if quote_ts > return_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
         return {"ok": False, "reason": "final_quote_timestamp_in_future_at_return"}
     final_quote_age_seconds = max(0.0, return_receipt_ts - quote_ts)
@@ -11429,6 +12427,26 @@ def _revalidate_stock_strategy_mail_candidate(
         "final_market_path_source": path.get("source"),
         "final_market_path_from": _stock_market_timestamp_iso(scan_observed_ts),
         "final_market_path_bars": len(path.get("bars") or []),
+        "final_market_path_provider_empty_intervals": path.get(
+            "provider_empty_aggregate_interval_count", 0
+        ),
+        "final_market_path_trailing_no_trade_verified": bool(
+            path.get("trailing_no_trade_evidence")
+        ),
+        "final_market_path_current_minute_aggregate_used": bool(
+            path.get("current_minute_aggregate_used")
+        ),
+        "final_market_path_trailing_raw_trade_evidence_used": bool(
+            path.get("trailing_raw_trade_evidence_used")
+        ),
+        "final_market_path_trailing_raw_trade_count": int(
+            path.get("trailing_raw_trade_count") or 0
+        ),
+        "final_market_path_round_count": path_round_count,
+        "final_market_path_watermark": _stock_market_timestamp_iso(
+            proven_path_end_ts
+        ),
+        "final_quote_handshake_complete": True,
         "live_rr": live_quality.get("effective_rr"),
         "live_rr_tp1": live_quality.get("rr_tp1"),
         "live_rr_tp2": live_quality.get("rr_tp2"),
@@ -11682,17 +12700,41 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             # Some unit tests monkeypatch the helper as a no-arg lambda.
             market_status = _stock_trade_email_status()
         if not market_status.get("allowed"):
+            candidate_count = sum(
+                1 for row in results[:50] if isinstance(row, dict)
+            )
+            # A completed daily pattern is useful evidence, but after close
+            # or before regular open there is no executable regular-session
+            # entry. Daily-close watches take precedence over the generic PM
+            # radar so a restart cannot turn a persisted plan into a PM mail.
+            if (
+                _strategy_rows_daily_close_confirmed(results)
+                or _strategy_rows_previous_close_watch_only(results)
+            ):
+                reason = "daily_close_confirmed_watch_only_no_afterhours_entry"
+                if candidate_count:
+                    _record_suppression_counts(
+                        scanner_key, {reason: candidate_count}
+                    )
+                print(
+                    f"[Alert] Aktien Strategie - {strategy_name}: SKIP "
+                    "daily-close watch confirmation outside executable session"
+                )
+                _record_email_event(
+                    f"Aktien Strategie Alert - {strategy_name}",
+                    "skipped",
+                    reason,
+                )
+                return
             if _premarket_window_active(send_time_utc):
                 premarket_mail_mode = True
-            # AUDIT K-2b (PRODUKTENTSCHEIDUNG, final): Nach US-Daily-Close ist
-            # die Bestaetigung eines Daily-Breakouts legitim — sonst waere der
-            # C&H-Kanal architektonisch tot (intraday unterdrueckt K-2a, nach
-            # Close blockte das Session-Gate alles). ENG begrenzte Ausnahme:
-            # nur wenn ALLE Rows BREAKOUT_CONFIRMED + heutige Tageskerze.
-            elif _strategy_rows_daily_close_confirmed(results):
-                daily_close_confirmed_mode = True
             else:
                 reason = str(market_status.get("reason") or "US market closed")
+                if candidate_count:
+                    _record_suppression_counts(
+                        scanner_key,
+                        {"stock_session_not_executable": candidate_count},
+                    )
                 print(f"[Alert] Aktien Strategie - {strategy_name}: SKIP stock strategy mail outside US regular session ({reason})")
                 _record_email_event(
                     f"Aktien Strategie Alert - {strategy_name}",
@@ -11712,6 +12754,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     business_quality_fetches = 0
     for row in results[:50]:
         if not isinstance(row, dict):
+            continue
+        if premarket_mail_mode and _strategy_row_previous_close_watch_only(row):
+            reason = "daily_close_confirmed_watch_only_no_afterhours_entry"
+            suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
         if market_type == "stocks":
             row = _attach_stock_company_name(
@@ -11796,6 +12842,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "source_row": row,  # Signal-Tracking: Row mit Entry/StopLoss/TP-Feldern
         })
 
+    # Unlike narrow counterfactual shadow rows, these durable counters cover
+    # every rejection reason while retaining no signal identity or price.
+    _record_suppression_counts(scanner_key, suppressed)
+
     # Shadow-Tracking (AUDIT 2026-07-31): geblockte Swing-Signale still in den
     # Tracker — bewusst UNABHAENGIG davon, ob unten eine Mail rausgeht (die
     # Messung soll gerade die Luecke zwischen "gemailt" und "geblockt" fuellen).
@@ -11815,15 +12865,29 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             )
         return
 
+    # Rank the complete cheap/static candidate set before limiting claims or
+    # starting any provider-backed final validation.  Python's stable sort
+    # preserves the scanner's order for equal scores.
+    alerts.sort(
+        key=lambda alert: _alert_float(alert.get("score"), 0) or 0,
+        reverse=True,
+    )
     total_alerts = len(alerts)
+    claim_candidates = alerts[:_ALERT_EMAIL_MAX_ROWS]
     email_alerts = [
-        alert for alert in alerts[:_ALERT_EMAIL_MAX_ROWS]
+        alert for alert in claim_candidates
         if _email_dedupe_claim(
             alert["cooldown_key"],
             _alert_dedupe_ttl_seconds(scanner_key),
             now=now,
         )
     ]
+    unclaimed_count = len(claim_candidates) - len(email_alerts)
+    if unclaimed_count:
+        _record_suppression_counts(
+            scanner_key,
+            {"dedupe_claim_not_owned": unclaimed_count},
+        )
     if not email_alerts:
         _record_email_event(
             f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
@@ -11832,11 +12896,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         )
         return
 
-    # Finaler Aktien-Evidenzvertrag: Der Sweep kann viele Minuten laufen. Erst
-    # nach dem atomaren Dedupe-Claim, aber noch VOR Regime, Mail-Bau und Tracker,
-    # wird jede Row gegen einen frischen ausfuehrbaren Polygon-Bid/Ask und den
-    # vollstaendigen 1m-Pfad seit ihrem Scan-Snapshot revalidiert. Ablehnung gibt
-    # den Claim frei; ein spaeterer, wirklich valider Lauf darf wieder senden.
+    # The provider-backed final validation is intentionally deferred until all
+    # cheap regime/equivalence filters have run and a row is immediately about
+    # to be sent.  This helper applies that one authoritative result to the
+    # rendered and tracked candidate.
     def _alert_with_revalidated_candidate(alert, validation):
         revalidated_row = dict(validation.get("candidate") or {})
         refreshed = dict(alert)
@@ -11853,53 +12916,6 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         ) or 0
         refreshed["trade_plan_html"] = _format_alert_plan_html(revalidated_row)
         return refreshed
-
-    if market_type == "stocks":
-        revalidated_alerts: List[Dict[str, Any]] = []
-        revalidation_suppressed: Dict[str, int] = {}
-        for alert in email_alerts:
-            source_row = dict(alert.get("source_row") or {})
-            try:
-                validation = _revalidate_stock_strategy_mail_candidate(
-                    source_row,
-                    # Never freeze the receipt clock across a sequential API
-                    # sweep: provider timestamps must be compared with the
-                    # instant at which this candidate is actually validated.
-                    now_ts=time.time(),
-                    price_session=(
-                        "PREMARKET"
-                        if premarket_mail_mode
-                        else str(market_status.get("session") or "UNKNOWN")
-                    ),
-                )
-            except Exception as exc:
-                print(
-                    "[Alert] final stock revalidation failed closed for "
-                    f"{_extract_alert_ticker(source_row)}: "
-                    f"{redact_sensitive_query_values(exc)}"
-                )
-                validation = {
-                    "ok": False,
-                    "reason": "final_stock_revalidation_exception",
-                }
-            if not validation.get("ok"):
-                reason = str(validation.get("reason") or "final_stock_revalidation_failed")
-                revalidation_suppressed[reason] = revalidation_suppressed.get(reason, 0) + 1
-                suppressed[reason] = suppressed.get(reason, 0) + 1
-                _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
-                continue
-            revalidated_alerts.append(
-                _alert_with_revalidated_candidate(alert, validation)
-            )
-        email_alerts = revalidated_alerts
-        if revalidation_suppressed:
-            _record_email_event(
-                f"Aktien Strategie Alert - {strategy_name}",
-                "skipped" if not email_alerts else "suppressed",
-                f"final_stock_revalidation:{revalidation_suppressed}",
-            )
-        if not email_alerts:
-            return
 
     # Regime-Filter (AUDIT 2026-08-01, F-14): Markt-Gate + Eigen-Performance-
     # Breaker. ROT degradiert die Mail zu watch (Banner statt SWING-Praefix,
@@ -11987,6 +13003,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         _market_reason_tag = str(
             (_market_red_decision or {}).get("reason_tag")
             or "market_regime_red"
+        )
+        _record_suppression_counts(
+            scanner_key,
+            {_market_reason_tag: len(_market_red_alerts)},
         )
         _safe_record_alert_signals(
             scanner_key,
@@ -12128,6 +13148,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             _reason_tag = str(
                 _decision.get("reason_tag") or "regime_cooldown"
             )
+            _record_suppression_counts(
+                scanner_key,
+                {_reason_tag: len(_group_alerts)},
+            )
             _safe_record_alert_signals(
                 scanner_key,
                 _regime_shadow_rows(_group_alerts, _reason_tag),
@@ -12241,6 +13265,15 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             _kept = [a for a in email_alerts if _alert_float(a.get("score"), 0) >= _boosted][:_max_rows]
             _dropped = [a for a in email_alerts if a not in _kept]
             if _dropped:
+                _record_suppression_counts(
+                    scanner_key,
+                    {
+                        str(
+                            _regime.get("reason_tag")
+                            or "market_regime_yellow"
+                        ): len(_dropped)
+                    },
+                )
                 for a in _dropped:
                     _email_dedupe_release(a["cooldown_key"], claimed_at=now)
                 _safe_record_alert_signals(
@@ -12284,6 +13317,11 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             else:
                 unique_email_alerts.append(alert)
         email_alerts = unique_email_alerts
+        if equivalent_count:
+            _record_suppression_counts(
+                scanner_key,
+                {"open_equivalent_trade": equivalent_count},
+            )
         if not email_alerts:
             _record_email_event(
                 f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
@@ -12292,11 +13330,10 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             )
             return
 
-    # Live stock rows are deliberately delivered one message at a time.  The
-    # earlier validation protects the regime/dedupe pipeline; this second,
-    # mail-adjacent validation closes the TOCTOU window created by validating a
-    # whole batch before SMTP.  No provider/network work for another row can
-    # occur between this row's final quote/path receipt and its send attempt.
+    # Live stock rows are deliberately delivered one message at a time.  Each
+    # surviving row is provider-revalidated exactly once, mail-adjacent.  No
+    # provider/network work for another row can occur between this row's final
+    # quote/path receipt and its send attempt.
     if (
         market_type == "stocks"
         and not _regime_shadow_tag
@@ -12352,6 +13389,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     validation.get("reason")
                     or "mail_adjacent_stock_revalidation_failed"
                 )
+                _record_suppression_counts(scanner_key, {reason: 1})
                 _email_dedupe_release(
                     pending_alert["cooldown_key"], claimed_at=now
                 )
@@ -12745,13 +13783,27 @@ def _new_listing_watch_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any
 
 
 def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[Dict[str, int]] = None, now: Optional[float] = None) -> bool:
+    base_suppressed = {
+        str(reason): int(count)
+        for reason, count in (suppressed or {}).items()
+        if str(reason) and isinstance(count, (int, float)) and int(count) > 0
+    }
+
+    def _record_watch_counts(extra_reason: str = "") -> None:
+        combined = dict(base_suppressed)
+        if extra_reason:
+            combined[extra_reason] = combined.get(extra_reason, 0) + 1
+        _record_suppression_counts("new_listing", combined)
+
     if not _NEW_LISTING_SEND_DUMP_WATCH_EMAILS:
         _record_email_event("Crypto New Listing Dump-Watch", "skipped", "new_listing_dump_watch_emails_disabled")
+        _record_watch_counts("new_listing_dump_watch_emails_disabled")
         return False
     now = now or time.time()
     candidates = _new_listing_watch_candidates(payload)
     if not candidates:
         _record_email_event("Crypto New Listing Dump-Watch", "skipped", "no_new_listing_dump_watch_candidates")
+        _record_watch_counts("no_new_listing_dump_watch_candidates")
         return False
 
     watch_dt = datetime.fromtimestamp(now, timezone.utc)
@@ -12759,6 +13811,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     dedupe_key = f"new_listing_watch_{day_key}"
     if not _email_dedupe_claim(dedupe_key, _NEW_LISTING_WATCH_DEDUPE_SEC, now=now):
         _record_email_event("Crypto New Listing Dump-Watch", "skipped", "daily_dump_watch_dedupe_active")
+        _record_watch_counts("daily_dump_watch_dedupe_active")
         return False
 
     def _fmt(value, suffix="", default="-"):
@@ -12835,6 +13888,7 @@ def _send_new_listing_watch_email(payload: Dict[str, Any], suppressed: Optional[
     {rows}</table>
     <p style="color:#999;font-size:12px;margin-top:20px">Dump-Watch-Mail maximal 1x taeglich und nur nach Pump >= {_NEW_LISTING_WATCH_MIN_PUMP_PCT:.0f}%, Score >= {_NEW_LISTING_WATCH_MIN_SCORE}, R:R >= {_NEW_LISTING_WATCH_MIN_RR:.1f}R und ohne Safety-/Low-Quality-Blocker. JETZT SHORTEN kommt separat nur bei 5m Micro-Crack/Rejection, Safety OK, ausreichendem R:R und New-Listing-Alter im Fenster.</p>
     </body></html>'''
+    _record_watch_counts()
     sent = _send_email_alert(
         f"Crypto New Listing Dump-Watch: {len(candidates)} Coin(s) - NICHT SHORTEN",
         body,
@@ -12919,7 +13973,10 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
     """Mail S/A active Pump-&-Dump short signals from the FastAPI pipeline."""
     signals = payload.get("signals", []) if isinstance(payload, dict) else []
     if not signals:
-        _send_new_listing_watch_email(payload if isinstance(payload, dict) else {})
+        _send_new_listing_watch_email(
+            payload if isinstance(payload, dict) else {},
+            suppressed={"no_new_listing_signals": 1},
+        )
         return
     now = time.time()
     alerts = []
@@ -13020,6 +14077,9 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
         "new_listing", alerts, source_key="source_row"
     )
     if not alerts:
+        _record_suppression_counts(
+            "new_listing", {"open_equivalent_trade": equivalent_count}
+        )
         _record_email_event(
             "Pump & Dump SHORT Alert",
             "skipped",
@@ -13118,6 +14178,7 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             "skipped",
             f"no_finally_executable_setups:{suppressed}",
         )
+    _record_suppression_counts("new_listing", suppressed)
 
 
 # Cleanup cooldown (alle 4h wird automatisch bereinigt)
@@ -13283,7 +14344,9 @@ def _sanitize_biotech_public_results(results: list) -> list:
 
 
 SCAN_DATA_SOURCES = {
+    "quote_capability": "Bounded Polygon snapshot + 1m aggregate + raw-trade control probe",
     "strategy_scan": "Polygon snapshots + strategy engine",
+    "cup_handle_watch": "Persisted prior-session Cup patterns + completed Polygon 5m trigger checks",
     "stock_strategy": "Polygon snapshots + strategy engine",
     "bi_long": "Polygon snapshots + BI scanner",
     "bi_short": "Polygon snapshots + BI scanner",
@@ -17940,6 +19003,510 @@ def _detect_cup_handle_breakout(
     return best
 
 
+def _current_us_market_date_str() -> str:
+    """Return today's New-York market date as an ISO string."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return (
+            datetime.now(timezone.utc)
+            .astimezone(ZoneInfo("America/New_York"))
+            .date()
+            .isoformat()
+        )
+    except Exception:
+        return ""
+
+
+def _previous_us_exchange_trading_date_str(day_value: str) -> str:
+    """Return the exchange session immediately preceding ``day_value``."""
+    try:
+        cursor = datetime.fromisoformat(str(day_value)[:10]).date()
+    except (TypeError, ValueError):
+        return ""
+    exchange = _us_exchange_calendar()
+    for offset in range(1, 11):
+        candidate = cursor - timedelta(days=offset)
+        try:
+            is_session = (
+                _is_exchange_trading_day(exchange, candidate)
+                if exchange is not None
+                else candidate.weekday() < 5
+            )
+        except Exception:
+            is_session = candidate.weekday() < 5
+        if is_session:
+            return candidate.isoformat()
+    return ""
+
+
+def _next_us_exchange_trading_date_str(day_value: str) -> str:
+    """Return the exchange session immediately following ``day_value``."""
+    try:
+        cursor = datetime.fromisoformat(str(day_value)[:10]).date()
+    except (TypeError, ValueError):
+        return ""
+    exchange = _us_exchange_calendar()
+    for offset in range(1, 11):
+        candidate = cursor + timedelta(days=offset)
+        try:
+            is_session = (
+                _is_exchange_trading_day(exchange, candidate)
+                if exchange is not None
+                else candidate.weekday() < 5
+            )
+        except Exception:
+            is_session = candidate.weekday() < 5
+        if is_session:
+            return candidate.isoformat()
+    return ""
+
+
+def _cup_handle_next_session_trigger_state(
+    ticker: str,
+    breakout_level: float,
+    *,
+    bars: Optional[List[Dict[str, Any]]] = None,
+    now_ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Require a fresh completed-5m trigger after yesterday's daily close.
+
+    A daily close proves the pattern, not today's executable entry.  Promotion
+    therefore needs either a recent cross, a held retest, or an opening hold;
+    all variants must still be near the lip and finish with constructive price
+    action.  The final mail-time bid/ask/path revalidation remains mandatory.
+    """
+    level = _alert_float(breakout_level, None)
+    symbol = str(ticker or "").strip().upper()
+    if not symbol or level is None or level <= 0:
+        return {"confirmed": False, "reason": "cup_next_session_trigger_data_missing"}
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    try:
+        from zoneinfo import ZoneInfo
+
+        current_market_date = datetime.fromtimestamp(
+            current_ts, timezone.utc
+        ).astimezone(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return {
+            "confirmed": False,
+            "reason": "cup_next_session_market_date_invalid",
+        }
+    recent = list(bars) if bars is not None else _fetch_recent_stock_5m_bars(
+        symbol, limit=96
+    )
+    cleaned: List[Dict[str, Any]] = []
+    for bar in recent:
+        if not isinstance(bar, dict):
+            continue
+        close = _alert_float(bar.get("close", bar.get("c")), None)
+        high = _alert_float(bar.get("high", bar.get("h")), None)
+        low = _alert_float(bar.get("low", bar.get("l")), None)
+        open_price = _alert_float(bar.get("open", bar.get("o")), None)
+        volume = _alert_float(bar.get("volume", bar.get("v")), None)
+        timestamp = _stock_market_timestamp_seconds(
+            bar.get("timestamp", bar.get("t"))
+        )
+        if (
+            None in (close, high, low, open_price, volume, timestamp)
+            or close <= 0
+            or open_price <= 0
+            or volume <= 0
+            or high < low
+        ):
+            continue
+        try:
+            if _stock_quote_session_at(float(timestamp)) != "US_REGULAR":
+                continue
+            bar_market_date = datetime.fromtimestamp(
+                float(timestamp), timezone.utc
+            ).astimezone(ZoneInfo("America/New_York")).date()
+            if bar_market_date != current_market_date:
+                continue
+        except Exception:
+            continue
+        cleaned.append({
+            "close": float(close),
+            "high": float(high),
+            "low": float(low),
+            "open": float(open_price),
+            "volume": float(volume),
+            "timestamp": float(timestamp),
+        })
+    if len(cleaned) < 2:
+        return {"confirmed": False, "reason": "cup_next_session_completed_5m_missing"}
+    if any(
+        right["timestamp"] <= left["timestamp"]
+        for left, right in zip(cleaned, cleaned[1:])
+    ):
+        return {"confirmed": False, "reason": "cup_next_session_5m_order_invalid"}
+
+    # A trigger is an execution event, not a durable pattern attribute.  Even
+    # when price still holds above the lip, a morning cross must not be revived
+    # hours later as a fresh entry.  Aggregate timestamps are bar starts, so
+    # freshness begins only when the latest completed five-minute candle closes.
+    latest_completed_ts = cleaned[-1]["timestamp"] + 300.0
+    trigger_age_seconds = current_ts - latest_completed_ts
+    if trigger_age_seconds < -5.0:
+        return {
+            "confirmed": False,
+            "reason": "cup_next_session_completed_5m_in_future",
+        }
+    if trigger_age_seconds > _MAIL_TRIGGER_MAX_AGE_SEC:
+        return {
+            "confirmed": False,
+            "reason": "cup_next_session_completed_5m_stale",
+        }
+
+    confirmation_level = level * 1.001
+    recent_start = max(1, len(cleaned) - 12)
+    crosses = [
+        idx
+        for idx in range(recent_start, len(cleaned))
+        if cleaned[idx - 1]["close"] < confirmation_level
+        and cleaned[idx]["close"] >= confirmation_level
+    ]
+    retests = [
+        idx
+        for idx in range(max(0, len(cleaned) - 12), len(cleaned))
+        if cleaned[idx]["low"] <= level * 1.005
+        and cleaned[idx]["close"] >= level * 0.998
+    ]
+    opening_hold = bool(
+        len(cleaned) <= 6
+        and cleaned[0]["close"] >= confirmation_level
+        and cleaned[1]["close"] >= confirmation_level
+    )
+    trigger_index: Optional[int] = None
+    trigger_type = ""
+    if crosses:
+        trigger_index = crosses[-1]
+        trigger_type = "fresh_5m_cross"
+    elif retests:
+        trigger_index = retests[-1]
+        trigger_type = "5m_retest_held"
+    elif opening_hold:
+        trigger_index = 1
+        trigger_type = "opening_5m_hold"
+    if trigger_index is None:
+        return {"confirmed": False, "reason": "cup_next_session_trigger_not_confirmed"}
+
+    trigger_completed_ts = cleaned[trigger_index]["timestamp"] + 300.0
+    actual_trigger_age_seconds = current_ts - trigger_completed_ts
+    if actual_trigger_age_seconds < -5.0:
+        return {
+            "confirmed": False,
+            "reason": "cup_next_session_trigger_in_future",
+        }
+    if actual_trigger_age_seconds > _MAIL_TRIGGER_MAX_AGE_SEC:
+        return {
+            "confirmed": False,
+            "reason": "cup_next_session_trigger_stale",
+        }
+
+    latest = cleaned[-1]
+    latest_range = max(latest["high"] - latest["low"], 1e-9)
+    latest_close_position = (latest["close"] - latest["low"]) / latest_range
+    extension_pct = (latest["close"] - level) / level * 100.0
+    if latest["close"] < confirmation_level:
+        return {"confirmed": False, "reason": "cup_next_session_lip_not_held"}
+    if extension_pct < 0 or extension_pct > 2.5:
+        return {"confirmed": False, "reason": "cup_next_session_entry_extended"}
+    if latest["close"] < latest["open"] or latest_close_position < 0.55:
+        return {"confirmed": False, "reason": "cup_next_session_latest_5m_weak"}
+    if any(
+        bar["close"] < level * 0.997
+        for bar in cleaned[trigger_index:]
+    ):
+        return {"confirmed": False, "reason": "cup_next_session_trigger_failed"}
+
+    # Polygon aggregate timestamps are bar starts; the evidence becomes causal
+    # only at the completed candle's close.
+    observed_ts = trigger_completed_ts
+    return {
+        "confirmed": True,
+        "reason": "cup_next_session_5m_trigger_confirmed",
+        "trigger_type": trigger_type,
+        "trigger_observed_ts": observed_ts,
+        "latest_close": latest["close"],
+        "extension_pct": round(extension_pct, 3),
+    }
+
+
+_CUP_HANDLE_WATCH_ROW_FIELDS = frozenset({
+    "ticker", "Ticker", "price", "Preis", "Price", "current_price",
+    "Prev_Close", "prev_close", "Dollar_Volume", "score", "grade",
+    "base_grade", "RVOL", "rvol", "Change_Pct", "change_pct",
+    "Close_Position", "close_pos", "latest_bar_change_pct",
+    "latest_bar_close_pos", "open_to_current_pct", "pattern",
+    "pattern_type", "pattern_timeframe", "confirmation_timeframe",
+    "pattern_score", "CupDepth%", "HandleDepth%", "Breakout_Level",
+    "Handle_Low", "Breakout_RVOL", "entry", "Entry", "stop_loss",
+    "StopLoss", "tp1", "TP1", "tp2", "TP2", "risk_reward",
+    "live_rr_ratio", "entry_distance_pct", "target_model", "direction",
+    "Signal_Direction", "scanner_note", "long_entry_quality", "data_gaps",
+    "daily_close_confirmed", "daily_close_confirmation_date",
+    "last_daily_bar_date", "entry_status", "trade_signal", "trade_action",
+    "alertable_long", "next_session_trigger_reason", "Strategy", "strategy",
+    "company_name", "Company_Name", "name", "Name",
+})
+_CUP_HANDLE_WATCH_SETUP_FIELDS = frozenset({
+    "direction", "trade_action", "entry_status", "entry", "stop_loss",
+    "stop", "tp1", "tp2", "risk_reward", "live_rr", "rr_model", "source",
+})
+
+
+def _cup_handle_watch_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Whitelist only code-owned setup and market fields for persistence."""
+    clean = {
+        key: value
+        for key, value in dict(row or {}).items()
+        if key in _CUP_HANDLE_WATCH_ROW_FIELDS
+        and isinstance(value, (str, int, float, bool, type(None)))
+    }
+    setup = row.get("trade_setup") if isinstance(row, dict) else None
+    if isinstance(setup, dict):
+        clean["trade_setup"] = {
+            key: value
+            for key, value in setup.items()
+            if key in _CUP_HANDLE_WATCH_SETUP_FIELDS
+            and isinstance(value, (str, int, float, bool, type(None)))
+        }
+    return clean
+
+
+def _cup_handle_watch_expiry_ts(target_session_date: str) -> Optional[float]:
+    """Expire shortly after the one permitted US regular session ends."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        target_date = datetime.fromisoformat(str(target_session_date)).date()
+        return datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            16,
+            15,
+            tzinfo=ZoneInfo("America/New_York"),
+        ).timestamp()
+    except Exception:
+        return None
+
+
+def _queue_cup_handle_next_session_watch(
+    row: Dict[str, Any],
+    *,
+    confirmation_date: str,
+    target_session_date: str,
+    breakout_level: Any,
+) -> bool:
+    """Persist one WAIT row without affecting scanner/mail behavior on error."""
+    ticker = _extract_alert_ticker(row)
+    expiry_ts = _cup_handle_watch_expiry_ts(target_session_date)
+    level = _alert_float(breakout_level, None)
+    if not ticker or not confirmation_date or not target_session_date or not expiry_ts or not level:
+        return False
+    now_ts = time.time()
+    identity = f"{ticker}|{confirmation_date}|{target_session_date}"
+    payload = {
+        "id": identity,
+        "ticker": ticker,
+        "confirmation_date": str(confirmation_date),
+        "target_session_date": str(target_session_date),
+        "breakout_level": float(level),
+        "created_at": now_ts,
+        "updated_at": now_ts,
+        "expires_at": expiry_ts,
+        "row": _cup_handle_watch_row(row),
+    }
+    try:
+        return bool(
+            _upsert_cup_handle_watch(
+                payload,
+                path=_CUP_HANDLE_WATCH_QUEUE_PATH,
+            )
+        )
+    except Exception as exc:
+        print(
+            "[Cup Watch] Queue update failed: "
+            + str(redact_sensitive_query_values(exc))
+        )
+        return False
+
+
+def _promote_cup_handle_watch_row(
+    queued_row: Dict[str, Any], trigger_state: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    observed_ts = _stock_market_timestamp_seconds(
+        trigger_state.get("trigger_observed_ts")
+    )
+    if observed_ts is None:
+        return None
+    promoted = dict(queued_row or {})
+    setup = dict(promoted.get("trade_setup") or {})
+    promoted.update({
+        "long_entry_quality": "NEXT_SESSION_5M_TRIGGER",
+        "entry_status": "NEXT_SESSION_TRIGGER_CONFIRMED",
+        "trade_signal": "JETZT_TRADEN",
+        "trade_action": "LONG_NOW",
+        "alertable_long": True,
+        "next_session_trigger_reason": trigger_state.get("reason"),
+        "next_session_trigger_type": trigger_state.get("trigger_type"),
+        "scan_price_observed_at": _stock_market_timestamp_iso(observed_ts),
+        "scan_price_source": (
+            "polygon_completed_5m_cup_handle_next_session_trigger"
+        ),
+        "scanner_note": (
+            "Cup-and-Handle gestern per Daily-Close bestaetigt; frischer "
+            "abgeschlossener 5m-Trigger heute bestaetigt. Entry bleibt von "
+            "finaler Echtzeit-Quote und Marktpfad abhaengig."
+        ),
+    })
+    setup.update({
+        "entry_status": "NEXT_SESSION_TRIGGER_CONFIRMED",
+        "trade_action": "LONG_NOW",
+    })
+    promoted["trade_setup"] = setup
+    return promoted
+
+
+def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[str, int]:
+    """Five-minute lightweight owner for queued next-session trigger checks."""
+    current_ts = float(time.time() if now_ts is None else now_ts)
+    now_utc = datetime.fromtimestamp(current_ts, timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        session_date = now_utc.astimezone(
+            ZoneInfo("America/New_York")
+        ).date().isoformat()
+    except Exception:
+        return {"claimed": 0, "triggered": 0, "completed": 0}
+
+    try:
+        status = _stock_trade_email_status(now_utc)
+    except TypeError:
+        status = _stock_trade_email_status()
+    except Exception:
+        status = {"allowed": False, "session": "UNKNOWN"}
+    regular_open = bool(status.get("allowed")) and (
+        _stock_session_family(status.get("session")) == "US_REGULAR"
+    )
+    if not regular_open:
+        _prune_cup_handle_watches(
+            session_date,
+            now_ts=current_ts,
+            path=_CUP_HANDLE_WATCH_QUEUE_PATH,
+        )
+        return {"claimed": 0, "triggered": 0, "completed": 0}
+
+    claims = _claim_cup_handle_watches(
+        session_date,
+        now_ts=current_ts,
+        path=_CUP_HANDLE_WATCH_QUEUE_PATH,
+    )
+    triggered = 0
+    completed = 0
+    owner_suppressed: Dict[str, int] = {}
+    expected_confirmation_date = _previous_us_exchange_trading_date_str(
+        session_date
+    )
+    for claim in claims:
+        identity = str(claim.get("id") or "")
+        owner = str(claim.get("lease_owner") or "")
+        remove = False
+        try:
+            row = claim.get("row")
+            ticker = str(claim.get("ticker") or "").strip().upper()
+            level = _alert_float(claim.get("breakout_level"), None)
+            valid = bool(
+                isinstance(row, dict)
+                and ticker
+                and level
+                and str(claim.get("confirmation_date") or "")
+                == str(expected_confirmation_date or "")
+                and str(claim.get("target_session_date") or "") == session_date
+            )
+            if not valid:
+                owner_suppressed["cup_next_session_claim_invalid"] = (
+                    owner_suppressed.get("cup_next_session_claim_invalid", 0)
+                    + 1
+                )
+                remove = True
+                continue
+            trigger_state = _cup_handle_next_session_trigger_state(
+                ticker,
+                float(level),
+                now_ts=current_ts,
+            )
+            if not trigger_state.get("confirmed"):
+                reason = str(
+                    trigger_state.get("reason")
+                    or "cup_next_session_trigger_not_confirmed"
+                )
+                owner_suppressed[reason] = owner_suppressed.get(reason, 0) + 1
+                continue
+            promoted = _promote_cup_handle_watch_row(row, trigger_state)
+            if not promoted:
+                owner_suppressed["cup_next_session_promotion_failed"] = (
+                    owner_suppressed.get(
+                        "cup_next_session_promotion_failed", 0
+                    )
+                    + 1
+                )
+                remove = True
+                continue
+            triggered += 1
+            state = _classify_alert_candidate("stock_strategy", promoted, current_ts)
+            cooldown_key = str(state.get("cooldown_key") or "")
+            _send_strategy_scan_alerts(
+                "Cup and Handle Breakout",
+                [promoted],
+                "stocks",
+            )
+            delivered = bool(
+                cooldown_key
+                and (
+                    cooldown_key in _EMAIL_COOLDOWN
+                    or _email_dedupe_remaining(
+                        cooldown_key,
+                        _alert_dedupe_ttl_seconds("stock_strategy"),
+                        now=time.time(),
+                    )
+                    > 0
+                )
+            )
+            remove = delivered
+            if delivered:
+                completed += 1
+        except Exception as exc:
+            owner_suppressed["cup_next_session_evaluation_exception"] = (
+                owner_suppressed.get(
+                    "cup_next_session_evaluation_exception", 0
+                )
+                + 1
+            )
+            print(
+                "[Cup Watch] Monitor item failed: "
+                + str(redact_sensitive_query_values(exc))
+            )
+        finally:
+            try:
+                claim_generation = int(claim.get("generation") or 0)
+            except (TypeError, ValueError, OverflowError):
+                claim_generation = 0
+            _finish_cup_handle_watch_claim(
+                identity,
+                owner,
+                remove=remove,
+                generation=claim_generation,
+                path=_CUP_HANDLE_WATCH_QUEUE_PATH,
+            )
+    if owner_suppressed:
+        _record_suppression_counts("cup_handle_watch", owner_suppressed)
+    return {"claimed": len(claims), "triggered": triggered, "completed": completed}
+
+
 def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     daily_bars = candidate.get("_daily_bars", [])
     liquidity_floor = max(int(strat.get("min_dollar_volume", 0) or 0), 2_000_000)
@@ -17947,7 +19514,52 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         return None
 
     price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
-    setup = _detect_cup_handle_breakout(daily_bars, current_price=price)
+    try:
+        session_status = _stock_trade_email_status()
+    except Exception:
+        session_status = {"allowed": False, "session": "UNKNOWN"}
+    us_session_open = bool(session_status.get("allowed"))
+    today_market_date = _current_us_market_date_str()
+    previous_market_date = _previous_us_exchange_trading_date_str(
+        today_market_date
+    )
+
+    # During the next regular session Polygon may already append today's
+    # unfinished daily bar.  Pattern confirmation must stay anchored to the
+    # previous completed session, never to that live bar.
+    completed_pattern_bars = list(daily_bars or [])
+    if (
+        us_session_open
+        and completed_pattern_bars
+        and today_market_date
+        and _daily_bar_date_str(completed_pattern_bars[-1]) == today_market_date
+    ):
+        completed_pattern_bars = completed_pattern_bars[:-1]
+    confirmation_bar_date = (
+        _daily_bar_date_str(completed_pattern_bars[-1])
+        if completed_pattern_bars
+        else ""
+    )
+    next_session_candidate = bool(
+        us_session_open
+        and previous_market_date
+        and confirmation_bar_date == previous_market_date
+    )
+    setup = None
+    if next_session_candidate:
+        setup = _detect_cup_handle_breakout(
+            completed_pattern_bars,
+            current_price=price,
+        )
+    if not setup:
+        next_session_candidate = False
+        completed_pattern_bars = list(daily_bars or [])
+        confirmation_bar_date = (
+            _daily_bar_date_str(completed_pattern_bars[-1])
+            if completed_pattern_bars
+            else ""
+        )
+        setup = _detect_cup_handle_breakout(daily_bars, current_price=price)
     if not setup:
         return None
 
@@ -18013,9 +19625,10 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "score": final_score,
         "grade": grade,
         "base_grade": grade,
-        # AUDIT K-2b: Frische-Stempel fuer die Daily-Close-Mail-Ausnahme
-        # (letzte Daily-Kerze muss der heutige US-Handelstag sein).
-        "last_daily_bar_date": _daily_bar_date_str(daily_bars[-1]) if daily_bars else "",
+        "daily_close_confirmed": False,
+        # Frische-Stempel fuer den Daily-Close-Watch-Status. Eine heutige
+        # abgeschlossene Kerze ist Evidenz, aber nie ein Afterhours-Entry.
+        "last_daily_bar_date": confirmation_bar_date,
         "data_gaps": bool(setup.get("data_gaps")),  # AUDIT N-4 (Anzeige-Info)
     })
     long_reasons = _long_entry_rule_reasons(enriched)
@@ -18023,28 +19636,149 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         return None
     enriched["long_entry_quality"] = _long_entry_quality(enriched)
     enriched["alertable_long"] = True
-    # AUDIT M-Cup&Handle: Waehrend der US-Regular-Session ist die Tageskerze
-    # unfertig — "BREAKOUT_CONFIRMED"/"JETZT_TRADEN" auf Basis des laufenden
-    # Daily-Close ist nicht belastbar (Kerze kann bis zum Schluss unter den
-    # Lip zurueckfallen). Minimal-invasiver Downgrade auf INTRADAY_UNCONFIRMED;
-    # der 5m-Fade-Check (_long_entry_rule_reasons) blockt weiterhin schwache
-    # Moves komplett. Nach Daily-Close bleibt CONFIRMED legitim.
-    try:
-        _us_session_open = bool(_stock_trade_email_status().get("allowed"))
-    except Exception:
-        _us_session_open = False
-    if _us_session_open:
+    # Today's unfinished daily candle is never actionable.  A pattern closed
+    # yesterday can, however, be promoted in the next session after a fresh
+    # completed-5m cross/retest/hold; the normal quote/path gate still runs
+    # immediately before mail delivery.
+    if us_session_open and next_session_candidate:
+        trigger_state = _cup_handle_next_session_trigger_state(
+            ticker,
+            setup["cup_lip"],
+        )
+        enriched["daily_close_confirmed"] = True
+        enriched["daily_close_confirmation_date"] = confirmation_bar_date
+        enriched["next_session_trigger_reason"] = trigger_state.get("reason")
+        if trigger_state.get("confirmed"):
+            observed_ts = _stock_market_timestamp_seconds(
+                trigger_state.get("trigger_observed_ts")
+            )
+            if observed_ts is None:
+                trigger_state = {
+                    "confirmed": False,
+                    "reason": "cup_next_session_trigger_timestamp_missing",
+                }
+            else:
+                enriched["long_entry_quality"] = "NEXT_SESSION_5M_TRIGGER"
+                enriched["entry_status"] = "NEXT_SESSION_TRIGGER_CONFIRMED"
+                enriched["trade_signal"] = "JETZT_TRADEN"
+                enriched["trade_action"] = "LONG_NOW"
+                enriched["alertable_long"] = True
+                enriched["next_session_trigger_type"] = trigger_state.get(
+                    "trigger_type"
+                )
+                enriched["scan_price_observed_at"] = _stock_market_timestamp_iso(
+                    observed_ts
+                )
+                enriched["scan_price_source"] = (
+                    "polygon_completed_5m_cup_handle_next_session_trigger"
+                )
+                trade_setup["entry_status"] = "NEXT_SESSION_TRIGGER_CONFIRMED"
+                trade_setup["trade_action"] = "LONG_NOW"
+                enriched["scanner_note"] = (
+                    "Cup-and-Handle gestern per Daily-Close bestaetigt; "
+                    "frischer abgeschlossener 5m-Trigger heute bestaetigt. "
+                    "Entry bleibt von finaler Echtzeit-Quote und Marktpfad abhaengig."
+                )
+        if not trigger_state.get("confirmed"):
+            enriched["long_entry_quality"] = "WAIT_NEXT_SESSION_TRIGGER"
+            enriched["entry_status"] = "NEXT_SESSION_TRIGGER_WAIT"
+            enriched["trade_signal"] = "BEOBACHTEN"
+            enriched["trade_action"] = "WAIT_FOR_5M_TRIGGER"
+            enriched["alertable_long"] = False
+            enriched["next_session_trigger_reason"] = trigger_state.get("reason")
+            trade_setup["entry_status"] = "NEXT_SESSION_TRIGGER_WAIT"
+            trade_setup["trade_action"] = "WAIT_FOR_5M_TRIGGER"
+            enriched["scanner_note"] = (
+                "Cup-and-Handle gestern per Daily-Close bestaetigt; heute "
+                "noch kein frischer abgeschlossener 5m-Cross/Retest/Hold."
+            )
+        # Persist before promotion/mail returns to the hourly sweep.  If a
+        # fresh trigger later fails final quote/path/SMTP transiently, the
+        # five-minute monitor may retry while the same trigger is still fresh.
+        _queue_cup_handle_next_session_watch(
+            enriched,
+            confirmation_date=confirmation_bar_date,
+            target_session_date=today_market_date,
+            breakout_level=setup["cup_lip"],
+        )
+    elif us_session_open:
+        enriched["long_entry_quality"] = "WAIT_DAILY_CLOSE"
         enriched["entry_status"] = "INTRADAY_UNCONFIRMED"
         enriched["trade_signal"] = "BEOBACHTEN"
         enriched["trade_action"] = "WAIT_FOR_DAILY_CLOSE"
         enriched["alertable_long"] = False
         trade_setup["entry_status"] = "INTRADAY_UNCONFIRMED"
         trade_setup["trade_action"] = "WAIT_FOR_DAILY_CLOSE"
-        # AUDIT M-5: kein "(oder via 5m-Trigger-Check)" mehr versprechen —
-        # es gibt keinen 5m-Trigger ueber den Pivot, nur den Fade-Check.
         enriched["scanner_note"] = (
             "Cup-and-Handle: 1D-Struktur intakt, aber Tageskerze noch offen — "
             "Breakout erst nach Daily-Close bestaetigt."
+        )
+    elif _stock_session_family(session_status.get("session")) == "PREMARKET":
+        enriched["daily_close_confirmed"] = True
+        enriched["daily_close_confirmation_date"] = confirmation_bar_date
+        enriched["long_entry_quality"] = "WATCH_NEXT_SESSION"
+        enriched["entry_status"] = "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+        enriched["trade_signal"] = "BEOBACHTEN"
+        enriched["trade_action"] = "PLAN_NEXT_SESSION"
+        enriched["alertable_long"] = False
+        trade_setup["entry_status"] = "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+        trade_setup["trade_action"] = "PLAN_NEXT_SESSION"
+        enriched["scanner_note"] = (
+            "Cup-and-Handle per vorherigem Tagesschluss bestaetigt; "
+            "Premarket nur Watch. 5m-Triggerpruefung und Entry erst in der "
+            "regulaeren US-Session."
+        )
+        if (
+            today_market_date
+            and confirmation_bar_date
+            == _previous_us_exchange_trading_date_str(today_market_date)
+        ):
+            _queue_cup_handle_next_session_watch(
+                enriched,
+                confirmation_date=confirmation_bar_date,
+                target_session_date=today_market_date,
+                breakout_level=setup["cup_lip"],
+            )
+    elif "CLOSED" in str(session_status.get("session") or "").upper():
+        enriched["daily_close_confirmed"] = True
+        enriched["daily_close_confirmation_date"] = confirmation_bar_date
+        enriched["long_entry_quality"] = "WATCH_NEXT_SESSION"
+        enriched["entry_status"] = "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+        enriched["trade_signal"] = "BEOBACHTEN"
+        enriched["trade_action"] = "PLAN_NEXT_SESSION"
+        enriched["alertable_long"] = False
+        trade_setup["entry_status"] = "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+        trade_setup["trade_action"] = "PLAN_NEXT_SESSION"
+        enriched["scanner_note"] = (
+            "Cup-and-Handle per Tagesschluss bestaetigt; 5m-Fade-Check "
+            "bestanden (kein Gegenvolumen) — nur Watch/Planung fuer die "
+            "naechste ausfuehrbare Session, kein Afterhours-Entry."
+        )
+        next_session_date = _next_us_exchange_trading_date_str(
+            today_market_date
+        )
+        if (
+            next_session_date
+            and confirmation_bar_date
+            == _previous_us_exchange_trading_date_str(next_session_date)
+        ):
+            _queue_cup_handle_next_session_watch(
+                enriched,
+                confirmation_date=confirmation_bar_date,
+                target_session_date=next_session_date,
+                breakout_level=setup["cup_lip"],
+            )
+    else:
+        enriched["long_entry_quality"] = "WATCH_SESSION_UNKNOWN"
+        enriched["entry_status"] = "SESSION_UNVERIFIED_WATCH_ONLY"
+        enriched["trade_signal"] = "BEOBACHTEN"
+        enriched["trade_action"] = "WAIT_FOR_SESSION_VERIFICATION"
+        enriched["alertable_long"] = False
+        trade_setup["entry_status"] = "SESSION_UNVERIFIED_WATCH_ONLY"
+        trade_setup["trade_action"] = "WAIT_FOR_SESSION_VERIFICATION"
+        enriched["scanner_note"] = (
+            "Cup-and-Handle erkannt, aber Markt-Session nicht verifizierbar — "
+            "nur beobachten."
         )
     return enriched
 
@@ -20156,6 +21890,7 @@ def _bear_scan_wrapper() -> None:
                     )
             # V2.6b: Crash-Flash — EINE Sammel-Mail pro Tag, nur Grade S/A, keine ETFs/ETPs
             _ETF_KEYWORDS = {"etf", "etp", "leveraged", "inverse", "ultra", "proshares", "direxion", "amplify", "graniteshares"}
+            _bear_batch_suppressed: Dict[str, int] = {}
             _crash_stocks = []
             _crash_level_tickers = set()
             for bd in result.get("breakdown_stocks", []):
@@ -20165,11 +21900,29 @@ def _bear_scan_wrapper() -> None:
                 _cs_chg = bd.get("change_pct", 0)
                 _crash_state = _classify_crash_alert_candidate(bd)
                 # Nur echte, aktuelle Crash-Setups: zentraler Alert-Gate inklusive Asset, Plan und Trade-Health.
-                if _cs_chg > -10 or not _crash_state.get("alertable_now"):
+                if _cs_chg > -10:
+                    _bear_batch_suppressed["bear_crash_drop_below_threshold"] = (
+                        _bear_batch_suppressed.get(
+                            "bear_crash_drop_below_threshold", 0
+                        ) + 1
+                    )
+                    continue
+                if not _crash_state.get("alertable_now"):
+                    for _reason in _crash_state.get("suppression_reasons") or ():
+                        _reason = str(_reason or "")
+                        if _reason:
+                            _bear_batch_suppressed[_reason] = (
+                                _bear_batch_suppressed.get(_reason, 0) + 1
+                            )
                     continue
                 # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
                 _cs_tk_up = _cs_ticker.upper()
                 if len(_cs_tk_up) >= 4 and _cs_tk_up[-1] in ("X", "Q", "S") and _cs_tk_up[-2] in ("X", "Q", "S"):
+                    _bear_batch_suppressed["non_common_stock_product"] = (
+                        _bear_batch_suppressed.get(
+                            "non_common_stock_product", 0
+                        ) + 1
+                    )
                     continue  # SOXS, SQQQ, SPXS, UVXY etc.
                 _crash_level_tickers.add(_cs_tk_up)
                 _crash_stocks.append(bd)
@@ -20186,6 +21939,11 @@ def _bear_scan_wrapper() -> None:
                         _fresh_crash_stocks.append(_cs)
                         _crash_dedupe_keys.append(_dedupe_key)
                     else:
+                        _bear_batch_suppressed["dedupe_claim_not_owned"] = (
+                            _bear_batch_suppressed.get(
+                                "dedupe_claim_not_owned", 0
+                            ) + 1
+                        )
                         print(f"[Bear] CRASH Alert skipped by persistent dedupe: {_ticker}")
                 _crash_stocks = _fresh_crash_stocks
             else:
@@ -20195,6 +21953,11 @@ def _bear_scan_wrapper() -> None:
             _stock_bear_mail_allowed = bool(_stock_bear_mail_status.get("allowed"))
             _stock_bear_mail_reason = str(_stock_bear_mail_status.get("reason") or "US market closed")
             if _crash_stocks and not _stock_bear_mail_allowed:
+                _bear_batch_suppressed["stock_session_not_executable"] = (
+                    _bear_batch_suppressed.get(
+                        "stock_session_not_executable", 0
+                    ) + len(_crash_stocks)
+                )
                 for _dedupe_key in _crash_dedupe_keys:
                     _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
                 _record_email_event(
@@ -20267,6 +22030,11 @@ def _bear_scan_wrapper() -> None:
                         for _dedupe_key in _crash_dedupe_keys:
                             _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
                 else:
+                    _bear_batch_suppressed["daily_summary_dedupe_active"] = (
+                        _bear_batch_suppressed.get(
+                            "daily_summary_dedupe_active", 0
+                        ) + len(_crash_stocks)
+                    )
                     for _dedupe_key in _crash_dedupe_keys:
                         _email_dedupe_release(_dedupe_key, claimed_at=_crash_claim_now)
             elif result.get("breakdown_stocks"):
@@ -20286,11 +22054,27 @@ def _bear_scan_wrapper() -> None:
                     continue
                 _bear_state = _classify_alert_candidate("bear", bd)
                 if not _bear_state.get("alertable_now"):
+                    for _reason in _bear_state.get("suppression_reasons") or ():
+                        _reason = str(_reason or "")
+                        if _reason:
+                            _bear_batch_suppressed[_reason] = (
+                                _bear_batch_suppressed.get(_reason, 0) + 1
+                            )
                     continue
                 _ticker_up = str(bd.get("ticker", "")).upper()
                 if _ticker_up in _crash_level_tickers or _bearish_stock_alert_remaining(_ticker_up) > 0:
+                    _bear_batch_suppressed["bearish_ticker_already_alerted"] = (
+                        _bear_batch_suppressed.get(
+                            "bearish_ticker_already_alerted", 0
+                        ) + 1
+                    )
                     continue
                 if _has_open_equivalent_trade_safe("bear", bd):
+                    _bear_batch_suppressed["open_equivalent_trade"] = (
+                        _bear_batch_suppressed.get(
+                            "open_equivalent_trade", 0
+                        ) + 1
+                    )
                     continue
                 _gr = bd.get("grade", "?")
                 _gc = {"S": "#7c3aed", "A": "#16a34a", "B": "#2563eb", "C": "#ca8a04"}.get(_gr, "#666")
@@ -20310,6 +22094,13 @@ def _bear_scan_wrapper() -> None:
             # Final market-time validation also applies to the separately built
             # Bear summary. It must never bypass the generic stock-mail gate.
             if len(_bear_alert_rows) > 1:
+                _record_suppression_counts(
+                    "bear",
+                    {
+                        "mail_adjacent_single_candidate_deferred":
+                        len(_bear_alert_rows) - 1
+                    },
+                )
                 _record_email_event(
                     "Bear Scanner Alert",
                     "suppressed",
@@ -20332,6 +22123,13 @@ def _bear_scan_wrapper() -> None:
                         dict(_bear_validation.get("candidate") or {})
                     )
                 else:
+                    _bear_reason = str(
+                        _bear_validation.get("reason")
+                        or "final_stock_revalidation_failed"
+                    )
+                    _bear_batch_suppressed[_bear_reason] = (
+                        _bear_batch_suppressed.get(_bear_reason, 0) + 1
+                    )
                     _record_email_event(
                         "Bear Scanner Alert",
                         "skipped",
@@ -20364,6 +22162,11 @@ def _bear_scan_wrapper() -> None:
                 )
             _total_signals = len(_bd_rows)
             if _total_signals > 0 and not _stock_bear_mail_allowed:
+                _bear_batch_suppressed["stock_session_not_executable"] = (
+                    _bear_batch_suppressed.get(
+                        "stock_session_not_executable", 0
+                    ) + _total_signals
+                )
                 _record_email_event(
                     "Bear Scanner Alert",
                     "skipped",
@@ -20426,6 +22229,12 @@ def _bear_scan_wrapper() -> None:
                             _mark_bearish_stock_alert(_ticker, now=time.time())
                     else:
                         _email_dedupe_release_after_send(_bear_ck, claimed_at=_bear_claim_now)
+                else:
+                    _bear_batch_suppressed["daily_summary_dedupe_active"] = (
+                        _bear_batch_suppressed.get(
+                            "daily_summary_dedupe_active", 0
+                        ) + _total_signals
+                    )
             elif result.get("breakdown_stocks"):
                 _record_email_event(
                     "Bear Scanner Alert",
@@ -20433,6 +22242,7 @@ def _bear_scan_wrapper() -> None:
                     "no_alertable_short_setup:"
                     + _alert_suppression_summary_for_rows("bear", result.get("breakdown_stocks", [])),
                 )
+            _record_suppression_counts("bear", _bear_batch_suppressed)
         else:
             print(f"[Bear] No data (market closed/weekend?) — keeping previous cache")
     except Exception as e:
@@ -20444,6 +22254,517 @@ def _bear_scan_wrapper() -> None:
 # ── Background Scheduler ──
 # Runs all scans automatically at defined intervals (like old Streamlit version)
 _scheduler_running = False
+
+
+def _stock_aggregate_capability_probe(
+    ticker: str,
+    snapshot: Dict[str, Any],
+    *,
+    composite_generation: int,
+    market_session: str,
+    quote_probe_id: int,
+) -> Dict[str, Any]:
+    """Verify one tightly bounded v2 1m-aggregate control interval."""
+    symbol = str(ticker or "").upper().strip()
+    quote_ts = _stock_market_timestamp_seconds(snapshot.get("observed_ts"))
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    def _record(
+        result: Dict[str, Any], *, http_status: Optional[int] = None
+    ) -> Dict[str, Any]:
+        reason = str(result.get("reason") or "") or None
+        access = (
+            "accessible"
+            if http_status == 200
+            else "authentication_failed"
+            if http_status == 401
+            else "forbidden"
+            if http_status == 403
+            else "rate_limited"
+            if http_status == 429
+            else "http_error"
+            if http_status is not None
+            else "transport_or_local_error"
+        )
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            composite = _STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}
+            publish_allowed = bool(
+                int(composite.get("generation") or 0)
+                == int(composite_generation)
+                and composite.get("status") == "in_flight"
+                and str(composite.get("market_session") or "")
+                == market_session
+                and composite.get("quote_probe_id") == quote_probe_id
+            )
+            if publish_allowed:
+                _STOCK_QUOTE_CAPABILITY["aggregate_endpoint"] = {
+                    "name": _STOCK_AGGREGATE_CAPABILITY_ENDPOINT,
+                    "path": _STOCK_AGGREGATE_CAPABILITY_PATH,
+                    "access": access,
+                    "checked_at": checked_at,
+                    "reason": reason,
+                    "http_status": http_status,
+                    "composite_generation": composite_generation,
+                    "market_session": market_session,
+                    "quote_probe_id": quote_probe_id,
+                }
+                if result.get("ok"):
+                    _STOCK_QUOTE_CAPABILITY.update({
+                        "last_verified_aggregate_at": checked_at,
+                        "last_verified_aggregate_generation": composite_generation,
+                        "last_verified_aggregate_session": market_session,
+                    })
+        if not publish_allowed:
+            result = dict(result)
+            result["_capability_publication"] = "superseded"
+        return result
+
+    if not symbol or quote_ts is None:
+        return _record({
+            "ok": False,
+            "reason": "aggregate_probe_watermark_missing",
+        })
+    start_ms = int(math.floor(max(0.0, quote_ts - 300.0) * 1000.0))
+    end_ms = int(math.ceil(quote_ts * 1000.0))
+    try:
+        response = rate_limited_get(
+            f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start_ms}/{end_ms}",
+            params={
+                "apiKey": POLYGON_KEY,
+                "adjusted": "true",
+                "sort": "asc",
+                "limit": 10,
+            },
+            timeout=8,
+        )
+    except Exception as exc:
+        print(
+            "[Health] stock aggregate probe failed: "
+            + str(redact_sensitive_query_values(exc))
+        )
+        return _record({
+            "ok": False,
+            "reason": "aggregate_probe_fetch_error",
+        })
+    if response.status_code != 200:
+        return _record(
+            {
+                "ok": False,
+                "reason": f"aggregate_probe_http_{response.status_code}",
+            },
+            http_status=response.status_code,
+        )
+    try:
+        payload = response.json()
+    except Exception:
+        return _record(
+            {"ok": False, "reason": "aggregate_probe_payload_invalid"},
+            http_status=200,
+        )
+    if not isinstance(payload, dict) or str(
+        payload.get("status") or ""
+    ).strip().upper() != "OK":
+        return _record(
+            {"ok": False, "reason": "aggregate_probe_not_realtime"},
+            http_status=200,
+        )
+    raw_results = payload.get("results")
+    results = [] if raw_results is None else raw_results
+    if payload.get("next_url") or not isinstance(results, list) or len(results) >= 10:
+        return _record(
+            {"ok": False, "reason": "aggregate_probe_incomplete"},
+            http_status=200,
+        )
+    return _record(
+        {"ok": True, "status": "verified_bounded_1m_aggregates"},
+        http_status=200,
+    )
+
+
+def _stock_trade_replay_capability_probe(
+    ticker: str,
+    snapshot: Dict[str, Any],
+    *,
+    composite_generation: Optional[int] = None,
+    market_session: Optional[str] = None,
+    quote_probe_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Verify bounded v3 trade replay separately from snapshot entitlement."""
+    symbol = str(ticker or "").upper().strip()
+    quote_ts = _stock_market_timestamp_seconds(snapshot.get("observed_ts"))
+    last_trade_ts = _stock_market_timestamp_seconds(snapshot.get("last_trade_ts"))
+    checked_at = datetime.now(timezone.utc).isoformat()
+
+    def _record(
+        result: Dict[str, Any],
+        *,
+        http_status: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        reason = str(result.get("reason") or "") or None
+        if http_status == 200:
+            access = "accessible"
+        elif http_status == 401:
+            access = "authentication_failed"
+        elif http_status == 403:
+            access = "forbidden"
+        elif http_status == 429:
+            access = "rate_limited"
+        elif http_status is not None:
+            access = "http_error"
+        else:
+            access = "transport_or_local_error"
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            publish_allowed = composite_generation is None
+            if composite_generation is not None:
+                composite = _STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}
+                publish_allowed = bool(
+                    int(composite.get("generation") or 0)
+                    == int(composite_generation)
+                    and composite.get("status") == "in_flight"
+                    and str(composite.get("market_session") or "")
+                    == str(market_session or "")
+                    and composite.get("quote_probe_id") == quote_probe_id
+                )
+            if publish_allowed:
+                _STOCK_QUOTE_CAPABILITY["trade_replay_endpoint"] = {
+                    "name": _STOCK_TRADE_REPLAY_CAPABILITY_ENDPOINT,
+                    "path": _STOCK_TRADE_REPLAY_CAPABILITY_PATH,
+                    "access": access,
+                    "checked_at": checked_at,
+                    "reason": reason,
+                    "http_status": http_status,
+                    "composite_generation": composite_generation,
+                    "market_session": market_session,
+                    "quote_probe_id": quote_probe_id,
+                }
+                if result.get("ok"):
+                    _STOCK_QUOTE_CAPABILITY.update({
+                        "last_verified_trade_replay_at": checked_at,
+                        "last_verified_trade_replay_market_timestamp": last_trade_ts,
+                        "last_verified_trade_replay_generation": composite_generation,
+                        "last_verified_trade_replay_session": market_session,
+                    })
+        if composite_generation is not None and not publish_allowed:
+            result = dict(result)
+            result["_capability_publication"] = "superseded"
+        return result
+
+    if not symbol or quote_ts is None or last_trade_ts is None:
+        return _record({
+            "ok": False,
+            "reason": "trade_replay_probe_watermark_missing",
+        })
+    if last_trade_ts > quote_ts:
+        return _record({
+            "ok": False,
+            "reason": "final_last_trade_after_quote_timestamp",
+        })
+    lower_ts = max(0.0, last_trade_ts - 0.001)
+    try:
+        response = rate_limited_get(
+            f"https://api.polygon.io/v3/trades/{symbol}",
+            params={
+                "apiKey": POLYGON_KEY,
+                "timestamp.gte": int(math.floor(lower_ts * 1_000_000_000)),
+                "timestamp.lte": int(math.ceil(last_trade_ts * 1_000_000_000)),
+                "sort": "timestamp",
+                "order": "asc",
+                "limit": 1000,
+            },
+            timeout=8,
+        )
+    except Exception as exc:
+        print(
+            "[Health] stock trade replay probe failed: "
+            + str(redact_sensitive_query_values(exc))
+        )
+        return _record({
+            "ok": False,
+            "reason": "trade_replay_probe_fetch_error",
+        })
+    if response.status_code != 200:
+        return _record(
+            {
+                "ok": False,
+                "reason": f"trade_replay_probe_http_{response.status_code}",
+            },
+            http_status=response.status_code,
+        )
+    try:
+        payload = response.json()
+    except Exception:
+        return _record(
+            {"ok": False, "reason": "trade_replay_probe_payload_invalid"},
+            http_status=200,
+        )
+    if not isinstance(payload, dict) or str(
+        payload.get("status") or ""
+    ).strip().upper() != "OK":
+        return _record(
+            {"ok": False, "reason": "trade_replay_probe_not_realtime"},
+            http_status=200,
+        )
+    raw_trades_value = payload.get("results")
+    raw_trades = [] if raw_trades_value is None else raw_trades_value
+    if payload.get("next_url") or not isinstance(raw_trades, list) or len(raw_trades) >= 1000:
+        return _record(
+            {"ok": False, "reason": "trade_replay_probe_incomplete"},
+            http_status=200,
+        )
+    latest_trade = None
+    for raw_trade in raw_trades:
+        trade_ts = _stock_market_timestamp_from(
+            raw_trade,
+            ("sip_timestamp", "participant_timestamp", "timestamp", "t"),
+        )
+        if trade_ts is not None:
+            latest_trade = trade_ts if latest_trade is None else max(latest_trade, trade_ts)
+    if (
+        latest_trade is None
+        or _stock_market_timestamp_order_ns(latest_trade)
+        < _stock_market_timestamp_order_ns(last_trade_ts)
+    ):
+        return _record(
+            {"ok": False, "reason": "trade_replay_probe_watermark_not_reached"},
+            http_status=200,
+        )
+    return _record(
+        {
+            "ok": True,
+            "status": "verified_bounded_trade_replay",
+            "evidence_timestamp": latest_trade,
+        },
+        http_status=200,
+    )
+
+
+def _stock_quote_capability_control_probe() -> Dict[str, Any]:
+    """Diagnose one atomic quote + bounded aggregate + trade generation.
+
+    The scheduler calls this at most every 15 minutes.  It performs no provider
+    request outside US regular trading and never sends mail or writes tracker
+    rows.  AAPL is diagnostic evidence only; normal candidates still need their
+    own <=90-second quote and complete market-path validation before delivery.
+    """
+    now_utc = datetime.now(timezone.utc)
+    try:
+        session = _stock_quote_session_at(now_utc.timestamp())
+    except Exception:
+        session = "UNKNOWN"
+    if session != "US_REGULAR":
+        return {
+            "ok": True,
+            "status": "not_applicable",
+            "reason": f"control_probe_market_{session.lower()}",
+        }
+    global _STOCK_QUOTE_CAPABILITY_COMPOSITE_SEQUENCE
+    started_at = datetime.now(timezone.utc).isoformat()
+    with _STOCK_QUOTE_CAPABILITY_LOCK:
+        _STOCK_QUOTE_CAPABILITY_COMPOSITE_SEQUENCE += 1
+        composite_generation = _STOCK_QUOTE_CAPABILITY_COMPOSITE_SEQUENCE
+        _STOCK_QUOTE_CAPABILITY["composite_probe"] = {
+            "generation": composite_generation,
+            "status": "in_flight",
+            "market_session": session,
+            "started_at": started_at,
+            "checked_at": None,
+            "quote_probe_id": None,
+            "reason": None,
+        }
+
+    def _finish_composite(status: str, reason: Optional[str]) -> bool:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            composite = _STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}
+            if int(composite.get("generation") or 0) != composite_generation:
+                return False
+            quote_probe_id = composite.get("quote_probe_id")
+            replay_endpoint = (
+                _STOCK_QUOTE_CAPABILITY.get("trade_replay_endpoint") or {}
+            )
+            aggregate_endpoint = (
+                _STOCK_QUOTE_CAPABILITY.get("aggregate_endpoint") or {}
+            )
+            if status == "verified" and (
+                quote_probe_id is None
+                or replay_endpoint.get("composite_generation")
+                != composite_generation
+                or replay_endpoint.get("quote_probe_id") != quote_probe_id
+                or str(replay_endpoint.get("market_session") or "") != session
+                or _STOCK_QUOTE_CAPABILITY.get(
+                    "last_verified_trade_replay_generation"
+                )
+                != composite_generation
+                or aggregate_endpoint.get("composite_generation")
+                != composite_generation
+                or aggregate_endpoint.get("quote_probe_id") != quote_probe_id
+                or str(aggregate_endpoint.get("market_session") or "")
+                != session
+                or _STOCK_QUOTE_CAPABILITY.get(
+                    "last_verified_aggregate_generation"
+                )
+                != composite_generation
+            ):
+                status = "failed"
+                reason = "composite_generation_evidence_mismatch"
+            composite.update({
+                "status": status,
+                "checked_at": checked_at,
+                "reason": reason,
+            })
+            _STOCK_QUOTE_CAPABILITY["composite_probe"] = composite
+            if status == "verified":
+                _STOCK_QUOTE_CAPABILITY.update({
+                    "last_verified_composite_at": checked_at,
+                    "last_verified_composite_generation": composite_generation,
+                    "last_verified_composite_session": session,
+                })
+            return status == "verified"
+
+    result = _fetch_stock_revalidation_snapshot(
+        "AAPL",
+        now_ts=now_utc.timestamp(),
+    )
+    if not result.get("ok"):
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            composite = _STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}
+            if int(composite.get("generation") or 0) == composite_generation:
+                _STOCK_QUOTE_CAPABILITY["control_quote"] = {
+                    "status": "failed",
+                    "generation": composite_generation,
+                    "market_session": session,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "observed_ts": None,
+                    "quote_age_seconds": result.get("age_seconds"),
+                    "quote_probe_id": None,
+                    "endpoint_access": (
+                        (_STOCK_QUOTE_CAPABILITY.get("latest_probe") or {}).get(
+                            "endpoint_access"
+                        )
+                        or "not_verified"
+                    ),
+                    "reason": result.get("reason"),
+                }
+        if not _finish_composite(
+            "failed", str(result.get("reason") or "snapshot_probe_failed")
+        ) and (
+            (_STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}).get(
+                "generation"
+            )
+            != composite_generation
+        ):
+            return {
+                "ok": True,
+                "status": "superseded",
+                "generation": composite_generation,
+            }
+        raise RuntimeError(
+            "quote capability control probe failed: "
+            + str(result.get("reason") or "unknown")
+        )
+    quote_probe_id = result.get("_capability_probe_id")
+    with _STOCK_QUOTE_CAPABILITY_LOCK:
+        composite = _STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}
+        if int(composite.get("generation") or 0) != composite_generation:
+            return {
+                "ok": True,
+                "status": "superseded",
+                "generation": composite_generation,
+            }
+        if quote_probe_id is None:
+            composite.update({
+                "status": "failed",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "composite_quote_probe_generation_mismatch",
+            })
+            _STOCK_QUOTE_CAPABILITY["composite_probe"] = composite
+            raise RuntimeError(
+                "quote capability control probe generation mismatch"
+            )
+        composite["quote_probe_id"] = quote_probe_id
+        _STOCK_QUOTE_CAPABILITY["composite_probe"] = composite
+        control_quote_checked_at = datetime.now(timezone.utc).isoformat()
+        _STOCK_QUOTE_CAPABILITY["control_quote"] = {
+            "status": "verified",
+            "generation": composite_generation,
+            "market_session": session,
+            "checked_at": control_quote_checked_at,
+            "observed_ts": result.get("observed_ts"),
+            "quote_age_seconds": result.get("age_seconds"),
+            "quote_probe_id": quote_probe_id,
+            "endpoint_access": "accessible",
+            "reason": None,
+        }
+        _STOCK_QUOTE_CAPABILITY.update({
+            "last_verified_control_quote_at": control_quote_checked_at,
+            "last_verified_control_quote_observed_at": result.get("observed_ts"),
+            "last_verified_control_quote_age_seconds": result.get("age_seconds"),
+            "last_verified_control_quote_generation": composite_generation,
+            "last_verified_control_quote_session": session,
+        })
+
+    aggregate_probe = _stock_aggregate_capability_probe(
+        "AAPL",
+        result,
+        composite_generation=composite_generation,
+        market_session=session,
+        quote_probe_id=quote_probe_id,
+    )
+
+    trade_replay = _stock_trade_replay_capability_probe(
+        "AAPL",
+        result,
+        composite_generation=composite_generation,
+        market_session=session,
+        quote_probe_id=quote_probe_id,
+    )
+    if not aggregate_probe.get("ok") or not trade_replay.get("ok"):
+        if (
+            aggregate_probe.get("_capability_publication") == "superseded"
+            or trade_replay.get("_capability_publication") == "superseded"
+        ):
+            return {
+                "ok": True,
+                "status": "superseded",
+                "generation": composite_generation,
+            }
+        failure_reason = str(
+            aggregate_probe.get("reason")
+            if not aggregate_probe.get("ok")
+            else trade_replay.get("reason")
+            or "composite_endpoint_probe_failed"
+        )
+        _finish_composite("failed", failure_reason)
+        raise RuntimeError(
+            "stock mail-evidence capability control probe failed: "
+            + failure_reason
+        )
+    if not _finish_composite("verified", None):
+        with _STOCK_QUOTE_CAPABILITY_LOCK:
+            current_generation = int(
+                (_STOCK_QUOTE_CAPABILITY.get("composite_probe") or {}).get(
+                    "generation"
+                )
+                or 0
+            )
+        if current_generation != composite_generation:
+            return {
+                "ok": True,
+                "status": "superseded",
+                "generation": composite_generation,
+            }
+        raise RuntimeError("quote capability composite publish failed")
+    return {
+        "ok": True,
+        "status": "verified_realtime_quote",
+        "ticker": "AAPL",
+        "age_seconds": result.get("age_seconds"),
+        "trade_replay_status": trade_replay.get("status"),
+        "aggregate_status": aggregate_probe.get("status"),
+        "generation": composite_generation,
+    }
+
+
 CRYPTO_EXPLOSION_CACHE = "/tmp/crypto_explosion_cache.json"
 CRYPTO_TRADE_SIGNALS_CACHE = "/tmp/crypto_trade_signals_cache.json"
 PENNY_STOCKS_CACHE = "/tmp/penny_stock_scanner_cache.json"
@@ -20475,8 +22796,15 @@ _scan_status = {
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    "cup_handle_watch": {"running": False, "last_run": None, "next_run": None, "interval_min": _CUP_HANDLE_WATCH_MONITOR_INTERVAL_MIN},
+    "quote_capability": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
 }
 SCAN_CACHE_MAP = {
+    # Control/queue monitors own runtime state but intentionally publish no
+    # scanner-result cache.  Explicit ``None`` keeps ownership/health contracts
+    # complete without making the scheduler skip a required control run.
+    "quote_capability": None,
+    "cup_handle_watch": None,
     "bi_long": "/tmp/bi_cache_long.json",
     "bi_short": "/tmp/bi_cache_short.json",
     "bear": "/tmp/bear_scanner_cache.json",
@@ -20619,9 +22947,10 @@ def _scan_cache_revision(cache_path: Optional[str]) -> Optional[tuple[int, int]]
         return None
 
 
+_ALPHA_RUNTIME_TMP_DIR = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or tempfile.gettempdir()
 _SCAN_PROGRESS_MAP = {
-    "bi_long": "/tmp/bi_scan_progress_long.json",
-    "bi_short": "/tmp/bi_scan_progress_short.json",
+    "bi_long": os.path.join(_ALPHA_RUNTIME_TMP_DIR, "bi_scan_progress_long.json"),
+    "bi_short": os.path.join(_ALPHA_RUNTIME_TMP_DIR, "bi_scan_progress_short.json"),
     "biotech": "/tmp/alpha_biotech_progress.json",
 }
 
@@ -20679,7 +23008,7 @@ def _init_scan_status_from_cache():
     """Read cache file timestamps to populate last_run on startup."""
     import os
     for scan_name, cache_path in SCAN_CACHE_MAP.items():
-        if scan_name in _scan_status and os.path.exists(cache_path):
+        if cache_path and scan_name in _scan_status and os.path.exists(cache_path):
             try:
                 with open(cache_path, "r") as f:
                     cache_data = json.load(f)
@@ -20717,6 +23046,7 @@ _SCAN_TIMEOUTS = {
     # ~2 Min Marge → 35 Min (P95 + ~50 % Puffer). Intervall seit 31.07. 60 Min
     # (Swing-Horizont: 30-Min-Takt brachte keinen Informationsgewinn).
     "strategy_scan": 35,
+    "quote_capability": 1,
 }
 
 # Haenge-Alarm ohne unsicheren Parallelstart.
@@ -21066,6 +23396,7 @@ def _scheduler_loop():
     # V2.2: Scans in LEICHT (Snapshot, 1-2 API Calls) und SCHWER (tausende Calls) aufteilen
     # Leichte Scans starten parallel, schwere NACHEINANDER (teilen sich 200 calls/min)
     light_scans = [
+        ("quote_capability", _stock_quote_capability_control_probe),
         ("crypto_explosion", _crypto_explosion_wrapper),
         ("early_movers", _early_movers_wrapper),
         ("crash_monitor", _crash_monitor_wrapper),
@@ -21078,6 +23409,7 @@ def _scheduler_loop():
         ("orb", _orb_scanner_wrapper),
         ("bear", _bear_scan_wrapper),  # V2.5: Bear ist light (~30 API-Calls), nicht heavy
         ("strategy_scan", _stock_strategy_alert_sweep_wrapper),
+        ("cup_handle_watch", _cup_handle_watch_monitor_wrapper),
         ("turtle", _turtle_scan_wrapper),  # ~80 API-Calls (Snapshot + Bars)
     ]
     heavy_scans = [
@@ -22333,6 +24665,33 @@ async def api_commercial_readiness():
         )
 
     system_health = _build_system_health()
+    suppression_telemetry_detail = (
+        load_suppression_summary(hours=24, limit=30)
+        if load_suppression_summary
+        else {
+            "available": False,
+            "initialized": False,
+            "writable": False,
+            "status": "unavailable",
+            "window_hours": 24,
+            "count_unit": "reason_occurrences",
+            "reason_occurrences": 0,
+            "total_count": 0,
+            "by_scanner": [],
+            "top_reasons": [],
+        }
+    )
+    _commercial_suppression_status = str(
+        suppression_telemetry_detail.get("status") or "unavailable"
+    )
+    if _commercial_suppression_status == "unavailable":
+        warnings.append(
+            "Suppression telemetry is unavailable; no-mail diagnostics are incomplete"
+        )
+    elif _commercial_suppression_status == "degraded":
+        warnings.append(
+            "Suppression telemetry is degraded; some no-mail reason occurrences may not be persisted"
+        )
     api_keys = system_health.get("api_keys_configured") or {}
     if not api_keys.get("market_data"):
         critical.append("Market data access is not configured")
@@ -22384,9 +24743,16 @@ async def api_commercial_readiness():
         "required_calendar_coverage_until": required_calendar_until,
         "calendar_coverage_by_exchange": calendar_coverage_by_exchange,
         "signal_tracker": _signal_tracker_status,
+        # This route is loopback/admin-gated.  Identifiers are still limited
+        # to the reviewed code registries; there are no symbols, recipients,
+        # prices or subjects in these aggregates.
+        "suppression_telemetry": suppression_telemetry_detail,
         "system_health": {
             "status": system_health.get("status"),
             "api_keys_configured": api_keys,
+            "market_data_quote_capability": system_health.get(
+                "market_data_quote_capability"
+            ),
             "email_configured": bool((system_health.get("email_alerts") or {}).get("configured")),
             "scheduler_running": bool((system_health.get("scheduler") or {}).get("running")),
             "stale_or_missing_scans": stale_scanners,
@@ -22695,6 +25061,340 @@ def _effective_scan_timing(
     return last_iso, next_iso
 
 
+def _stock_quote_capability_health_snapshot(
+    now_utc: Optional[datetime] = None,
+) -> Tuple[Dict[str, Any], Optional[bool]]:
+    """Return session-aware quote, replay and composite diagnostics.
+
+    ``realtime_quote`` remains a quote-only fact for compatibility.
+    ``bounded_trade_replay`` is independent. ``stock_trade_mail_evidence`` is
+    verified only when one generation- and session-bound control handshake
+    proved all three endpoint facts atomically. The control is diagnostic; every candidate
+    still runs its own fail-closed pre-delivery validation.
+    """
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    try:
+        market_session = _stock_quote_session_at(current.timestamp())
+    except Exception:
+        market_session = "UNKNOWN"
+    try:
+        market_status = _stock_trade_email_status(current)
+        market_reason = str(
+            market_status.get("reason") or "US market status unavailable"
+        )
+    except Exception:
+        market_reason = "US market status unavailable"
+
+    with _STOCK_QUOTE_CAPABILITY_LOCK:
+        state = dict(_STOCK_QUOTE_CAPABILITY)
+        state["endpoint"] = dict(state.get("endpoint") or {})
+        state["trade_replay_endpoint"] = dict(
+            state.get("trade_replay_endpoint") or {}
+        )
+        state["aggregate_endpoint"] = dict(state.get("aggregate_endpoint") or {})
+        state["control_quote"] = dict(state.get("control_quote") or {})
+        state["composite_probe"] = dict(state.get("composite_probe") or {})
+        state["latest_probe"] = (
+            dict(state.get("latest_probe") or {})
+            if state.get("latest_probe")
+            else None
+        )
+    # Health is public in the default deployment.  Candidate identity is not
+    # capability telemetry and must never be exposed by this snapshot, even
+    # when reading state left by an older process version.
+    state.pop("last_verified_ticker", None)
+    if isinstance(state.get("latest_probe"), dict):
+        state["latest_probe"].pop("ticker", None)
+
+    def _age_seconds(raw: Any) -> Optional[int]:
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(
+                0,
+                int((current - parsed.astimezone(timezone.utc)).total_seconds()),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    control_quote = state.get("control_quote") or {}
+    has_control_quote_state = control_quote.get("generation") is not None
+    verified_at_raw = (
+        state.get("last_verified_control_quote_at")
+        if has_control_quote_state
+        else state.get("last_verified_realtime_quote_at")
+    )
+    verification_age_seconds = _age_seconds(verified_at_raw)
+    trade_replay_verified_at_raw = state.get("last_verified_trade_replay_at")
+    trade_replay_verification_age_seconds = _age_seconds(
+        trade_replay_verified_at_raw
+    )
+    aggregate_verified_at_raw = state.get("last_verified_aggregate_at")
+    aggregate_verification_age_seconds = _age_seconds(aggregate_verified_at_raw)
+    composite_verified_at_raw = state.get("last_verified_composite_at")
+    composite_verification_age_seconds = _age_seconds(composite_verified_at_raw)
+
+    latest_probe = state.get("latest_probe") or {}
+    latest_endpoint_access = str(
+        (
+            control_quote.get("endpoint_access")
+            if has_control_quote_state
+            else latest_probe.get("endpoint_access")
+        )
+        or ""
+    )
+    latest_hard_access_failure = latest_endpoint_access in {
+        "authentication_failed",
+        "forbidden",
+    }
+    trade_replay_endpoint = state.get("trade_replay_endpoint") or {}
+    trade_replay_access = str(trade_replay_endpoint.get("access") or "")
+    trade_replay_hard_access_failure = trade_replay_access in {
+        "authentication_failed",
+        "forbidden",
+    }
+    aggregate_endpoint = state.get("aggregate_endpoint") or {}
+    aggregate_access = str(aggregate_endpoint.get("access") or "")
+    aggregate_hard_access_failure = aggregate_access in {
+        "authentication_failed",
+        "forbidden",
+    }
+    verified_quote_session = "UNKNOWN"
+    verified_quote_observed_ts = _stock_market_timestamp_seconds(
+        (
+            state.get("last_verified_control_quote_observed_at")
+            if has_control_quote_state
+            else state.get("last_verified_quote_observed_at")
+        )
+    )
+    if verified_quote_observed_ts is not None:
+        try:
+            verified_quote_session = _stock_quote_session_at(
+                verified_quote_observed_ts
+            )
+        except Exception:
+            verified_quote_session = "UNKNOWN"
+    fresh_quote_verified = bool(
+        verification_age_seconds is not None
+        and verification_age_seconds <= _STOCK_QUOTE_CAPABILITY_TTL_SECONDS
+        and not latest_hard_access_failure
+        and verified_quote_session == market_session
+    )
+    replay_generation = state.get("last_verified_trade_replay_generation")
+    replay_session = str(
+        state.get("last_verified_trade_replay_session") or "UNKNOWN"
+    )
+    fresh_trade_replay_verified = bool(
+        trade_replay_verification_age_seconds is not None
+        and trade_replay_verification_age_seconds
+        <= _STOCK_QUOTE_CAPABILITY_TTL_SECONDS
+        and not trade_replay_hard_access_failure
+        and replay_generation is not None
+        and replay_session == market_session
+        and trade_replay_endpoint.get("composite_generation")
+        == replay_generation
+        and str(trade_replay_endpoint.get("market_session") or "UNKNOWN")
+        == replay_session
+    )
+    aggregate_generation = state.get("last_verified_aggregate_generation")
+    aggregate_session = str(
+        state.get("last_verified_aggregate_session") or "UNKNOWN"
+    )
+    fresh_aggregate_verified = bool(
+        aggregate_verification_age_seconds is not None
+        and aggregate_verification_age_seconds
+        <= _STOCK_QUOTE_CAPABILITY_TTL_SECONDS
+        and not aggregate_hard_access_failure
+        and aggregate_generation is not None
+        and aggregate_session == market_session
+        and aggregate_endpoint.get("composite_generation")
+        == aggregate_generation
+        and str(aggregate_endpoint.get("market_session") or "UNKNOWN")
+        == aggregate_session
+    )
+    composite_probe = state.get("composite_probe") or {}
+    composite_generation = state.get("last_verified_composite_generation")
+    composite_session = str(
+        state.get("last_verified_composite_session") or "UNKNOWN"
+    )
+    fresh_composite_verified = bool(
+        composite_verification_age_seconds is not None
+        and composite_verification_age_seconds
+        <= _STOCK_QUOTE_CAPABILITY_TTL_SECONDS
+        and composite_probe.get("status") == "verified"
+        and composite_probe.get("generation") == composite_generation
+        and composite_generation == replay_generation
+        and composite_generation == aggregate_generation
+        and composite_session == market_session
+        and str(composite_probe.get("market_session") or "UNKNOWN")
+        == market_session
+        and composite_probe.get("quote_probe_id")
+        == trade_replay_endpoint.get("quote_probe_id")
+        and composite_probe.get("quote_probe_id")
+        == aggregate_endpoint.get("quote_probe_id")
+        and fresh_quote_verified
+        and fresh_trade_replay_verified
+        and fresh_aggregate_verified
+    )
+    control_applicable = market_session == "US_REGULAR"
+    if not POLYGON_KEY:
+        status = "not_configured"
+        applicable: Optional[bool] = market_session in {
+            "US_REGULAR",
+            "PREMARKET",
+        }
+        reason = "final_polygon_key_missing"
+        public_value: Optional[bool] = False if control_applicable else None
+        realtime_status = "not_configured"
+        replay_status = "not_configured" if applicable else "not_applicable"
+        aggregate_status = replay_status
+        combined_status = "blocked" if applicable else "not_applicable"
+        combined_reason = reason
+    elif market_session in {"CLOSED", "POSTMARKET"}:
+        status = "market_closed"
+        applicable = False
+        reason = f"not_applicable_market_closed:{market_reason}"
+        public_value = None
+        realtime_status = "not_applicable"
+        replay_status = "not_applicable"
+        aggregate_status = "not_applicable"
+        combined_status = "not_applicable"
+        combined_reason = reason
+    elif market_session == "PREMARKET":
+        status = "control_not_run_for_premarket"
+        applicable = True
+        reason = "regular_session_control_not_run_for_premarket"
+        public_value = None
+        realtime_status = "unverified"
+        replay_status = "unverified"
+        aggregate_status = "unverified"
+        combined_status = "unverified"
+        combined_reason = reason
+    elif market_session == "UNKNOWN":
+        status = "unverified_market_session"
+        applicable = None
+        reason = "market_session_unknown"
+        public_value = None
+        realtime_status = "unverified"
+        replay_status = "unverified"
+        aggregate_status = "unverified"
+        combined_status = "unverified"
+        combined_reason = reason
+    elif fresh_quote_verified:
+        status = "verified_realtime_quote"
+        applicable = True
+        reason = "fresh_runtime_quote_verified"
+        public_value = True
+        realtime_status = "verified"
+        replay_status = (
+            "verified" if fresh_trade_replay_verified else "not_verified"
+        )
+        aggregate_status = (
+            "verified" if fresh_aggregate_verified else "not_verified"
+        )
+        combined_status = "verified" if fresh_composite_verified else "blocked"
+        if fresh_composite_verified:
+            combined_reason = (
+                "matching_quote_aggregate_and_trade_replay_generation_verified"
+            )
+        elif not fresh_aggregate_verified:
+            combined_reason = str(
+                aggregate_endpoint.get("reason")
+                or "no_fresh_runtime_aggregate_verification"
+            )
+        elif not fresh_trade_replay_verified:
+            combined_reason = str(
+                trade_replay_endpoint.get("reason")
+                or "no_fresh_runtime_trade_replay_verification"
+            )
+        else:
+            combined_reason = "matching_composite_generation_not_verified"
+    else:
+        latest = state.get("latest_probe") or {}
+        status = "diagnostic_failed"
+        applicable = True
+        reason = (
+            "verified_quote_from_different_market_session"
+            if (
+                verification_age_seconds is not None
+                and verification_age_seconds
+                <= _STOCK_QUOTE_CAPABILITY_TTL_SECONDS
+                and verified_quote_session not in {"UNKNOWN", market_session}
+            )
+            else str(
+                latest.get("reason")
+                or "no_fresh_runtime_quote_verification"
+            )
+        )
+        public_value = False
+        realtime_status = "not_verified"
+        replay_status = (
+            "verified" if fresh_trade_replay_verified else "not_verified"
+        )
+        aggregate_status = (
+            "verified" if fresh_aggregate_verified else "not_verified"
+        )
+        combined_status = "blocked"
+        combined_reason = reason
+
+    state.update({
+        "status": status,
+        "applicable": applicable,
+        "market_session": market_session,
+        "assessment_checked_at": current.isoformat(),
+        "reason": reason,
+        "verification_age_seconds": verification_age_seconds,
+        "capability_ttl_seconds": _STOCK_QUOTE_CAPABILITY_TTL_SECONDS,
+        "realtime_quote": {
+            "status": realtime_status,
+            "checked_at": verified_at_raw,
+            "verification_age_seconds": verification_age_seconds,
+            "quote_age_seconds_at_check": state.get(
+                "last_verified_control_quote_age_seconds"
+                if has_control_quote_state
+                else "last_verified_quote_age_seconds"
+            ),
+            "verified_market_session": verified_quote_session,
+            "reason": reason,
+        },
+        "bounded_trade_replay": {
+            "status": replay_status,
+            "checked_at": trade_replay_verified_at_raw,
+            "verification_age_seconds": trade_replay_verification_age_seconds,
+            "endpoint_access": trade_replay_access or "unverified",
+            "reason": trade_replay_endpoint.get("reason"),
+        },
+        "bounded_minute_aggregates": {
+            "status": aggregate_status,
+            "checked_at": aggregate_verified_at_raw,
+            "verification_age_seconds": aggregate_verification_age_seconds,
+            "endpoint_access": aggregate_access or "unverified",
+            "reason": aggregate_endpoint.get("reason"),
+        },
+        "stock_trade_mail_evidence": {
+            "status": combined_status,
+            "applicable": applicable,
+            "checked_at": composite_verified_at_raw,
+            "verification_age_seconds": composite_verification_age_seconds,
+            "generation": composite_generation,
+            "market_session": composite_session,
+            "reason": combined_reason,
+        },
+        "diagnostic_note": (
+            "The scheduled control probe is diagnostic, not a delivery "
+            "prerequisite. Every candidate independently proves a fresh "
+            "executable quote and complete market path before delivery."
+        ),
+    })
+    return state, public_value
+
+
 def _build_system_health() -> Dict[str, Any]:
     """Build a trader-facing health summary without triggering expensive scans."""
     with _scan_lock:
@@ -22732,50 +25432,140 @@ def _build_system_health() -> Dict[str, Any]:
                 **cache,
             }
 
-    with _STOCK_QUOTE_CAPABILITY_LOCK:
-        quote_capability = dict(_STOCK_QUOTE_CAPABILITY)
-    capability_checked_at = quote_capability.get("checked_at")
-    capability_age_seconds: Optional[int] = None
-    if capability_checked_at:
-        try:
-            capability_dt = datetime.fromisoformat(
-                str(capability_checked_at).replace("Z", "+00:00")
-            )
-            if capability_dt.tzinfo is None:
-                capability_dt = capability_dt.replace(tzinfo=timezone.utc)
-            capability_age_seconds = max(
-                0,
-                int((datetime.now(timezone.utc) - capability_dt).total_seconds()),
-            )
-        except (TypeError, ValueError):
-            capability_age_seconds = None
-    quote_capability["age_seconds"] = capability_age_seconds
-    quote_capability_verified = bool(
-        quote_capability.get("status") == "verified_realtime_quote"
-        and capability_age_seconds is not None
-        and capability_age_seconds <= 900
+    quote_capability, quote_capability_public_value = (
+        _stock_quote_capability_health_snapshot()
     )
+    combined_mail_evidence = quote_capability.get(
+        "stock_trade_mail_evidence"
+    ) or {}
+    combined_mail_evidence_value: Optional[bool] = (
+        None
+        if (
+            combined_mail_evidence.get("applicable") is not True
+            or combined_mail_evidence.get("status") == "unverified"
+        )
+        else combined_mail_evidence.get("status") == "verified"
+    )
+    # A prior in-session probe error must not keep the scanner rollup red all
+    # night/weekend.  The next scheduler tick normally clears it, but health is
+    # queried asynchronously and should be correct immediately at market close.
+    quote_scan_health = scan_health.get("quote_capability")
+    if (
+        quote_capability.get("applicable") is False
+        and isinstance(quote_scan_health, dict)
+        and not quote_scan_health.get("running")
+    ):
+        previous_health = str(
+            quote_scan_health.get("cache_health") or "not_tracked"
+        )
+        if health_counts.get(previous_health, 0) > 0:
+            health_counts[previous_health] -= 1
+        health_counts["not_applicable"] = (
+            health_counts.get("not_applicable", 0) + 1
+        )
+        quote_scan_health.update({
+            "cache_health": "not_applicable",
+            "cache_data_health": "not_applicable",
+            "cache_stale": False,
+            "scan_error": None,
+        })
+        stale_or_missing = [
+            name for name in stale_or_missing if name != "quote_capability"
+        ]
+        stuck_scans = [
+            name for name in stuck_scans if name != "quote_capability"
+        ]
 
     api_keys = {
         "market_data": bool(POLYGON_KEY),
-        "market_data_trade_quotes": quote_capability_verified,
+        # None means not applicable (for example weekend/after close), not
+        # "provider plan lacks realtime quotes".  Entry gates remain fail-closed.
+        "market_data_trade_quotes": quote_capability_public_value,
+        "stock_trade_mail_evidence": combined_mail_evidence_value,
         "catalyst_data": bool(BPIQ_API_KEY),
         "ai_assistant": bool(ANTHROPIC_API_KEY),
     }
     email_alerts = _email_alert_status()
     email_pipeline = _email_pipeline_summary(public=True)
+    suppression_telemetry_detail = (
+        load_suppression_summary(hours=24, limit=30)
+        if load_suppression_summary
+        else {
+            "available": False,
+            "initialized": False,
+            "writable": False,
+            "window_hours": 24,
+            "count_unit": "reason_occurrences",
+            "reason_occurrences": 0,
+            "total_count": 0,
+            "by_scanner": [],
+            "top_reasons": [],
+        }
+    )
+    # /api/system-health is intentionally public.  Scanner names, exact gate
+    # reasons, revisions and event times belong in server-side diagnostics,
+    # not in an unauthenticated response.
+    suppression_telemetry = {
+        "available": bool(
+            suppression_telemetry_detail.get("available", False)
+        ),
+        "initialized": bool(
+            suppression_telemetry_detail.get("initialized", False)
+        ),
+        "writable": bool(
+            suppression_telemetry_detail.get("writable", False)
+        ),
+        "window_hours": int(
+            suppression_telemetry_detail.get("window_hours") or 24
+        ),
+        "window_semantics": str(
+            suppression_telemetry_detail.get("window_semantics")
+            or "approximate_hour_bucket_by_last_seen"
+        ),
+    }
+    _suppression_status = str(
+        suppression_telemetry_detail.get("status") or ""
+    )
+    suppression_telemetry["status"] = (
+        _suppression_status
+        if _suppression_status in {"healthy", "degraded", "unavailable"}
+        else "unavailable"
+        if not suppression_telemetry["available"]
+        else "degraded"
+        if not suppression_telemetry["writable"]
+        else "healthy"
+    )
 
     warnings = []
     critical = []
     if not api_keys["market_data"]:
         critical.append("Market-Data-Zugang fehlt - Aktien-/ORB-/Marktdaten koennen nicht sauber laufen")
-    elif not quote_capability_verified:
+    elif (
+        quote_capability.get("applicable") is True
+        and combined_mail_evidence_value is not True
+    ):
         warnings.append(
-            "Realtime-Bid/Ask-Faehigkeit ist nicht aktuell verifiziert - "
-            "Aktien-Trade-Mails bleiben bis zu einem frischen Quote-Nachweis gesperrt"
+            "Die diagnostische Quote-/Trade-Replay-Kontrolle ist waehrend "
+            "US Regular nicht vollstaendig verifiziert. Einzelne Kandidaten "
+            "werden unabhaengig unmittelbar vor Zustellung fail-closed geprueft"
         )
     if not email_alerts["configured"]:
         warnings.append("Email-Alerts sind nicht konfiguriert - GMAIL_USER/GMAIL_APP_PASSWORD fehlen")
+    if not suppression_telemetry.get("available", False):
+        warnings.append(
+            "Suppression-Telemetrie ist nicht verfuegbar - Gruende fuer "
+            "fehlende Trade-Mails koennen nicht dauerhaft auditiert werden"
+        )
+    elif suppression_telemetry_detail.get("writable") is False:
+        warnings.append(
+            "Der Datenpfad der Suppression-Telemetrie ist nicht schreibbar - "
+            "neue Unterdrueckungsgruende koennen nicht persistiert werden"
+        )
+    elif suppression_telemetry.get("status") == "degraded":
+        warnings.append(
+            "Suppression-Telemetrie ist eingeschraenkt - einzelne Gruende "
+            "fuer fehlende Trade-Mails konnten nicht persistiert werden"
+        )
     if not _scheduler_running:
         warnings.append("Background-Scheduler ist nicht aktiv")
     cache_problems = [name for name in stale_or_missing if name not in stuck_scans]
@@ -22841,6 +25631,7 @@ def _build_system_health() -> Dict[str, Any]:
         "market_data_quote_capability": quote_capability,
         "email_alerts": _public_email_alert_status(email_alerts),
         "email_pipeline": email_pipeline,
+        "suppression_telemetry": suppression_telemetry,
         "scheduler": {
             "running": _scheduler_running,
             "total_scans": len(_scan_status),
@@ -22937,7 +25728,7 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
             "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed closed 5m execution, BTC tailwind, fresh data, TP1 not missed, live R:R and a weak-link trade score. Explosion-Armed/watch mails are hard-disabled.",
         },
         "coverage": {
-            "automatic_api_scheduler": ["bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan"],
+            "automatic_api_scheduler": ["quote_capability", "bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan", "cup_handle_watch"],
             "manual_scan_alerts": ["stock_strategy"],
             "watch_only_crypto_no_trade_email": ["crypto_strategy", "btc_divergenz"],
             "informational_no_trade_email": ["btc_divergenz", "money_flow", "crash_monitor"],
@@ -30511,31 +33302,23 @@ def _penny_expected_volume_fraction(now_utc: Optional[datetime] = None) -> float
 
 
 def _penny_fetch_live_spread(ticker: str) -> Optional[Dict[str, Any]]:
-    """Fallback quote check only for otherwise valid 5m trigger candidates."""
+    """Final snapshot check only for otherwise valid 5m trigger candidates.
+
+    Reusing the stock snapshot endpoint keeps the executable bid/ask and its
+    latest-trade watermark in one atomic provider response. The latter is only
+    path evidence; the entry price remains the executable ask.
+    """
     try:
-        response = rate_limited_get(
-            f"https://api.polygon.io/v3/quotes/{ticker}",
-            params={"apiKey": POLYGON_KEY, "limit": 1, "order": "desc", "sort": "timestamp"},
-            timeout=8,
-        )
-        if response.status_code != 200:
+        snapshot = _fetch_stock_revalidation_snapshot(ticker)
+        if not snapshot.get("ok"):
             return None
-        results = response.json().get("results", []) or []
-        if not results:
-            return None
-        quote = results[0]
-        bid = _alert_float(quote.get("bid_price"), None)
-        ask = _alert_float(quote.get("ask_price"), None)
-        timestamp = _alert_float(
-            quote.get("sip_timestamp") or quote.get("participant_timestamp") or quote.get("timestamp"),
-            None,
-        )
-        if timestamp and timestamp > 1_000_000_000_000_000:
-            timestamp /= 1_000_000_000.0
-        elif timestamp and timestamp > 10_000_000_000:
-            timestamp /= 1000.0
-        received_at = time.time()
-        age_seconds = received_at - timestamp if timestamp else None
+        bid = _alert_float(snapshot.get("bid"), None)
+        ask = _alert_float(snapshot.get("ask"), None)
+        timestamp = _stock_market_timestamp_seconds(snapshot.get("observed_ts"))
+        received_at = _stock_market_timestamp_seconds(snapshot.get("receipt_ts"))
+        if received_at is None:
+            received_at = time.time()
+        age_seconds = received_at - timestamp if timestamp is not None else None
         if (
             not bid
             or not ask
@@ -30555,6 +33338,7 @@ def _penny_fetch_live_spread(ticker: str) -> Optional[Dict[str, Any]]:
             "spread_bps": (ask - bid) / midpoint * 10_000.0 if midpoint > 0 else 9_999.0,
             "spread_known": True,
             "quote_age_seconds": round(age_seconds, 1),
+            "last_trade_ts": snapshot.get("last_trade_ts"),
         }
     except Exception as exc:
         print(
@@ -30606,9 +33390,6 @@ def _penny_revalidate_buy_candidate(
     stop = _alert_float(setup.get("stop_loss") or setup.get("stop"), 0.0) or 0.0
     tp1 = _alert_float(setup.get("tp1"), 0.0) or 0.0
     tp2 = _alert_float(setup.get("tp2"), 0.0) or 0.0
-    live_entry = _alert_float(quote.get("ask"), 0.0) or 0.0
-    if not (0 < stop < live_entry < tp1 < tp2):
-        return None, "live_trade_geometry_invalid"
 
     trigger_bar_ts = _stock_market_timestamp_seconds(
         intraday.get("trigger_timestamp")
@@ -30626,6 +33407,7 @@ def _penny_revalidate_buy_candidate(
         symbol,
         source_observed_ts,
         now_ts=quote_ts,
+        last_trade_ts=quote.get("last_trade_ts"),
     )
     path_elapsed_seconds = max(0.0, time.monotonic() - path_started_monotonic)
     if not market_path.get("ok"):
@@ -30646,24 +33428,209 @@ def _penny_revalidate_buy_candidate(
         return None, "final_receipt_session_not_regular"
 
     path_bars = market_path.get("bars") or []
+    coverage_verified = market_path.get("coverage_verified") is True
     first_path_ts = _stock_market_timestamp_seconds(
         market_path.get("first_timestamp")
     )
     last_path_ts = _stock_market_timestamp_seconds(
         market_path.get("last_timestamp")
     )
-    if first_path_ts is None or last_path_ts is None or not path_bars:
-        return None, "final_market_path_bounds_missing"
-    if (
-        first_path_ts > source_observed_ts
-        or first_path_ts + 60.0 < source_observed_ts
-    ):
-        return None, "final_market_path_start_gap"
-    if last_path_ts > quote_ts:
-        return None, "final_quote_older_than_market_path"
-    if quote_ts >= last_path_ts + 60.0:
-        return None, "final_market_path_end_gap"
+    if coverage_verified:
+        coverage_start_ts = _stock_market_timestamp_seconds(
+            market_path.get("coverage_start_timestamp")
+        )
+        coverage_end_ts = _stock_market_timestamp_seconds(
+            market_path.get("coverage_end_timestamp")
+        )
+        if coverage_start_ts is None or coverage_end_ts is None:
+            return None, "final_market_path_bounds_missing"
+        if coverage_start_ts > source_observed_ts:
+            return None, "final_market_path_start_gap"
+        if coverage_end_ts < quote_ts:
+            return None, "final_market_path_end_gap"
+    else:
+        if first_path_ts is None or last_path_ts is None or not path_bars:
+            return None, "final_market_path_bounds_missing"
+        if (
+            first_path_ts > source_observed_ts
+            or first_path_ts + 60.0 < source_observed_ts
+        ):
+            return None, "final_market_path_start_gap"
+        if last_path_ts > quote_ts:
+            return None, "final_quote_older_than_market_path"
+        if quote_ts >= last_path_ts + 60.0:
+            return None, "final_market_path_end_gap"
 
+    proven_path_end_ts = coverage_end_ts if coverage_verified else quote_ts
+    path_round_count = 1
+    handshake_receipt_floor_ts = post_path_receipt_ts
+
+    # Penny entries are real mail instructions too. Close the same Q1->path
+    # TOCTOU window as stock/ORB and price the candidate only from Q2/Qfinal.
+    next_quote = _penny_fetch_live_spread(symbol)
+    if not next_quote:
+        return None, "final_handshake_quote_unavailable"
+    next_quote_ts = _stock_market_timestamp_seconds(
+        next_quote.get("observed_ts")
+    )
+    next_last_trade_ts = _stock_market_timestamp_seconds(
+        next_quote.get("last_trade_ts")
+    )
+    if next_quote_ts is None:
+        return None, "final_handshake_quote_timestamp_missing"
+    if next_quote_ts < quote_ts:
+        return None, "final_handshake_quote_timestamp_regressed"
+    if next_last_trade_ts is None:
+        return None, "final_handshake_last_trade_timestamp_missing"
+    if next_last_trade_ts > next_quote_ts:
+        return None, "final_last_trade_after_quote_timestamp"
+
+    if next_last_trade_ts > proven_path_end_ts:
+        incremental_started_monotonic = time.monotonic()
+        incremental_path = _fetch_stock_revalidation_market_path(
+            symbol,
+            proven_path_end_ts,
+            now_ts=next_quote_ts,
+            last_trade_ts=next_last_trade_ts,
+        )
+        incremental_elapsed_seconds = max(
+            0.0, time.monotonic() - incremental_started_monotonic
+        )
+        if not incremental_path.get("ok"):
+            return None, str(
+                incremental_path.get("reason")
+                or "final_incremental_market_path_unavailable"
+            )
+        incremental_coverage_start = _stock_market_timestamp_seconds(
+            incremental_path.get("coverage_start_timestamp")
+        )
+        incremental_coverage_end = _stock_market_timestamp_seconds(
+            incremental_path.get("coverage_end_timestamp")
+        )
+        if (
+            incremental_path.get("coverage_verified") is not True
+            or incremental_coverage_start is None
+            or incremental_coverage_end is None
+        ):
+            return None, "final_incremental_market_path_bounds_missing"
+        if incremental_coverage_start > proven_path_end_ts:
+            return None, "final_incremental_market_path_start_gap"
+        if incremental_coverage_end < next_quote_ts:
+            return None, "final_incremental_market_path_end_gap"
+        if any(
+            (_stock_market_timestamp_seconds(bar.get("timestamp")) or float("inf"))
+            > next_quote_ts
+            for bar in incremental_path.get("bars") or []
+            if isinstance(bar, dict)
+        ):
+            return None, "final_incremental_quote_older_than_market_path"
+
+        combined_path_bars: Dict[float, Dict[str, Any]] = {}
+        for combined_bar in list(market_path.get("bars") or []) + list(
+            incremental_path.get("bars") or []
+        ):
+            if not isinstance(combined_bar, dict):
+                return None, "final_market_path_bar_invalid"
+            combined_bar_ts = _stock_market_timestamp_seconds(
+                combined_bar.get("timestamp")
+            )
+            if combined_bar_ts is None:
+                return None, "final_market_path_timestamp_missing"
+            # The second bounded request may repeat its overlapping first
+            # minute. Prefer that later, watermarked real evidence.
+            combined_path_bars[combined_bar_ts] = combined_bar
+        market_path["bars"] = [
+            combined_path_bars[bar_ts]
+            for bar_ts in sorted(combined_path_bars)
+        ]
+        market_path["source"] = (
+            f"{market_path.get('source') or 'polygon_market_path'}+"
+            f"{incremental_path.get('source') or 'polygon_incremental_market_path'}"
+        )
+        market_path["last_timestamp"] = incremental_path.get("last_timestamp")
+        market_path["coverage_end_timestamp"] = incremental_coverage_end
+        market_path["provider_empty_aggregate_interval_count"] = int(
+            market_path.get("provider_empty_aggregate_interval_count") or 0
+        ) + int(
+            incremental_path.get("provider_empty_aggregate_interval_count") or 0
+        )
+        market_path["trailing_raw_trade_count"] = int(
+            market_path.get("trailing_raw_trade_count") or 0
+        ) + int(incremental_path.get("trailing_raw_trade_count") or 0)
+        market_path["trailing_raw_trade_evidence_used"] = bool(
+            market_path.get("trailing_raw_trade_evidence_used")
+            or incremental_path.get("trailing_raw_trade_evidence_used")
+        )
+        market_path["current_minute_aggregate_used"] = bool(
+            market_path.get("current_minute_aggregate_used")
+            or incremental_path.get("current_minute_aggregate_used")
+        )
+        proven_path_end_ts = incremental_coverage_end
+        path_round_count += 1
+        next_receipt_ts = _stock_market_timestamp_seconds(
+            next_quote.get("receipt_ts")
+        )
+        handshake_receipt_floor_ts = (
+            next_receipt_ts
+            if next_receipt_ts is not None
+            else post_path_receipt_ts
+        ) + incremental_elapsed_seconds
+
+        final_quote = _penny_fetch_live_spread(symbol)
+        if not final_quote:
+            return None, "final_handshake_quote_unavailable"
+        final_quote_ts = _stock_market_timestamp_seconds(
+            final_quote.get("observed_ts")
+        )
+        final_last_trade_ts = _stock_market_timestamp_seconds(
+            final_quote.get("last_trade_ts")
+        )
+        if final_quote_ts is None:
+            return None, "final_handshake_quote_timestamp_missing"
+        if final_quote_ts < next_quote_ts:
+            return None, "final_handshake_quote_timestamp_regressed"
+        if final_last_trade_ts is None:
+            return None, "final_handshake_last_trade_timestamp_missing"
+        if final_last_trade_ts > final_quote_ts:
+            return None, "final_last_trade_after_quote_timestamp"
+        if final_last_trade_ts > proven_path_end_ts:
+            return None, "final_market_path_handshake_unbounded_trade_advance"
+        quote = final_quote
+        quote_ts = final_quote_ts
+    else:
+        quote = next_quote
+        quote_ts = next_quote_ts
+
+    quote_receipt_ts = _stock_market_timestamp_seconds(quote.get("receipt_ts"))
+    post_path_receipt_ts = (
+        max(quote_receipt_ts, handshake_receipt_floor_ts)
+        if quote_receipt_ts is not None
+        else handshake_receipt_floor_ts
+    )
+    if quote_ts > post_path_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
+        return None, "final_quote_timestamp_in_future_after_handshake"
+    final_quote_age_seconds = max(0.0, post_path_receipt_ts - quote_ts)
+    if final_quote_age_seconds > 30.0:
+        return None, "final_quote_stale_after_path"
+    if _stock_quote_session_at(quote_ts) != "US_REGULAR":
+        return None, "final_quote_session_not_regular"
+    if _stock_quote_session_at(post_path_receipt_ts) != "US_REGULAR":
+        return None, "final_receipt_session_not_regular"
+    final_quote_reference_monotonic = time.monotonic()
+
+    spread_bps_value = _alert_float(quote.get("spread_bps"))
+    if spread_bps_value is None or spread_bps_value < 0:
+        return None, "live_spread_missing_or_invalid"
+    spread_bps = spread_bps_value
+    if spread_bps > PENNY_EXECUTION_MAX_SPREAD_BPS:
+        return None, "live_spread_too_wide"
+    live_entry = _alert_float(quote.get("ask"), 0.0) or 0.0
+    if not (0 < stop < live_entry < tp1 < tp2):
+        return None, "live_trade_geometry_invalid"
+
+    # Q2 may have appended genuine incremental replay bars. Never retain the
+    # stale pre-handshake list when checking stop/TP touches.
+    path_bars = market_path.get("bars") or []
     prior_bar_ts: Optional[float] = None
     stop_touched = False
     tp1_touched = False
@@ -30678,7 +33645,7 @@ def _penny_revalidate_buy_candidate(
         if prior_bar_ts is not None:
             if path_bar_ts <= prior_bar_ts:
                 return None, "final_market_path_order_invalid"
-            if path_bar_ts - prior_bar_ts > 61.0:
+            if not coverage_verified and path_bar_ts - prior_bar_ts > 61.0:
                 return None, "final_market_path_internal_gap"
         if high is None or low is None or high < low or low <= 0:
             return None, "final_market_path_ohlc_invalid"
@@ -30739,8 +33706,8 @@ def _penny_revalidate_buy_candidate(
     gross_rr_tp1 = (tp1 - live_entry) / gross_risk
     gross_rr_tp2 = (tp2 - live_entry) / gross_risk
 
-    return_receipt_ts = receipt_base_ts + max(
-        0.0, time.monotonic() - path_started_monotonic
+    return_receipt_ts = post_path_receipt_ts + max(
+        0.0, time.monotonic() - final_quote_reference_monotonic
     )
     if quote_ts > return_receipt_ts + _STOCK_FINAL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS:
         return None, "final_quote_timestamp_in_future_at_return"
@@ -30794,6 +33761,26 @@ def _penny_revalidate_buy_candidate(
             source_observed_ts
         ),
         "final_market_path_bars": len(path_bars),
+        "final_market_path_provider_empty_intervals": market_path.get(
+            "provider_empty_aggregate_interval_count", 0
+        ),
+        "final_market_path_trailing_no_trade_verified": bool(
+            market_path.get("trailing_no_trade_evidence")
+        ),
+        "final_market_path_current_minute_aggregate_used": bool(
+            market_path.get("current_minute_aggregate_used")
+        ),
+        "final_market_path_trailing_raw_trade_evidence_used": bool(
+            market_path.get("trailing_raw_trade_evidence_used")
+        ),
+        "final_market_path_trailing_raw_trade_count": int(
+            market_path.get("trailing_raw_trade_count") or 0
+        ),
+        "final_market_path_round_count": path_round_count,
+        "final_market_path_watermark": _stock_market_timestamp_iso(
+            proven_path_end_ts
+        ),
+        "final_market_path_handshake_complete": True,
         "final_quote_age_seconds": round(final_quote_age_seconds, 3),
         "trigger_type": intraday.get("trigger_type"),
         "trigger_timestamp": intraday.get("trigger_timestamp"),
@@ -31407,7 +34394,10 @@ def _penny_trigger_prep_rows(
     return prep_rows[:_PENNY_OPTIONAL_ROW_LIMIT]
 
 
-def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
+def _penny_buy_email(
+    rows: List[Dict[str, Any]], *, telemetry_scanner: str = "penny_stocks"
+) -> bool:
+    _set_last_delivery_outcome("not_attempted")
     if not rows:
         return False
     # A single actionable setup per wire message keeps the final quote/path
@@ -31419,11 +34409,21 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
         return False
     allowed, _ = _stock_trade_email_allowed("penny_stocks")
     if not allowed:
+        candidate_count = sum(1 for row in rows if isinstance(row, dict))
+        if candidate_count:
+            _record_suppression_counts(
+                telemetry_scanner,
+                {"stock_session_not_executable": candidate_count},
+            )
+        _set_last_delivery_outcome("stock_session_not_executable")
         return False
     original_row = rows[0]
     validated_row, validation_reason = _penny_revalidate_buy_candidate(original_row)
     if not validated_row:
         original_row["mail_revalidation_reason"] = validation_reason
+        _record_suppression_counts(
+            telemetry_scanner, {"final_stock_revalidation_failed": 1}
+        )
         print(
             f"[Penny] buy email suppressed {str(original_row.get('ticker') or '').upper()}: "
             f"{validation_reason}"
@@ -31442,6 +34442,9 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
         or validated_row.get("quote_evidence_verified") is not True
     ):
         original_row["mail_revalidation_reason"] = "final_quote_or_session_stale"
+        _record_suppression_counts(
+            telemetry_scanner, {"final_quote_or_session_stale": 1}
+        )
         return False
     # Keep the caller's state row identical to the row embedded in the mail
     # and handed to the delivery-intent tracker.
@@ -31495,11 +34498,42 @@ def _penny_buy_email(rows: List[Dict[str, Any]]) -> bool:
     )
 
 
-def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
+def _call_penny_mail_helper(
+    sender,
+    rows: List[Dict[str, Any]],
+    *,
+    telemetry_scanner: str,
+) -> bool:
+    """Pass explicit attribution without retrying an invoked sender."""
+    try:
+        parameters = inspect.signature(sender).parameters.values()
+        supports_attribution = any(
+            parameter.name == "telemetry_scanner"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_attribution = True
+    if supports_attribution:
+        return sender(rows, telemetry_scanner=telemetry_scanner)
+    return sender(rows)
+
+
+def _penny_management_email(
+    rows: List[Dict[str, Any]], *, telemetry_scanner: str = "penny_stocks"
+) -> bool:
+    _set_last_delivery_outcome("not_attempted")
     if not rows:
         return False
     allowed, _ = _stock_trade_email_allowed("penny_stocks_management")
     if not allowed:
+        candidate_count = sum(1 for row in rows if isinstance(row, dict))
+        if candidate_count:
+            _record_suppression_counts(
+                telemetry_scanner,
+                {"stock_session_not_executable": candidate_count},
+            )
+        _set_last_delivery_outcome("stock_session_not_executable")
         return False
     _load_common_stock_universe(require_names=True)
     rows = [
@@ -31532,11 +34566,21 @@ def _penny_management_email(rows: List[Dict[str, Any]]) -> bool:
     )
 
 
-def _penny_exit_email(rows: List[Dict[str, Any]]) -> bool:
+def _penny_exit_email(
+    rows: List[Dict[str, Any]], *, telemetry_scanner: str = "penny_stocks"
+) -> bool:
+    _set_last_delivery_outcome("not_attempted")
     if not rows:
         return False
     allowed, _ = _stock_trade_email_allowed("penny_stocks_exit")
     if not allowed:
+        candidate_count = sum(1 for row in rows if isinstance(row, dict))
+        if candidate_count:
+            _record_suppression_counts(
+                telemetry_scanner,
+                {"stock_session_not_executable": candidate_count},
+            )
+        _set_last_delivery_outcome("stock_session_not_executable")
         return False
     _load_common_stock_universe(require_names=True)
     rows = [
@@ -32112,6 +35156,11 @@ def _penny_stock_scanner_wrapper() -> None:
             candidate["position_event_id"] = position_event_id
             dedupe_key = f"penny_buy:{symbol}:{trigger_id}"
             if state.get("last_buy_trigger") == trigger_id or _email_dedupe_active(dedupe_key, 6 * 3600, now=time.time()):
+                revalidation_blocked["buy_trigger_already_processed"] = (
+                    revalidation_blocked.get(
+                        "buy_trigger_already_processed", 0
+                    ) + 1
+                )
                 state.update({
                     "active": bool(state.get("active")),
                     "last_action": "TRIGGER_WARTEN",
@@ -32213,16 +35262,46 @@ def _penny_stock_scanner_wrapper() -> None:
 
         # External side effects only happen after every operational source of
         # truth has been published successfully.
+        _penny_batch_suppressed: Dict[str, int] = {}
+        for _counter_name in (
+            "trigger_pool_rejected_counts",
+            "preflight_rejected_counts",
+            "buy_revalidation_blocked",
+            "blocked_counts",
+        ):
+            for _reason, _count in (
+                diagnostics.get(_counter_name) or {}
+            ).items():
+                _penny_batch_suppressed[str(_reason)] = (
+                    _penny_batch_suppressed.get(str(_reason), 0)
+                    + int(_count or 0)
+                )
+        if diagnostics.get("suppressed_non_actionable"):
+            _penny_batch_suppressed["penny_non_actionable"] = int(
+                diagnostics["suppressed_non_actionable"]
+            )
         state_changed_after_mail = False
         side_effect_now = time.time()
         mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
             "penny_stocks", buy_candidates
         )
         diagnostics["cross_scanner_duplicates"] = equivalent_count
+        if equivalent_count:
+            _penny_batch_suppressed["open_equivalent_trade"] = (
+                _penny_batch_suppressed.get("open_equivalent_trade", 0)
+                + equivalent_count
+            )
+        buy_claim_candidates = mail_buy_candidates[:5]
         claimed_buy_candidates = [
-            row for row in mail_buy_candidates[:5]
+            row for row in buy_claim_candidates
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
         ]
+        _buy_unclaimed = len(buy_claim_candidates) - len(claimed_buy_candidates)
+        if _buy_unclaimed:
+            _penny_batch_suppressed["dedupe_claim_not_owned"] = (
+                _penny_batch_suppressed.get("dedupe_claim_not_owned", 0)
+                + _buy_unclaimed
+            )
         for row in claimed_buy_candidates:
             try:
                 buy_mail_sent = _penny_buy_email([row])
@@ -32244,10 +35323,19 @@ def _penny_stock_scanner_wrapper() -> None:
                 state_changed_after_mail = True
 
         side_effect_now = time.time()
+        management_claim_candidates = management_candidates[:5]
         claimed_management_candidates = [
-            row for row in management_candidates[:5]
+            row for row in management_claim_candidates
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=side_effect_now)
         ]
+        _management_unclaimed = (
+            len(management_claim_candidates) - len(claimed_management_candidates)
+        )
+        if _management_unclaimed:
+            _penny_batch_suppressed["dedupe_claim_not_owned"] = (
+                _penny_batch_suppressed.get("dedupe_claim_not_owned", 0)
+                + _management_unclaimed
+            )
         try:
             management_mail_sent = _penny_management_email(claimed_management_candidates)
         except Exception as exc:
@@ -32287,10 +35375,17 @@ def _penny_stock_scanner_wrapper() -> None:
                 )
 
         side_effect_now = time.time()
+        exit_claim_candidates = exit_candidates[:5]
         claimed_exit_candidates = [
-            row for row in exit_candidates[:5]
+            row for row in exit_claim_candidates
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
         ]
+        _exit_unclaimed = len(exit_claim_candidates) - len(claimed_exit_candidates)
+        if _exit_unclaimed:
+            _penny_batch_suppressed["dedupe_claim_not_owned"] = (
+                _penny_batch_suppressed.get("dedupe_claim_not_owned", 0)
+                + _exit_unclaimed
+            )
         try:
             exit_mail_sent = _penny_exit_email(claimed_exit_candidates)
         except Exception as exc:
@@ -32334,6 +35429,7 @@ def _penny_stock_scanner_wrapper() -> None:
 
         if state_changed_after_mail:
             ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=time.time())
+        _record_suppression_counts("penny_stocks", _penny_batch_suppressed)
         with _scan_lock:
             _scan_status.get("penny_stocks", {}).pop("last_error", None)
         print(
@@ -32341,6 +35437,9 @@ def _penny_stock_scanner_wrapper() -> None:
             f"{len(active_rows)} active, {len(optional_rows)} optional, {diagnostics['buy_now']} buy"
         )
     except Exception as exc:
+        _record_suppression_counts(
+            "penny_stocks", {"scanner_failed": 1}
+        )
         _remove_partial_cache(PENNY_STOCKS_CACHE)
         diagnostics["error"] = "penny_scanner_failed"
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
@@ -32943,23 +36042,46 @@ def _penny_position_monitor_wrapper() -> None:
         _penny_save_dict(PENNY_STOCKS_NEWS_CACHE, news_cache)
         _penny_save_dict(PENNY_STOCKS_SEC_CACHE, sec_cache)
 
+        _penny_monitor_suppressed: Dict[str, int] = {
+            str(reason): int(count or 0)
+            for reason, count in (
+                diagnostics.get("trigger_rejected_counts") or {}
+            ).items()
+            if int(count or 0) > 0
+        }
         state_changed_after_mail = False
         claim_time = time.time()
         mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
             "penny_stocks", buy_candidates
         )
         diagnostics["cross_scanner_duplicates"] = equivalent_count
+        if equivalent_count:
+            _penny_monitor_suppressed["open_equivalent_trade"] = (
+                _penny_monitor_suppressed.get("open_equivalent_trade", 0)
+                + equivalent_count
+            )
+        buy_claim_candidates = mail_buy_candidates[:5]
         claimed_buys = [
-            row for row in mail_buy_candidates[:5]
+            row for row in buy_claim_candidates
             if _email_dedupe_claim(
                 str(row.get("_dedupe_key") or ""),
                 6 * 3600,
                 now=claim_time,
             )
         ]
+        _buy_unclaimed = len(buy_claim_candidates) - len(claimed_buys)
+        if _buy_unclaimed:
+            _penny_monitor_suppressed["dedupe_claim_not_owned"] = (
+                _penny_monitor_suppressed.get("dedupe_claim_not_owned", 0)
+                + _buy_unclaimed
+            )
         for row in claimed_buys:
             try:
-                buy_mail_sent = _penny_buy_email([row])
+                buy_mail_sent = _call_penny_mail_helper(
+                    _penny_buy_email,
+                    [row],
+                    telemetry_scanner="penny_positions",
+                )
             except Exception as exc:
                 print(f"[Penny monitor] buy email error: {_sanitized_exception_text(exc)}")
                 buy_mail_sent = False
@@ -32978,12 +36100,25 @@ def _penny_position_monitor_wrapper() -> None:
                 state_changed_after_mail = True
 
         claim_time = time.time()
+        management_claim_candidates = management_candidates[:5]
         claimed_management = [
-            row for row in management_candidates[:5]
+            row for row in management_claim_candidates
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=claim_time)
         ]
+        _management_unclaimed = (
+            len(management_claim_candidates) - len(claimed_management)
+        )
+        if _management_unclaimed:
+            _penny_monitor_suppressed["dedupe_claim_not_owned"] = (
+                _penny_monitor_suppressed.get("dedupe_claim_not_owned", 0)
+                + _management_unclaimed
+            )
         try:
-            management_mail_sent = _penny_management_email(claimed_management)
+            management_mail_sent = _call_penny_mail_helper(
+                _penny_management_email,
+                claimed_management,
+                telemetry_scanner="penny_positions",
+            )
         except Exception as exc:
             print(f"[Penny monitor] management email error: {exc}")
             management_mail_sent = False
@@ -33018,12 +36153,23 @@ def _penny_position_monitor_wrapper() -> None:
                 )
 
         claim_time = time.time()
+        exit_claim_candidates = exit_candidates[:5]
         claimed_exits = [
-            row for row in exit_candidates[:5]
+            row for row in exit_claim_candidates
             if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=claim_time)
         ]
+        _exit_unclaimed = len(exit_claim_candidates) - len(claimed_exits)
+        if _exit_unclaimed:
+            _penny_monitor_suppressed["dedupe_claim_not_owned"] = (
+                _penny_monitor_suppressed.get("dedupe_claim_not_owned", 0)
+                + _exit_unclaimed
+            )
         try:
-            exit_mail_sent = _penny_exit_email(claimed_exits)
+            exit_mail_sent = _call_penny_mail_helper(
+                _penny_exit_email,
+                claimed_exits,
+                telemetry_scanner="penny_positions",
+            )
         except Exception as exc:
             print(f"[Penny monitor] exit email error: {_sanitized_exception_text(exc)}")
             exit_mail_sent = False
@@ -33065,6 +36211,9 @@ def _penny_position_monitor_wrapper() -> None:
 
         if state_changed_after_mail:
             _penny_merge_state_tickers(ticker_state, now_ts=time.time())
+        _record_suppression_counts(
+            "penny_positions", _penny_monitor_suppressed
+        )
         with _scan_lock:
             _scan_status.get("penny_positions", {}).pop("last_error", None)
         print(
@@ -33074,6 +36223,9 @@ def _penny_position_monitor_wrapper() -> None:
             f"{diagnostics['exit_now']} exit"
         )
     except Exception as exc:
+        _record_suppression_counts(
+            "penny_positions", {"scanner_failed": 1}
+        )
         diagnostics["error"] = "penny_position_monitor_failed"
         diagnostics["duration_seconds"] = round(time.time() - started_at, 1)
         print(f"[Penny monitor] error: {_sanitized_exception_text(exc)}")
@@ -34176,16 +37328,42 @@ def _orb_scanner_wrapper() -> None:
         print(f"[ORB] Filter-Stats: {_dbg}")
 
         # ── Alert bei Grade S/A Breakouts ──
-        alert_breakouts = [
-            row
-            for row in actionable_breakouts
-            if row.get("grade") in ("S", "A")
-            and str(row.get("trade_decision") or "").upper() == "TRADEABLE"
-        ]
+        _orb_batch_suppressed: Dict[str, int] = {}
+        for _rejected_orb in decorated_result.get(
+            "rejected_range_breaks", []
+        ):
+            if not isinstance(_rejected_orb, dict):
+                continue
+            _rejected_reasons = (
+                _rejected_orb.get("orb_gate_reasons")
+                or ["orb_not_tradeable"]
+            )
+            for _reason in _rejected_reasons:
+                _reason = str(_reason or "")
+                if _reason:
+                    _orb_batch_suppressed[_reason] = (
+                        _orb_batch_suppressed.get(_reason, 0) + 1
+                    )
+        alert_breakouts = []
+        for row in actionable_breakouts:
+            if row.get("grade") not in ("S", "A"):
+                _orb_batch_suppressed["grade_below_alert_threshold"] = (
+                    _orb_batch_suppressed.get(
+                        "grade_below_alert_threshold", 0
+                    ) + 1
+                )
+                continue
+            if str(row.get("trade_decision") or "").upper() != "TRADEABLE":
+                _orb_batch_suppressed["orb_not_tradeable"] = (
+                    _orb_batch_suppressed.get("orb_not_tradeable", 0) + 1
+                )
+                continue
+            alert_breakouts.append(row)
         alert_breakouts, equivalent_count = _filter_open_equivalent_trade_rows(
             "orb", alert_breakouts
         )
         if equivalent_count:
+            _orb_batch_suppressed["open_equivalent_trade"] = equivalent_count
             print(
                 f"[ORB] {equivalent_count} wirtschaftlich identische offene Trade(s) unterdrueckt"
             )
@@ -34195,19 +37373,40 @@ def _orb_scanner_wrapper() -> None:
         for _b in alert_breakouts:
             _state = _classify_alert_candidate("orb", _b, _alert_now)
             _cooldown_key = str(_state.get("cooldown_key") or "")
-            if (
-                _state["alertable_now"]
-                and _cooldown_key
-                and _email_dedupe_claim(
-                    _cooldown_key,
-                    _alert_dedupe_ttl_seconds("orb"),
-                    now=_alert_now,
+            if not _state["alertable_now"]:
+                for _reason in _state.get("suppression_reasons") or ():
+                    _reason = str(_reason or "")
+                    if _reason:
+                        _orb_batch_suppressed[_reason] = (
+                            _orb_batch_suppressed.get(_reason, 0) + 1
+                        )
+                continue
+            if not _cooldown_key:
+                _orb_batch_suppressed["missing_cooldown_key"] = (
+                    _orb_batch_suppressed.get("missing_cooldown_key", 0) + 1
                 )
+                continue
+            if not _email_dedupe_claim(
+                _cooldown_key,
+                _alert_dedupe_ttl_seconds("orb"),
+                now=_alert_now,
             ):
-                _fresh_alert_breakouts.append(_b)
-                _orb_alert_cooldown_keys.append(_cooldown_key)
+                _orb_batch_suppressed["dedupe_claim_not_owned"] = (
+                    _orb_batch_suppressed.get("dedupe_claim_not_owned", 0) + 1
+                )
+                continue
+            _fresh_alert_breakouts.append(_b)
+            _orb_alert_cooldown_keys.append(_cooldown_key)
+        _record_suppression_counts("orb", _orb_batch_suppressed)
         alert_breakouts = _fresh_alert_breakouts
         if len(alert_breakouts) > 1:
+            _record_suppression_counts(
+                "orb",
+                {
+                    "mail_adjacent_single_candidate_deferred":
+                    len(alert_breakouts) - 1
+                },
+            )
             for _deferred_key in _orb_alert_cooldown_keys[1:]:
                 _email_dedupe_release(_deferred_key, claimed_at=_alert_now)
             _record_email_event(
@@ -34243,6 +37442,15 @@ def _orb_scanner_wrapper() -> None:
                     scanner_name="orb",
                 )
                 if not _validation.get("ok"):
+                    _record_suppression_counts(
+                        "orb",
+                        {
+                            str(
+                                _validation.get("reason")
+                                or "final_stock_revalidation_failed"
+                            ): 1
+                        },
+                    )
                     _email_dedupe_release(_cooldown_key, claimed_at=_alert_now)
                     _record_email_event(
                         "ORB Stock Alert",

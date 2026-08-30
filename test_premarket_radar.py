@@ -226,6 +226,74 @@ def test_premarket_mail_sends_with_own_channel_and_warning(monkeypatch):
     )
 
 
+def test_premarket_mixed_batch_suppresses_cup_watch_per_row(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_stock_trade_email_status",
+        lambda *a, **k: {
+            "allowed": False,
+            "session": "PREMARKET",
+            "reason": "unit Monday premarket",
+        },
+    )
+    monkeypatch.setattr(api, "_premarket_window_active", lambda *a, **k: True)
+    monkeypatch.setattr(api, "_current_us_market_date_str", lambda: "2026-08-31")
+    monkeypatch.setattr(
+        api,
+        "_previous_us_exchange_trading_date_str",
+        lambda _day: "2026-08-28",
+    )
+    sent = []
+    revalidated = []
+    suppressions = []
+    monkeypatch.setattr(
+        api,
+        "_send_email_alert",
+        lambda subject, body, **kwargs: sent.append((subject, body, kwargs)) or True,
+    )
+    monkeypatch.setattr(api, "_safe_record_alert_signals", lambda *a, **k: None)
+    monkeypatch.setattr(api, "_record_email_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        api,
+        "_record_suppression_counts",
+        lambda scanner, reasons: suppressions.append((scanner, dict(reasons))),
+    )
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: revalidated.append(row.get("ticker"))
+        or {"ok": True, "candidate": dict(row)},
+    )
+
+    cup_watch = _pm_row(
+        ticker="CUPX",
+        Ticker="CUPX",
+        Strategy="Cup and Handle Breakout",
+        daily_close_confirmed=True,
+        daily_close_confirmation_date="2026-08-28",
+        last_daily_bar_date="2026-08-28",
+        entry_status="DAILY_CLOSE_CONFIRMED_WATCH_ONLY",
+        trade_signal="BEOBACHTEN",
+    )
+    genuine_pm = _pm_row(ticker="AAA", Ticker="AAA")
+
+    api._send_strategy_scan_alerts(
+        "Aktien Auto-Sweep", [cup_watch, genuine_pm], "stocks"
+    )
+
+    assert len(sent) == 1
+    assert "AAA" in sent[0][1]
+    assert "CUPX" not in sent[0][1]
+    assert revalidated == ["AAA"]
+    assert [
+        row.get("ticker") for row in sent[0][2].get("tracking_rows", [])
+    ] == ["AAA"]
+    assert any(
+        reasons.get("daily_close_confirmed_watch_only_no_afterhours_entry") == 1
+        for _scanner, reasons in suppressions
+    )
+
+
 def test_premarket_mail_skips_when_no_pm_rows(monkeypatch):
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda *a, **k: {"allowed": False, "session": "CLOSED", "reason": "unit closed"})
     monkeypatch.setattr(api, "_premarket_window_active", lambda *a, **k: True)

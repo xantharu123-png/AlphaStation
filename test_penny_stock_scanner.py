@@ -827,6 +827,7 @@ def test_api_wrapper_tracks_model_position_when_buy_mail_fails(monkeypatch, tmp_
         "observed_ts": now_ts,
         "receipt_ts": now_ts,
         "quote_age_seconds": 0.0,
+        "last_trade_ts": now_ts,
     })
     monkeypatch.setattr(
         api,

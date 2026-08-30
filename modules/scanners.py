@@ -245,7 +245,10 @@ _BIOTECH_FORWARD_RESULT_RE = re.compile(
 _AUTOTRADER_DEFAULT_CONFIG = dict(_paper_autotrader.DEFAULT_CONFIG)
 
 _BI_CACHE_FILE = "/tmp/bi_cache_{direction}.json"
-_BI_PROGRESS_FILE = "/tmp/bi_scan_progress_{direction}.json"
+_ALPHA_RUNTIME_TMP_DIR = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or tempfile.gettempdir()
+_BI_PROGRESS_FILE = os.path.join(
+    _ALPHA_RUNTIME_TMP_DIR, "bi_scan_progress_{direction}.json"
+)
 _BI_CONFIG_FILE = "/tmp/alpha_bi_config.json"
 _BI_CACHE_MAX_AGE = 7200
 _bi_scan_lock = threading.Lock()

@@ -16,6 +16,9 @@ tmp_*.html
 .pytest_tmp_local/
 .pytest_*/
 .codex_pytest_*/
+alpha-time-*/
+# Private local mail exports used for audits; never publish them with source.
+Mailarchiv/
 output/playwright/
 .playwright-cli/
 tmp/

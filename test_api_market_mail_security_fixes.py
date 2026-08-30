@@ -102,18 +102,275 @@ def test_trade_reminder_unknown_smtp_is_terminal_and_never_auto_retried(monkeypa
     assert reminder["email_attempts"] == 1
 
 
-def test_stock_market_path_rejects_an_internal_missing_minute(monkeypatch):
+def test_stock_market_path_preserves_provider_empty_minute_without_synthetic_bar(monkeypatch):
+    class AggregateResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104, "l": 96},
+                    {"t": int((NOW - 60) * 1000), "h": 104, "l": 96},
+                ]
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    calls = []
+
+    def _get(url, *args, **kwargs):
+        calls.append((url, kwargs.get("params") or {}))
+        if "/v3/trades/" in url:
+            class EmptyTradeResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"status": "OK", "results": []}
+
+            return EmptyTradeResponse()
+        return AggregateResponse()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA", NOW - 180, now_ts=NOW
+    )
+
+    assert result["ok"] is True
+    assert [bar["timestamp"] for bar in result["bars"]] == [NOW - 180, NOW - 60]
+    assert result["provider_empty_aggregate_interval_count"] == 1
+    assert result["provider_empty_aggregate_intervals"] == [
+        {
+            "start_timestamp": NOW - 120,
+            "end_timestamp": NOW - 60,
+            "proof": "bounded_trade_replay_no_trade",
+        }
+    ]
+    # No flat/interpolated candle is invented for the empty minute.
+    assert len(result["bars"]) == 2
+    assert len(calls) == 2
+    assert "/v2/aggs/" in calls[0][0]
+    assert "/v3/trades/" in calls[1][0]
+
+
+def test_stock_market_path_accepts_fully_elapsed_leading_provider_empty_minutes(
+    monkeypatch,
+):
+    # 10:00:30 observation, then no qualifying trade until the genuine 10:02 bar.
+    observation = NOW - 210
+    first_real_bar = NOW - 120
+
     class Response:
         status_code = 200
 
         @staticmethod
         def json():
             return {
+                "status": "OK",
+                "results": [
+                    {
+                        "t": int(first_real_bar * 1000),
+                        "h": 104.0,
+                        "l": 96.0,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    def _get(url, *args, **kwargs):
+        if "/v3/trades/" in url:
+            class EmptyTradeResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"status": "OK", "results": []}
+
+            return EmptyTradeResponse()
+        return Response()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        observation,
+        now_ts=NOW - 60,
+    )
+
+    assert result["ok"] is True
+    assert result["bars"] == [
+        {"timestamp": first_real_bar, "high": 104.0, "low": 96.0}
+    ]
+    assert result["provider_empty_aggregate_intervals"][0] == {
+        "start_timestamp": observation,
+        "end_timestamp": first_real_bar,
+        "proof": "bounded_trade_replay_no_trade",
+    }
+    assert len(result["bars"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("scan_ts", "quote_ts", "aggregate_bars", "trade_ts", "trade_price", "reason"),
+    [
+        (
+            NOW - 180,
+            NOW - 10,
+            [
+                {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 96.0},
+            ],
+            NOW - 61,
+            94.0,
+            "final_stop_touched_since_scan",
+        ),
+        (
+            NOW - 210,
+            NOW - 60,
+            [
+                {"t": int((NOW - 120) * 1000), "h": 104.0, "l": 96.0},
+            ],
+            NOW - 180,
+            111.0,
+            "final_tp1_touched_since_scan",
+        ),
+    ],
+)
+def test_stock_revalidation_reconstructs_leading_or_internal_gap_touch_from_raw(
+    monkeypatch,
+    scan_ts,
+    quote_ts,
+    aggregate_bars,
+    trade_ts,
+    trade_price,
+    reason,
+):
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        if "/v3/trades/" in url:
+            return Response({
+                "status": "OK",
+                "results": [{
+                    "sip_timestamp": int(trade_ts * 1_000_000_000),
+                    "price": trade_price,
+                }],
+            })
+        return Response({"status": "OK", "results": aggregate_bars})
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.2,
+            "observed_ts": quote_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": trade_ts,
+        },
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _stock_row(scan_ts), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {"ok": False, "reason": reason}
+    assert len([url for url in calls if "/v3/trades/" in url]) == 1
+
+
+def test_stock_market_path_replays_positive_half_second_trailing_gap(monkeypatch):
+    observed_ts = NOW - 60
+    quote_ts = NOW + 0.5
+    last_trade_ts = NOW + 0.25
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        if "/v3/trades/" in url:
+            return Response({
+                "status": "OK",
+                "results": [{
+                    "sip_timestamp": int(last_trade_ts * 1_000_000_000),
+                    "price": 94.0,
+                }],
+            })
+        return Response({
+            "status": "OK",
+            "results": [
+                {"t": int(observed_ts * 1000), "h": 104.0, "l": 96.0},
+                {"t": int(NOW * 1000), "h": 104.0, "l": 99.0},
+            ],
+        })
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        observed_ts,
+        now_ts=quote_ts,
+        last_trade_ts=last_trade_ts,
+    )
+
+    assert result["ok"] is True, result
+    assert result["bars"][-1]["low"] == pytest.approx(94.0)
+    assert result["bars"][-1]["evidence_source"] == "polygon_bounded_trades"
+    assert len([url for url in calls if "/v3/trades/" in url]) == 1
+
+
+@pytest.mark.parametrize(
+    ("payload_updates", "expected_reason"),
+    [
+        ({"status": "DELAYED"}, "final_market_path_not_realtime"),
+        ({"status": None}, "final_market_path_not_realtime"),
+        ({"next_url": "https://api.polygon.io/cursor"}, "final_market_path_truncated"),
+        ({"results": {}}, "final_market_path_payload_invalid"),
+        ({"results": ""}, "final_market_path_payload_invalid"),
+        ({"results": False}, "final_market_path_payload_invalid"),
+        ({"results": 0}, "final_market_path_payload_invalid"),
+    ],
+)
+def test_stock_market_path_rejects_noncurrent_or_paginated_aggregate_evidence(
+    monkeypatch, payload_updates, expected_reason
+):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            payload = {
+                "status": "OK",
                 "results": [
                     {"t": int((NOW - 180) * 1000), "h": 104, "l": 96},
                     {"t": int((NOW - 60) * 1000), "h": 104, "l": 96},
-                ]
+                ],
             }
+            payload.update(payload_updates)
+            return payload
 
     monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
     monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
@@ -122,7 +379,504 @@ def test_stock_market_path_rejects_an_internal_missing_minute(monkeypatch):
         "AAA", NOW - 180, now_ts=NOW
     )
 
-    assert result == {"ok": False, "reason": "final_market_path_internal_gap"}
+    assert result == {"ok": False, "reason": expected_reason}
+
+
+def test_stock_market_path_current_minute_bar_closes_touch_rebound_gap_with_one_call(
+    monkeypatch,
+):
+    watermark = NOW - 10
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    # The current minute crossed TP1 and rebounded before the
+                    # executable quote. These are provider-emitted prices.
+                    {"t": int((NOW - 60) * 1000), "h": 111.0, "l": 99.0},
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        calls.append((url, kwargs.get("params") or {}))
+        if "/v3/trades/" in url:
+            class TradeResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {
+                        "status": "OK",
+                        "results": [{
+                            "sip_timestamp": int((NOW - 61) * 1_000_000_000),
+                            "price": 100.0,
+                        }],
+                    }
+
+            return TradeResponse()
+        return Response()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=NOW - 61,
+    )
+
+    assert result["ok"] is True
+    assert result["current_minute_aggregate_used"] is True
+    assert result["bars"][-1] == {
+        "timestamp": NOW - 60,
+        "high": 111.0,
+        "low": 99.0,
+    }
+    assert len(calls) == 2
+    assert "/v2/aggs/" in calls[0][0]
+    assert len([url for url, _params in calls if "/v3/trades/" in url]) == 1
+
+
+def test_stock_market_path_replaces_lagging_current_bar_with_complete_raw_trades(
+    monkeypatch,
+):
+    watermark = NOW - 10
+    snapshot_last_trade = watermark - 1
+    calls = []
+
+    class AggregateResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    # This aggregate is harmless but lags the snapshot trade.
+                    {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 99.0},
+                ],
+            }
+
+    class TradeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {
+                        "sip_timestamp": int((watermark - 20) * 1_000_000_000),
+                        "price": 94.0,
+                    },
+                    {
+                        "sip_timestamp": int(snapshot_last_trade * 1_000_000_000),
+                        "price": 100.0,
+                    },
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        calls.append((url, kwargs.get("params") or {}))
+        return TradeResponse() if "/v3/trades/" in url else AggregateResponse()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=snapshot_last_trade,
+    )
+
+    assert result["ok"] is True
+    assert result["bars"][-1]["timestamp"] == NOW - 60
+    assert result["bars"][-1]["high"] == pytest.approx(100.0)
+    assert result["bars"][-1]["low"] == pytest.approx(94.0)
+    assert result["bars"][-1]["evidence_source"] == "polygon_bounded_trades"
+    assert result["trailing_raw_trade_evidence_used"] is True
+    assert result["trailing_raw_trade_count"] == 2
+    assert result["current_minute_aggregate_used"] is False
+    assert len(calls) == 2
+    raw_calls = [(url, params) for url, params in calls if "/v3/trades/" in url]
+    assert len(raw_calls) == 1
+    raw_url, raw_params = raw_calls[0]
+    assert "apiKey" not in raw_url
+    assert raw_params["timestamp.gte"] == int((NOW - 120) * 1_000_000_000)
+    assert raw_params["timestamp.lte"] == int(watermark * 1_000_000_000)
+    assert raw_params["limit"] == 50_000
+
+
+def test_stock_market_path_blocks_when_raw_trade_feed_does_not_reach_snapshot(
+    monkeypatch,
+):
+    watermark = NOW - 10
+    snapshot_last_trade = watermark - 1
+    calls = []
+
+    class AggregateResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 99.0},
+                ],
+            }
+
+    class LaggingTradeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {
+                        "sip_timestamp": int((watermark - 5) * 1_000_000_000),
+                        "price": 100.0,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        return (
+            LaggingTradeResponse()
+            if "/v3/trades/" in url
+            else AggregateResponse()
+        )
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=snapshot_last_trade,
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_market_path_trailing_trade_watermark_not_reached",
+    }
+    assert len([url for url in calls if "/v3/trades/" in url]) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_updates", "expected_reason"),
+    [
+        (
+            {"status": None},
+            "final_market_path_trailing_trades_not_realtime",
+        ),
+        (
+            {"next_url": "https://api.polygon.io/v3/trades/AAA?cursor=secret"},
+            "final_market_path_trailing_trades_truncated",
+        ),
+        (
+            {"results": {}},
+            "final_market_path_trailing_trades_payload_invalid",
+        ),
+        (
+            {"results": ""},
+            "final_market_path_trailing_trades_payload_invalid",
+        ),
+        (
+            {"results": False},
+            "final_market_path_trailing_trades_payload_invalid",
+        ),
+        (
+            {"results": 0},
+            "final_market_path_trailing_trades_payload_invalid",
+        ),
+    ],
+)
+def test_stock_market_path_rejects_incomplete_raw_trade_evidence(
+    monkeypatch, raw_updates, expected_reason
+):
+    watermark = NOW - 10
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    aggregate_payload = {
+        "status": "OK",
+        "results": [
+            {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+            {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 99.0},
+        ],
+    }
+    trade_payload = {
+        "status": "OK",
+        "results": [
+            {
+                "sip_timestamp": int((watermark - 1) * 1_000_000_000),
+                "price": 100.0,
+            }
+        ],
+    }
+    trade_payload.update(raw_updates)
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(
+        api,
+        "rate_limited_get",
+        lambda url, *args, **kwargs: Response(
+            trade_payload if "/v3/trades/" in url else aggregate_payload
+        ),
+    )
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=watermark - 1,
+    )
+
+    assert result == {"ok": False, "reason": expected_reason}
+
+
+def test_stock_market_path_fails_closed_without_raw_trade_entitlement(monkeypatch):
+    watermark = NOW - 10
+
+    class AggregateResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 99.0},
+                ],
+            }
+
+    class ForbiddenTradeResponse:
+        status_code = 403
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(
+        api,
+        "rate_limited_get",
+        lambda url, *args, **kwargs: (
+            ForbiddenTradeResponse()
+            if "/v3/trades/" in url
+            else AggregateResponse()
+        ),
+    )
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=watermark - 1,
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_market_path_trailing_trades_http_403",
+    }
+
+
+def test_stock_market_path_accepts_empty_trailing_gap_only_with_snapshot_watermark(
+    monkeypatch,
+):
+    watermark = NOW - 10
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    {"t": int((NOW - 120) * 1000), "h": 104.0, "l": 96.0},
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        return Response()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        # The latest snapshot trade predates the missing trailing minute.
+        last_trade_ts=NOW - 61,
+    )
+
+    assert result["ok"] is True
+    assert result["trailing_no_trade_evidence"] == {
+        "start_timestamp": NOW - 60,
+        "end_timestamp": watermark,
+        "proof": "snapshot_last_trade_before_trailing_gap",
+        "last_trade_timestamp": NOW - 61,
+    }
+    assert result["current_minute_aggregate_used"] is False
+    assert len(calls) == 1
+
+
+def test_stock_market_path_rejects_unverified_trade_inside_missing_trailing_gap(
+    monkeypatch,
+):
+    watermark = NOW - 10
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 180) * 1000), "h": 104.0, "l": 96.0},
+                    {"t": int((NOW - 120) * 1000), "h": 104.0, "l": 96.0},
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        if "/v3/trades/" in url:
+            class EmptyTradeResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"status": "OK", "results": []}
+
+            return EmptyTradeResponse()
+        return Response()
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        NOW - 180,
+        now_ts=watermark,
+        last_trade_ts=NOW - 30,
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_market_path_trailing_trade_watermark_not_reached",
+    }
+
+
+def test_stock_market_path_accepts_all_empty_only_when_last_trade_predates_observation(
+    monkeypatch,
+):
+    observation = NOW - 180
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "OK"}
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        observation,
+        now_ts=NOW - 10,
+        last_trade_ts=observation - 1,
+    )
+
+    assert result["ok"] is True
+    assert result["bars"] == []
+    assert result["trailing_no_trade_evidence"]["proof"] == (
+        "snapshot_last_trade_before_observation"
+    )
+
+
+@pytest.mark.parametrize(
+    ("last_trade_ts", "expected_reason"),
+    [
+        (None, "final_market_path_trailing_gap_unverified"),
+        (NOW - 120, "final_market_path_trailing_trade_watermark_not_reached"),
+    ],
+)
+def test_stock_market_path_rejects_all_empty_without_prior_trade_watermark(
+    monkeypatch, last_trade_ts, expected_reason
+):
+    observation = NOW - 180
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "OK", "results": []}
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA",
+        observation,
+        now_ts=NOW - 10,
+        last_trade_ts=last_trade_ts,
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": expected_reason,
+    }
+
+
+def test_stock_market_path_rejects_result_limit_even_without_cursor(monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "OK", "results": [{}] * 5000}
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+    monkeypatch.setattr(api, "rate_limited_get", lambda *args, **kwargs: Response())
+
+    result = api._fetch_stock_revalidation_market_path(
+        "AAA", NOW - 180, now_ts=NOW
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_market_path_result_limit_reached",
+    }
 
 
 def test_stock_quote_is_reaged_after_slow_path_io(monkeypatch):
@@ -138,6 +892,7 @@ def test_stock_quote_is_reaged_after_slow_path_io(monkeypatch):
             "ask": 100.2,
             "observed_ts": quote_ts,
             "receipt_ts": NOW,
+            "last_trade_ts": quote_ts - 1,
         },
     )
     monkeypatch.setattr(
@@ -168,6 +923,7 @@ def test_stock_receipt_session_is_checked_after_path_io(monkeypatch):
             "ask": 100.2,
             "observed_ts": quote_ts,
             "receipt_ts": receipt_ts,
+            "last_trade_ts": quote_ts - 1,
         },
     )
     monkeypatch.setattr(
@@ -194,6 +950,7 @@ def _patch_penny_candidate(monkeypatch, *, trigger_ts, path_bars):
             "observed_ts": NOW - 10,
             "receipt_ts": NOW,
             "quote_age_seconds": 10.0,
+            "last_trade_ts": NOW - 61,
         },
     )
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *a, **k: [])
@@ -227,6 +984,28 @@ def _penny_row():
     }
 
 
+def test_penny_live_spread_reuses_atomic_snapshot_trade_watermark(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.2,
+            "observed_ts": NOW - 10,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 11,
+        },
+    )
+
+    result = api._penny_fetch_live_spread("PENNY")
+
+    assert result is not None
+    assert result["bid"] == pytest.approx(99.8)
+    assert result["ask"] == pytest.approx(100.2)
+    assert result["last_trade_ts"] == NOW - 11
+
+
 def test_penny_revalidation_blocks_stop_touch_since_closed_trigger(monkeypatch):
     source_ts = NOW - 60
     _patch_penny_candidate(
@@ -239,6 +1018,32 @@ def test_penny_revalidation_blocks_stop_touch_since_closed_trigger(monkeypatch):
 
     assert candidate is None
     assert reason == "final_stop_touched_since_trigger"
+
+
+def test_penny_revalidation_passes_atomic_snapshot_trade_watermark_to_path(
+    monkeypatch,
+):
+    source_ts = NOW - 60
+    _patch_penny_candidate(
+        monkeypatch,
+        trigger_ts=source_ts - 300,
+        path_bars=[{"timestamp": source_ts, "high": 104.0, "low": 96.0}],
+    )
+    captured = []
+
+    def _path(*args, **kwargs):
+        captured.append(kwargs)
+        return {"ok": False, "reason": "unit_path_stop"}
+
+    monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _path)
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert candidate is None
+    assert reason == "unit_path_stop"
+    assert captured == [{"now_ts": NOW - 10, "last_trade_ts": NOW - 61}]
 
 
 def test_penny_revalidation_rejects_internal_causal_path_gap(monkeypatch):
@@ -256,6 +1061,299 @@ def test_penny_revalidation_rejects_internal_causal_path_gap(monkeypatch):
 
     assert candidate is None
     assert reason == "final_market_path_internal_gap"
+
+
+def test_penny_revalidation_accepts_provider_empty_aggregate_gap_coverage(monkeypatch):
+    source_ts = NOW - 180
+    _patch_penny_candidate(
+        monkeypatch,
+        trigger_ts=source_ts - 300,
+        path_bars=[
+            {"timestamp": source_ts, "high": 104.0, "low": 96.0},
+            {"timestamp": NOW - 60, "high": 104.0, "low": 96.0},
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_market_path",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bars": [
+                {"timestamp": source_ts, "high": 104.0, "low": 96.0},
+                {"timestamp": NOW - 60, "high": 104.0, "low": 96.0},
+            ],
+            "source": "polygon_1m_aggs_with_provider_empty_intervals",
+            "first_timestamp": source_ts,
+            "last_timestamp": NOW - 60,
+            "coverage_verified": True,
+            "coverage_start_timestamp": source_ts,
+            "coverage_end_timestamp": NOW - 10,
+            "provider_empty_aggregate_interval_count": 1,
+            "provider_empty_aggregate_intervals": [
+                {
+                    "start_timestamp": source_ts + 60,
+                    "end_timestamp": NOW - 60,
+                    "proof": "massive_no_qualifying_trade_aggregate",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "estimate_penny_execution_costs",
+        lambda **kwargs: {
+            "max_order_notional": 1_000.0,
+            "slippage_bps": 10.0,
+            "execution_cost_bps": 60.0,
+        },
+    )
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert reason == "ok"
+    assert candidate is not None
+    assert candidate["final_market_path_bars"] == 2
+    assert candidate["final_market_path_provider_empty_intervals"] == 1
+    assert candidate["final_market_path_source"].endswith(
+        "provider_empty_intervals"
+    )
+
+
+def _patch_penny_execution_costs(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "estimate_penny_execution_costs",
+        lambda **kwargs: {
+            "max_order_notional": 1_000.0,
+            "slippage_bps": 10.0,
+            "execution_cost_bps": 40.0,
+        },
+    )
+
+
+def test_penny_revalidation_prices_entry_from_q2_not_q1(monkeypatch):
+    source_ts = NOW - 60
+    _patch_penny_candidate(
+        monkeypatch,
+        trigger_ts=source_ts - 300,
+        path_bars=[{"timestamp": source_ts, "high": 104.0, "low": 96.0}],
+    )
+    _patch_penny_execution_costs(monkeypatch)
+    quotes = iter([
+        {
+            "bid": 99.8,
+            "ask": 100.0,
+            "spread_bps": 20.0,
+            "observed_ts": NOW - 10,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 61,
+        },
+        {
+            "bid": 100.8,
+            "ask": 101.0,
+            "spread_bps": 20.0,
+            "observed_ts": NOW - 5,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 61,
+        },
+    ])
+    monkeypatch.setattr(
+        api, "_penny_fetch_live_spread", lambda *_a, **_k: next(quotes)
+    )
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert reason == "ok"
+    assert candidate is not None
+    assert candidate["price"] == pytest.approx(101.0)
+    assert candidate["trade_setup"]["entry"] == pytest.approx(101.0)
+    assert candidate["final_market_path_round_count"] == 1
+
+
+def _patch_penny_advancing_handshake(monkeypatch, *, final_watermark="bounded"):
+    source_ts = NOW - 180
+    trigger_ts = source_ts - 300
+    _patch_penny_candidate(
+        monkeypatch,
+        trigger_ts=trigger_ts,
+        path_bars=[{"timestamp": source_ts, "high": 104.0, "low": 96.0}],
+    )
+    _patch_penny_execution_costs(monkeypatch)
+    q1_ts = NOW - 20
+    q2_ts = NOW - 10
+    q3_ts = NOW - 5
+    q2_last_trade = NOW - 11
+    final_last_trade = (
+        None
+        if final_watermark == "missing"
+        else NOW - 6
+        if final_watermark == "unbounded"
+        else q2_last_trade
+    )
+    quotes = iter([
+        {
+            "bid": 99.8,
+            "ask": 100.0,
+            "spread_bps": 20.0,
+            "observed_ts": q1_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q1_ts - 1,
+        },
+        {
+            "bid": 100.3,
+            "ask": 100.5,
+            "spread_bps": 20.0,
+            "observed_ts": q2_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q2_last_trade,
+        },
+        {
+            "bid": 100.8,
+            "ask": 101.0,
+            "spread_bps": 20.0,
+            "observed_ts": q3_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": final_last_trade,
+        },
+    ])
+    monkeypatch.setattr(
+        api, "_penny_fetch_live_spread", lambda *_a, **_k: next(quotes)
+    )
+    path_calls = []
+
+    def _market_path(_ticker, observed_ts, **kwargs):
+        path_calls.append((observed_ts, kwargs["now_ts"], kwargs["last_trade_ts"]))
+        return {
+            "ok": True,
+            "bars": [
+                {"timestamp": observed_ts, "high": 104.0, "low": 96.0}
+            ],
+            "source": "unit_path",
+            "first_timestamp": observed_ts,
+            "last_timestamp": observed_ts,
+            "coverage_verified": True,
+            "coverage_start_timestamp": observed_ts,
+            "coverage_end_timestamp": kwargs["now_ts"],
+        }
+
+    monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _market_path)
+    return path_calls
+
+
+def test_penny_revalidation_incrementally_extends_path_and_uses_qfinal(monkeypatch):
+    path_calls = _patch_penny_advancing_handshake(monkeypatch)
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert reason == "ok"
+    assert candidate is not None
+    assert candidate["price"] == pytest.approx(101.0)
+    assert candidate["final_market_path_round_count"] == 2
+    assert len(path_calls) == api._STOCK_FINAL_MAX_PATH_ROUNDS
+
+
+def test_penny_revalidation_blocks_stop_touch_in_incremental_handshake_path(
+    monkeypatch,
+):
+    _patch_penny_advancing_handshake(monkeypatch)
+    path_calls = []
+
+    def _market_path(_ticker, observed_ts, **kwargs):
+        path_calls.append(observed_ts)
+        is_incremental = len(path_calls) == 2
+        return {
+            "ok": True,
+            "bars": [{
+                "timestamp": observed_ts,
+                "high": 104.0,
+                "low": 94.0 if is_incremental else 96.0,
+            }],
+            "source": "unit_path",
+            "first_timestamp": observed_ts,
+            "last_timestamp": observed_ts,
+            "coverage_verified": True,
+            "coverage_start_timestamp": observed_ts,
+            "coverage_end_timestamp": kwargs["now_ts"],
+        }
+
+    monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _market_path)
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert candidate is None
+    assert reason == "final_stop_touched_since_trigger"
+    assert len(path_calls) == api._STOCK_FINAL_MAX_PATH_ROUNDS
+
+
+@pytest.mark.parametrize(
+    ("final_watermark", "expected_reason"),
+    [
+        (
+            "unbounded",
+            "final_market_path_handshake_unbounded_trade_advance",
+        ),
+        ("missing", "final_handshake_last_trade_timestamp_missing"),
+    ],
+)
+def test_penny_revalidation_blocks_invalid_qfinal_watermark(
+    monkeypatch, final_watermark, expected_reason
+):
+    path_calls = _patch_penny_advancing_handshake(
+        monkeypatch, final_watermark=final_watermark
+    )
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert candidate is None
+    assert reason == expected_reason
+    assert len(path_calls) == api._STOCK_FINAL_MAX_PATH_ROUNDS
+
+
+def test_penny_revalidation_blocks_q2_without_last_trade_watermark(monkeypatch):
+    source_ts = NOW - 60
+    _patch_penny_candidate(
+        monkeypatch,
+        trigger_ts=source_ts - 300,
+        path_bars=[{"timestamp": source_ts, "high": 104.0, "low": 96.0}],
+    )
+    quotes = iter([
+        {
+            "bid": 99.8,
+            "ask": 100.0,
+            "spread_bps": 20.0,
+            "observed_ts": NOW - 10,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 61,
+        },
+        {
+            "bid": 100.3,
+            "ask": 100.5,
+            "spread_bps": 20.0,
+            "observed_ts": NOW - 5,
+            "receipt_ts": NOW,
+            "last_trade_ts": None,
+        },
+    ])
+    monkeypatch.setattr(
+        api, "_penny_fetch_live_spread", lambda *_a, **_k: next(quotes)
+    )
+
+    candidate, reason = api._penny_revalidate_buy_candidate(
+        _penny_row(), now_ts=NOW
+    )
+
+    assert candidate is None
+    assert reason == "final_handshake_last_trade_timestamp_missing"
 
 
 @pytest.mark.parametrize("venue", [None, "kraken", "UNKNOWN"])

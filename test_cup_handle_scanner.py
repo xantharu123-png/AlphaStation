@@ -47,11 +47,9 @@ def test_cup_handle_detector_rejects_chased_breakout():
     assert setup is None
 
 
-def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now(monkeypatch):
-    # M-Cup&Handle-Fix: Waehrend offener US-Session wird CONFIRMED designgemaess
-    # auf INTRADAY_UNCONFIRMED/BEOBACHTEN downgegradet (unfertige Tageskerze).
-    # Dieser Test prueft den Confirmed-Pfad NACH Tagesschluss => Session mocken,
-    # sonst ist der Test tageszeitabhaengig flaky.
+def test_cup_handle_strategy_filter_marks_daily_close_as_next_session_watch(monkeypatch):
+    # Nach Tagesschluss ist die Pattern-Evidenz bestaetigt, aber es gibt keinen
+    # ausfuehrbaren <=90s Entry. Deshalb ausschliesslich Watch/Planung.
     monkeypatch.setattr(
         api,
         "_stock_trade_email_status",
@@ -75,13 +73,15 @@ def test_cup_handle_strategy_filter_marks_confirmed_breakout_as_trade_now(monkey
     enriched = api._apply_cup_handle_strategy_filter(candidate, strat)
 
     assert enriched is not None
-    assert enriched["trade_signal"] == "JETZT_TRADEN"
-    assert enriched["trade_action"] == "LONG_NOW"
-    assert enriched["entry_status"] == "BREAKOUT_CONFIRMED"
+    assert enriched["trade_signal"] == "BEOBACHTEN"
+    assert enriched["trade_action"] == "PLAN_NEXT_SESSION"
+    assert enriched["entry_status"] == "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+    assert enriched["daily_close_confirmed"] is True
+    assert enriched["alertable_long"] is False
     assert enriched["pattern_type"] == "cup_handle_breakout"
     assert enriched["score"] >= 80
     assert enriched["grade"] in {"S", "A"}
-    assert enriched["long_entry_quality"] == "TRADEABLE"
+    assert enriched["long_entry_quality"] == "WATCH_NEXT_SESSION"
 
 
 def test_cup_handle_strategy_filter_rejects_missing_fresh_5m_trigger(monkeypatch):

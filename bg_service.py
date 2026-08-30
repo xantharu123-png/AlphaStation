@@ -44,6 +44,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
+_ALPHA_RUNTIME_TMP_DIR = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or tempfile.gettempdir()
+
+
+def _bi_progress_file(direction):
+    return os.path.join(_ALPHA_RUNTIME_TMP_DIR, f"bi_scan_progress_{direction}.json")
+
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         try:
@@ -5619,7 +5625,7 @@ def _bg_run_bi_scan(direction, secrets, candidates=None):
     candidates) — denselben Code, den auch der Streamlit-/api-Pfad nutzt
     (Schwelle 45/40, Struktur-Level, Geometrie-Gates). Die Funktion schreibt
     Cache (/tmp/bi_cache_{direction}.json) und Progress-File
-    (/tmp/bi_scan_progress_{direction}.json) selbst via _bi_cache_save /
+    (ALPHA_RUNTIME_TMP_DIR/bi_scan_progress_{direction}.json) selbst via _bi_cache_save /
     _bi_progress_write.
 
     candidates: vorgefilterte Kandidaten-Liste (Dicts mit "Ticker"-Key oder
@@ -5752,7 +5758,7 @@ def _run_bi_scanner(poly_key, direction="long"):
                 "count": 0,
                 "results": [],
             })
-            progress_file = f"/tmp/bi_scan_progress_{direction}.json"
+            progress_file = _bi_progress_file(direction)
             _atomic_write_json(progress_file, {
                 "status": "done",
                 "direction": direction,
@@ -5770,7 +5776,7 @@ def _run_bi_scanner(poly_key, direction="long"):
             return []
 
         # 5) Progress-Datei schreiben damit Streamlit-UI den Fortschritt sieht
-        progress_file = f"/tmp/bi_scan_progress_{direction}.json"
+        progress_file = _bi_progress_file(direction)
         _atomic_write_json(progress_file, {"status": "running", "checked": 0, "total": len(filtered),
                        "hits": 0, "detail": f"{len(filtered)} Kandidaten", "timestamp": time.time()})
 
@@ -5786,7 +5792,7 @@ def _run_bi_scanner(poly_key, direction="long"):
             scanner_name,
             cache_file,
             previous_revision,
-            f"/tmp/bi_scan_progress_{direction}.json",
+            _bi_progress_file(direction),
             started_at,
             direction=direction,
         )

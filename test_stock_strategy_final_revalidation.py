@@ -80,8 +80,10 @@ def _patch_market_evidence(monkeypatch, *, direction="LONG", bars=None):
             "bid": 99.8,
             "ask": 100.2,
             "observed_ts": NOW - 10,
+            "receipt_ts": NOW,
             "age_seconds": 10.0,
             "source": api._STOCK_FINAL_PRICE_SOURCE,
+            "last_trade_ts": NOW - 20,
         },
     )
 
@@ -159,6 +161,55 @@ def test_completed_polygon_bar_is_valid_causal_scan_source(monkeypatch):
     assert result["ok"] is True
 
 
+@pytest.mark.parametrize("scanner_name", ["stock_strategy", "orb"])
+def test_stock_and_orb_accept_provider_empty_aggregate_minutes(
+    monkeypatch, scanner_name
+):
+    _patch_market_evidence(monkeypatch)
+    scan_ts = NOW - 600
+    quote_ts = NOW - 10
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_market_path",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bars": [
+                {"timestamp": scan_ts, "high": 104.0, "low": 96.0},
+                {"timestamp": NOW - 60, "high": 104.0, "low": 96.0},
+            ],
+            "source": "polygon_1m_aggs_with_provider_empty_intervals",
+            "first_timestamp": scan_ts,
+            "last_timestamp": NOW - 60,
+            "coverage_verified": True,
+            "coverage_start_timestamp": scan_ts,
+            "coverage_end_timestamp": quote_ts,
+            "provider_empty_aggregate_interval_count": 1,
+            "provider_empty_aggregate_intervals": [
+                {
+                    "start_timestamp": scan_ts + 60,
+                    "end_timestamp": NOW - 60,
+                    "proof": "massive_no_qualifying_trade_aggregate",
+                }
+            ],
+        },
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(),
+        now_ts=NOW,
+        price_session="US_REGULAR",
+        scanner_name=scanner_name,
+    )
+
+    assert result["ok"] is True
+    candidate = result["candidate"]
+    assert candidate["final_market_path_bars"] == 2
+    assert candidate["final_market_path_provider_empty_intervals"] == 1
+    assert candidate["final_market_path_source"].endswith(
+        "provider_empty_intervals"
+    )
+
+
 @pytest.mark.parametrize(
     ("direction", "bars", "reason"),
     [
@@ -192,6 +243,137 @@ def test_final_revalidation_blocks_ambiguous_same_bar_stop_and_tp1(monkeypatch):
         "ok": False,
         "reason": "final_stop_and_tp1_touched_since_scan",
     }
+
+
+def test_final_revalidation_blocks_current_minute_tp_touch_and_rebound(monkeypatch):
+    quote_ts = NOW - 10
+
+    class AggregateResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [
+                    {"t": int((NOW - 600) * 1000), "h": 104.0, "l": 96.0},
+                    {"t": int((NOW - 60) * 1000), "h": 110.5, "l": 99.0},
+                ],
+            }
+
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    class TradeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "results": [{
+                    "sip_timestamp": int((NOW - 61) * 1_000_000_000),
+                    "price": 100.0,
+                }],
+            }
+
+    monkeypatch.setattr(
+        api,
+        "rate_limited_get",
+        lambda url, *args, **kwargs: (
+            TradeResponse() if "/v3/trades/" in url else AggregateResponse()
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.2,
+            "observed_ts": quote_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 61,
+        },
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_tp1_touched_since_scan",
+    }
+
+
+def test_final_revalidation_uses_complete_raw_trades_for_lagging_current_bar(
+    monkeypatch,
+):
+    quote_ts = NOW - 10
+    snapshot_last_trade = quote_ts - 1
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    aggregate_payload = {
+        "status": "OK",
+        "results": [
+            {"t": int((NOW - 600) * 1000), "h": 104.0, "l": 96.0},
+            # Harmless but lagging current-minute aggregate.
+            {"t": int((NOW - 60) * 1000), "h": 104.0, "l": 99.0},
+        ],
+    }
+    trade_payload = {
+        "status": "OK",
+        "results": [
+            {
+                "sip_timestamp": int((quote_ts - 20) * 1_000_000_000),
+                "price": 94.0,
+            },
+            {
+                "sip_timestamp": int(snapshot_last_trade * 1_000_000_000),
+                "price": 100.0,
+            },
+        ],
+    }
+    monkeypatch.setattr(api, "POLYGON_KEY", "unit-key")
+
+    def _get(url, *args, **kwargs):
+        calls.append(url)
+        return Response(
+            trade_payload if "/v3/trades/" in url else aggregate_payload
+        )
+
+    monkeypatch.setattr(api, "rate_limited_get", _get)
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.2,
+            "observed_ts": quote_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": snapshot_last_trade,
+        },
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_stop_touched_since_scan",
+    }
+    assert len([url for url in calls if "/v3/trades/" in url]) == 1
 
 
 @pytest.mark.parametrize(
@@ -239,6 +421,7 @@ def test_final_revalidation_blocks_wide_live_spread(monkeypatch):
             "observed_ts": NOW - 10,
             "age_seconds": 10.0,
             "source": api._STOCK_FINAL_PRICE_SOURCE,
+            "last_trade_ts": NOW - 20,
         },
     )
 
@@ -289,6 +472,7 @@ def test_regular_open_rejects_quote_timestamped_in_premarket(monkeypatch):
             "observed_ts": quote,
             "age_seconds": 20.0,
             "source": api._STOCK_FINAL_PRICE_SOURCE,
+            "last_trade_ts": quote - 1,
         },
     )
     row = _row(
@@ -336,6 +520,7 @@ def test_regular_close_rejects_quote_received_after_market_close(monkeypatch):
             "ask": 100.2,
             "observed_ts": quote,
             "receipt_ts": receipt,
+            "last_trade_ts": quote - 1,
         },
     )
     row = _row(
@@ -349,7 +534,10 @@ def test_regular_close_rejects_quote_received_after_market_close(monkeypatch):
     assert result == {"ok": False, "reason": "final_receipt_session_mismatch"}
 
 
-def test_final_revalidation_fetches_quote_before_watermarked_path(monkeypatch):
+@pytest.mark.parametrize("scanner_name", ["stock_strategy", "orb"])
+def test_final_revalidation_fetches_quote_before_watermarked_path(
+    monkeypatch, scanner_name
+):
     calls = []
     quote_ts = NOW - 10
     monkeypatch.setattr(
@@ -362,11 +550,14 @@ def test_final_revalidation_fetches_quote_before_watermarked_path(monkeypatch):
             "observed_ts": quote_ts,
             "age_seconds": 10.0,
             "source": api._STOCK_FINAL_PRICE_SOURCE,
+            "last_trade_ts": quote_ts - 15,
         },
     )
 
     def _path(*args, **kwargs):
-        calls.append(("path", kwargs.get("now_ts")))
+        calls.append(
+            ("path", kwargs.get("now_ts"), kwargs.get("last_trade_ts"))
+        )
         return {
             "ok": True,
             "bars": [
@@ -381,11 +572,322 @@ def test_final_revalidation_fetches_quote_before_watermarked_path(monkeypatch):
     monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _path)
 
     result = api._revalidate_stock_strategy_mail_candidate(
-        _row(), now_ts=NOW, price_session="US_REGULAR"
+        _row(),
+        now_ts=NOW,
+        price_session="US_REGULAR",
+        scanner_name=scanner_name,
     )
 
     assert result["ok"] is True
-    assert calls == ["quote", ("path", quote_ts)]
+    assert calls == ["quote", ("path", quote_ts, quote_ts - 15), "quote"]
+
+
+def test_final_revalidation_uses_q2_entry_price_not_q1(monkeypatch):
+    q1_ts = NOW - 10
+    q2_ts = NOW - 5
+    snapshots = iter([
+        {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.0,
+            "observed_ts": q1_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q1_ts - 1,
+        },
+        {
+            "ok": True,
+            "bid": 101.8,
+            "ask": 102.0,
+            "observed_ts": q2_ts,
+            "receipt_ts": NOW,
+            # No trade advanced beyond the already proven Q1 path.
+            "last_trade_ts": q1_ts - 1,
+        },
+    ])
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_market_path",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "bars": [
+                {"timestamp": NOW - 600, "high": 104.0, "low": 96.0},
+                {"timestamp": NOW - 60, "high": 104.0, "low": 96.0},
+            ],
+            "source": "unit_path",
+            "first_timestamp": NOW - 600,
+            "last_timestamp": NOW - 60,
+            "coverage_verified": True,
+            "coverage_start_timestamp": NOW - 600,
+            "coverage_end_timestamp": q1_ts,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "validate_fill_quality",
+        lambda *args, **kwargs: {"valid": True},
+    )
+    row = _row()
+    row["trade_setup"].update({"tp1": 113.0, "tp2": 123.0})
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        row, now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result["ok"] is True
+    assert result["candidate"]["price"] == pytest.approx(102.0)
+    assert result["candidate"]["final_quote_ask"] == pytest.approx(102.0)
+    assert result["candidate"]["price_observed_at"] == datetime.fromtimestamp(
+        q2_ts, timezone.utc
+    ).isoformat()
+    assert result["candidate"]["final_market_path_round_count"] == 1
+
+
+def _patch_advancing_quote_handshake(monkeypatch, *, unbounded=False):
+    q1_ts = NOW - 20
+    q2_ts = NOW - 10
+    q3_ts = NOW - 5
+    q2_trade_ts = NOW - 11
+    q3_trade_ts = NOW - 6 if unbounded else q2_trade_ts
+    snapshots = iter([
+        {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.0,
+            "observed_ts": q1_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q1_ts - 1,
+        },
+        {
+            "ok": True,
+            "bid": 100.8,
+            "ask": 101.0,
+            "observed_ts": q2_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q2_trade_ts,
+        },
+        {
+            "ok": True,
+            "bid": 101.8,
+            "ask": 102.0,
+            "observed_ts": q3_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q3_trade_ts,
+        },
+    ])
+    path_calls = []
+
+    def _path(_ticker, observed_ts, **kwargs):
+        path_calls.append((observed_ts, kwargs["now_ts"], kwargs["last_trade_ts"]))
+        return {
+            "ok": True,
+            "bars": [
+                {
+                    "timestamp": observed_ts,
+                    "high": 104.0,
+                    "low": 96.0,
+                }
+            ],
+            "source": "unit_path",
+            "first_timestamp": observed_ts,
+            "last_timestamp": observed_ts,
+            "coverage_verified": True,
+            "coverage_start_timestamp": observed_ts,
+            "coverage_end_timestamp": kwargs["now_ts"],
+        }
+
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _path)
+    monkeypatch.setattr(
+        api,
+        "validate_fill_quality",
+        lambda *args, **kwargs: {"valid": True},
+    )
+    return path_calls
+
+
+def test_final_revalidation_incrementally_extends_path_when_q2_trade_advances(
+    monkeypatch,
+):
+    path_calls = _patch_advancing_quote_handshake(monkeypatch)
+    row = _row()
+    row["trade_setup"].update({"tp1": 113.0, "tp2": 123.0})
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        row, now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result["ok"] is True
+    assert result["candidate"]["price"] == pytest.approx(102.0)
+    assert result["candidate"]["final_market_path_round_count"] == 2
+    assert len(path_calls) == 2
+    assert path_calls[1][0] == pytest.approx(NOW - 20)
+    assert path_calls[1][1] == pytest.approx(NOW - 10)
+    assert path_calls[1][2] == pytest.approx(NOW - 11)
+
+
+def test_submillisecond_q2_trade_advance_is_replayed_and_stop_touch_blocks(
+    monkeypatch,
+):
+    q1_ts = NOW - 20
+    advanced_trade_ts = q1_ts + 0.0005
+    snapshots = iter([
+        {
+            "ok": True, "bid": 99.8, "ask": 100.0,
+            "observed_ts": q1_ts, "receipt_ts": NOW,
+            "last_trade_ts": q1_ts - 1,
+        },
+        {
+            "ok": True, "bid": 100.8, "ask": 101.0,
+            "observed_ts": NOW - 10, "receipt_ts": NOW,
+            "last_trade_ts": advanced_trade_ts,
+        },
+        {
+            "ok": True, "bid": 100.8, "ask": 101.0,
+            "observed_ts": NOW - 5, "receipt_ts": NOW,
+            "last_trade_ts": advanced_trade_ts,
+        },
+    ])
+    path_calls = []
+
+    def _path(_ticker, observed_ts, **kwargs):
+        path_calls.append((observed_ts, kwargs["now_ts"]))
+        incremental = len(path_calls) == 2
+        return {
+            "ok": True,
+            "bars": [{
+                "timestamp": observed_ts,
+                "high": 104.0,
+                "low": 94.0 if incremental else 96.0,
+            }],
+            "source": "unit_path",
+            "coverage_verified": True,
+            "coverage_start_timestamp": observed_ts,
+            "coverage_end_timestamp": kwargs["now_ts"],
+        }
+
+    monkeypatch.setattr(
+        api, "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _path)
+    monkeypatch.setattr(
+        api, "validate_fill_quality", lambda *args, **kwargs: {"valid": True}
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {"ok": False, "reason": "final_stop_touched_since_scan"}
+    assert len(path_calls) == 2
+    assert path_calls[1][1] == pytest.approx(NOW - 10)
+
+
+def test_final_revalidation_blocks_trade_advance_after_second_path_round(
+    monkeypatch,
+):
+    path_calls = _patch_advancing_quote_handshake(monkeypatch, unbounded=True)
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_market_path_handshake_unbounded_trade_advance",
+    }
+    assert len(path_calls) == api._STOCK_FINAL_MAX_PATH_ROUNDS
+
+
+def test_final_revalidation_blocks_q2_without_last_trade_watermark(monkeypatch):
+    _patch_market_evidence(monkeypatch)
+    snapshots = iter([
+        {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.0,
+            "observed_ts": NOW - 10,
+            "receipt_ts": NOW,
+            "last_trade_ts": NOW - 20,
+        },
+        {
+            "ok": True,
+            "bid": 100.8,
+            "ask": 101.0,
+            "observed_ts": NOW - 5,
+            "receipt_ts": NOW,
+            "last_trade_ts": None,
+        },
+    ])
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: next(snapshots),
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_handshake_last_trade_timestamp_missing",
+    }
+
+
+def test_final_revalidation_blocks_qfinal_without_last_trade_watermark(monkeypatch):
+    _patch_advancing_quote_handshake(monkeypatch)
+    q1_ts = NOW - 20
+    q2_ts = NOW - 10
+    snapshots = iter([
+        {
+            "ok": True,
+            "bid": 99.8,
+            "ask": 100.0,
+            "observed_ts": q1_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q1_ts - 1,
+        },
+        {
+            "ok": True,
+            "bid": 100.8,
+            "ask": 101.0,
+            "observed_ts": q2_ts,
+            "receipt_ts": NOW,
+            "last_trade_ts": q2_ts - 1,
+        },
+        {
+            "ok": True,
+            "bid": 101.8,
+            "ask": 102.0,
+            "observed_ts": NOW - 5,
+            "receipt_ts": NOW,
+            "last_trade_ts": None,
+        },
+    ])
+    monkeypatch.setattr(
+        api,
+        "_fetch_stock_revalidation_snapshot",
+        lambda *args, **kwargs: next(snapshots),
+    )
+
+    result = api._revalidate_stock_strategy_mail_candidate(
+        _row(), now_ts=NOW, price_session="US_REGULAR"
+    )
+
+    assert result == {
+        "ok": False,
+        "reason": "final_handshake_last_trade_timestamp_missing",
+    }
 
 
 @pytest.mark.parametrize(
@@ -428,7 +930,9 @@ def test_final_snapshot_requires_fresh_timestamped_executable_quote(monkeypatch)
 
     result = api._fetch_stock_revalidation_snapshot("AAA", now_ts=NOW)
 
-    assert result == {"ok": False, "reason": "final_quote_stale"}
+    assert result["ok"] is False
+    assert result["reason"] == "final_quote_stale"
+    assert result["age_seconds"] > 90
 
 
 def test_final_market_path_keeps_observation_minute_conservatively(monkeypatch):
@@ -440,6 +944,7 @@ def test_final_market_path_keeps_observation_minute_conservatively(monkeypatch):
         @staticmethod
         def json():
             return {
+                "status": "OK",
                 "results": [
                     {"t": int((NOW - 60) * 1000), "h": 110.5, "l": 99.0},
                 ]
@@ -547,17 +1052,16 @@ def test_each_stock_row_is_revalidated_immediately_before_its_own_send(
 ):
     sent, tracked, events, released = _patch_strategy_mail_pipeline(monkeypatch)
     api._EMAIL_COOLDOWN.clear()
-    rows = [_row(ticker="AAA", Ticker="AAA"), _row(ticker="BBB", Ticker="BBB")]
+    rows = [
+        _row(ticker="AAA", Ticker="AAA", score=89),
+        _row(ticker="BBB", Ticker="BBB", score=95),
+    ]
     calls = []
 
     def _validate(row, **kwargs):
         ticker = row["ticker"]
         calls.append(("validate", ticker))
-        count = sum(
-            1 for event in calls
-            if event == ("validate", ticker)
-        )
-        if ticker == "BBB" and count == 2:
+        if ticker == "AAA":
             return {"ok": False, "reason": "final_stop_touched_since_scan"}
         candidate = dict(row)
         candidate.update({
@@ -584,18 +1088,77 @@ def test_each_stock_row_is_revalidated_immediately_before_its_own_send(
     api._send_strategy_scan_alerts("Momentum Breakout Long", rows, "stocks")
 
     assert calls == [
-        ("validate", "AAA"),
         ("validate", "BBB"),
+        ("send", "BBB"),
         ("validate", "AAA"),
-        ("send", "AAA"),
-        ("validate", "BBB"),
     ]
-    assert [mail["tracking_rows"][0]["ticker"] for mail in sent] == ["AAA"]
-    assert released == ["stock_strategy_BBB"]
+    assert [mail["tracking_rows"][0]["ticker"] for mail in sent] == ["BBB"]
+    assert released == ["stock_strategy_AAA"]
     assert any(
         "mail_adjacent_stock_revalidation:final_stop_touched_since_scan"
         in reason
         for _, _, reason in events
+    )
+
+
+def test_regime_filtered_stock_row_uses_no_provider_revalidation(monkeypatch):
+    sent, tracked, events, released = _patch_strategy_mail_pipeline(monkeypatch)
+    api._EMAIL_COOLDOWN.clear()
+    validation_calls = []
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: validation_calls.append(row["ticker"])
+        or {"ok": True, "candidate": dict(row)},
+    )
+    monkeypatch.setattr(
+        api,
+        "_regime_mail_decision",
+        lambda *args, **kwargs: {
+            "state": "YELLOW",
+            "layer": "market",
+            "reason_tag": "market_regime_yellow",
+            "banner": "",
+            "score_boost": 20,
+            "max_rows": 2,
+        },
+    )
+
+    api._send_strategy_scan_alerts(
+        "Momentum Breakout Long", [_row(score=91)], "stocks"
+    )
+
+    assert validation_calls == []
+    assert sent == []
+    assert released == ["stock_strategy_AAA"]
+    assert any(
+        status == "skipped" and reason == "market_regime_yellow_filtered_all"
+        for _, status, reason in events
+    )
+
+
+def test_open_equivalent_stock_row_uses_no_provider_revalidation(monkeypatch):
+    sent, tracked, events, released = _patch_strategy_mail_pipeline(monkeypatch)
+    api._EMAIL_COOLDOWN.clear()
+    validation_calls = []
+    monkeypatch.setattr(
+        api,
+        "_revalidate_stock_strategy_mail_candidate",
+        lambda row, **kwargs: validation_calls.append(row["ticker"])
+        or {"ok": True, "candidate": dict(row)},
+    )
+    monkeypatch.setattr(
+        api, "_has_open_equivalent_trade_safe", lambda *args, **kwargs: True
+    )
+
+    api._send_strategy_scan_alerts("Momentum Breakout Long", [_row()], "stocks")
+
+    assert validation_calls == []
+    assert sent == []
+    assert released == ["stock_strategy_AAA"]
+    assert any(
+        status == "skipped" and reason == "open_equivalent_trade:1"
+        for _, status, reason in events
     )
 
 

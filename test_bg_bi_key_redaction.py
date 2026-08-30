@@ -1,11 +1,13 @@
 """Regression tests for Polygon-key hygiene in both BG BI entry points."""
 
 import json
+from pathlib import Path
 
 import pytest
 import requests
 
 import bg_service
+import api
 from modules import data_fetchers, scanners
 
 
@@ -55,6 +57,7 @@ def test_bg_bi_pagination_and_failures_never_expose_polygon_key(
         "_SCAN_CACHE_MAP",
         {**bg_service._SCAN_CACHE_MAP, "bi_long": str(tmp_path / "bi.json")},
     )
+    monkeypatch.setattr(bg_service, "_ALPHA_RUNTIME_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(bg_service, "_clear_scan_cache", lambda *args: None)
     monkeypatch.setattr(
         bg_service, "_scanner_cache_snapshot", lambda *args: (None, None)
@@ -86,6 +89,13 @@ def test_bg_bi_pagination_and_failures_never_expose_polygon_key(
     assert calls[1][1] == {"apiKey": canary}
     assert canary not in combined
     assert "apiKey=<redacted>" in combined
+
+
+def test_bi_progress_paths_share_runtime_temp_directory():
+    expected = str(Path(bg_service._ALPHA_RUNTIME_TMP_DIR) / "bi_scan_progress_long.json")
+    assert bg_service._bi_progress_file("long") == expected
+    assert scanners._bi_progress_path("long") == expected
+    assert api._SCAN_PROGRESS_MAP["bi_long"] == expected
 
 
 def test_scanner_bi_universe_progress_redacts_polygon_key(
