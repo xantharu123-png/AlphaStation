@@ -852,12 +852,133 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
         return False, 0, [f" Flag-Analyse Fehler: {str(e)[:80]}"], {}
 
 
+# Stable stock-BI confluence contract.  These IDs/keys are part of the scanner
+# payload contract; append a new version instead of silently renaming them.
+BI_STOCK_INDICATOR_COUNT = 20
+BI_STOCK_REQUIRED_GREEN = 17
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v1"
+BI_STOCK_INDICATORS = (
+    (1, "atr_squeeze", "ATR-Squeeze", 6),
+    (2, "volume_dry_up", "Volume Dry-Up", 5),
+    (3, "obv_flow", "OBV-Flow", 13),
+    (4, "close_position", "Close-Position", 10),
+    (5, "range_duration", "Range-Dauer", 5),
+    (6, "boundary_tests", "Boundary-Tests", 10),
+    (7, "adx_turning", "ADX-Wende", 14),
+    (8, "institutional_flow", "Institutioneller Flow", 7),
+    (9, "rsi_drift", "RSI-Drift", 5),
+    (10, "range_structure", "Range-Struktur", 10),
+    (11, "directional_persistence", "Direktionale Persistenz", 8),
+    (12, "range_compression", "Range-Kompression", 6),
+    (13, "macd_histogram", "MACD-Histogramm", 10),
+    (14, "stochastic_momentum", "Stochastic-Momentum", 10),
+    (15, "order_block_confluence", "Order-Block-Konfluenz", 14),
+    (16, "fvg_proximity", "FVG-Naehe", 6),
+    (17, "liquidity_pool_proximity", "Liquidity-Pool-Naehe", 14),
+    (18, "fibonacci_confluence", "Fibonacci-Konfluenz", 10),
+    (19, "volume_void", "Volume-Void", 10),
+    (20, "candle_body_compression", "Kerzenkoerper-Kompression", 5),
+)
+
+
+class BreakoutAnalysisResult(tuple):
+    """Eight-item legacy tuple plus explicit BI confluence diagnostics.
+
+    Existing consumers can keep indexing/unpacking the historical eight values.
+    New consumers must use the named attributes instead of inferring confluence
+    from the weighted score or from human-readable detail strings.
+    """
+
+    def __new__(
+        cls,
+        values,
+        *,
+        indicator_checks=(),
+        green_count=0,
+        available_count=0,
+        required_green=BI_STOCK_REQUIRED_GREEN,
+        indicator_contract_ok=False,
+        hard_gate_failures=(),
+        weighted_score_pct=0,
+        contract_version=BI_STOCK_CONTRACT_VERSION,
+    ):
+        obj = super().__new__(cls, values)
+        obj.indicator_checks = tuple(dict(item) for item in indicator_checks)
+        obj.green_count = int(green_count)
+        obj.available_count = int(available_count)
+        obj.required_green = int(required_green)
+        obj.indicator_contract_ok = bool(indicator_contract_ok)
+        obj.hard_gate_failures = tuple(str(item) for item in hard_gate_failures)
+        obj.weighted_score_pct = int(weighted_score_pct)
+        obj.contract_version = str(contract_version)
+        return obj
+
+
+def _bi_indicator_check(indicator_id, *, available, passed, points, reason):
+    spec = BI_STOCK_INDICATORS[indicator_id - 1]
+    if spec[0] != indicator_id:
+        raise RuntimeError(f"BI indicator registry is corrupt at id={indicator_id}")
+    available = bool(available)
+    return {
+        "id": indicator_id,
+        "key": spec[1],
+        "name": spec[2],
+        "available": available,
+        "passed": bool(passed) if available else False,
+        "points": max(0, int(points or 0)),
+        "max_points": spec[3],
+        "reason": str(reason or "Keine Detailangabe"),
+    }
+
+
+def _bi_unavailable_checks(reason):
+    return tuple(
+        _bi_indicator_check(spec[0], available=False, passed=False, points=0, reason=reason)
+        for spec in BI_STOCK_INDICATORS
+    )
+
+
+def _breakout_analysis_result(
+    is_valid,
+    score,
+    max_score,
+    details,
+    direction_confidence,
+    grade,
+    smart_money_fires,
+    smart_money_hits,
+    *,
+    indicator_checks,
+    indicator_contract_ok,
+    hard_gate_failures=(),
+):
+    checks = tuple(indicator_checks)
+    green_count = sum(1 for item in checks if item.get("passed") is True)
+    available_count = sum(1 for item in checks if item.get("available") is True)
+    weighted_score_pct = round((score / max_score) * 100) if max_score > 0 else 0
+    return BreakoutAnalysisResult(
+        (
+            bool(is_valid), int(score), int(max_score), details,
+            int(direction_confidence), str(grade),
+            int(smart_money_fires), int(smart_money_hits),
+        ),
+        indicator_checks=checks,
+        green_count=green_count,
+        available_count=available_count,
+        indicator_contract_ok=indicator_contract_ok,
+        hard_gate_failures=hard_gate_failures,
+        weighted_score_pct=weighted_score_pct,
+    )
+
+
 # ── analyze_breakout_imminent (originally line 3296) ──
 def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     """
      BREAKOUT IMMINENT V2.1 — 20-Signal Composite Prediction (Pro-Reweighted)
 
     Kombiniert 20 Faktoren um bevorstehende Long/Short Breakouts vorherzusagen.
+    Ein Stock-BI-Signal ist nur valide, wenn alle 20 Faktoren berechenbar sind,
+    mindestens 17 davon richtungskonform bestaetigen und kein Hard-Gate greift.
     Maximum: 173 Punkte fuer Aktien, 168 fuer Krypto. Doppelte oder nicht
     messbare Proxies werden nicht als unabhaengige Evidenz gezaehlt.
 
@@ -881,20 +1002,31 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     Weinstein Stage Analysis, Van Tharp Position Sizing, Wyckoff
 
     Args:
-        bars: Liste von OHLC-Dicts (min 15 Tage, ideal 30)
+        bars: Liste von OHLC-Dicts (min 15 fuer Legacy-Score; min 36 damit
+              alle 20 Stock-Indikatoren inklusive ADX-Wende/MACD pruefbar sind)
         direction: "long" oder "short"
 
     Returns:
-        (is_valid, score, max_score, details, direction_confidence, grade)
+        Legacy-8-Tuple (is_valid, score, max_score, details,
+        direction_confidence, grade, sm_fires, sm_hits). Das Tuple traegt
+        zusaetzlich die expliziten indicator_checks/Confluence-Attribute.
     """
+    if direction not in {"long", "short"}:
+        raise ValueError("direction must be 'long' or 'short'")
+
     if not bars or len(bars) < 15:
         max_score = 168 if crypto_mode else 173
-        return False, 0, max_score, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0
+        return _breakout_analysis_result(
+            False, 0, max_score, ["Nicht genug Daten (min 15 Tage)"], 0, "D", 0, 0,
+            indicator_checks=_bi_unavailable_checks("Nicht genug Daten (min 15 Tage)"),
+            indicator_contract_ok=False,
+        )
 
     score = 0
     sm_fires = 0  # Smart Money Fires (Boosted-Signale auf Maximum)
     sm_hits = 0    # + Smart Money Hits (Boosted-Signale aktiv)
     details = []
+    indicator_checks = []
     n = len(bars)
 
     closes = [b["close"] for b in bars]
@@ -909,10 +1041,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ATR schrumpft = Energie baut sich auf, ABER auch bei toten Aktien!
     # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
+    s1_detail_start = len(details)
+    s1_score_before = score
+    s1_available = False
+    s1_passed = False
     daily_ranges = []
     for b in bars:
         if b["close"] > 0:
             daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
+    s1_available = len(daily_ranges) >= 15
 
     avg_volume = _covered_volume_baseline(volumes)
     close = closes[-1] if closes else 0
@@ -931,6 +1068,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
         if prior_atr > 0:
             atr_ratio = recent_atr / prior_atr
+            s1_passed = atr_ratio < 0.85
             if atr_ratio < 0.5:
                 score += 6
                 details.append(f" ATR-Squeeze extrem: {atr_ratio:.2f}x (Ranges halbiert)")
@@ -947,6 +1085,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(" ATR-Squeeze: Nicht genug Daten (min 15 Tage)")
 
+    indicator_checks.append(_bi_indicator_check(
+        1,
+        available=s1_available,
+        passed=s1_passed,
+        points=score - s1_score_before,
+        reason=details[-1] if len(details) > s1_detail_start else "ATR-Squeeze nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 2: VOLUME DRY-UP / BODY COMPRESSION — max 5 Punkte [CUT]
     # Crypto: Body-Kompression (|close-open|/range schrumpft) statt Spread Dry-Up
@@ -955,6 +1101,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # was Unentschlossenheit = Energie-Aufbau signalisiert.
     # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
+    s2_detail_start = len(details)
+    s2_score_before = score
+    s2_available = False
+    s2_passed = False
     if not is_penny_illiquid and crypto_mode:
         # Body-Ratio: |close-open| / (high-low) pro Bar — 0=Doji, 1=Marubozu
         body_ratios = []
@@ -967,6 +1117,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             prior_body = sum(body_ratios[-20:-5]) / max(1, len(body_ratios[-20:-5]))
             if prior_body > 0:
                 body_decline = recent_body / prior_body
+                s2_available = True
+                s2_passed = body_decline < 0.8
                 if body_decline < 0.4:
                     score += 5
                     details.append(f" Body-Kompression extrem: {body_decline:.2f}x (Doji-Phase)")
@@ -990,6 +1142,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 recent_vol = sum(recent_values) / len(recent_values)
                 prior_vol = sum(prior_values) / len(prior_values)
                 vol_decline = recent_vol / prior_vol
+                s2_available = prior_vol > 0
+                s2_passed = s2_available and vol_decline < 0.85
                 if vol_decline < 0.5:
                     score += 5
                     details.append(f" Vol Dry-Up extrem: {vol_decline:.2f}x")
@@ -1008,10 +1162,28 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(" Vol Dry-Up: Penny/Illiquid Stock ignoriert")
 
+    if not crypto_mode and not s2_available:
+        s2_available = (
+            len(_positive_volume_values(volumes[-5:])) >= 3
+            and len(_positive_volume_values(volumes[-20:-5])) >= 5
+        )
+
+    indicator_checks.append(_bi_indicator_check(
+        2,
+        available=s2_available,
+        passed=s2_passed,
+        points=score - s2_score_before,
+        reason=details[-1] if len(details) > s2_detail_start else "Volume Dry-Up nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 3: OBV-DIVERGENZ / CLOSE-MOMENTUM DIVERGENZ — max 13 Punkte [BOOSTED]
     # Crypto: Cumulative Close Delta (wie OBV aber mit Preis-Änderung statt Volume)
     # ===================================================================
+    s3_detail_start = len(details)
+    s3_score_before = score
+    s3_available = False
+    s3_passed = False
     price_change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
     price_flat = abs(price_change_pct) < 5  # Preis relativ flat
 
@@ -1036,6 +1208,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             late_flow = ccd[-1] - ccd[mid]       # Netto-Momentum zweite Hälfte
             ccd_rising = late_flow > 0 and (early_flow <= 0 or late_flow > early_flow * 0.5)
             ccd_falling = late_flow < 0 and (early_flow >= 0 or late_flow < early_flow * 0.5)
+            s3_available = True
+            s3_passed = ccd_rising if direction == "long" else ccd_falling
 
             if price_flat:
                 if direction == "long" and ccd_rising:
@@ -1088,6 +1262,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             obv_rising = late_flow > 0 and (early_flow <= 0 or late_flow > early_flow * 0.5)
             # Falling: Negativer Flow in 2. Hälfte UND stärker als 1. Hälfte (oder 1. war positiv)
             obv_falling = late_flow < 0 and (early_flow >= 0 or late_flow < early_flow * 0.5)
+            s3_available = bool(_positive_volume_values(volumes))
+            s3_passed = s3_available and (obv_rising if direction == "long" else obv_falling)
 
             if price_flat:
                 if direction == "long" and obv_rising:
@@ -1115,10 +1291,22 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(" OBV: Nicht genug Daten")
 
+    indicator_checks.append(_bi_indicator_check(
+        3,
+        available=s3_available,
+        passed=s3_passed,
+        points=score - s3_score_before,
+        reason=details[-1] if len(details) > s3_detail_start else "OBV-Flow nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 4: CLOSE POSITION CLUSTERING — max 10 Punkte
     # Closes clustern nahe High (bullish) oder Low (bearish)
     # ===================================================================
+    s4_detail_start = len(details)
+    s4_score_before = score
+    s4_available = False
+    s4_passed = False
     if n >= 5:
         recent_close_positions = []
         for b in bars[-5:]:
@@ -1129,6 +1317,8 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
         if recent_close_positions:
             avg_cp = sum(recent_close_positions) / len(recent_close_positions)
+            s4_available = True
+            s4_passed = avg_cp > 0.55 if direction == "long" else avg_cp < 0.45
 
             if direction == "long" and avg_cp > 0.7:
                 score += 10
@@ -1145,13 +1335,25 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             else:
                 details.append(f" Close Position neutral: {avg_cp:.0%}")
 
+    indicator_checks.append(_bi_indicator_check(
+        4,
+        available=s4_available,
+        passed=s4_passed,
+        points=score - s4_score_before,
+        reason=details[-1] if len(details) > s4_detail_start else "Close-Position nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 5: RANGE DURATION — max 5 Punkte [CUT]
     # Laengere Konsolidierung, ABER zu lang = tote Aktie!
     # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
+    s5_detail_start = len(details)
+    s5_score_before = score
     # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
-    range_days = 0
+    # Der aktuelle Bar ist bereits in max/min enthalten und muss deshalb als
+    # erster Range-Tag zaehlen. Der alte Startwert 0 war um einen Tag zu klein.
+    range_days = 1
     max_range_high = highs[-1]
     min_range_low = lows[-1]
 
@@ -1180,6 +1382,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(f" Range Duration: Penny/Illiquid Stock ignoriert ({range_days} Tage)")
 
+    indicator_checks.append(_bi_indicator_check(
+        5,
+        available=n >= 2,
+        passed=not is_penny_illiquid and range_days >= 6,
+        points=score - s5_score_before,
+        reason=details[-1] if len(details) > s5_detail_start else "Range-Dauer nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 6: RANGE BOUNDARY TESTS — max 10 Punkte
     # Mehrfache Tests der Grenze = Widerstand wird schwaecher (Wyckoff Logic)
@@ -1187,6 +1397,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Multiple resistance tests + DECLINING volume = weak breakout (max 3pts)
     # Multiple resistance tests + INCREASING volume = accumulation (max 10pts)
     # ===================================================================
+    s6_detail_start = len(details)
+    s6_score_before = score
+    s6_available = n >= 5
+    s6_passed = False
     if range_days >= 5:
         range_high = max(highs[-range_days:])
         range_low = min(lows[-range_days:])
@@ -1198,6 +1412,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
             upper_tests = sum(1 for h in highs[-range_days:] if h >= threshold_upper)
             lower_tests = sum(1 for l in lows[-range_days:] if l <= threshold_lower)
+            s6_passed = (upper_tests >= 3) if direction == "long" else (lower_tests >= 3)
 
             # FIX (BUG 1): Check volume TREND over test period (accumulation vs exhaustion)
             # Compare avg volume of last 5 bars vs last 15 bars
@@ -1256,11 +1471,23 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(f" Boundary-Tests: Keine Konsolidierung ({range_days} Tage < 5)")
 
+    indicator_checks.append(_bi_indicator_check(
+        6,
+        available=s6_available,
+        passed=s6_passed,
+        points=score - s6_score_before,
+        reason=details[-1] if len(details) > s6_detail_start else "Boundary-Tests nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 7: ADX TURNING UP — max 14 Punkte [BOOSTED]
     # ADX < 20 + steigend = neuer Trend beginnt JETZT (Minervini/O'Neil Key Signal)
     # ===================================================================
+    s7_detail_start = len(details)
+    s7_score_before = score
     adx, adx_prev = calculate_adx(bars)
+    s7_available = adx is not None and adx_prev is not None
+    s7_passed = bool(s7_available and adx < 25 and adx > adx_prev)
 
     if adx is not None:
         if adx < 20 and adx_prev and adx > adx_prev:
@@ -1275,12 +1502,24 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(f" ADX bereits hoch: {adx:.0f} (Trend laeuft schon)")
 
+    indicator_checks.append(_bi_indicator_check(
+        7,
+        available=s7_available,
+        passed=s7_passed,
+        points=score - s7_score_before,
+        reason=details[-1] if len(details) > s7_detail_start else "ADX-Wende nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 8: INSTITUTIONAL ACCUMULATION / SPREAD-EXPANSION DAYS — max 7 Punkte [FIX 1: Reduced from 14 to 7]
     # Crypto: Spread-Expansion + Close Direction als Volume-Proxy
     # AUDIT: OBV Divergence (Signal 3) + RSI Drift (Signal 9) bereits messen Buying Pressure
     # Reduced to avoid triple-counting "buying pressure despite flat price"
     # ===================================================================
+    s8_detail_start = len(details)
+    s8_score_before = score
+    s8_available = False
+    s8_passed = False
     if n >= 10:
         if crypto_mode:
             # Crypto: Tage mit überdurchschnittlichem Spread + Close in Richtung
@@ -1294,8 +1533,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         accum_days += 1
                     elif closes[i] < closes[i-1]:
                         distri_days += 1
+            s8_available = bool(daily_ranges)
         else:
             avg_vol = _covered_volume_baseline(volumes)
+            s8_available = avg_vol > 0
             accum_days = 0
             distri_days = 0
             for i in range(1, n):
@@ -1319,6 +1560,19 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             details.append(f" Distribution: {distri_days} vs {accum_days} Tage")
         else:
             details.append(f" Gemischte Aktivitaet: {accum_days} Akku / {distri_days} Distri")
+
+        if direction == "long":
+            s8_passed = bool(s8_available and sm_eligible and accum_days >= 3 and accum_days > distri_days)
+        else:
+            s8_passed = bool(s8_available and sm_eligible and distri_days >= 3 and distri_days > accum_days)
+
+    indicator_checks.append(_bi_indicator_check(
+        8,
+        available=s8_available,
+        passed=s8_passed,
+        points=score - s8_score_before,
+        reason=details[-1] if len(details) > s8_detail_start else "Institutioneller Flow nicht berechenbar",
+    ))
 
     # ===================================================================
     # M-2 DEDUP (BI-Audit 2026-06-10): Volumen-Komplex = OBV-Flow (S3) +
@@ -1375,6 +1629,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         rsi_detail = " RSI: Nicht genug Daten"
 
+    indicator_checks.append(_bi_indicator_check(
+        9,
+        available=rsi is not None,
+        passed=(
+            rsi is not None
+            and ((50 <= rsi <= 65) if direction == "long" else (35 <= rsi <= 50))
+        ),
+        points=rsi_points,
+        reason=rsi_detail,
+    ))
+
     # ===================================================================
     # SIGNAL 10: HIGHER LOWS / LOWER HIGHS IN RANGE — max 10 Punkte
     # Zeigt welche Seite die Kontrolle gewinnt
@@ -1382,6 +1647,9 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # 75% = full 10pts (statistically significant vs chance)
     # 65% = intermediate 5pts (only marginally above random)
     # ===================================================================
+    s10_detail_start = len(details)
+    s10_score_before = score
+    s10_passed = False
     if range_days >= 6:
         recent_lows = lows[-range_days:]
         recent_highs = highs[-range_days:]
@@ -1399,6 +1667,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             if recent_highs[i] < recent_highs[i-1]:
                 lower_highs += 1
         lh_pct = lower_highs / max(1, len(recent_highs) - 1)
+        s10_passed = hl_pct >= 0.65 if direction == "long" else lh_pct >= 0.65
 
         if direction == "long" and hl_pct >= 0.75:
             score += 10
@@ -1423,10 +1692,22 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(f" Higher Lows/Lower Highs: Zu kurze Range ({range_days} Tage < 6)")
 
+    indicator_checks.append(_bi_indicator_check(
+        10,
+        available=n >= 6,
+        passed=s10_passed,
+        points=score - s10_score_before,
+        reason=details[-1] if len(details) > s10_detail_start else "Range-Struktur nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 11: DIRECTIONAL PERSISTENCE — max 8 Punkte
     # Kein Marktvergleich: misst nur die Stabilitaet der juengsten Bewegung.
     # ===================================================================
+    s11_detail_start = len(details)
+    s11_score_before = score
+    s11_available = n >= 10
+    s11_passed = False
     if n >= 10:
         persistence_closes = closes[-10:]
         sign = 1.0 if direction == "long" else -1.0
@@ -1458,6 +1739,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
         min_return = 3.0 if crypto_mode else 2.0
         max_adverse = 10.0 if crypto_mode else 8.0
+        s11_passed = directional_return > 0 and directional_days >= 0.55
         if (
             directional_return >= min_return
             and directional_days >= 0.67
@@ -1480,16 +1762,28 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 f"{directional_days:.0%} Richtungstage"
             )
 
+    indicator_checks.append(_bi_indicator_check(
+        11,
+        available=s11_available,
+        passed=s11_passed,
+        points=score - s11_score_before,
+        reason=details[-1] if len(details) > s11_detail_start else "Direktionale Persistenz nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 12: TIGHT RANGE COMPRESSION (Bollinger-Squeeze Proxy) — max 6 Punkte [CUT]
     # StdDev schrumpft, ABER extreme Kompression = oft tote Aktie!
     # FIX 2: Filter out penny stocks with low liquidity (< 500K volume, < $5 price)
     # ===================================================================
+    s12_detail_start = len(details)
+    s12_score_before = score
+    s12_passed = False
     if n >= 10 and not is_penny_illiquid:
         recent_closes = closes[-10:]
         mean_price = sum(recent_closes) / len(recent_closes)
         variance = sum((c - mean_price) ** 2 for c in recent_closes) / len(recent_closes)
         std_dev_pct = ((variance ** 0.5) / mean_price) * 100 if mean_price > 0 else 99
+        s12_passed = std_dev_pct < 4.0
 
         if std_dev_pct < 1.5:
             score += 6
@@ -1503,6 +1797,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(f" Keine Kompression: StdDev {std_dev_pct:.2f}%")
 
+    indicator_checks.append(_bi_indicator_check(
+        12,
+        available=n >= 10,
+        passed=s12_passed,
+        points=score - s12_score_before,
+        reason=details[-1] if len(details) > s12_detail_start else "Range-Kompression nicht aktiv",
+    ))
+
     # ===================================================================
     # SIGNAL 13: MACD HISTOGRAM DIVERGENZ — max 10 Punkte
     # MACD-Histogram dreht → unsichtbares Momentum baut auf
@@ -1511,11 +1813,16 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # behandelte hist als Liste => TypeError ab 35 Bars (bg/Autotrader-Crash) bzw.
     # toter Code bei <=34 Bars (api-Pfad, 10 Punkte nie vergebbar). Jetzt: echte
     # Histogramm-SERIE; None-Padding (Prefix) wird entfernt, Chronologie bleibt.
+    s13_detail_start = len(details)
+    s13_score_before = score
     hist = [h for h in calculate_macd_histogram_series(closes) if h is not None]
+    s13_available = bool(hist and len(hist) >= 3)
+    s13_passed = False
     if hist and len(hist) >= 3:
         # Histogram Slope: letzte 3 Werte
         hist_slope = hist[-1] - hist[-3]
         hist_turning = (hist[-2] < hist[-1]) if direction == "long" else (hist[-2] > hist[-1])
+        s13_passed = hist_slope > 0 if direction == "long" else hist_slope < 0
 
         if direction == "long" and hist[-1] < 0 and hist_slope > 0 and hist_turning:
             score += 10
@@ -1533,6 +1840,14 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             details.append(f" MACD neutral (Hist: {hist[-1]:.3f})")
     else:
         details.append(" MACD: Nicht genug Daten")
+
+    indicator_checks.append(_bi_indicator_check(
+        13,
+        available=s13_available,
+        passed=s13_passed,
+        points=score - s13_score_before,
+        reason=details[-1] if len(details) > s13_detail_start else "MACD-Histogramm nicht berechenbar",
+    ))
 
     # ===================================================================
     # SIGNAL 14: STOCHASTIC MOMENTUM — max 10 Punkte
@@ -1576,12 +1891,29 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         stoch_detail = " Stochastic: Nicht genug Daten"
 
+    indicator_checks.append(_bi_indicator_check(
+        14,
+        available=stoch_k is not None and stoch_d is not None,
+        passed=(
+            stoch_k is not None
+            and stoch_d is not None
+            and ((stoch_k > stoch_d) if direction == "long" else (stoch_k < stoch_d))
+        ),
+        points=stoch_points,
+        reason=stoch_detail,
+    ))
+
     # ===================================================================
     # SIGNAL 15: ORDER BLOCK CONFLUENCE — max 14 Punkte [BOOSTED]
     # Breakout nahe Order Block = institutionelle Zone (Wyckoff/ICT)
     # ===================================================================
+    s15_detail_start = len(details)
+    s15_score_before = score
+    s15_available = False
+    s15_passed = False
     try:
         ob_data = detect_order_blocks(bars, max_blocks=5)
+        s15_available = isinstance(ob_data, dict)
         range_high_15 = max(highs[-min(15, n):])
         range_low_15 = min(lows[-min(15, n):])
         atr_ob, _ = calculate_atr_14(bars)
@@ -1597,6 +1929,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 # V68 Fix: Key "ob_high"/"ob_low" statt "zone_high"/"zone_low" (KeyError behoben)
                 near_breakout = any(abs(ob["ob_high"] - range_high_15) < ob_tol for ob in bull_obs)
                 near_support = any(abs(ob["ob_low"] - range_low_15) < ob_tol for ob in bull_obs)
+                s15_passed = near_breakout or near_support
                 if near_breakout:
                     score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f" Bullish OB nahe Breakout-Level = institutionelles Kaufinteresse!")
@@ -1628,6 +1961,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 # M-2: gleicher 3%-Naehe-Deckel wie im Long-Zweig
                 near_breakout = any(abs(ob["ob_low"] - range_low_15) < ob_tol for ob in bear_obs)
                 near_resistance = any(abs(ob["ob_high"] - range_high_15) < ob_tol for ob in bear_obs)
+                s15_passed = near_breakout or near_resistance
                 if near_breakout:
                     score += 14; sm_fires += 1; sm_hits += 1
                     details.append(f" Bearish OB nahe Breakdown-Level = institutioneller Verkaufsdruck!")
@@ -1651,14 +1985,29 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             else:
                 details.append(f" Keine Bearish Order Blocks")
     except Exception:
+        s15_available = False
+        s15_passed = False
         details.append(" Order Block Check uebersprungen")
+
+    indicator_checks.append(_bi_indicator_check(
+        15,
+        available=s15_available,
+        passed=s15_passed,
+        points=score - s15_score_before,
+        reason=details[-1] if len(details) > s15_detail_start else "Order-Block-Konfluenz nicht berechenbar",
+    ))
 
     # ===================================================================
     # SIGNAL 16: FVG SUPPORT / RESISTANCE PROXIMITY — max 6 Punkte
     # Nur unfilled Zonen auf der strukturell richtigen Seite des Preises.
     # ===================================================================
+    s16_detail_start = len(details)
+    s16_score_before = score
+    s16_available = False
+    s16_passed = False
     try:
         vi_data = detect_volume_imbalances(bars, max_zones=20)
+        s16_available = isinstance(vi_data, dict)
         if direction == "long" and vi_data.get("unfilled_bull"):
             supports = [
                 z for z in vi_data["unfilled_bull"]
@@ -1673,6 +2022,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     (current_price - float(nearest.get("zone_high", 0) or 0))
                     / max(1e-9, current_price) * 100.0
                 )
+                s16_passed = distance <= 6.0
                 if distance <= 3.0:
                     score += 6
                     details.append(f" Bullish FVG-Support {distance:.1f}% unter Preis")
@@ -1697,6 +2047,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     (float(nearest.get("zone_low", 0) or 0) - current_price)
                     / max(1e-9, current_price) * 100.0
                 )
+                s16_passed = distance <= 6.0
                 if distance <= 3.0:
                     score += 6
                     details.append(f" Bearish FVG-Resistance {distance:.1f}% ueber Preis")
@@ -1710,14 +2061,29 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(f" Keine relevanten FVGs")
     except Exception:
+        s16_available = False
+        s16_passed = False
         details.append(" FVG Check uebersprungen")
+
+    indicator_checks.append(_bi_indicator_check(
+        16,
+        available=s16_available,
+        passed=s16_passed,
+        points=score - s16_score_before,
+        reason=details[-1] if len(details) > s16_detail_start else "FVG-Naehe nicht berechenbar",
+    ))
 
     # ===================================================================
     # SIGNAL 17: LIQUIDITY POOL PROXIMITY — max 14 Punkte [BOOSTED]
     # Buyside Liq ueber Range = Stop-Hunt → explosiver Move (ICT/Wyckoff)
     # ===================================================================
+    s17_detail_start = len(details)
+    s17_score_before = score
+    s17_available = False
+    s17_passed = False
     try:
         liq_data = detect_liquidity_levels(bars, max_levels=5)
+        s17_available = isinstance(liq_data, dict)
         range_high_17 = max(highs[-min(15, n):])
         range_low_17 = min(lows[-min(15, n):])
 
@@ -1725,6 +2091,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             # V68 Fix: Key "level" statt "price" (detect_liquidity_levels gibt "level" zurück)
             near_liq = [l for l in liq_data["buyside"] if l["level"] > range_high_17 and current_price > 0 and (l["level"] - range_high_17) / current_price * 100 < 3]
             if near_liq:
+                s17_passed = True
                 score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f" Buyside Liquidity {near_liq[0]['level']:.2f} knapp ueber Range = Stop-Hunt Potential")
             elif liq_data["buyside"]:
@@ -1736,6 +2103,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     current_price > 0 and abs(l["level"] - range_high_17) / current_price * 100 < 3
                     for l in liq_data["buyside"]
                 )
+                s17_passed = near_pool
                 if near_pool:
                     sm_hits += 1
                     details.append(f" Buyside Liq nahe Range-High ({len(liq_data['buyside'])} Levels)")
@@ -1746,6 +2114,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         elif direction == "short" and liq_data.get("sellside"):
             near_liq = [l for l in liq_data["sellside"] if l["level"] < range_low_17 and current_price > 0 and (range_low_17 - l["level"]) / current_price * 100 < 3]
             if near_liq:
+                s17_passed = True
                 score += 14; sm_fires += 1; sm_hits += 1
                 details.append(f" Sellside Liquidity {near_liq[0]['level']:.2f} knapp unter Range = Stop-Hunt Potential")
             elif liq_data["sellside"]:
@@ -1755,6 +2124,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     current_price > 0 and abs(l["level"] - range_low_17) / current_price * 100 < 3
                     for l in liq_data["sellside"]
                 )
+                s17_passed = near_pool
                 if near_pool:
                     sm_hits += 1
                     details.append(f" Sellside Liq nahe Range-Low ({len(liq_data['sellside'])} Levels)")
@@ -1765,12 +2135,26 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(f" Keine relevanten Liquidity Levels")
     except Exception:
+        s17_available = False
+        s17_passed = False
         details.append(" Liquidity Check uebersprungen")
+
+    indicator_checks.append(_bi_indicator_check(
+        17,
+        available=s17_available,
+        passed=s17_passed,
+        points=score - s17_score_before,
+        reason=details[-1] if len(details) > s17_detail_start else "Liquidity-Pool-Naehe nicht berechenbar",
+    ))
 
     # ===================================================================
     # SIGNAL 18: FIBONACCI CONFLUENCE — max 10 Punkte
     # Preis nahe Key-Fib-Level = starker Breakout-Punkt
     # ===================================================================
+    s18_detail_start = len(details)
+    s18_score_before = score
+    s18_available = n >= 20
+    s18_passed = False
     if n >= 20:
         # Finde Swing High/Low der letzten 30 Bars fuer Fib
         lookback = min(30, n)
@@ -1805,6 +2189,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                     near_fibs = ["50.0%"]
 
             if near_fibs:
+                s18_passed = True
                 score += 10
                 details.append(f" Fib-Confluence: Preis nahe {', '.join(near_fibs)} ({'bullisch' if direction == 'long' else 'baerisch'})")
             else:
@@ -1814,6 +2199,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 boundary = range_h if direction == "long" else range_l
                 near_boundary_fibs = [name for name, level in fib_levels.items() if abs(boundary - level) < tolerance]
                 if near_boundary_fibs:
+                    s18_passed = True
                     score += 5
                     details.append(f" Range-Boundary nahe Fib {', '.join(near_boundary_fibs)}")
                 else:
@@ -1823,10 +2209,22 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     else:
         details.append(" Fib: Nicht genug Daten (min 20 Tage)")
 
+    indicator_checks.append(_bi_indicator_check(
+        18,
+        available=s18_available,
+        passed=s18_passed,
+        points=score - s18_score_before,
+        reason=details[-1] if len(details) > s18_detail_start else "Fibonacci-Konfluenz nicht berechenbar",
+    ))
+
     # ===================================================================
     # SIGNAL 19: VOLUME PROFILE VOID / PRICE GAP — max 10 Punkte
     # Crypto: Price Gap Detector — Preiszonen mit wenig Aktivität (Preis fliegt durch)
     # ===================================================================
+    s19_detail_start = len(details)
+    s19_score_before = score
+    s19_available = False
+    s19_passed = False
     if crypto_mode:
         try:
             # Price Distribution: Histogramm der Close-Preise
@@ -1834,6 +2232,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             price_max = max(highs)
             price_range = price_max - price_min
             if price_range > 0 and n >= 10:
+                s19_available = True
                 num_bins = 15
                 bin_size = price_range / num_bins
                 bins = [0] * num_bins
@@ -1855,9 +2254,11 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         void_below = True
                         break
                 if direction == "long" and void_above:
+                    s19_passed = True
                     score += 10
                     details.append(f" Price Void ueber Preis = wenig Widerstand")
                 elif direction == "short" and void_below:
+                    s19_passed = True
                     score += 10
                     details.append(f" Price Void unter Preis = wenig Support")
                 elif direction == "long" and void_below:
@@ -1871,17 +2272,21 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             else:
                 details.append(" Price Gap: Nicht genug Daten")
         except Exception:
+            s19_available = False
+            s19_passed = False
             details.append(" Price Gap Check uebersprungen")
     else:
         try:
             vol_profile = calculate_volume_profile(bars, num_bins=15)
             if vol_profile:
+                s19_available = True
                 void_data = find_volume_voids(current_price, vol_profile, min_void_size_pct=0.5)
                 if void_data:
                     if direction == "long" and void_data.get("voids_above"):
                         nearest = void_data["nearest_void_above"]
                         if nearest:
                             dist_pct = (nearest["low"] - current_price) / current_price * 100 if current_price > 0 else 99
+                            s19_passed = dist_pct < 10
                             if dist_pct < 5:
                                 score += 10
                                 details.append(f" Volume Void {dist_pct:.1f}% ueber Preis = Vakuum-Effekt!")
@@ -1896,6 +2301,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                         nearest = void_data["nearest_void_below"]
                         if nearest:
                             dist_pct = (current_price - nearest["high"]) / current_price * 100 if current_price > 0 else 99
+                            s19_passed = dist_pct < 10
                             if dist_pct < 5:
                                 score += 10
                                 details.append(f" Volume Void {dist_pct:.1f}% unter Preis = Vakuum-Effekt!")
@@ -1913,13 +2319,27 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             else:
                 details.append(f" Volume Profile nicht berechenbar")
         except Exception:
+            s19_available = False
+            s19_passed = False
             details.append(" Volume Void Check uebersprungen")
+
+    indicator_checks.append(_bi_indicator_check(
+        19,
+        available=s19_available,
+        passed=s19_passed,
+        points=score - s19_score_before,
+        reason=details[-1] if len(details) > s19_detail_start else "Volume-Void nicht berechenbar",
+    ))
 
     # ===================================================================
     # SIGNAL 20: CANDLE BODY COMPRESSION — max 5 Punkte [CUT]
     # Body-Ratio sinkt = Doji-Cluster, ABER auch bei Aktien ohne Interesse!
     # Crypto wird bereits in Signal 2 ueber Body-Kompression bewertet.
     # ===================================================================
+    s20_detail_start = len(details)
+    s20_score_before = score
+    s20_available = bool(n >= 10 and not crypto_mode)
+    s20_passed = False
     if n >= 10 and not crypto_mode:
         # Vergleiche Body/Range Ratio: letzte 5 vs vorherige 10
         def _body_ratio(b):
@@ -1936,6 +2356,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
         if avg_prior_body > 0:
             body_compression = avg_recent_body / avg_prior_body
+            s20_passed = body_compression < 0.8
 
             if body_compression < 0.4:
                 score += 5
@@ -1948,6 +2369,18 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 details.append(f" Leichte Body-Kompression: {body_compression:.2f}x")
             else:
                 details.append(f" Keine Body-Kompression: {body_compression:.2f}x")
+
+    indicator_checks.append(_bi_indicator_check(
+        20,
+        available=s20_available,
+        passed=s20_passed,
+        points=score - s20_score_before,
+        reason=(
+            "Krypto-Vertrag hat keinen unabhaengigen 20. Indikator"
+            if crypto_mode
+            else (details[-1] if len(details) > s20_detail_start else "Kerzenkoerper-Kompression nicht berechenbar")
+        ),
+    ))
 
     # ===================================================================
     # FIX 4: RSI + STOCHASTIC DEDUP — Take max() of both momentum signals
@@ -2023,15 +2456,32 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     #   Summe Aktien             173
     #   Summe Krypto             168 (S20 wird nicht doppelt gewertet)
     max_score = 168 if crypto_mode else 173
-    # Confidence, grade and the returned score must use one identical basis.
-    # Clamp before deriving either value so no path can expose >100% confidence.
+    # Clamp the weighted ranking score before deriving grades/sort metadata.
     score = max(0, min(score, max_score))
 
-    # Richtungs-Konfidenz: Wie viele von 20 Signalen sind positiv?
-    # Nutze feste Basis 20 (nicht len(details)) um keine künstliche Inflation
-    # V2.7: Fix — "" in d war immer True (Emojis verloren beim Refactoring)
-    # Statt Emoji-Suche: Score-basierte Konfidenz (akkurater als String-Matching)
-    direction_confidence = round((score / max_score) * 100) if max_score > 0 else 0
+    indicator_ids = [item.get("id") for item in indicator_checks]
+    indicator_keys = [item.get("key") for item in indicator_checks]
+    indicator_shape_ok = (
+        len(indicator_checks) == BI_STOCK_INDICATOR_COUNT
+        and indicator_ids == list(range(1, BI_STOCK_INDICATOR_COUNT + 1))
+        and len(set(indicator_keys)) == BI_STOCK_INDICATOR_COUNT
+    )
+    available_count = sum(1 for item in indicator_checks if item.get("available") is True)
+    green_count = sum(1 for item in indicator_checks if item.get("passed") is True)
+    # Crypto has only 19 independent factors today: S2 already uses body
+    # compression and S20 is intentionally omitted to avoid double-counting.
+    # It must not be advertised or released as the stock 20/20 contract.
+    indicator_contract_ok = bool(
+        not crypto_mode
+        and indicator_shape_ok
+        and available_count == BI_STOCK_INDICATOR_COUNT
+    )
+    # This legacy tuple field now finally matches its documented meaning.
+    direction_confidence = (
+        round(green_count / BI_STOCK_INDICATOR_COUNT * 100)
+        if indicator_contract_ok
+        else 0
+    )
 
     # Smart Money Sub-Score: Inline-Counter sm_fires/sm_hits werden direkt
     # bei jedem BOOSTED-Signal inkrementiert (Signale 3,7,8,15,17)
@@ -2097,21 +2547,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         elif score >= 57 and smart_money_hits >= 2:
             grade = "B"  # SOLIDE — Score + 2 SM hits
         elif score >= 55 and smart_money_hits >= 1:
-            grade = "C"  # WATCHLIST — Score 55+ UND mind. 1 SM hit
+            grade = "C"  # BASIS — Score 55+ UND mind. 1 SM hit
         else:
             grade = "D"  # SCHWACH
 
-    # Threshold: V4 — nach kumulativen Audit-Korrekturen (Wyckoff-Boundary, Signal8-Reduktion,
-    # Higher-Lows-Threshold, RSI/Stoch-Dedup, OBV-Neutral-Fix) sind ~28 Punkte weniger erreichbar.
-    # Alter Threshold 65/60 war VOR diesen Fixes kalibriert → ergab NULL Resultate.
-    # Neu: 45 Long (23.9%), 40 Short (21.3%) — kalibriert für 50+ Ergebnisse.
-    # Eine marginale Breakout-Aktie erzielt ~50 Punkte nach Audit-Korrekturen.
-    # Qualitätskontrolle: Grading (A/B brauchen SM-Fires) + Score-Bucket Tracking.
-    if crypto_mode:
-        threshold = 35 if direction == "long" else 30
-    else:
-        threshold = 45 if direction == "long" else 40
-    is_valid = score >= threshold
+    # Verbindlicher Roh-BI-Vertrag: Der gewichtete Score sortiert nur bereits
+    # qualifizierte Signale. Er darf die 17-von-20-Grenze niemals ersetzen.
+    is_valid = bool(
+        indicator_contract_ok
+        and green_count >= BI_STOCK_REQUIRED_GREEN
+    )
+    hard_gate_failures = []
 
     # V3.3: Pump-Detection — blockiert "already broken out" Setups
     # Problem: Flache 29 Bars + 1 Bar Pump (+40%) triggert Volume-Void (+10) + Resilience
@@ -2132,6 +2578,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             std_prev = math.sqrt(var_prev)
             if last_move_pct > 8 and last_move_pct > 5 * max(0.1, std_prev):
                 is_valid = False
+                hard_gate_failures.append("last_bar_pump")
                 details.append(
                     f" Pump erkannt: letzte Kerze +{last_move_pct:.1f}% ({last_move_pct/max(0.1,std_prev):.1f}x StdDev) → kein Setup"
                 )
@@ -2151,6 +2598,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             # Toleranz 1%: echter Breakdown, nicht Mikrofluktuation
             if current_close < prior_low * 0.99:
                 is_valid = False
+                hard_gate_failures.append("range_breakdown")
                 details.append(
                     f" Range-Breakdown: Close ${current_close:.2f} unter Prior-Low ${prior_low:.2f} → Setup gebrochen"
                 )
@@ -2170,6 +2618,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             # Close muss deutlich unter recent High liegen (mehr als 2%)
             if recent_high > 0 and (closes[-1] / recent_high) < 0.98:
                 is_valid = False
+                hard_gate_failures.append("recent_bearish_pressure")
                 details.append(
                     f" Recent-Bearish: letzte 2 Kerzen rot, Close ${closes[-1]:.2f} "
                     f"< 98% von 5-Bar-High ${recent_high:.2f} → nicht imminent"
@@ -2187,12 +2636,25 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             recent_low = min(b["low"] for b in bars[-5:])
             if recent_low > 0 and (closes[-1] / recent_low) > 1.02:
                 is_valid = False
+                hard_gate_failures.append("recent_bullish_pressure")
                 details.append(
                     f" Recent-Bullish: letzte 2 Kerzen gruen, Close ${closes[-1]:.2f} "
                     f"> 102% von 5-Bar-Low ${recent_low:.2f} → Short nicht imminent"
                 )
 
-    return is_valid, score, max_score, details, direction_confidence, grade, smart_money_fires, smart_money_hits
+    return _breakout_analysis_result(
+        is_valid,
+        score,
+        max_score,
+        details,
+        direction_confidence,
+        grade,
+        smart_money_fires,
+        smart_money_hits,
+        indicator_checks=indicator_checks,
+        indicator_contract_ok=indicator_contract_ok,
+        hard_gate_failures=hard_gate_failures,
+    )
 
 
 # ── find_pivots (originally line 4246) ──

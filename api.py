@@ -123,6 +123,11 @@ from modules.data_fetchers import (
     get_ticker_news,
 )
 from modules.indicators import calculate_ema_series, calculate_vwap, calculate_rsi_from_bars, calculate_macd, calculate_obv, calculate_ad_line
+from modules.patterns import (
+    BI_STOCK_CONTRACT_VERSION,
+    BI_STOCK_INDICATOR_COUNT,
+    BI_STOCK_REQUIRED_GREEN,
+)
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.trade_levels import format_target_reachability_text, minimum_stop_distance, normalize_alert_trade_levels, target_reachability, trade_geometry, trade_plan_quality
 from modules.trading_risk import summarize_hypothetical_batch_risk
@@ -1867,6 +1872,125 @@ _BI_CANDIDATE_ONLY_SUPPRESSION_REASONS = {
     "score_below_alert_threshold",
     "rvol_below_alert_threshold",
 }
+
+# BI scanner signal contract.  This is intentionally independent from the
+# later execution/mail gates: a BI row may only enter caches and downstream
+# consumers after all 20 technical checks were evaluated and at least 17
+# passed.  Version and redundant counters make legacy/partial cache rows fail
+# closed instead of silently inheriting the old score-only threshold.
+_BI_SIGNAL_SCANNERS = frozenset({"bi_long", "bi_short"})
+_BI_INDICATOR_CONTRACT_VERSION = BI_STOCK_CONTRACT_VERSION
+_BI_INDICATOR_TOTAL = BI_STOCK_INDICATOR_COUNT
+_BI_INDICATOR_REQUIRED = BI_STOCK_REQUIRED_GREEN
+
+
+def _bi_contract_value(row: Dict[str, Any], *keys: str) -> Any:
+    if not isinstance(row, dict):
+        return None
+    for key in keys:
+        if key in row:
+            return row.get(key)
+    return None
+
+
+def _bi_contract_int(value: Any) -> Optional[int]:
+    """Parse exact integer cache fields without accepting booleans/fractions."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _bi_row_meets_signal_contract(row: Dict[str, Any]) -> bool:
+    """Return True only for a complete, current 17-of-20 BI scanner signal.
+
+    Raw scanner cache keys and normalized REST keys are both accepted.  Missing
+    fields are never inferred from the weighted BI score because old caches did
+    not prove how many independent indicator checks actually passed.
+    """
+    if not isinstance(row, dict):
+        return False
+
+    checks = _bi_contract_value(row, "BI_IndicatorChecks", "bi_indicator_checks")
+    green = _bi_contract_int(
+        _bi_contract_value(row, "BI_IndicatorsGreen", "bi_indicators_green")
+    )
+    available = _bi_contract_int(
+        _bi_contract_value(row, "BI_IndicatorsAvailable", "bi_indicators_available")
+    )
+    total = _bi_contract_int(
+        _bi_contract_value(row, "BI_IndicatorsTotal", "bi_indicators_total")
+    )
+    required = _bi_contract_int(
+        _bi_contract_value(row, "BI_IndicatorsRequired", "bi_indicators_required")
+    )
+    contract_ok = _bi_contract_value(
+        row, "BI_IndicatorContractOK", "bi_indicator_contract_ok"
+    )
+    version = str(
+        _bi_contract_value(
+            row, "BI_IndicatorContractVersion", "bi_indicator_contract_version"
+        )
+        or ""
+    ).strip()
+
+    if (
+        contract_ok is not True
+        or version != _BI_INDICATOR_CONTRACT_VERSION
+        or total != _BI_INDICATOR_TOTAL
+        or required != _BI_INDICATOR_REQUIRED
+        or available != _BI_INDICATOR_TOTAL
+        or green is None
+        or green < _BI_INDICATOR_REQUIRED
+        or green > _BI_INDICATOR_TOTAL
+        or not isinstance(checks, (list, tuple))
+        or len(checks) != _BI_INDICATOR_TOTAL
+    ):
+        return False
+
+    check_ids = []
+    check_keys = []
+    passed = 0
+    available_checks = 0
+    for check in checks:
+        if not isinstance(check, dict):
+            return False
+        check_id = check.get("id")
+        check_key = check.get("key")
+        if check_id in (None, "") or check_key in (None, ""):
+            return False
+        check_ids.append(str(check_id))
+        check_keys.append(str(check_key))
+        if check.get("available") is True:
+            available_checks += 1
+        if check.get("passed") is True:
+            passed += 1
+
+    return (
+        len(set(check_ids)) == _BI_INDICATOR_TOTAL
+        and len(set(check_keys)) == _BI_INDICATOR_TOTAL
+        and available_checks == available
+        and passed == green
+    )
+
+
+def _filter_bi_signal_rows(
+    scanner_name: str, rows: Iterable[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Fail-closed boundary for all BI cache consumers."""
+    materialized = list(rows or [])
+    scanner_key = str(scanner_name or "").strip().lower()
+    if scanner_key not in _BI_SIGNAL_SCANNERS:
+        return materialized
+    return [
+        row for row in materialized
+        if isinstance(row, dict) and _bi_row_meets_signal_contract(row)
+    ]
 
 
 def _stock_trade_email_status(now_utc: Optional[datetime] = None) -> Dict[str, Any]:
@@ -9495,6 +9619,7 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     if scanner_name == "biotech":
         _enrich_biotech_alert_trade_levels()
     rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file)
+    rows = _filter_bi_signal_rows(scanner_name, rows)
     now = time.time()
     grade_counts: Dict[str, int] = {}
     decision_counts: Dict[str, int] = {}
@@ -9955,6 +10080,9 @@ def _safe_record_alert_signals(
     """
     if not record_alert_signals or not rows:
         return
+    rows = _filter_bi_signal_rows(scanner_name, rows)
+    if scanner_name in _BI_SIGNAL_SCANNERS and not rows:
+        return
     delivery_required = str(mail_class or "").strip().lower() in {"trade", "swing_trade"}
     if delivery_recipient_keys is None:
         recipient_keys = _take_last_delivery_recipients() if delivery_required else ()
@@ -9971,7 +10099,7 @@ def _safe_record_alert_signals(
         if scanner_key in {"orb", "penny_stocks", "volume_spikes"}
         else "swing"
     )
-    for raw_row in rows or []:
+    for raw_row in rows:
         if not isinstance(raw_row, dict):
             normalized_rows.append(raw_row)
             continue
@@ -10240,6 +10368,16 @@ def _send_email_alert(
     tracking_rows_list = [
         dict(row) for row in (tracking_rows or []) if isinstance(row, dict)
     ]
+    tracking_rows_list = _filter_bi_signal_rows(
+        str(tracking_scanner or "").strip().lower(), tracking_rows_list
+    )
+    if (
+        str(tracking_scanner or "").strip().lower() in _BI_SIGNAL_SCANNERS
+        and not tracking_rows_list
+    ):
+        _record_email_event(subject, "skipped", "bi_indicator_contract_not_met")
+        _mail_suppressed("bi_indicator_contract_not_met")
+        return False
     intent_key = ""
     if tracking_scanner or tracking_rows_list:
         if (
@@ -10831,6 +10969,11 @@ def _check_and_alert(scanner_name, cache_file):
             results = results[0].get("data", results)
         if not isinstance(results, list):
             print(f"[Alert] {scanner_name}: Cache hat kein gültiges results-Array")
+            return
+        # Fail closed before session telemetry, enrichment, mail and tracking:
+        # old BI rows only prove the retired weighted-score threshold.
+        results = _filter_bi_signal_rows(scanner_name, results)
+        if scanner_name in _BI_SIGNAL_SCANNERS and not results:
             return
         if scanner_name in _STOCK_ALERT_SCANNERS:
             allowed, _reason = _stock_trade_email_allowed(scanner_name)
@@ -14263,6 +14406,14 @@ _BI_KEY_MAP = {
     "Ticker": "ticker", "Name": "name", "Preis": "price", "Change%": "change_pct",
     "BI_Score": "score", "BI_MaxScore": "max_score", "BI_Grade": "grade",
     "BI_GradeLabel": "grade_label", "BI_Confidence": "confidence", "BI_Details": "details",
+    "BI_IndicatorChecks": "bi_indicator_checks",
+    "BI_IndicatorsGreen": "bi_indicators_green",
+    "BI_IndicatorsAvailable": "bi_indicators_available",
+    "BI_IndicatorsTotal": "bi_indicators_total",
+    "BI_IndicatorsRequired": "bi_indicators_required",
+    "BI_IndicatorContractOK": "bi_indicator_contract_ok",
+    "BI_IndicatorContractVersion": "bi_indicator_contract_version",
+    "BI_WeightedScorePct": "bi_weighted_score_pct",
     "Entry": "entry", "StopLoss": "stop_loss", "TP1": "tp1", "TP2": "tp2",
     "RiskReward": "risk_reward", "RVOL": "rvol", "SmartMoney": "smart_money",
     "Volumen": "volume", "AvgVolumen": "avg_volume",
@@ -15236,8 +15387,9 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     ]
     decision_reasons = display_reasons
     if scanner_name in {"bi_long", "bi_short"}:
-        # BI intentionally exposes a broader result set. Failing the stricter
-        # automatic-release gate must not become "NO TRADE"; hard blockers do.
+        # Jede BI-Zeile hat hier bereits den separaten 17/20-Rohsignalvertrag
+        # bestanden. Ein spaeteres Timing-/Mail-Gate darf dieses Scanner-Signal
+        # nicht rueckwirkend entwerten; nur harte Ausfuehrungsblocker tun das.
         decision_reasons = [
             reason for reason in display_reasons
             if reason not in _BI_CANDIDATE_ONLY_SUPPRESSION_REASONS
@@ -15278,8 +15430,9 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
 def _bi_trade_criteria(row: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
     """Twenty transparent BI checks for UI diagnostics.
 
-    These checks do not hide candidates. They make clear why something is only
-    a candidate, waiting setup, actionable trade, or hard no-trade.
+    Diese separaten Ausfuehrungschecks kommen erst nach dem 17/20-Rohsignal.
+    Sie erklaeren Timing, Handelsfreigabe oder einen harten No-Trade-Blocker;
+    sie sind nicht die 20 technischen BI-Indikatoren.
     """
     reasons = set(str(r) for r in (state.get("display_reasons") or []))
     levels = _alert_trade_levels(row)
@@ -26542,41 +26695,34 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 
         # ── BI Scanner Cache Lookup: übernimm Grade/Score/Direction wenn vorhanden ──
         bi_scanner = None
-        for cache_path, bi_dir in [(BI_CACHE_LONG, "LONG"), (BI_CACHE_SHORT, "SHORT")]:
-            try:
-                cached_results, _ = load_cache_file(cache_path)
-                if cached_results:
-                    normed = _normalize_keys(cached_results, _BI_KEY_MAP)
-                    for item in normed:
-                        if isinstance(item, dict) and item.get("ticker", "").upper() == ticker.upper():
-                            bi_scanner = {
-                                "grade": item.get("grade"),
-                                "score": item.get("score"),
-                                "max_score": item.get("max_score"),
-                                "grade_label": item.get("grade_label"),
-                                "confidence": item.get("confidence"),
-                                "direction": bi_dir,
-                                "source": "BI Scanner",
-                                "entry": item.get("entry"),
-                                "stop_loss": item.get("stop_loss"),
-                                "tp1": item.get("tp1"),
-                                "tp2": item.get("tp2"),
-                                "risk_reward": item.get("risk_reward"),
-                                "rvol": item.get("rvol"),
-                                "trade_setup": dict(item.get("trade_setup") or {})
-                                if isinstance(item.get("trade_setup"), dict) else None,
-                                "barrier_gate": item.get("barrier_gate"),
-                                "barrier_gate_active": item.get("barrier_gate_active"),
-                                "structure_status": item.get("structure_status"),
-                                "structure_reason": item.get("structure_reason"),
-                                "target_quality": item.get("target_quality"),
-                                "nearest_barrier": item.get("nearest_barrier"),
-                            }
-                            break
-                if bi_scanner:
-                    break
-            except Exception as e:
-                print(f"[Warning] Error loading BI Scanner cache for {ticker}: {e}")
+        item, bi_dir = _find_bi_signal_cache_row(ticker)
+        if item is not None and bi_dir is not None:
+            bi_scanner = {
+                "grade": item.get("grade"),
+                "score": item.get("score"),
+                "max_score": item.get("max_score"),
+                "grade_label": item.get("grade_label"),
+                "confidence": item.get("confidence"),
+                "direction": bi_dir,
+                "source": "BI Scanner",
+                "entry": item.get("entry"),
+                "stop_loss": item.get("stop_loss"),
+                "tp1": item.get("tp1"),
+                "tp2": item.get("tp2"),
+                "risk_reward": item.get("risk_reward"),
+                "rvol": item.get("rvol"),
+                "trade_setup": dict(item.get("trade_setup") or {})
+                if isinstance(item.get("trade_setup"), dict) else None,
+                "barrier_gate": item.get("barrier_gate"),
+                "barrier_gate_active": item.get("barrier_gate_active"),
+                "structure_status": item.get("structure_status"),
+                "structure_reason": item.get("structure_reason"),
+                "target_quality": item.get("target_quality"),
+                "nearest_barrier": item.get("nearest_barrier"),
+                "indicators_green": item.get("bi_indicators_green"),
+                "indicators_total": item.get("bi_indicators_total"),
+                "indicator_contract_version": item.get("bi_indicator_contract_version"),
+            }
 
         # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
         if bi_scanner:
@@ -26590,7 +26736,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
             elif _bi_rvol < 0.5 and _bi_grade == "B":
                 _bi_grade = "C"
                 bi_scanner["grade"] = "C"
-                bi_scanner["grade_label"] = "C — WATCH (RVOL zu niedrig)"
+                bi_scanner["grade_label"] = "C — BASIS (RVOL zu niedrig)"
             signal_grade = _bi_grade
             score = bi_scanner["score"] if bi_scanner["score"] is not None else score
             confluence_direction = bi_scanner["direction"]
@@ -28070,6 +28216,7 @@ def get_scan_results(
     diagnostics = cache_meta.get("diagnostics") if isinstance(cache_meta.get("diagnostics"), dict) else None
     if normalize_map:
         results = _normalize_keys(results, normalize_map)
+    results = _filter_bi_signal_rows(scanner_name, results)
 
     cache_age = None
     if cached_at:
@@ -28168,6 +28315,8 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         running=bool(scan_state.get("running")),
     )
     results = _normalize_keys(results, _BI_KEY_MAP)
+    raw_cache_count = len(results or [])
+    results = _filter_bi_signal_rows(scanner_name, results)
 
     # RVOL Guard: Korrigiere Grades bei Auslieferung (Sicherheitsnetz)
     for r in results:
@@ -28180,7 +28329,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
                 r["grade_label"] = "B — SOLIDE (RVOL zu niedrig)"
             elif _rv < 0.5 and _gr == "B":
                 r["grade"] = "C"
-                r["grade_label"] = "C — WATCH (RVOL zu niedrig)"
+                r["grade_label"] = "C — BASIS (RVOL zu niedrig)"
 
     cache_age = None
     if cached_at:
@@ -28196,18 +28345,25 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
     results = _apply_signal_only_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     diagnostics = {
-        "mode": "candidate_analysis",
+        "mode": "scanner_signals_only",
         "scanner": scanner_name,
         "direction": direction,
-        "raw_cache_results": pre_decorate_count,
-        "decorated_candidates": decorated_count,
-        "visible_candidates": len(results or []),
+        "raw_cache_rows": raw_cache_count,
+        "validated_scanner_signals": pre_decorate_count,
+        "decorated_scanner_signals": decorated_count,
+        "visible_scanner_signals": len(results or []),
+        "indicator_gate": {
+            "minimum_green": _BI_INDICATOR_REQUIRED,
+            "total_indicators": _BI_INDICATOR_TOTAL,
+            "contract_version": _BI_INDICATOR_CONTRACT_VERSION,
+            "legacy_or_invalid_rows_rejected": max(0, raw_cache_count - pre_decorate_count),
+        },
         "cache_partial": cache_meta.get("partial", False),
         "checked": cache_meta.get("checked"),
         "total": cache_meta.get("total"),
         "progress_detail": cache_meta.get("detail", ""),
         "mail_gate": "strict: S/A/A+, score>=80, RVOL>=0.7, valid levels, trade health, no severe chase/fakeout/liquidity blockers",
-        "display_note": "BI tab shows candidates for trader review; mails still require the stricter alert gate.",
+        "display_note": "BI tab shows only scanner signals with at least 17 of 20 green technical indicators; mail delivery has separate execution gates.",
     }
     return ScanResultsResponse(
         status="success",
@@ -32650,6 +32806,39 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
         normalized["structure_trade_block_reason"] = structure_block_reason
         normalized["alertable_crypto"] = False
     return normalized
+
+
+def _find_bi_signal_cache_row(ticker: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Find one current-contract BI signal for chart enrichment.
+
+    Chart analysis must not resurrect a pre-contract cache row after the main
+    BI list and mail paths have already rejected it.
+    """
+    wanted = str(ticker or "").strip().upper()
+    if not wanted:
+        return None, None
+    for cache_path, bi_direction in (
+        (BI_CACHE_LONG, "LONG"),
+        (BI_CACHE_SHORT, "SHORT"),
+    ):
+        try:
+            cached_results, _ = load_cache_file(cache_path)
+            normalized = _normalize_keys(cached_results or [], _BI_KEY_MAP)
+            normalized = _filter_bi_signal_rows(
+                f"bi_{bi_direction.lower()}", normalized
+            )
+            for item in normalized:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("ticker") or "").upper() == wanted
+                ):
+                    return item, bi_direction
+        except Exception as exc:
+            print(
+                f"[Warning] Error loading BI Scanner cache for {wanted}: "
+                f"{_sanitized_exception_text(exc)}"
+            )
+    return None, None
 
 
 def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

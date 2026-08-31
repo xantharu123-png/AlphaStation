@@ -3,6 +3,32 @@ from datetime import datetime, timedelta
 import modules.scanners as scanners
 
 
+class _ContractResult(tuple):
+    def __new__(cls, values):
+        obj = super().__new__(cls, values)
+        obj.indicator_checks = [
+            {
+                "id": idx,
+                "key": f"indicator_{idx:02d}",
+                "name": f"Indicator {idx:02d}",
+                "available": True,
+                "passed": idx <= 17,
+                "points": 1 if idx <= 17 else 0,
+                "max_points": 1,
+                "reason": "test fixture",
+            }
+            for idx in range(1, 21)
+        ]
+        obj.green_count = 17
+        obj.available_count = 20
+        obj.required_green = 17
+        obj.indicator_contract_ok = True
+        obj.hard_gate_failures = []
+        obj.weighted_score_pct = 63.8
+        obj.contract_version = "stock-bi-20-v1"
+        return obj
+
+
 def _bars(days=40):
     start = datetime(2026, 1, 1)
     data = []
@@ -33,7 +59,9 @@ def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
     monkeypatch.setattr(
         scanners,
         "analyze_breakout_imminent",
-        lambda bars, direction: (True, 120, 188, ["ok"], "high", "A", 4, 4),
+        lambda bars, direction: _ContractResult(
+            (True, 120, 188, ["ok"], 85.0, "A", 4, 4)
+        ),
     )
     monkeypatch.setattr(scanners, "calculate_short_bonus_signals", lambda *args, **kwargs: {"bonus_score": 0, "details": []})
     monkeypatch.setattr(scanners, "_detect_chart_patterns", lambda *args, **kwargs: [])
@@ -52,3 +80,5 @@ def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
     assert saved["results"]
     assert saved["results"][0]["Ticker"] == "TEST"
     assert saved["results"][0]["above_sma20_pct"] is not None
+    assert saved["results"][0]["BI_IndicatorsGreen"] == 17
+    assert saved["results"][0]["BI_IndicatorsTotal"] == 20

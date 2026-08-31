@@ -20,6 +20,28 @@ from modules import regime_filter
 from modules import penny_stock_scanner
 
 
+def _bi_contract_row(ticker, green=17):
+    checks = [
+        {
+            "id": f"indicator_{index}",
+            "key": f"indicator_{index}",
+            "available": True,
+            "passed": index <= green,
+        }
+        for index in range(1, 21)
+    ]
+    return {
+        "ticker": ticker,
+        "BI_IndicatorChecks": checks,
+        "BI_IndicatorsGreen": green,
+        "BI_IndicatorsAvailable": 20,
+        "BI_IndicatorsTotal": 20,
+        "BI_IndicatorsRequired": 17,
+        "BI_IndicatorContractOK": True,
+        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+    }
+
+
 def _multiprocess_suppression_write(args):
     db_path, observed_at = args
     from modules import suppression_telemetry as process_telemetry
@@ -1147,7 +1169,11 @@ def test_generic_stock_closed_counts_current_dict_candidates_once(
 ):
     cache = tmp_path / "closed.json"
     cache.write_text(
-        json.dumps([{"ticker": "ONE"}, "not-a-row", {"ticker": "TWO"}]),
+        json.dumps([
+            _bi_contract_row("ONE"),
+            "not-a-row",
+            _bi_contract_row("TWO"),
+        ]),
         encoding="utf-8",
     )
     calls = []

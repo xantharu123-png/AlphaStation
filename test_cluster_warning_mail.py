@@ -44,6 +44,27 @@ def _patch_adr_set(monkeypatch, tickers):
     monkeypatch.setattr(api, "_adr_ticker_set", lambda: set(tickers))
 
 
+def _bi_contract_fields(green=17):
+    checks = [
+        {
+            "id": f"indicator_{index}",
+            "key": f"indicator_{index}",
+            "available": True,
+            "passed": index <= green,
+        }
+        for index in range(1, 21)
+    ]
+    return {
+        "BI_IndicatorChecks": checks,
+        "BI_IndicatorsGreen": green,
+        "BI_IndicatorsAvailable": 20,
+        "BI_IndicatorsTotal": 20,
+        "BI_IndicatorsRequired": 17,
+        "BI_IndicatorContractOK": True,
+        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+    }
+
+
 # ── _cluster_warning_html: Regel A (ADR-Cluster) ──
 
 def test_regel_a_zwei_adr_rows_warnen_mit_beiden_tickern(monkeypatch):
@@ -296,8 +317,16 @@ def test_e2e_check_and_alert_adr_cluster_warnzeile(monkeypatch, tmp_path):
     _patch_adr_set(monkeypatch, ADR_SET)
     cache = tmp_path / "bi_cache.json"
     cache.write_text(json.dumps({"results": [
-        {"ticker": "TGS", "grade": "S", "score": 95, "price": 30.0, "rvol": 3.0, "change_pct": 4.0},
-        {"ticker": "IRS", "grade": "S", "score": 95, "price": 12.0, "rvol": 3.0, "change_pct": 3.0},
+        {
+            "ticker": "TGS", "grade": "S", "score": 95,
+            "price": 30.0, "rvol": 3.0, "change_pct": 4.0,
+            **_bi_contract_fields(),
+        },
+        {
+            "ticker": "IRS", "grade": "S", "score": 95,
+            "price": 12.0, "rvol": 3.0, "change_pct": 3.0,
+            **_bi_contract_fields(),
+        },
     ]}))
 
     api._check_and_alert("bi_long", str(cache))

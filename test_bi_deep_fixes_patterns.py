@@ -342,15 +342,20 @@ def test_m3_short_direction_no_malus():
 # ====================================================================
 
 def test_n_max_score_pinned_173():
-    """max_score == 173 (bereinigte Komponenten-Summe), auch im
-    Early-Return; direction_confidence konsistent und <= 100%."""
-    bars = gen_textbook_accumulation(seed=11)[-30:]
+    """max_score bleibt 173; confidence ist die echte Green-Quote."""
+    bars = gen_textbook_accumulation(seed=11)[-50:]
     iv, sc, mx, det, conf, gr, fires, hits = analyze_breakout_imminent(bars, direction="long")
     assert mx == 173, f"max_score muss 173 sein, ist {mx}"
-    assert conf == round(sc / 173 * 100), f"confidence inkonsistent: {conf} vs score {sc}"
+    result = analyze_breakout_imminent(bars, direction="long")
+    assert result.indicator_contract_ok is True
+    assert conf == round(result.green_count / 20 * 100), (
+        f"confidence inkonsistent: {conf} vs {result.green_count}/20"
+    )
+    assert result.weighted_score_pct == round(sc / 173 * 100)
     assert 0 <= conf <= 100, f"confidence ausserhalb [0,100]: {conf}"
     early = analyze_breakout_imminent(bars[:5], direction="long")
     assert early[2] == 173, f"Early-Return max_score muss 173 sein, ist {early[2]}"
+    assert early[4] == 0 and early.indicator_contract_ok is False
     # Score-Cap: score darf max_score nie ueberschreiten -> confidence <= 100 strukturell
     for seed in range(10):
         b2 = gen_textbook_accumulation(seed=seed, range_pct=3.0, dryup=0.3,

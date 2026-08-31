@@ -27,7 +27,13 @@ from modules.indicators import (
 )
 from modules.scorers import calculate_setup_score, calculate_alpha_score
 from modules.helpers import is_spac
-from modules.patterns import analyze_breakout_imminent, analyze_candles
+from modules.patterns import (
+    BI_STOCK_CONTRACT_VERSION,
+    BI_STOCK_INDICATOR_COUNT,
+    BI_STOCK_REQUIRED_GREEN,
+    analyze_breakout_imminent,
+    analyze_candles,
+)
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
 from modules.trade_levels import trade_geometry
 from modules.vrvp_levels import (
@@ -252,6 +258,65 @@ _BI_PROGRESS_FILE = os.path.join(
 _BI_CONFIG_FILE = "/tmp/alpha_bi_config.json"
 _BI_CACHE_MAX_AGE = 7200
 _bi_scan_lock = threading.Lock()
+
+# Der BI-Scanner publiziert ausschliesslich Resultate, deren Core-Analyse den
+# expliziten Stock-BI-Vertrag nachweist. Ein blosses ``is_valid=True`` oder ein
+# hoher gewichteter Score reicht absichtlich nicht: So koennen weder alte
+# Analyseobjekte noch Test-/Cache-Altlasten die 17-von-20-Grenze umgehen.
+def _bi_analysis_contract_payload(result):
+    checks = getattr(result, "indicator_checks", None)
+    green = getattr(result, "green_count", None)
+    available = getattr(result, "available_count", None)
+    required = getattr(result, "required_green", None)
+    contract_ok = getattr(result, "indicator_contract_ok", None)
+    version = getattr(result, "contract_version", None)
+    weighted_pct = getattr(result, "weighted_score_pct", None)
+
+    if not isinstance(checks, (list, tuple)):
+        return None
+    checks = [dict(item) for item in checks if isinstance(item, dict)]
+    if len(checks) != BI_STOCK_INDICATOR_COUNT:
+        return None
+    ids = [item.get("id") for item in checks]
+    keys = [str(item.get("key") or "") for item in checks]
+    passed = [item.get("passed") is True for item in checks]
+    all_available = all(item.get("available") is True for item in checks)
+    if (
+        len(set(ids)) != BI_STOCK_INDICATOR_COUNT
+        or any(item_id is None for item_id in ids)
+        or len(set(keys)) != BI_STOCK_INDICATOR_COUNT
+        or not all(keys)
+    ):
+        return None
+
+    try:
+        green = int(green)
+        available = int(available)
+        required = int(required)
+    except (TypeError, ValueError):
+        return None
+
+    if (
+        version != BI_STOCK_CONTRACT_VERSION
+        or contract_ok is not True
+        or required != BI_STOCK_REQUIRED_GREEN
+        or available != BI_STOCK_INDICATOR_COUNT
+        or not all_available
+        or green != sum(passed)
+        or green < required
+    ):
+        return None
+
+    return {
+        "BI_IndicatorChecks": checks,
+        "BI_IndicatorsGreen": green,
+        "BI_IndicatorsAvailable": available,
+        "BI_IndicatorsTotal": BI_STOCK_INDICATOR_COUNT,
+        "BI_IndicatorsRequired": required,
+        "BI_IndicatorContractOK": True,
+        "BI_IndicatorContractVersion": version,
+        "BI_WeightedScorePct": weighted_pct,
+    }
 
 _BI_DEFAULT_CONFIG = {
     "direction": "long",
@@ -1151,7 +1216,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         results = []
         checked = 0
         no_data_count = 0
-        low_score_count = 0
+        contract_reject_count = 0
         range_fail = 0
         atr_fail = 0
         rr_fail = 0
@@ -1244,11 +1309,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 # Partial-Bar verfaelschte die Kontraktions-Signale. Live-Preis-Checks
                 # (Already-Broke-Out, Extension-Gates, Preis-Feld) nutzen weiter all_bars.
                 _session_bars = _bi_strip_partial_bar(all_bars)
-                bars = _session_bars[-30:]  # Letzte 30 KOMPLETTE Tage für BI-Analyse
+                # 50 abgeschlossene Tageskerzen halten die 20 BI-Indikatoren auf
+                # demselben Datenfenster wie AutoTrader/Backtest. Insbesondere
+                # benoetigt der MACD drei Histogrammwerte (mindestens 36 Bars),
+                # und die ADX-Wende braucht ebenfalls mehr als die alten 30 Bars.
+                bars = _session_bars[-50:]
 
-                # ── Mindest-History: Brauchen min 15 Bars für zuverlässige Analyse ──
-                # IPOs/frische Listings haben zu wenig Daten für Pattern-Erkennung
-                if len(_session_bars) < 15:
+                # Fail closed: Ohne 36 komplette Bars sind nicht alle 20
+                # Vertragsindikatoren berechenbar; dann gibt es kein BI-Signal.
+                if len(_session_bars) < 36:
                     no_data_count += 1
                     continue
 
@@ -1354,8 +1423,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 elif bi_score >= 20: _score_buckets["20-39"] += 1
                 else: _score_buckets["0-19"] += 1
 
-                if not is_valid:
-                    low_score_count += 1
+                contract_payload = _bi_analysis_contract_payload(result)
+                if not is_valid or contract_payload is None:
+                    contract_reject_count += 1
                     continue
 
                 # V2.7: Short Trend-Info (nur informativ, kein Hard-Reject mehr)
@@ -1402,7 +1472,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     atr_fail += 1
                     continue
 
-                grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — WATCH", "D": "D — SCHWACH"}
+                grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — BASIS", "D": "D — SCHWACH"}
                 grade_label = grade_map.get(grade, grade)
 
                 candidate["Alpha"] = bi_score
@@ -1413,6 +1483,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["BI_Direction"] = direction.upper()
                 candidate["BI_Grade"] = grade
                 candidate["BI_GradeLabel"] = grade_label
+                candidate.update(contract_payload)
 
                 atr_5 = calculate_wilder_atr(bars, period=5)
                 if atr_5 <= 0:
@@ -1716,7 +1787,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if _cand_rvol < 0.7 and candidate["BI_Grade"] in ("S", "A"):
                     candidate["BI_Grade"], candidate["BI_GradeLabel"] = "B", "B — SOLIDE (RVOL zu niedrig)"
                 elif _cand_rvol < 0.5 and candidate["BI_Grade"] == "B":
-                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — WATCH (RVOL zu niedrig)"
+                    candidate["BI_Grade"], candidate["BI_GradeLabel"] = "C", "C — BASIS (RVOL zu niedrig)"
 
                 results.append(candidate)
 
@@ -1731,7 +1802,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         total=total,
                         detail=f"Zwischenstand: {checked}/{total} analysiert",
                     )
-                    print(f"[BI {direction}] Live-Update: {len(_live)} Treffer bei {checked}/{total}")
+                    print(f"[BI {direction}] Live-Update: {len(_live)} BI-Signale bei {checked}/{total}")
             except Exception as e:
                 analysis_errors += 1
                 print(
@@ -1755,13 +1826,13 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         )
 
         avg_sc = round(score_sum / max(1, score_count))
-        _thr = 45 if direction == "long" else 40  # V4: Angepasst an post-Audit Scores
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
         pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
                     f"{cum_pump_fail} 2d-Pump → "
-                    f"{score_count} analysiert (Ø {avg_sc}, Top {top_score}, Threshold {_thr}) → "
-                    f"{low_score_count} unter Threshold → {range_fail} Range → "
-                    f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} Treffer"
+                    f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "
+                    f"{contract_reject_count} unter {BI_STOCK_REQUIRED_GREEN}/{BI_STOCK_INDICATOR_COUNT} "
+                    f"oder Vertragsfehler → {range_fail} Range → "
+                    f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} BI-Signale"
                     f" [Scores: {_buckets_str}]")
         print(f"[BI {direction}] Pipeline: {pipeline}")
 

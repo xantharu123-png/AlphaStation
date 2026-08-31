@@ -949,7 +949,7 @@ Mehr erfahren ↓
                         {/* With */}
                         <div style={{ padding: 32, background: 'linear-gradient(135deg, rgba(59,130,246,0.06), rgba(30,41,59,0.4))', borderRadius: '0 16px 16px 0', border: '1px solid rgba(59,130,246,0.15)', borderLeft: 'none' }}>
                             <div style={{ fontSize: 13, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 20 }}>Mit Alpha Station</div>
-                            {['Scanner findet Setups automatisch', 'Long- und Short-Strukturen getrennt bewerten', 'BI Scanner prüft mehrere technische Faktoren gleichzeitig', 'After Hours & Pre-Market werden berücksichtigt', 'Biotech-Scanner verbindet technische Daten mit Catalyst-Kontext', 'Ein Dashboard mit Datenstatus und Risiko-Hinweisen'].map((t, i) => (
+                            {['Scanner findet Setups automatisch', 'Long- und Short-Strukturen getrennt bewerten', 'BI Scanner meldet erst ab 17 von 20 bestätigten Indikatoren', 'After Hours & Pre-Market werden berücksichtigt', 'Biotech-Scanner verbindet technische Daten mit Catalyst-Kontext', 'Ein Dashboard mit Datenstatus und Risiko-Hinweisen'].map((t, i) => (
                                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 14, color: '#60a5fa' }}>
                                     <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>✓</span> {t}
                                 </div>
@@ -1476,7 +1476,7 @@ Mehr erfahren ↓
                                     <p style={{ marginBottom: 12 }}>Diese AGB gelten für die Nutzung der Plattform "Alpha Station" (nachfolgend "Dienst"), betrieben von {legalEntity} (nachfolgend "Anbieter"). Mit der Registrierung akzeptiert der Nutzer diese AGB.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>2. Leistungsbeschreibung</p>
-                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. BI Scanner mit 20+ Indikatoren), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), technische Trade-Setups (Entry, Stop-Loss, Take-Profit) sowie Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan enthält derzeit ausschließlich eine Paper-Broker-Simulation. Sie erstellt und simuliert Order-Pläne; echte Broker-Orders und Live-Trading sind technisch blockiert. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
+                                    <p style={{ marginBottom: 12 }}>Alpha Station ist eine technische Marktanalyse-Plattform. Der Dienst umfasst automatisierte Scanner (inkl. Stock-BI-Scanner mit 20 Indikatoren und einer Mindestkonfluenz von 17/20), technische Chartanalysen, Pattern-Erkennung (Harmonic Patterns, Candlestick Patterns, Order Blocks, Liquidity Zones), technische Trade-Setups (Entry, Stop-Loss, Take-Profit) sowie separate Kryptowährungs-Scanner (Early Movers, Whale Tracking, Funding Rates) für US-amerikanische Wertpapiere (NYSE, NASDAQ) und Kryptowährungen. Der Elite-Plan enthält derzeit ausschließlich eine Paper-Broker-Simulation. Sie erstellt und simuliert Order-Pläne; echte Broker-Orders und Live-Trading sind technisch blockiert. Der Dienst stellt ausdrücklich keine Anlageberatung, Finanzberatung oder Aufforderung zum Kauf oder Verkauf von Wertpapieren oder Kryptowährungen dar.</p>
 
                                     <p style={{ fontWeight: 700, color: '#f1f5f9', marginBottom: 8, marginTop: 24 }}>3. Haftungsausschluss & Risikohinweis</p>
                                     <p style={{ marginBottom: 12 }}>Der Handel mit Wertpapieren und Kryptowährungen ist mit erheblichen Risiken verbunden und kann zum Totalverlust des eingesetzten Kapitals führen. Die vom Dienst bereitgestellten Analysen, Signale und Setup-Hinweise sind rein informativer Natur. Der Anbieter übernimmt keinerlei Haftung für Verluste, die aus Handelsentscheidungen resultieren, die auf Grundlage der bereitgestellten Informationen getroffen werden. Paper-Fills und simulierte Ergebnisse können von einer realen Broker-Ausführung erheblich abweichen; die Funktion übermittelt keine echten Orders. Vergangene Ergebnisse und Analysen sind keine Garantie für zukünftige Gewinne. Der Nutzer handelt stets auf eigenes Risiko und eigene Verantwortung.</p>
@@ -5926,7 +5926,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} />
 
             <div className="flex flex-wrap items-center justify-end gap-3 px-1 text-xs text-gray-400">
-                <span>{results.length} Setups</span>
+                <span>{results.length} BI-Signale (mindestens 17/20)</span>
                 {diagnostics?.cache_partial && <span>Scan laeuft: {diagnostics.checked || 0}/{diagnostics.total || '?'} geprueft</span>}
             </div>
 
@@ -5939,6 +5939,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
+                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('bi_indicators_green')}>Konfluenz {sortKey === 'bi_indicators_green' && '↓'}</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('trade_action')}>Aktion {sortKey === 'trade_action' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Trade-Score {sortKey === 'score' && '↓'}</th>
                             <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('grade')}>Freigabe {sortKey === 'grade' && '↓'}</th>
@@ -5979,6 +5980,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 ? setupGrade
                                 : tradeGrade;
                             const releaseGrade = String(item.release_grade || conservativeGrade || 'C').toUpperCase();
+                            const indicatorsGreen = Number(item.bi_indicators_green ?? item.BI_IndicatorsGreen ?? 0);
+                            const indicatorsTotal = Number(item.bi_indicators_total ?? item.BI_IndicatorsTotal ?? 20);
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
                                     <td className="py-3 px-2 font-semibold">
@@ -5989,6 +5992,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                     <td className="py-3 px-2 text-right" style={{color: (item.change_pct || 0) >= 0 ? '#10b981' : '#ef4444'}}>{(item.change_pct || 0) >= 0 ? '+' : ''}{(item.change_pct || 0).toFixed(2)}%</td>
                                     <td className="py-3 px-2 text-right">{item.rsi != null ? Number(item.rsi).toFixed(1) : '–'}</td>
                                     <td className="py-3 px-2 text-right" style={{color: (item.rvol || 0) >= 2 ? '#f59e0b' : '#9ca3af'}}>{(item.rvol || 0).toFixed(1)}x</td>
+                                    <td className="py-3 px-2 text-center font-semibold" style={{color: indicatorsGreen >= 17 ? '#10b981' : '#ef4444'}}>{indicatorsGreen}/{indicatorsTotal}</td>
                                     <td className="py-3 px-2"><span className={`px-2 py-1 rounded text-xs font-semibold ${actionCls}`}>{actionLabel}</span></td>
                                     <td className="py-3 px-2 text-right font-semibold">{Number(item.score ?? 0).toFixed(0)}</td>
                                     <td className="py-3 px-2 text-center">
@@ -6001,7 +6005,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         })}
                     </tbody>
                 </table>
-                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Keine BI-Setups im aktuellen Scan.</div>}
+                {sorted.length === 0 && <div className="text-center text-gray-400 py-8">Keine Stock-BI-Signale mit mindestens 17 von 20 bestätigten Indikatoren.</div>}
             </div>
         </div>
     );

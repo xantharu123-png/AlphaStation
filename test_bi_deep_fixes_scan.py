@@ -39,6 +39,38 @@ class _Resp:
         return {"results": self._raw}
 
 
+class _ContractResult(tuple):
+    """Test double fuer das rueckwaertskompatible 8-Tuple mit BI-Vertrag."""
+
+    def __new__(cls, values, *, green=17):
+        obj = super().__new__(cls, values)
+        obj.indicator_checks = [
+            {
+                "id": idx,
+                "key": f"indicator_{idx:02d}",
+                "name": f"Indicator {idx:02d}",
+                "available": True,
+                "passed": idx <= green,
+                "points": 1 if idx <= green else 0,
+                "max_points": 1,
+                "reason": "test fixture",
+            }
+            for idx in range(1, 21)
+        ]
+        obj.green_count = green
+        obj.available_count = 20
+        obj.required_green = 17
+        obj.indicator_contract_ok = True
+        obj.hard_gate_failures = []
+        obj.weighted_score_pct = round(float(values[1]) / max(1.0, float(values[2])) * 100, 1)
+        obj.contract_version = "stock-bi-20-v1"
+        return obj
+
+
+def _contract_result(values, *, green=17):
+    return _ContractResult(values, green=green)
+
+
 def _to_polygon(bars):
     return [{"t": b["t"], "o": b["open"], "h": b["high"], "l": b["low"],
              "c": b["close"], "v": b["volume"]} for b in bars]
@@ -59,7 +91,7 @@ def _bar(o, h, l, c, v):
     return {"open": o, "high": max(h, o, c), "low": min(l, o, c), "close": c, "volume": int(v)}
 
 
-def _flat_bars(n=30, price=100.0, half_range=0.6, vol=250_000, seed=7):
+def _flat_bars(n=50, price=100.0, half_range=0.6, vol=250_000, seed=7):
     rng = random.Random(seed)
     bars = []
     for _ in range(n):
@@ -72,7 +104,7 @@ def _spike_then_flat(n_spike=5, n_flat=10, spike_high=107.0, price=100.0, vol=25
     """Erst Spike-Region bis 107, dann enge Konsolidierung um 100. Der Spike
     liegt im 15-Bar-Fallback-Fenster, aber NICHT im 10-Tage-Adaptivfenster."""
     bars = []
-    for _ in range(15):
+    for _ in range(35):
         bars.append(_bar(price, price + 0.6, price - 0.6, price, vol))
     for _ in range(n_spike):
         bars.append(_bar(price, spike_high, price - 0.5, price + 0.5, vol))
@@ -108,7 +140,7 @@ def _patch_scan_io(monkeypatch, bars_by_ticker, analyze_result=None, analyze_log
         def fake_analyze(bars, direction="long"):
             if analyze_log is not None:
                 analyze_log.append({"bars": list(bars), "direction": direction})
-            return analyze_result
+            return _contract_result(analyze_result)
 
         monkeypatch.setattr(scanners, "analyze_breakout_imminent", fake_analyze)
     return saved
@@ -201,7 +233,7 @@ def test_h2_short_extension_reject_and_control(monkeypatch, capsys):
     # Already-Crashed-Tagesfilter, aber klar unter dem Extension-Limit).
     def mk(crash_close):
         bars = []
-        for _ in range(12):
+        for _ in range(32):
             bars.append(_bar(103, 104, 102, 103, 250_000))
         bars.append(_bar(103, 106, 102, 103, 250_000))   # Range-High-Touch
         bars.append(_bar(103, 104, 100, 103, 250_000))   # Range-Low-Touch
@@ -235,7 +267,7 @@ def test_h2_short_tp_formula_guarantees_geometry(monkeypatch):
     bindet, die Geometrie Stop > Entry > TP1 > TP2 bleibt strukturell
     garantiert — und das R:R-Gate verwirft den 0.5R-Fall ehrlich."""
     bars = []
-    for _ in range(20):
+    for _ in range(40):
         bars.append(_bar(103, 106, 100, 103, 250_000))
     # Letzter kompletter Tag schliesst nahe Range-Low mit grosser Spanne (hoher ATR)
     bars.append(_bar(103, 104, 100, 100.2, 400_000))
@@ -299,7 +331,7 @@ def test_h2_geometry_mini_fuzz_500_both_directions(monkeypatch):
         rng = random.Random(42 if direction == "long" else 4242)
         bars_by_ticker = {}
         for i in range(500):
-            n = 35
+            n = 50
             base = rng.uniform(5, 150)
             b = []
             p = base
@@ -318,7 +350,7 @@ def test_h2_geometry_mini_fuzz_500_both_directions(monkeypatch):
         def fake_analyze(bars, direction=direction):
             rd = rd_rng.choice([0, 5, 8, 12, 15, 20])
             details = [f" Solide Konsolidierung: {rd} Tage"] if rd else [" Keine Konsolidierung: 2 Tage"]
-            return (True, 60, 188, details, "high", "B", 2, 2)
+            return _contract_result((True, 60, 188, details, "high", "B", 2, 2))
 
         saved = _patch_scan_io(monkeypatch, bars_by_ticker)
         monkeypatch.setattr(scanners, "analyze_breakout_imminent", fake_analyze)
@@ -356,7 +388,7 @@ def test_h2_cumulative_pump_filter(monkeypatch):
     """2 Tage x +7% (Σ 14% > 12%, > 4x StdDev) → Reject VOR der Analyse.
     Kontrolle: 2 x +4% (Σ 8%) → Analyse laeuft."""
     def mk(d1, d2):
-        bars = _flat_bars(n=28, price=100.0, half_range=0.4, seed=3)
+        bars = _flat_bars(n=48, price=100.0, half_range=0.4, seed=3)
         c1 = 100.0 * (1 + d1)
         c2 = c1 * (1 + d2)
         bars.append(_bar(100.0, c1 + 0.2, 99.8, c1, 600_000))
@@ -421,7 +453,7 @@ def test_m1_analysis_excludes_partial_bar(monkeypatch):
     """Scan-Pfad: Die an analyze uebergebenen Bars enden mit dem letzten
     KOMPLETTEN Tag — identisch mit und ohne heutigen Partial-Pump-Bar
     (Score-Neutralitaet, die 8/25 invalid→valid-Flips sind unmoeglich)."""
-    base = _flat_bars(n=30, seed=5)
+    base = _flat_bars(n=50, seed=5)
     # Letzter kompletter Tag = gestern (relativ zur Fake-Uhr)
     end_day = _real_datetime(2026, 6, 9).date()
     _attach_ts(base, end_day=end_day)
@@ -454,7 +486,7 @@ def test_m1_analysis_excludes_partial_bar(monkeypatch):
 
 def test_m1_after_close_bar_counts(monkeypatch):
     """Nach US-Close ist der heutige Bar komplett und MUSS in die Analyse."""
-    base = _flat_bars(n=30, seed=5)
+    base = _flat_bars(n=50, seed=5)
     end_day = _real_datetime(2026, 6, 10).date()
     _attach_ts(base, end_day=end_day)
 
@@ -466,6 +498,76 @@ def test_m1_after_close_bar_counts(monkeypatch):
                    analyze_result=(True, 80, 188, ["ok"], "high", "B", 2, 2), analyze_log=log)
     scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
     assert log[0]["bars"][-1]["date"] == "2026-06-10", "Kompletter heutiger Bar muss drin bleiben"
+
+
+def test_stock_bi_requires_36_complete_bars_and_passes_up_to_50(monkeypatch):
+    calls_35 = []
+    saved_35 = _patch_scan_io(
+        monkeypatch,
+        {"TEST": _flat_bars(n=35)},
+        analyze_result=(False, 0, 173, ["insufficient"], 0.0, "D", 0, 0),
+        analyze_log=calls_35,
+    )
+    scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
+    assert calls_35 == []
+    assert saved_35["results"] == []
+
+    calls_60 = []
+    _patch_scan_io(
+        monkeypatch,
+        {"TEST": _flat_bars(n=60)},
+        analyze_result=(False, 0, 173, ["contract reject"], 0.0, "D", 0, 0),
+        analyze_log=calls_60,
+    )
+    scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
+    assert len(calls_60) == 1
+    assert len(calls_60[0]["bars"]) == 50
+
+
+def test_stock_bi_scanner_fails_closed_without_contract_metadata(monkeypatch):
+    saved = _patch_scan_io(monkeypatch, {"TEST": _flat_bars()})
+    monkeypatch.setattr(
+        scanners,
+        "analyze_breakout_imminent",
+        lambda bars, direction="long": (True, 173, 173, ["legacy"], 100.0, "S", 4, 4),
+    )
+    scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
+    assert saved["results"] == []
+
+
+def test_stock_bi_scanner_rejects_16_and_publishes_17_of_20(monkeypatch):
+    bars = {"TEST": _flat_bars()}
+    saved_16 = _patch_scan_io(monkeypatch, bars)
+    monkeypatch.setattr(
+        scanners,
+        "analyze_breakout_imminent",
+        lambda *_args, **_kwargs: _contract_result(
+            (True, 173, 173, ["legacy high score"], 80.0, "S", 4, 4),
+            green=16,
+        ),
+    )
+    scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
+    assert saved_16["results"] == []
+
+    saved_17 = _patch_scan_io(monkeypatch, bars)
+    monkeypatch.setattr(
+        scanners,
+        "analyze_breakout_imminent",
+        lambda *_args, **_kwargs: _contract_result(
+            (True, 85, 173, [" Solide Konsolidierung: 10 Tage"], 85.0, "B", 2, 2),
+            green=17,
+        ),
+    )
+    scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
+    assert len(saved_17["results"]) == 1
+    row = saved_17["results"][0]
+    assert row["BI_IndicatorsGreen"] == 17
+    assert row["BI_IndicatorsAvailable"] == 20
+    assert row["BI_IndicatorsTotal"] == 20
+    assert row["BI_IndicatorsRequired"] == 17
+    assert row["BI_IndicatorContractOK"] is True
+    assert row["BI_IndicatorContractVersion"] == "stock-bi-20-v1"
+    assert len(row["BI_IndicatorChecks"]) == 20
 
 
 if __name__ == "__main__":

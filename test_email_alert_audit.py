@@ -8,6 +8,27 @@ import pytest
 import api
 
 
+def _bi_contract_fields(green=17):
+    checks = [
+        {
+            "id": f"indicator_{index}",
+            "key": f"indicator_{index}",
+            "available": True,
+            "passed": index <= green,
+        }
+        for index in range(1, 21)
+    ]
+    return {
+        "BI_IndicatorChecks": checks,
+        "BI_IndicatorsGreen": green,
+        "BI_IndicatorsAvailable": 20,
+        "BI_IndicatorsTotal": 20,
+        "BI_IndicatorsRequired": 17,
+        "BI_IndicatorContractOK": True,
+        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+    }
+
+
 @pytest.fixture(autouse=True)
 def _mock_common_stock_universe(monkeypatch, tmp_path, request):
     """Keep alert unit tests offline; individual asset-guard tests override this."""
@@ -367,6 +388,7 @@ def test_stock_alert_skip_reason_is_logged(tmp_path, monkeypatch):
             "StopLoss": 9.5,
             "TP1": 10.8,
             "TP2": 11.3,
+            **_bi_contract_fields(),
         }],
     }))
 
@@ -431,6 +453,7 @@ def test_intraday_long_alert_audit_allows_clean_momentum_continuation(tmp_path, 
         "StopLoss": 23.6,
         "TP1": 25.9,
         "TP2": 26.8,
+        **_bi_contract_fields(),
     }
     cache_file.write_text(json.dumps({
         "cached_at": datetime.now().isoformat(),
