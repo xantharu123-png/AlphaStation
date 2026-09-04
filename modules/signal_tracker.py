@@ -1289,6 +1289,9 @@ CREATE TABLE IF NOT EXISTS signals (
     ,be_exit_fill_price REAL
     ,be_exit_at TEXT
     ,be_exit_evidence_mode TEXT
+    ,be_exit_tp1_order TEXT
+    ,evaluation_model_version TEXT
+    ,path_extrema_evidence_mode TEXT
     ,be_trigger_at TEXT
     ,be_delivery_evidence_key TEXT
     ,update_mail_sent_at TEXT
@@ -1329,6 +1332,9 @@ _SCHEMA_MIGRATIONS = {
     "be_exit_fill_price": "REAL",
     "be_exit_at": "TEXT",
     "be_exit_evidence_mode": "TEXT",
+    "be_exit_tp1_order": "TEXT",
+    "evaluation_model_version": "TEXT",
+    "path_extrema_evidence_mode": "TEXT",
     "be_trigger_at": "TEXT",
     "market_regime": "TEXT",
     "delivery_recipient_keys_json": "TEXT",
@@ -3849,6 +3855,79 @@ def _breakeven_after_mfe_resolution(
     return None, True
 
 
+EVALUATION_MODEL_VERSION = "causal-legs-extrema-v2"
+
+
+def _event_time_bounds(value: Any) -> Tuple[Optional[datetime], Optional[datetime]]:
+    instant = _parse_utc_datetime(value)
+    if instant is None:
+        return None, None
+    if isinstance(value, str) and len(value.strip()) == 10:
+        return instant, instant + timedelta(days=1) - timedelta(microseconds=1)
+    return instant, instant
+
+
+def _managed_tp1_order_at_be_exit(row: Mapping[str, Any]) -> str:
+    """Order the partial exit against a whole-position BE exit, never by price alone."""
+    tp1_at, tp1_end = _event_time_bounds(row.get("tp1_hit_at"))
+    be_at, be_end = _event_time_bounds(row.get("be_exit_at"))
+    if be_at is None:
+        return "unknown"
+    if tp1_end is not None and tp1_end < be_at:
+        return "before"
+    if tp1_at is not None and tp1_at > be_end:
+        return "not_reached"
+    explicit = str(row.get("be_exit_tp1_order") or "")
+    if explicit in {"before", "not_reached", "unknown"}:
+        return explicit
+    if tp1_at is None and row.get("status") != STATUS_TP2:
+        return "not_reached"
+    # Daily/interval timestamps identify a containing bar, not an intrabar order.
+    return "unknown"
+
+
+def _managed_be_exit_resolution(row: Mapping[str, Any], be_exit_r: float) -> Tuple[Optional[float], bool]:
+    order = _managed_tp1_order_at_be_exit(row)
+    if order == "not_reached":
+        return round(be_exit_r, 4), False
+    if order != "before":
+        return None, True
+    geometry = _managed_control_geometry(dict(row))
+    if geometry is None:
+        return None, True
+    tp1_r = _signed_r(geometry["tp1"], geometry["fill"], geometry["risk"], geometry["direction"])
+    return round(0.5 * tp1_r + 0.5 * be_exit_r, 4), False
+
+
+def _be_exit_tp1_order(tp1_at: Any, bar_at: Any, *, open_be_exit: bool, open_tp1: bool, tp1_touched: bool) -> str:
+    _prior_start, prior_end = _event_time_bounds(tp1_at)
+    current, _current_end = _event_time_bounds(bar_at)
+    if prior_end is not None and current is not None and prior_end < current:
+        return "before"
+    if open_tp1:
+        return "before"
+    if open_be_exit or not tp1_touched:
+        return "not_reached"
+    return "unknown"
+
+
+def _terminal_extrema_bounds(*, previous_favorable: float, previous_adverse: float,
+                             open_r: Optional[float], exit_r: float, stopped: bool,
+                             opening_exit: bool) -> Tuple[float, float]:
+    """Only prices provably reached while the position existed enter its extrema.
+
+    At a normal terminal touch the opposite extreme may be after the exit.
+    Keep the prior/open bound rather than pretending that whole-bar extreme
+    occurred before the fill. The exit itself is an observed path endpoint.
+    """
+    opening = float(open_r) if open_r is not None else 0.0
+    if opening_exit:
+        return max(previous_favorable, opening), min(previous_adverse, opening)
+    if stopped:
+        return max(previous_favorable, opening), min(previous_adverse, opening, exit_r)
+    return max(previous_favorable, opening, exit_r), min(previous_adverse, opening)
+
+
 def _managed_5050_be_resolution(row: Dict[str, Any]) -> Tuple[Optional[float], bool]:
     """Resolve recommended 50/50+BE R and flag incomplete delivery evidence."""
     realized = _to_float(row.get("r_realized"))
@@ -3883,7 +3962,7 @@ def _managed_5050_be_resolution(row: Dict[str, Any]) -> Tuple[Optional[float], b
             return None, True
         # Der beobachtete BE-Exit ersetzt den Exit der Resthaelfte und darf bei
         # einem Gap unter/ueber Einstand negativ sein.
-        return round(base - 0.5 * realized + 0.5 * be_exit_r, 4), False
+        return _managed_be_exit_resolution(row, be_exit_r)
     if realized >= 0.0 and not _is_ambiguous_outcome(row):
         return base, False
     return None, True
@@ -3938,10 +4017,7 @@ def _shadow_counterfactual_5050_be_resolution(
         be_exit_r = _signed_r(
             be_exit, geometry["fill"], geometry["risk"], geometry["direction"]
         )
-        tp1_hit = bool(row.get("tp1_hit_at")) or row.get("status") == STATUS_TP2
-        if not tp1_hit:
-            return round(be_exit_r, 4), False
-        return round(base - 0.5 * realized + 0.5 * be_exit_r, 4), False
+        return _managed_be_exit_resolution(row, be_exit_r)
 
     tp1_at = _parse_utc_datetime(row.get("tp1_hit_at"))
     tp2_at = _parse_utc_datetime(row.get("tp2_hit_at"))
@@ -4520,7 +4596,7 @@ def _evaluate_stock_signal(
         return {}, False
 
     now_iso = now_dt.isoformat()
-    updates: Dict[str, Any] = {"last_eval_at": now_iso}
+    updates: Dict[str, Any] = {"last_eval_at": now_iso, "evaluation_model_version": EVALUATION_MODEL_VERSION}
     tp1_hit_at = sig.get("tp1_hit_at") or None
     max_fav = float(sig.get("max_favorable_r") or 0.0)
     max_adv = float(sig.get("max_adverse_r") or 0.0)
@@ -4574,6 +4650,10 @@ def _evaluate_stock_signal(
         filled_before_bar = fill_price is not None
         filled_intrabar_this_bar = False
         if fill_price is None:
+            if (open_price <= stop if direction == "LONG" else open_price >= stop):
+                updates.update(status=STATUS_NO_FILL, closed_at=now_iso,
+                               outcome_detail="entry_invalidated_before_fill")
+                break
             if direction == "LONG":
                 if open_price >= tp1:
                     updates.update({
@@ -4601,6 +4681,10 @@ def _evaluate_stock_signal(
                     fill_price = entry
                     filled_intrabar_this_bar = True
             if fill_price is None:
+                if (low <= stop if direction == "LONG" else high >= stop):
+                    updates.update(status=STATUS_NO_FILL, closed_at=now_iso,
+                                   outcome_detail="entry_invalidated_before_fill")
+                    break
                 if bars_after_alert >= horizon_bars:
                     updates.update({
                         "status": STATUS_NO_FILL,
@@ -4687,6 +4771,7 @@ def _evaluate_stock_signal(
             favorable = (fill_price - low) / risk
             adverse = (fill_price - high) / risk
         max_fav_before_bar = max_fav
+        max_adv_before_bar = max_adv
         max_fav = max(max_fav, favorable)
         # In an unordered OHLC fill bar the adverse extreme may have happened
         # before entry.  Keep only the neutral proven bound for that bar and
@@ -4701,6 +4786,15 @@ def _evaluate_stock_signal(
         day_iso = bar_date.isoformat()
 
         if ordered_open_stop:
+            if ((be_delivery_proven or shadow_counterfactual_be) and be_exit_fill_price is None
+                    and be_effective_date is not None and bar_date > be_effective_date):
+                updates.update(
+                    be_exit_fill_price=round(open_price, 8), be_exit_at=day_iso,
+                    be_exit_tp1_order=_be_exit_tp1_order(tp1_hit_at, day_iso,
+                        open_be_exit=True, open_tp1=False, tp1_touched=tp1_touch),
+                    be_exit_evidence_mode=("shadow_counterfactual_daily_open_or_entry_level"
+                        if shadow_counterfactual_be else "daily_open_or_entry_level"),
+                )
             lower_r = round(
                 _signed_r(open_price, fill_price, risk, direction), 4
             )
@@ -4754,6 +4848,11 @@ def _evaluate_stock_signal(
                 updates.update({
                     "be_exit_fill_price": round(be_exit_fill_price, 8),
                     "be_exit_at": day_iso,
+                    "be_exit_tp1_order": _be_exit_tp1_order(
+                        tp1_hit_at, day_iso,
+                        open_be_exit=(open_price <= fill_price if direction == "LONG" else open_price >= fill_price),
+                        open_tp1=ordered_open_tp1, tp1_touched=tp1_touch,
+                    ),
                     "be_exit_evidence_mode": (
                         "shadow_counterfactual_daily_open_or_entry_level"
                         if shadow_counterfactual_be
@@ -4864,6 +4963,14 @@ def _evaluate_stock_signal(
             })
             break
 
+    if updates.get("status") in {STATUS_STOP, STATUS_TP2} and not ordered_terminal_open:
+        max_fav, max_adv = _terminal_extrema_bounds(
+            previous_favorable=max_fav_before_bar, previous_adverse=max_adv_before_bar,
+            open_r=None if filled_intrabar_this_bar else _signed_r(open_price, fill_price, risk, direction),
+            exit_r=updates["r_realized"], stopped=updates["status"] == STATUS_STOP,
+            opening_exit=False,
+        )
+        updates["path_extrema_evidence_mode"] = "terminal_intrabar_bounds"
     if tp1_hit_at:
         updates["tp1_hit_at"] = tp1_hit_at
     updates["max_favorable_r"] = round(max_fav, 4)
@@ -5334,7 +5441,9 @@ def _evaluate_crypto_signal(
     mae_evidence_mode = str(sig.get("mae_evidence_mode") or "").strip()
     # Only a completed interval may advance the causal cursor. A running bar
     # would otherwise make its unfinished range disappear from the next fetch.
-    updates: Dict[str, Any] = {"last_eval_at": now_iso} if interval_complete else {}
+    updates: Dict[str, Any] = {
+        "last_eval_at": now_iso, "evaluation_model_version": EVALUATION_MODEL_VERSION,
+    } if interval_complete else {}
 
     if direction == "LONG":
         entry_touched = interval_high >= entry
@@ -5578,6 +5687,22 @@ def _evaluate_crypto_signal(
         updates["mae_evidence_mode"] = mae_evidence_mode
 
     if ordered_open_stop:
+        proven_be = _be_delivery_is_proven(sig)
+        shadow_be = str(sig.get("mail_class") or "").lower() == "shadow"
+        effective_candidates = [_parse_utc_datetime(sig.get("be_trigger_at"))]
+        if proven_be:
+            effective_candidates.append(_parse_utc_datetime(sig.get("be_mail_sent_at")))
+        effective_candidates = [instant for instant in effective_candidates if instant is not None]
+        interval_start = _parse_utc_datetime(observation.get("started_at"))
+        if ((proven_be or shadow_be) and not sig.get("be_exit_at") and effective_candidates
+                and interval_start is not None and interval_start >= max(effective_candidates)):
+            updates.update(
+                be_exit_fill_price=round(interval_open, 8), be_exit_at=now_iso,
+                be_exit_tp1_order=_be_exit_tp1_order(tp1_hit_at, now_iso,
+                    open_be_exit=True, open_tp1=False, tp1_touched=tp1_touched),
+                be_exit_evidence_mode=("shadow_counterfactual_completed_interval_open_or_entry_level"
+                    if shadow_be else "completed_interval_open_or_entry_level"),
+            )
         stop_r = round(_signed_r(interval_open, fill_price, risk, direction), 4)
         updates.update({
             "status": STATUS_STOP,
@@ -5665,6 +5790,12 @@ def _evaluate_crypto_signal(
             updates.update({
                 "be_exit_fill_price": round(be_exit_fill, 8),
                 "be_exit_at": now_iso,
+                "be_exit_tp1_order": _be_exit_tp1_order(
+                    tp1_hit_at, now_iso,
+                    open_be_exit=(interval_open is not None and (
+                        interval_open <= fill_price if direction == "LONG" else interval_open >= fill_price)),
+                    open_tp1=ordered_open_tp1, tp1_touched=tp1_touched,
+                ),
                 "be_exit_evidence_mode": (
                     "shadow_counterfactual_completed_interval_open_or_entry_level"
                     if shadow_counterfactual_be
@@ -5767,6 +5898,16 @@ def _evaluate_crypto_signal(
                 "outcome_detail": "tp1_then_expired" if tp1_hit_at else "",
             })
 
+    if updates.get("status") in {STATUS_STOP, STATUS_TP2}:
+        bounded_fav, bounded_adv = _terminal_extrema_bounds(
+            previous_favorable=max_fav_before_interval, previous_adverse=max_adv_before_interval,
+            open_r=(None if filled_intrabar_this_interval or interval_open is None else
+                    _signed_r(interval_open, fill_price, risk, direction)),
+            exit_r=updates["r_realized"], stopped=updates["status"] == STATUS_STOP,
+            opening_exit=False,
+        )
+        updates.update(max_favorable_r=round(bounded_fav, 4), max_adverse_r=round(bounded_adv, 4),
+                       path_extrema_evidence_mode="terminal_intrabar_bounds")
     if tp1_hit_at:
         updates["tp1_hit_at"] = tp1_hit_at
     return updates, False
@@ -7184,6 +7325,35 @@ def build_calibration_cell_identity(
         return None
 
 
+def select_performance_cohort(candidate_rows: Iterable[Mapping[str, Any]], *, days: int,
+                              as_of: datetime, mature_only: bool = True) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Pure cohort selection shared by API reporting and read-only export tools."""
+    as_of = _coerce_now(as_of)
+    cutoff = as_of - timedelta(days=max(1, int(days)))
+    earliest = cutoff - timedelta(days=_MAX_PERFORMANCE_MATURITY_LOOKBACK_DAYS) if mature_only else cutoff
+    candidates = []
+    for candidate in candidate_rows:
+        row = dict(candidate)
+        started = _signal_causal_start(row)
+        if (row.get("mail_class") == "trade" and row.get("status") != STATUS_PENDING_DELIVERY
+                and started is not None and earliest <= started <= as_of):
+            candidates.append(row)
+    created = [row for row in candidates if _signal_causal_start(row) >= cutoff]
+    rows = []
+    for row in candidates if mature_only else created:
+        maturity = _signal_maturity_at(row)
+        if not mature_only or (maturity is not None and cutoff <= maturity <= as_of):
+            if maturity is not None:
+                row = dict(row, maturity_at=maturity.isoformat())
+            rows.append(row)
+    excluded = sum(not _signal_has_full_observation_window(row, as_of) for row in created) if mature_only else 0
+    return rows, {
+        "created_in_window": len(created),
+        "matured_in_window": len(rows) if mature_only else sum(_signal_has_full_observation_window(row, as_of) for row in created),
+        "included_signals": len(rows), "excluded_not_mature": excluded,
+    }
+
+
 def load_performance_summary(
     days: int = 90,
     mature_only: bool = False,
@@ -7245,6 +7415,8 @@ def load_performance_summary(
         "cohort_mode": "fully_observed" if mature_only else "created_in_window",
         "cohort_selection_basis": "matured_in_window" if mature_only else "created_in_window",
         "as_of": as_of_dt.isoformat(),
+        "evaluation_model_version": EVALUATION_MODEL_VERSION,
+        "cost_basis": "gross_price_path_no_general_roundtrip_costs",
         "excluded_not_mature": 0,
         "total": _empty_bucket(),
         "per_scanner": {},
@@ -7308,21 +7480,10 @@ def load_performance_summary(
             >= cutoff_dt
         ]
         created_in_window = len(created_rows)
-        if mature_only:
-            rows = []
-            for row in candidate_rows:
-                maturity_at = _signal_maturity_at(row)
-                if maturity_at is not None and cutoff_dt <= maturity_at <= as_of_dt:
-                    row = dict(row)
-                    row["maturity_at"] = maturity_at.isoformat()
-                    rows.append(row)
-            summary["excluded_not_mature"] = sum(
-                1
-                for row in created_rows
-                if (_signal_maturity_at(row) is None or _signal_maturity_at(row) > as_of_dt)
-            )
-        else:
-            rows = created_rows
+        rows, cohort_counts = select_performance_cohort(
+            candidate_rows, days=window, as_of=as_of_dt, mature_only=mature_only,
+        )
+        summary["excluded_not_mature"] = cohort_counts["excluded_not_mature"]
         summary["cohort"].update({
             "created_in_window": created_in_window,
             "matured_in_window": len(rows) if mature_only else sum(
@@ -7657,6 +7818,9 @@ def load_performance_summary(
                 "entry_fill_price": row.get("entry_fill_price"),
                 "fill_evidence_mode": row.get("fill_evidence_mode") or "legacy_unclassified",
                 "code_revision": row.get("code_revision") or "legacy_unknown",
+                "evaluation_model_version": row.get("evaluation_model_version") or "legacy_unversioned",
+                "path_extrema_evidence_mode": row.get("path_extrema_evidence_mode") or "legacy_unversioned",
+                "be_exit_tp1_order": row.get("be_exit_tp1_order"),
                 "stop": row.get("stop"),
                 "exit_fill_price": row.get("exit_fill_price"),
                 "stop_gap_slippage_r": row.get("stop_gap_slippage_r"),
@@ -8254,6 +8418,8 @@ def shadow_summary(
             "matured_in_window" if mature_only else "created_in_window"
         ),
         "as_of": as_of_dt.isoformat(),
+        "evaluation_model_version": EVALUATION_MODEL_VERSION,
+        "cost_basis": "gross_price_path_no_general_roundtrip_costs",
         "excluded_not_mature": 0,
         "total": {
             "signals": 0, "open": 0, "decided": 0, "decided_signals": 0,

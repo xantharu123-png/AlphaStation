@@ -158,7 +158,9 @@ def test_tracker_stop_transition_has_complete_contract_fields(tracker):
     assert tr["public_signal_ref"] is None
     assert tr["origin_evidence"] == "direct_post_send"
     assert tr["delivery_accepted_at"] is None
-    assert tr["mfe"] == pytest.approx(0.2)
+    # High 101 and stop 95 share an unordered terminal bar. Opening at 100
+    # proves 0R, not that +0.2R occurred before the exit.
+    assert tr["mfe"] == pytest.approx(0.0)
 
 
 def test_tracker_tp1_without_close_yields_tp1_hit_open_exactly_once(tracker):
@@ -369,7 +371,9 @@ def test_terminal_direct_and_reloaded_events_keep_public_delivery_evidence(track
     assert direct[0]["public_signal_ref"] == public_ref
     assert direct[0]["origin_evidence"] == "smtp_acceptance"
     assert direct[0]["delivery_accepted_at"] == accepted_at.isoformat()
-    assert direct[0]["mfe"] == pytest.approx(0.2)
+    # Both event paths must retain the same conservative terminal-bar bound;
+    # the unordered high 101 is not proven to precede the stop at 95.
+    assert direct[0]["mfe"] == pytest.approx(0.0)
 
 
 def test_tracker_no_status_change_means_empty_transitions(tracker):

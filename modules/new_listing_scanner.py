@@ -5,11 +5,9 @@
 Erkennt neue PERP-Listings auf Crypto-Exchanges und generiert Short-Signale
 nach dem typischen Pump-Dump-Muster bei neuen Listings.
 
-Strategie (basierend auf Marktdaten 2024-2026):
-- 54% der neuen Listings pumpen am ersten Tag
-- 89% dumpen danach, 70% unter Peak innerhalb 2 Wochen
-- Pump-Fenster: 2-6 Stunden
-- Profitable Seite: SHORT nach dem Pump
+Hypothese: Neue Listings koennen nach einem Pump abverkauft werden.
+Weder die Heuristik noch ihre Scores sind eine kalibrierte Gewinnwahrscheinlichkeit.
+Die Profitabilitaet muss je Kohorte nach Kosten separat gemessen werden.
 
 Pipeline:
 1. DETECT   — Neue PERP-Instrumente auf Exchange erkennen (Cache-Diff)
@@ -32,6 +30,7 @@ import logging
 import traceback
 import re
 import html as html_lib
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -154,9 +153,78 @@ def _to_float(value, default=0.0):
     try:
         if value is None or value == "":
             return default
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
+
+
+def _funding_fields(rate=None, interval=None, source=None, source_timestamp=None):
+    """Raw fraction and measured settlement period; unknown is never zero/8h."""
+    rate = None if isinstance(rate, bool) else _to_float(rate, None)
+    interval = None if isinstance(interval, bool) else _to_float(interval, None)
+    if interval is not None and interval <= 0:
+        interval = None
+    return {
+        "funding_rate": rate,
+        "funding_rate_available": rate is not None,
+        "funding_rate_unit": "fraction",
+        "funding_interval_hours": interval,
+        "funding_available": rate is not None and interval is not None,
+        "funding_data_status": "missing_rate" if rate is None else "missing_interval" if interval is None else "ok",
+        "funding_source": source,
+        "funding_source_timestamp": source_timestamp,
+    }
+
+
+_FUNDING_MEASUREMENT_CACHE = {}
+_BINANCE_FUNDING_INFO_CACHE = {"ts": 0.0, "data": None}
+
+
+def fetch_funding_measurement(exchange, symbol):
+    """Public, reusable fraction/interval measurement for a native venue symbol.
+
+    The returned mapping includes availability, source and source/retrieval time.
+    Positive normalization requires an explicit interval; a missing Binance
+    adjustment row does not prove this instrument's current interval. No keys,
+    private endpoints or orders are involved. Cached for at most 30 seconds.
+    """
+    exchange, symbol = str(exchange).lower(), str(symbol).upper()
+    key = (exchange, symbol)
+    now = time.time()
+    cached = _FUNDING_MEASUREMENT_CACHE.get(key)
+    if cached and 0 <= now - cached[0] < 30:
+        return dict(cached[1])
+    result = _funding_fields(source=exchange)
+    if exchange == "mexc":
+        url = f"https://contract.mexc.com/api/v1/contract/funding_rate/{symbol}"
+        payload = _api_get(url)
+        row = payload.get("data") if isinstance(payload, dict) and payload.get("success") else None
+        if isinstance(row, dict) and row.get("symbol") == symbol:
+            result = _funding_fields(row.get("fundingRate"), row.get("collectCycle"), url, row.get("timestamp"))
+    elif exchange == "bitget":
+        url = "https://api.bitget.com/api/v3/market/current-fund-rate"
+        payload = _api_get(url, {"category": "USDT-FUTURES", "symbol": symbol})
+        rows = payload.get("data") if isinstance(payload, dict) and payload.get("code") == "00000" else None
+        if isinstance(rows, list):
+            row = next((r for r in rows if isinstance(r, dict) and r.get("symbol") == symbol), None)
+            if row:
+                result = _funding_fields(row.get("fundingRate"), row.get("fundingRateInterval"), url, payload.get("requestTime"))
+    elif exchange == "binance":
+        url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        row = _api_get(url, {"symbol": symbol})
+        info = _BINANCE_FUNDING_INFO_CACHE
+        if not 0 <= now - info["ts"] < 300:
+            rows = _api_get("https://fapi.binance.com/fapi/v1/fundingInfo")
+            # An error/object/partial row cannot supply a default settlement cycle.
+            info.update(ts=now, data=rows if isinstance(rows, list) else None)
+        rows = info["data"] or []
+        meta = next((r for r in rows if isinstance(r, dict) and r.get("symbol") == symbol), {})
+        if isinstance(row, dict) and row.get("symbol") == symbol:
+            result = _funding_fields(row.get("lastFundingRate"), meta.get("fundingIntervalHours"), url + "+fundingInfo", row.get("time"))
+    result["funding_retrieved_at"] = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+    _FUNDING_MEASUREMENT_CACHE[key] = (now, dict(result))
+    return result
 
 
 def _normalize_epoch_seconds(ts):
@@ -164,6 +232,8 @@ def _normalize_epoch_seconds(ts):
     try:
         ts_float = float(ts)
     except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(ts_float):
         return 0
     if ts_float > 10_000_000_000:
         ts_float /= 1000
@@ -638,6 +708,9 @@ def fetch_mexc_ticker(symbol):
         oi_usd_estimate = True
         oi_data_status = "missing_contract_size"
 
+    funding = fetch_funding_measurement("mexc", symbol)
+    if funding["funding_rate"] is None:
+        funding.update(_funding_fields(t.get("fundingRate"), source="mexc:ticker", source_timestamp=t.get("timestamp")))
     return {
         "price": price,
         "bid": float(t.get("bid1", 0)),
@@ -652,10 +725,8 @@ def fetch_mexc_ticker(symbol):
         "contract_size": contract_size or None,
         "oi_usd_estimate": oi_usd_estimate,
         "oi_data_status": oi_data_status,
-        "funding_rate": float(t.get("fundingRate", 0)),
-        "funding_interval_hours": 8.0,
+        **funding,
         "open_interest_available": oi_data_status == "ok",
-        "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
         "long_short_ratio_available": False,
         "timestamp": t.get("timestamp", 0),
     }
@@ -684,7 +755,9 @@ def fetch_mexc_candles(symbol, timeframe="1h", count=50):
 
     candles = []
     for i in range(len(times)):
-        vol_usd = float(amounts[i]) if i < len(amounts) else float(vols[i]) * float(closes[i]) if i < len(vols) and i < len(closes) else 0
+        # MEXC vol is contracts, not coins. Without amount, quote volume is
+        # unavailable; contracts * price would fabricate liquidity.
+        vol_usd = _to_float(amounts[i], None) if i < len(amounts) else None
         candles.append({
             "timestamp": int(times[i]) if i < len(times) else 0,
             "open": float(opens[i]) if i < len(opens) else 0,
@@ -693,6 +766,7 @@ def fetch_mexc_candles(symbol, timeframe="1h", count=50):
             "close": float(closes[i]) if i < len(closes) else 0,
             "volume": float(vols[i]) if i < len(vols) else 0,
             "volume_usd": vol_usd,
+            "volume_usd_available": vol_usd is not None,
         })
     candles.sort(key=lambda x: x["timestamp"])
     return candles
@@ -744,8 +818,7 @@ def fetch_binance_ticker(symbol):
         "volume_usd_24h": float(data.get("quoteVolume", 0)),
         "change_24h": float(data.get("priceChangePercent", 0)),
         "open_interest": 0,
-        "funding_rate": 0,
-        "funding_interval_hours": 8.0,
+        **_funding_fields(),
         "long_short_ratio": 0,
         "open_interest_available": False,
         "funding_available": False,
@@ -762,12 +835,9 @@ def fetch_binance_ticker(symbol):
     except Exception:
         pass
 
-    # Funding Rate separat holen
+    # Funding rate and the explicitly reported settlement interval.
     try:
-        fr_data = _api_get(f"{BINANCE_FUTURES_BASE}/premiumIndex", {"symbol": symbol})
-        if fr_data and isinstance(fr_data, dict):
-            result["funding_rate"] = float(fr_data.get("lastFundingRate", 0))
-            result["funding_available"] = "lastFundingRate" in fr_data
+        result.update(fetch_funding_measurement("binance", symbol))
     except Exception:
         pass
 
@@ -857,6 +927,9 @@ def fetch_bitget_ticker(symbol):
     t = tickers[0] if isinstance(tickers, list) else tickers
     if not isinstance(t, dict):
         return None
+    funding = fetch_funding_measurement("bitget", symbol)
+    if funding["funding_rate"] is None:
+        funding.update(_funding_fields(t.get("fundingRate"), source="bitget:ticker", source_timestamp=t.get("ts")))
     return {
         "price": float(t.get("lastPr", 0)),
         "bid": float(t.get("bidPr", 0)),
@@ -867,10 +940,8 @@ def fetch_bitget_ticker(symbol):
         "volume_usd_24h": float(t.get("usdtVolume", 0)),
         "change_24h": float(t.get("change24h", 0)) * 100,
         "open_interest": float(t.get("holdingAmount", 0)),
-        "funding_rate": float(t.get("fundingRate", 0)),
-        "funding_interval_hours": 8.0,
+        **funding,
         "open_interest_available": "holdingAmount" in t and t.get("holdingAmount") not in (None, ""),
-        "funding_available": "fundingRate" in t and t.get("fundingRate") not in (None, ""),
         "long_short_ratio_available": False,
         "timestamp": int(t.get("ts", 0)),
     }
@@ -1535,7 +1606,11 @@ def calculate_listing_exhaustion(
         ticker.get("open_interest_available")
         or ticker.get("oi_data_status") == "ok"
     )
-    funding_available = bool(ticker.get("funding_available"))
+    funding_available = bool(
+        ticker.get("funding_available")
+        and _to_float(ticker.get("funding_rate"), None) is not None
+        and _to_float(ticker.get("funding_interval_hours")) > 0
+    )
     long_short_available = bool(ticker.get("long_short_ratio_available"))
     momentum_available = False
     btc_context_available = False
@@ -1789,25 +1864,28 @@ def calculate_listing_exhaustion(
 
     # ═══════════════════════════════════════════════════════════════════════
     # 8. FUNDING RATE (0-15)
-    #    DER stärkste Dump-Indikator bei neuen Listings!
-    #    Hohe positive Funding = Longs überhitzt, zahlen Shorts
-    #    Extrem hohe Funding (>0.1%) bei neuen Listings = fast sicherer Dump
+    #    Positive Funding: Longs zahlen Shorts, kein Beweis fuer einen Dump.
     # ═══════════════════════════════════════════════════════════════════════
     # Telemetry contract: the venue value stays a fraction in
     # ``funding_rate_raw``/``funding_rate_unit``; ``funding_rate_pct`` and the
     # legacy ``funding_rate`` alias carry the interval-normalized percentage.
-    fr_raw = _to_float(ticker.get("funding_rate"))
+    fr_raw = _to_float(ticker.get("funding_rate"), None)
     fr = fr_raw
-    # M-Funding-Intervall AUDIT FIX: Die Schwellen unten sind pro-8h kalibriert.
-    # Liefert ein Fetcher kuenftig ein Intervall-Feld, wird hier auf 8h normalisiert.
-    # Stand heute liefern fetch_mexc/bitget/binance_ticker KEIN Intervall-Feld
-    # (alle drei nutzen den 8h-Standard) -> Konstante 8h.
-    # TODO: Sobald ein Fetcher "funding_interval_hours" liefert (z.B. MEXC
-    # collectCycle oder Bitget fundingTime-Abstand), Feld im Ticker-Dict setzen.
+    # The thresholds use an 8h comparison basis, not an assumed venue cycle.
     FUNDING_STANDARD_INTERVAL_H = 8.0
-    source_funding_interval_h = _to_float((ticker or {}).get("funding_interval_hours"), 0)
-    if funding_available and source_funding_interval_h <= 0:
-        source_funding_interval_h = FUNDING_STANDARD_INTERVAL_H
+    source_funding_interval_h = _to_float(ticker.get("funding_interval_hours"), None)
+    if source_funding_interval_h is not None and source_funding_interval_h <= 0:
+        source_funding_interval_h = None
+    pump_data.update({
+        "funding_rate": None,
+        "funding_rate_pct": None,
+        "funding_rate_raw": fr_raw,
+        "funding_rate_unit": "fraction",
+        "funding_available": funding_available,
+        "funding_interval_hours": FUNDING_STANDARD_INTERVAL_H if funding_available else None,
+        "funding_source_interval_hours": source_funding_interval_h,
+        "funding_data_status": "ok" if funding_available else "missing_rate" if fr_raw is None else "missing_interval",
+    })
     if (
         funding_available
         and source_funding_interval_h > 0
@@ -1857,7 +1935,7 @@ def calculate_listing_exhaustion(
         pump_data["funding_source_interval_hours"] = source_funding_interval_h
         details.append("💰 Funding: 0.000% (gültiger Messwert, neutral)")
     else:
-        details.append("💰 Funding: keine Daten")
+        details.append("💰 Funding: keine vergleichbaren Daten (Rate oder Abrechnungsintervall fehlt)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 9. LONG/SHORT RATIO (0-15)
@@ -2024,9 +2102,9 @@ def calculate_listing_exhaustion(
     score += btc_divergence_pts
 
     # ═══════════════════════════════════════════════════════════════════════
-    # GESAMT-SCORE: normalize only across dimensions that were actually
-    # measured. A coverage cap prevents sparse exchange responses from being
-    # inflated into an actionable score.
+    # Fixed applicable denominator: losing a measurement must never improve
+    # the score by removing a zero/negative component from its denominator.
+    # Coverage remains explicit and additionally caps incomplete evidence.
     # ═══════════════════════════════════════════════════════════════════════
     component_availability = {
         "pump": (20, True),
@@ -2054,7 +2132,7 @@ def calculate_listing_exhaustion(
         if not available and not (name == "listing_age" and not is_new_listing)
     ]
     data_coverage = available_max / applicable_max if applicable_max > 0 else 0.0
-    normalized = int(round(score / available_max * 100)) if available_max > 0 else 0
+    normalized = int(round(score / applicable_max * 100)) if applicable_max > 0 else 0
     # Avoid discontinuous score jumps at arbitrary coverage thresholds.
     score_cap = _coverage_score_cap(data_coverage)
     normalized = max(0, min(score_cap, normalized))
@@ -2062,11 +2140,12 @@ def calculate_listing_exhaustion(
     pump_data["raw_score"] = score
     pump_data["max_score"] = available_max
     pump_data["theoretical_max_score"] = applicable_max
+    pump_data["normalization_denominator"] = applicable_max
     pump_data["data_coverage_pct"] = round(data_coverage * 100, 1)
     pump_data["score_cap"] = score_cap
     pump_data["missing_dimensions"] = missing_dimensions
     details.append(
-        f"══ GESAMT: {score}/{available_max} verfügbare Punkte → {normalized}/100 "
+        f"══ GESAMT: {score}/{applicable_max} Punkte → {normalized}/100 "
         f"(Datenabdeckung {data_coverage:.0%}, Cap {score_cap})"
     )
 
@@ -3183,7 +3262,7 @@ def detect_active_pumps(all_perps):
 
     Kriterien für Pump-Erkennung:
     - 24h Change > 25%  ODER
-    - 24h Change > 15% UND Funding < -0.05%  ODER
+    - 24h Change > 15% UND gemessene Funding > +0.05% pro 8h ODER
     - 24h Change > 15% UND Volume extrem hoch
 
     M-Pumps AUDIT FIX:
@@ -3219,7 +3298,7 @@ def detect_active_pumps(all_perps):
                         continue
                     change = float(t.get("riseFallRate", 0)) * 100
                     volume = float(t.get("amount24", 0))
-                    fr = float(t.get("fundingRate", 0))
+                    fr = _to_float(t.get("fundingRate"), None)
                     last_price = float(t.get("lastPrice", 0))
                     exchange_tickers[f"mexc:{sym}"] = {
                         "symbol": sym,
@@ -3245,7 +3324,7 @@ def detect_active_pumps(all_perps):
                         continue
                     change = float(t.get("change24h", 0)) * 100
                     volume = float(t.get("usdtVolume", 0))
-                    fr = float(t.get("fundingRate", 0))
+                    fr = _to_float(t.get("fundingRate"), None)
                     last_price = float(t.get("lastPr", 0))
                     exchange_tickers[f"bitget:{sym}"] = {
                         "symbol": sym,
@@ -3276,7 +3355,7 @@ def detect_active_pumps(all_perps):
                         "exchange": "binance",
                         "change_24h": change,
                         "volume_usd_24h": volume,
-                        "funding_rate": 0,  # Binance braucht separaten Call
+                        "funding_rate": None,  # 24h ticker does not report funding
                         "price": last_price,
                     }
     except Exception as e:
@@ -3289,7 +3368,7 @@ def detect_active_pumps(all_perps):
         change = ticker["change_24h"]
         volume = ticker["volume_usd_24h"]
         fr = ticker["funding_rate"]
-        fr_pct = fr * 100
+        fr_pct = None
         sym = ticker["symbol"]
         exchange = ticker["exchange"]
         monitor_key = _monitor_key(sym, exchange)
@@ -3303,6 +3382,17 @@ def detect_active_pumps(all_perps):
         if volume < PUMP_MIN_QUOTE_VOLUME_USD:
             continue
 
+        # Bulk tickers lack settlement intervals. Enrich only the liquid pump
+        # shortlist, then compare a measured rate on the common 8h basis.
+        funding = _funding_fields(fr, source=f"{exchange}:bulk_ticker")
+        if change > 15:
+            measured = fetch_funding_measurement(exchange, sym)
+            if measured.get("funding_rate_available"):
+                funding = measured
+                fr = measured["funding_rate"]
+            if funding.get("funding_available"):
+                fr_pct = fr * 100 * 8.0 / funding["funding_interval_hours"]
+
         # === PUMP-KRITERIEN ===
         pump_reasons = []
 
@@ -3312,7 +3402,7 @@ def detect_active_pumps(all_perps):
 
         # Kriterium 2: Starker Pump + positive Funding = ueberhitzte Longs.
         # Negative Funding ist fuer Shorts eher Squeeze-Risiko, kein Trigger.
-        if change > 15 and fr_pct > 0.05:
+        if change > 15 and fr_pct is not None and fr_pct > 0.05:
             pump_reasons.append(f"24h +{change:.0f}% + FR {fr_pct:.3f}% (Longs ueberhitzt)")
 
         # Kriterium 3: Starker Pump + extremes Volume
@@ -3333,7 +3423,10 @@ def detect_active_pumps(all_perps):
             "change_24h": change,
             "volume_usd_24h": volume,
             "funding_rate": fr,
-            "negative_funding_squeeze_risk": fr_pct < -0.05,
+            "funding_interval_hours": funding["funding_interval_hours"],
+            "funding_available": funding["funding_available"],
+            "funding_rate_pct_8h": fr_pct,
+            "negative_funding_squeeze_risk": fr_pct < -0.05 if fr_pct is not None else None,
             "price": ticker["price"],
             "source": "pump_detection",
         })

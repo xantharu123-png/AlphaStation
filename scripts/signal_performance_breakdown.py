@@ -1,40 +1,20 @@
 #!/usr/bin/env python3
-"""Performance-Breakdown pro Scanner x Kalendermonat.
+"""Read-only scanner performance by the same cohort as the main API.
 
-AUDIT 2026-07-29 (Hit-Rate-Frage). Der Wochenreport aggregiert das Fenster
-in EINEN Bucket pro Scanner — damit ist unsichtbar, WANN eine Quote kippte
-("frueher ueber 70%"?). Dieses Skript bricht exakt dieselbe Metrik auf
-Monatszellen herunter:
+Default: fully observed signals grouped by maturity month/day. --include-recent
+uses the causal delivery timestamp and explicitly reports a provisional cohort.
+Only terminal filled rows enter R/win arithmetic; unresolved BE cases stay visible.
+No schema migration, signal evaluation, network call or database write occurs.
 
-  entschieden = Signale mit r_realized (Tracker-Semantik, identisch zum
-                Wochenreport)
-  Win         = r_realized > 0
-  ØR 50/50    = R des empfohlenen 50/50-Managements (T1)
-
-So ist auf einen Blick sichtbar, ob es fruehere Monate mit >70% gab, ob die
-Quote mit Stichprobengroesse/Regime schwankt und welcher Scanner sie zieht
-oder drueckt. Zellen mit n < 30 sind markiert: keine belastbare Aussage.
-
-Usage (auf dem Server, im App-Verzeichnis):
-    venv/bin/python3 scripts/signal_performance_breakdown.py
-    venv/bin/python3 scripts/signal_performance_breakdown.py --days 365
-    venv/bin/python3 scripts/signal_performance_breakdown.py --scanner stock_strategy
-    venv/bin/python3 scripts/signal_performance_breakdown.py --days 21 --per-day
-
---per-day (AUDIT 2026-08-01, 14-Tage-Kollaps): Monatszellen sind zu grob,
-wenn eine Quote mitten im Monat kippt (44% -> 16% -> 0% innerhalb von
-14 Tagen). Pro-Tag-Zellen machen sichtbar, an welchem Tag die Signal-Flut
-begann, ob sich Verlierer um bestimmte Ereignisse clustern (z. B.
-Fed-Mittwoch) und ob Signale NACH einem Fix-Deploy wieder performen.
-
-Exit 0 immer (Analyse-Tool, kein Gate).
+Usage: python scripts/signal_performance_breakdown.py --days 365 --per-day
 """
 from __future__ import annotations  # Annotations lazy: py3.8-kompatibel
 
 import argparse
+import sqlite3
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -61,41 +41,45 @@ def main() -> int:
                         help="Nur diesen Scanner zeigen (z. B. stock_strategy)")
     parser.add_argument("--per-day", action="store_true",
                         help="Zellen pro Tag statt pro Monat (Regime-Brueche sichtbar machen)")
+    parser.add_argument("--include-recent", action="store_true",
+                        help="Vorlaeufige Versandkohorte statt vollstaendig beobachteter Kohorte")
     args = parser.parse_args()
 
     from modules import signal_tracker as st
 
     print(f"DB: {st.SIGNAL_DB_PATH}")
-    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max(1, args.days))).isoformat()
-    with st._db_connection() as conn:  # WAL/Migration wie im Tracker
+    as_of = datetime.now(timezone.utc)
+    # Reporting never migrates or creates a production DB.
+    db_path = Path(st.SIGNAL_DB_PATH).resolve()
+    if not db_path.is_file():
+        print("Keine Tracker-Datenbank vorhanden.")
+        return 0
+    with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
         rows = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM signals WHERE created_at >= ? "
-                "AND mail_class = 'trade' "
-                "ORDER BY created_at ASC, id ASC",
-                (cutoff_iso,),
+                "SELECT * FROM signals WHERE mail_class = 'trade' "
+                "ORDER BY created_at ASC, id ASC"
             ).fetchall()
         ]
+    rows, cohort = st.select_performance_cohort(
+        rows, days=max(1, args.days), as_of=as_of, mature_only=not args.include_recent,
+    )
     if args.scanner:
         rows = [r for r in rows if str(r.get("scanner") or "") == args.scanner]
 
     # Zellen: (scanner, Bucket) -> {signals, r[], managed[]}
     # Bucket = "JJJJ-MM" (Default) oder "JJJJ-MM-TT" (--per-day)
     bucket_len = 10 if args.per_day else 7
-    cells: dict = defaultdict(lambda: {"signals": 0, "r": [], "managed": []})
+    cells: dict = defaultdict(list)
     for row in rows:
-        month = str(row.get("created_at") or "")[:bucket_len] or "unbekannt"
+        cohort_time = (st._signal_causal_start(row).isoformat() if args.include_recent
+                       else row.get("maturity_at"))
+        month = str(cohort_time or "")[:bucket_len] or "unbekannt"
         scanner = str(row.get("scanner") or "unknown")
         for key in ((scanner, month), ("GESAMT", month)):
-            cell = cells[key]
-            cell["signals"] += 1
-            r_value = row.get("r_realized")
-            if r_value is not None:
-                cell["r"].append(float(r_value))
-            managed = st._managed_r_50_50(row)
-            if managed is not None:
-                cell["managed"].append(managed)
+            cells[key].append(row)
 
     scanners = sorted({s for s, _ in cells if s != "GESAMT"})
     if not scanners:
@@ -104,8 +88,10 @@ def main() -> int:
 
     print(f"Fenster: {args.days} Tage | Signale: {len(rows)} | "
           f"Scanner: {len(scanners)}")
-    print("Semantik: Win = r_realized > 0 über entschiedene Signale "
-          "(= Wochenreport). n < 30: Stichprobe zu klein für belastbare Quote.\n")
+    print("Kohorte: " + ("Versandzeit, vorlaeufig" if args.include_recent else "Reifezeit, vollstaendig beobachtet"))
+    print(f"Noch nicht reif: {cohort['excluded_not_mature']}")
+    print("Semantik: gleiche Kohorten- und Fill/Terminal-Pruefung wie Hauptstatistik; "
+          "Level-R vor allgemeinen Kosten, keine Broker-PnL. n < 30 nicht belastbar.\n")
 
     label = "Tag" if args.per_day else "Monat"
     width = 11 if args.per_day else 9
@@ -119,16 +105,15 @@ def main() -> int:
         print(header)
         print("-" * 100)
         for month in months:
-            cell = cells[(scanner, month)]
-            r_values = cell["r"]
-            decided = len(r_values)
-            wins = sum(1 for v in r_values if v > 0)
-            win_pct, ci = _fmt_cell(wins, decided, st._wilson_interval_95(wins, decided))
-            avg_r = f"{sum(r_values) / decided:+.2f}" if decided else "—"
-            managed = cell["managed"]
-            avg_m = f"{sum(managed) / len(managed):+.2f}" if managed else "—"
-            sum_r = f"{sum(r_values):+.1f}" if decided else "+0.0"
-            note = "n < 30" if 0 < decided < 30 else ""
+            cell = st._performance_bucket_for_rows(cells[(scanner, month)], max(1, args.days), as_of)
+            decided = cell["decided_signals"]
+            win_pct = f"{cell['win_rate_pct']:.0f}%" if decided else "—"
+            ci_raw = cell["win_rate_wilson_95"]
+            ci = f"{ci_raw['lower_pct']:.0f}–{ci_raw['upper_pct']:.0f}%" if ci_raw else "—"
+            avg_r = f"{cell['avg_r']:+.2f}" if cell["avg_r"] is not None else "—"
+            avg_m = f"{cell['avg_r_managed_50_50']:+.2f}" if cell["avg_r_managed_50_50"] is not None else "—"
+            sum_r = f"{cell['sum_r']:+.1f}" if decided else "+0.0"
+            note = ("n < 30; " if 0 < decided < 30 else "") + f"BE unaufgeloest: {cell['managed_be_unresolved']}"
             print(f"{month:<{width}}{cell['signals']:>5}{decided:>8}{win_pct:>7}"
                   f"{ci:>11}{avg_r:>8}{avg_m:>9}{sum_r:>9}  {note}")
         print()

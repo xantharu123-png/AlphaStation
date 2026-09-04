@@ -108,7 +108,8 @@ def test_h7_beobachten_statt_short_bei_btc_staerke(impl):
 def test_h7_jetzt_shorten_ab_65_nur_mit_btc_schwaeche(impl):
     """ExhScore 65 + nahe High + 1h kippt + BTC schwach → JETZT SHORTEN (q=5)."""
     timing, quality, gate = impl(65, 0.85, -2.0, change_24h=3.0, btc_weak=True)
-    assert "JETZT SHORTEN" in timing
+    assert "SHORT-KONTEXT" in timing
+    assert "kein Einstiegssignal" in timing
     assert quality == 5
     assert gate is True
 
@@ -128,9 +129,9 @@ def test_h7_jetzt_traegt_kein_stop_hinweis(impl):
     t5, _, _ = impl(70, 0.9, -2.0, change_24h=2.0, btc_weak=True)
     t4, _, _ = impl(70, 0.9, -0.8, change_24h=2.0, btc_weak=True)
     for t in (t5, t4):
-        assert "JETZT" in t
+        assert "SHORT-KONTEXT" in t
         assert "kein definierter Stop" in t
-        assert "Beobachtungssignal" in t
+        assert "kein Einstiegssignal" in t
 
 
 @pytest.mark.parametrize("impl", BOTH_IMPLS)

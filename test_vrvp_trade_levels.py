@@ -1058,7 +1058,9 @@ def test_vrvp_support_only_preserves_existing_level_zone_target_attribution():
     assert enriched["stop_source"] == "VRVP POC invalidation"
     assert enriched["tp1"] == 105.0
     assert enriched["tp1_source"] == "confirmed daily swing"
-    assert enriched["target_quality"] == "STRUCTURAL_FIRST_BARRIER"
+    assert enriched["target_quality"] == "STRUCTURAL_TP1_PROJECTION_TP2"
+    assert enriched["level_quality"]["tp1"]["quality"] == "confirmed_zone"
+    assert enriched["level_quality"]["tp2"]["quality"] == "projection"
 
 
 def test_unverified_tp1_claim_without_nearest_barrier_becomes_projection_and_reject():

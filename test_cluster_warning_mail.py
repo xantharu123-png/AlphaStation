@@ -61,7 +61,7 @@ def _bi_contract_fields(green=17):
         "BI_IndicatorsTotal": 20,
         "BI_IndicatorsRequired": 17,
         "BI_IndicatorContractOK": True,
-        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+        "BI_IndicatorContractVersion": api._BI_INDICATOR_CONTRACT_VERSION,
     }
 
 

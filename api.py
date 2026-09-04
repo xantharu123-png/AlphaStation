@@ -184,6 +184,7 @@ from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
     calculate_wilder_atr,
+    trade_level_quality,
 )
 from modules.level_zones import (
     StructureSnapshot,
@@ -367,6 +368,7 @@ try:
         run_new_listing_scanner,
         seed_instrument_cache,
         fetch_mexc_contract_sizes,
+        fetch_funding_measurement,
     )
     HAS_NEW_LISTING_SCANNER = True
 except ImportError:
@@ -798,7 +800,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 6
+STOCK_STRATEGY_CACHE_VERSION = 7
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -11095,25 +11097,17 @@ def _check_and_alert(scanner_name, cache_file):
         if not alerts:
             return
         if scanner_name in _STOCK_ALERT_SCANNERS:
-            if len(alerts) > 1:
-                _record_suppression_counts(
-                    scanner_name,
-                    {"mail_adjacent_single_candidate_deferred": len(alerts) - 1},
-                )
-                for deferred in alerts[1:]:
-                    _email_dedupe_release(
-                        deferred["cooldown_key"], claimed_at=now
-                    )
-                _record_email_event(
-                    f"{scanner_name} Stock Alert",
-                    "suppressed",
-                    f"mail_adjacent_single_candidate:{len(alerts) - 1}_deferred",
-                )
-                alerts = alerts[:1]
-                claimed_alerts = alerts
             revalidated_alerts: List[Dict[str, Any]] = []
             revalidation_reasons: Dict[str, int] = {}
+            deferred_count = 0
             for alert in alerts:
+                # Select the first EXECUTABLE candidate, not merely the first
+                # cached row. Keep one quote adjacent to SMTP without starving
+                # the rest whenever the highest-ranked stale plan fails.
+                if revalidated_alerts:
+                    deferred_count += 1
+                    _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
+                    continue
                 anchored = _conservative_regular_session_anchor(
                     dict(alert.get("source_row") or {}), now_ts=time.time()
                 )
@@ -11136,6 +11130,14 @@ def _check_and_alert(scanner_name, cache_file):
                 updated_alert["price"] = _extract_alert_price(candidate)
                 updated_alert["trade_plan_html"] = _format_alert_plan_html(candidate)
                 revalidated_alerts.append(updated_alert)
+            if deferred_count:
+                _record_suppression_counts(
+                    scanner_name, {"mail_adjacent_single_candidate_deferred": deferred_count},
+                )
+                _record_email_event(
+                    f"{scanner_name} Stock Alert", "suppressed",
+                    f"mail_adjacent_single_candidate:{deferred_count}_deferred",
+                )
             alerts = revalidated_alerts
             claimed_alerts = revalidated_alerts
             if revalidation_reasons:
@@ -16507,6 +16509,14 @@ def _round_trade_price(price: float) -> float:
     return round(price, 5)
 
 
+def _round_trade_price_directional(price: float, *, upward: bool) -> float:
+    """Round structural orders away from invalidation/toward the first barrier."""
+    from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+    decimals = 2 if price >= 1 else 3 if price >= 0.1 else 5
+    quantum = Decimal(1).scaleb(-decimals)
+    return float(Decimal(str(price)).quantize(quantum, rounding=ROUND_CEILING if upward else ROUND_FLOOR))
+
+
 def _attach_starter_entry_plan(
     setup: Optional[Dict[str, Any]],
     *,
@@ -16959,12 +16969,12 @@ def _build_structured_trade_setup(
         entry = float(entry or 0)
     except (TypeError, ValueError):
         return None
-    if side not in ("LONG", "SHORT") or entry <= 0:
+    if side not in ("LONG", "SHORT") or not math.isfinite(entry) or entry <= 0:
         return None
     if require_causal_structure and not isinstance(structure_snapshot, StructureSnapshot):
         return None
 
-    atr_value = float(atr or 0)
+    atr_value = _alert_float(atr, 0.0) or 0.0
     if atr_value <= 0:
         atr_value = entry * 0.03
 
@@ -16980,10 +16990,10 @@ def _build_structured_trade_setup(
     warnings: List[str] = []
     notes: List[str] = []
 
-    support = float(support_1 or 0)
-    resistance = float(resistance_1 or 0)
-    hi20 = float(high_20d or 0)
-    lo20 = float(low_20d or 0)
+    support = _alert_float(support_1, 0.0) or 0.0
+    resistance = _alert_float(resistance_1, 0.0) or 0.0
+    hi20 = _alert_float(high_20d, 0.0) or 0.0
+    lo20 = _alert_float(low_20d, 0.0) or 0.0
     range_size = hi20 - lo20 if hi20 > lo20 else 0.0
     directional_structure = None
     if isinstance(structure_snapshot, StructureSnapshot):
@@ -17093,20 +17103,22 @@ def _build_structured_trade_setup(
         if directional_structure is not None:
             for zone in directional_structure.invalidation_candidates:
                 stop_candidates.append((zone.lower - buffer, f"{_zone_label(zone)} invalidation"))
-        if 0 < support < entry:
+        elif 0 < support < entry:
             stop_candidates.append((support - buffer, "S1 invalidation"))
-        if 0 < lo20 < entry:
+        if directional_structure is None and 0 < lo20 < entry:
             stop_candidates.append((lo20 - buffer, "20D low invalidation"))
-        stop_candidates.append((entry - max(atr_value * 1.2, entry * 0.03), "ATR invalidation fallback"))
-
-        selected_stop = None
-        stop_source = "ATR invalidation fallback"
-        for price, label in _unique_levels(stop_candidates, reverse=True):
-            if entry - price >= min_risk:
-                selected_stop = price
-                stop_source = label
-                break
-        stop = selected_stop if selected_stop is not None else entry - min_risk
+        structural_stops = [(p, label) for p, label in stop_candidates if 0 < p < entry]
+        if structural_stops:
+            selected_stop, stop_source = _unique_levels(structural_stops, reverse=True)[0]
+            # A volatility floor may move the stop farther OUTSIDE invalidation,
+            # but an attractive ATR fallback must never replace real structure.
+            stop = min(selected_stop, entry - min_risk)
+        elif directional_structure is not None or require_causal_structure:
+            return None
+        else:
+            stop = entry - max(min_risk, atr_value * 1.2, entry * 0.03)
+            stop_source = "ATR invalidation fallback (no confirmed structure)"
+            warnings.append("Stop nur ATR-Ableitung; keine bestaetigte Invalidierungsstruktur")
         risk = entry - stop
         if risk <= 0:
             return None
@@ -17115,20 +17127,20 @@ def _build_structured_trade_setup(
         if directional_structure is not None:
             for zone in directional_structure.invalidation_candidates:
                 stop_candidates.append((zone.upper + buffer, f"{_zone_label(zone)} invalidation"))
-        if resistance > entry:
+        elif resistance > entry:
             stop_candidates.append((resistance + buffer, "R1 invalidation"))
-        if hi20 > entry:
+        if directional_structure is None and hi20 > entry:
             stop_candidates.append((hi20 + buffer, "20D high invalidation"))
-        stop_candidates.append((entry + max(atr_value * 1.2, entry * 0.03), "ATR invalidation fallback"))
-
-        selected_stop = None
-        stop_source = "ATR invalidation fallback"
-        for price, label in _unique_levels(stop_candidates):
-            if price - entry >= min_risk:
-                selected_stop = price
-                stop_source = label
-                break
-        stop = selected_stop if selected_stop is not None else entry + min_risk
+        structural_stops = [(p, label) for p, label in stop_candidates if p > entry]
+        if structural_stops:
+            selected_stop, stop_source = _unique_levels(structural_stops)[0]
+            stop = max(selected_stop, entry + min_risk)
+        elif directional_structure is not None or require_causal_structure:
+            return None
+        else:
+            stop = entry + max(min_risk, atr_value * 1.2, entry * 0.03)
+            stop_source = "ATR invalidation fallback (no confirmed structure)"
+            warnings.append("Stop nur ATR-Ableitung; keine bestaetigte Invalidierungsstruktur")
         risk = stop - entry
         if risk <= 0:
             return None
@@ -17250,6 +17262,15 @@ def _build_structured_trade_setup(
             "barrier_gate": None,
         }
 
+    # Validate exactly the prices sent to clients. Rounding after the R/R check
+    # otherwise leaves risk and reward referring to a different trade.
+    entry = _round_trade_price(entry)
+    stop = _round_trade_price_directional(
+        min(stop, entry - min_risk) if side == "LONG" else max(stop, entry + min_risk),
+        upward=side == "SHORT",
+    )
+    tp1 = _round_trade_price_directional(tp1, upward=side == "SHORT")
+    tp2 = _round_trade_price_directional(tp2, upward=side == "SHORT")
     geometry = trade_geometry(entry, stop, tp1, tp2, side)
     if not geometry.get("valid"):
         return None
@@ -17257,6 +17278,21 @@ def _build_structured_trade_setup(
     rr_tp1 = float(geometry["rr_tp1"])
     rr_tp2 = float(geometry["rr_tp2"])
     blended_rr = float(geometry["rr"])
+
+    structure_decision_payload.update(entry=entry, stop=stop, risk=risk, target1=tp1)
+    if nearest_barrier_meta is not None:
+        rounded_room = 0.0 if nearest_barrier_meta.get("overlapping") else abs(tp1 - entry)
+        rounded_barrier_r = rounded_room / risk
+        nearest_barrier_meta["distance_r"] = round(rounded_barrier_r, 3)
+        structure_decision_payload.update(barrier_distance=rounded_room, barrier_r=rounded_barrier_r)
+        # A rounding change may tighten a gate, never erase an existing wait.
+        if rounded_barrier_r + 1e-12 < 1.35:
+            barrier_gate = "BREAK_RECLAIM_REQUIRED" if side == "LONG" else "BREAK_SUPPORT_REQUIRED"
+            nearest_barrier_meta["action"] = barrier_gate
+            structure_decision_payload.update(
+                status="WAIT_BREAK_RECLAIM", reason="first_opposing_barrier_before_minimum_rr",
+                barrier_gate=barrier_gate,
+            )
 
     if range_pos is not None:
         try:
@@ -17280,19 +17316,20 @@ def _build_structured_trade_setup(
         "atr": _round_trade_price(atr_value),
         "model": "Kausale Struktur-Invalidation + erste Gegenbarriere; R:R nur Filter",
         "level_model": (
-            f"{structure_snapshot.model}+first_barrier_v1"
+            f"{structure_snapshot.model}+invalidation_first_v2"
             if isinstance(structure_snapshot, StructureSnapshot)
-            else "structure_first_v3_first_barrier"
+            else "structure_first_v4_invalidation"
         ),
         "stop_source": stop_source,
+        "stop_is_projection": stop_source.startswith("ATR invalidation fallback"),
         "tp1_source": tp1_source,
         "tp2_source": tp2_source,
         "tp1_is_projection": tp1_is_projection,
         "tp2_is_projection": tp2_is_projection,
         "target_quality": (
-            "STRUCTURAL_FIRST_BARRIER"
-            if nearest_barrier_meta is not None
-            else "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+            "PROJECTION_ONLY_NO_CONFIRMED_BARRIER" if tp1_is_projection
+            else "STRUCTURAL_TP1_PROJECTION_TP2" if tp2_is_projection
+            else "STRUCTURAL_FIRST_BARRIER"
         ),
         "structure_decision": structure_decision_payload,
         "structure_status": structure_decision_payload.get("status"),
@@ -17323,6 +17360,29 @@ def _build_structured_trade_setup(
         "notes": notes,
         "direction": side,
     }
+    if directional_structure is not None:
+        stop_zones = [
+            zone for zone in directional_structure.invalidation_candidates
+            if (side == "LONG" and stop < zone.lower < entry)
+            or (side == "SHORT" and stop > zone.upper > entry)
+        ]
+        selected_zone = min(stop_zones, key=lambda zone: abs(entry - (zone.lower if side == "LONG" else zone.upper)), default=None)
+        target_zones = [("tp1", first_barrier)]
+        if not tp2_is_projection and first_barrier is not None and later_barriers:
+            target_zones.append(("tp2", later_barriers[0]))
+        zones_to_persist = [("stop", selected_zone)] + [(prefix, row.get("zone")) for prefix, row in target_zones if row]
+        for prefix, zone in zones_to_persist:
+            if zone is None:
+                continue
+            result.update({
+                f"{prefix}_zone_id": zone.zone_id,
+                f"{prefix}_zone_low": zone.lower,
+                f"{prefix}_zone_high": zone.upper,
+                f"{prefix}_timeframe": "/".join(sorted({item.timeframe for item in zone.evidence})),
+                f"{prefix}_confirmed_at": zone.confirmed_at.isoformat().replace("+00:00", "Z"),
+                f"{prefix}_causal_structure_validated": True,
+            })
+    result["level_quality"] = trade_level_quality(result)
     if nearest_barrier_meta is not None:
         barrier_key = "overhead_resistance" if side == "LONG" else "underlying_support"
         result[barrier_key] = nearest_barrier_meta
@@ -18572,8 +18632,56 @@ def _stock_momentum_breakout_continuation_quality(
     }
 
 
+def _stock_completed_pattern_history(daily_bars, *, as_of):
+    """Canonical completed daily prefix shared by stock pattern post-filters."""
+    completed = normalize_completed_bars(_daily_level_bars(daily_bars), timeframe="1D", as_of=as_of)
+    return [{**bar.to_dict(), "open_time": bar.opened_at.isoformat(),
+             "close_time": bar.closed_at.isoformat(), "date": bar.closed_at.date().isoformat()}
+            for bar in completed]
+
+
+def _stock_previous_session_change(daily_bars, *, as_of):
+    """Previous trading day's close-to-close return, not its candle body."""
+    from zoneinfo import ZoneInfo
+    today_et = as_of.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    previous = [bar for bar in _stock_completed_pattern_history(daily_bars, as_of=as_of)
+                if bar["date"] < today_et]
+    if len(previous) < 2:
+        return None
+    return (previous[-1]["close"] / previous[-2]["close"] - 1.0) * 100.0
+
+
 def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate multi-day pattern strategies with real daily history."""
+    if strat.get("canonical_name") == "Turtle Breakout":
+        # The public menu used to fall through to generic consolidation because
+        # its config has no pattern_type. A Turtle result requires Donchian20.
+        daily_bars = candidate.get("_daily_bars", [])
+        if len(daily_bars) < 22 or float(candidate.get("Dollar_Volume", 0) or 0) < 1_000_000:
+            return None
+        current = float(daily_bars[-1]["close"])
+        entry = max(float(bar["high"]) for bar in daily_bars[-21:-1])
+        exit_level = min(float(bar["low"]) for bar in daily_bars[-11:-1])
+        atr = calculate_wilder_atr(daily_bars, period=20)
+        if current <= entry or atr <= 0:
+            return None
+        entry = _round_trade_price(entry)
+        stop = _round_trade_price(entry - 2.0 * atr)
+        risk = entry - stop
+        tp1, tp2 = _round_trade_price(entry + 1.5 * risk), _round_trade_price(entry + 2.5 * risk)
+        geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
+        if not geometry.get("valid"):
+            return None
+        return {**candidate, "pattern_type": "turtle_donchian20", "direction": "LONG", "Signal_Direction": "LONG",
+                "Entry": entry, "entry": entry, "StopLoss": stop, "stop_loss": stop,
+                "TP1": tp1, "tp1": tp1, "TP2": tp2, "tp2": tp2, "Exit_Level": exit_level,
+                "DC_High_20": entry, "ATR": atr, "risk_reward": geometry["rr"],
+                "Trade_Setup_Source": "turtle_r_multiple", "bar_state": "completed_daily_breakout",
+                "trade_setup": {"entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2,
+                                "direction": "LONG", "rr": geometry["rr"],
+                                "level_model": "turtle_r_multiple_v1", "stop_source": "2 ATR turtle stop",
+                                "tp1_source": "measured move 1.5R (turtle)",
+                                "tp2_source": "measured move 2.5R (turtle)"}}
     if analyze_multi_day_pattern is None:
         return None
 
@@ -18659,7 +18767,7 @@ def _apply_void_strategy_filter(
 
     size_pct = float(relevant.get("size_pct", 0) or 0)
     directional_voids = voids.get("voids_above", []) if is_long else voids.get("voids_below", [])
-    close_pos = float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)) or 0.5)
+    close_pos = _clamp_float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)), 0.0, 1.0, 0.5)
 
     void_score = 0.0
     if distance_pct <= 1.5:
@@ -19954,7 +20062,7 @@ def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) 
         return None
 
     change_pct = float(candidate.get("change_pct", candidate.get("Change_Pct", 0)) or 0)
-    close_pos = float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)) or 0.5)
+    close_pos = _clamp_float(candidate.get("Close_Position", candidate.get("close_pos", 0.5)), 0.0, 1.0, 0.5)
     rvol = float(candidate.get("RVOL", candidate.get("rvol", 0)) or 0)
     base_score = float(candidate.get("base_score", candidate.get("score", 0)) or 0)
     best_match: Optional[Dict[str, Any]] = None
@@ -20125,7 +20233,10 @@ def _apply_special_strategy_post_filter(
         if not ticker:
             continue
 
-        daily_bars = _fetch_strategy_daily_history(str(ticker), min_history, history_cache)
+        daily_bars = _stock_completed_pattern_history(
+            _fetch_strategy_daily_history(str(ticker), min_history, history_cache),
+            as_of=datetime.now(timezone.utc),
+        )
         if len(daily_bars) < min_history:
             continue
 
@@ -20511,9 +20622,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     regular_gap_pct = ((day_open - prev_close_regular) / prev_close_regular * 100) if prev_close_regular > 0 else 0
                     gap_pct = change_pct if use_ext_price else regular_gap_pct
 
-                    # V2.2: Vortag % = Previous Day Change (prev_close vs prev_open approximiert)
-                    prev_open = prev.get("o", prev_close_regular)
-                    vortag_pct = ((prev_close_regular - prev_open) / prev_open * 100) if prev_open > 0 else 0
+                    # Filled from completed close-to-close history below. A
+                    # candle body excludes overnight gaps and is not Vortag%.
+                    vortag_pct = 0.0
 
                     # Cheap filters first; only then fetch 1D history for true 20D RVOL,
                     # ATR14 and swing structure. This avoids Vortags-RVOL false positives.
@@ -20534,11 +20645,6 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         continue
                     if _has_gap_filter:
                         _stage("gap_filter")
-                    if _has_vortag_filter and not (vortag_min <= vortag_pct <= vortag_max):
-                        _reject("vortag_filter")
-                        continue
-                    if _has_vortag_filter:
-                        _stage("vortag_filter")
                     if premarket_mode:
                         # PM: absolute PM-Liquiditaet + Spread-Guard statt
                         # Ganztages-Projektion/RVOL (AUDIT 2026-07-29, Punkt C).
@@ -20558,6 +20664,13 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
+                    previous_change = _stock_previous_session_change(daily_bars, as_of=scan_now_utc)
+                    if _has_vortag_filter:
+                        if previous_change is None or not (vortag_min <= previous_change <= vortag_max):
+                            _reject("vortag_filter")
+                            continue
+                        _stage("vortag_filter")
+                    vortag_pct = previous_change if previous_change is not None else 0.0
                     _history_direction = _infer_strategy_direction(strategy_name, filters).upper()
                     history_metrics = _strategy_daily_history_metrics(
                         daily_bars,
@@ -20822,6 +20935,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         "Gap_Pct": round(gap_pct, 2),
                         "gap_pct": round(gap_pct, 2),
                         "Vortag_Pct": round(vortag_pct, 2),
+                        "Vortag_Pct_Available": previous_change is not None,
+                        "Vortag_Pct_Source": "completed_close_to_close" if previous_change is not None else "unavailable",
                         "ATR_Pct": _score_meta.get("atr_pct"),
                         "ATR14": _round_trade_price(history_metrics.get("atr14") or price * prev_atr_pct / 100.0),
                         "Swing_Range_Pos": round(history_metrics.get("range_pos") or close_pos * 100.0, 1),
@@ -21083,6 +21198,22 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
         raise
 
 
+def _crypto_prior_six_day_average(change_7d, change_24h):
+    """Derived six-day geometric average excluding today's overlapping 24h.
+
+    CoinGecko snapshots do not provide six individual daily returns. This is
+    explicitly a compounded-window proxy, never yesterday's actual return.
+    """
+    week, today = _alert_float(change_7d), _alert_float(change_24h)
+    if week is None or today is None or week <= -100 or today <= -100:
+        return None
+    try:
+        result = math.expm1((math.log1p(week / 100.0) - math.log1p(today / 100.0)) / 6.0) * 100.0
+    except (ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
     """CoinGecko-basierter Scanner fuer generische Crypto-Strategien."""
     _strat_cache = _strategy_cache_path(strategy_name, "crypto")
@@ -21106,10 +21237,17 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         cg_source = cg_status.get("source") or "unknown"
         cg_warning = cg_status.get("warning")
         results = []
-        btc_7d = 0.0
+        def _week_change(snapshot):
+            raw = snapshot.get("price_change_percentage_7d_in_currency")
+            if raw is None:
+                raw = snapshot.get("price_change_percentage_7d")
+            value = _alert_float(raw)
+            return value if value is not None and value > -100 else None
+
+        btc_7d = None
         for coin in coins:
             if coin.get("id") == "bitcoin":
-                btc_7d = coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0
+                btc_7d = _week_change(coin)
                 break
 
         _remove_partial_cache(_strat_cache)
@@ -21158,8 +21296,10 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
 
                 mcap = float(coin.get("market_cap") or 0)
                 vol_24h = float(coin.get("total_volume") or 0)
-                change_24h = float(coin.get("price_change_percentage_24h") or 0)
-                change_7d = float(coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0)
+                change_24h = _alert_float(coin.get("price_change_percentage_24h"))
+                if change_24h is None or change_24h <= -100:
+                    continue
+                change_7d = _week_change(coin)
                 high_24h = float(coin.get("high_24h") or price)
                 low_24h = float(coin.get("low_24h") or price)
                 range_24h = high_24h - low_24h
@@ -21167,7 +21307,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
 
                 vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0.0
                 turnover_intensity = vol_mcap_ratio / 10.0  # 15% Vol/MCap ~= 1.5 turnover intensity
-                trend_daily = change_7d / 7.0
+                trend_daily = _crypto_prior_six_day_average(change_7d, change_24h)
 
                 if not (change_min <= change_24h <= change_max):
                     continue
@@ -21179,7 +21319,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     continue
                 if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
                     continue
-                if "Vortag %" in filters and not (trend_min <= trend_daily <= trend_max):
+                if "Vortag %" in filters and (trend_daily is None or not (trend_min <= trend_daily <= trend_max)):
                     continue
 
                 score = 35
@@ -21207,13 +21347,14 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 elif close_pos <= 0.25 and change_24h > 0:
                     score -= 8
 
-                btc_alpha_7d = change_7d - btc_7d if btc_7d else change_7d
-                if btc_alpha_7d > 10:
-                    score += 10
-                elif btc_alpha_7d > 3:
-                    score += 5
-                elif btc_alpha_7d < -15:
-                    score -= 12
+                btc_alpha_7d = change_7d - btc_7d if change_7d is not None and btc_7d is not None else None
+                if btc_alpha_7d is not None:
+                    if btc_alpha_7d > 10:
+                        score += 10
+                    elif btc_alpha_7d > 3:
+                        score += 5
+                    elif btc_alpha_7d < -15:
+                        score -= 12
 
                 # Strategy-specific quality nudges.
                 key = _normalize_strategy_key(strategy_name)
@@ -21236,6 +21377,13 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 risk_flags = ["coingecko_snapshot_only", "no_intraday_execution_trigger"]
                 if cg_partial:
                     risk_flags.append("partial_crypto_data")
+                context_missing_fields = []
+                if change_7d is None:
+                    context_missing_fields.append("coin_change_7d")
+                if btc_7d is None:
+                    context_missing_fields.append("btc_change_7d")
+                if context_missing_fields:
+                    risk_flags.append("btc_relative_7d_unavailable")
                 results.append({
                     "Ticker": symbol,
                     "ticker": symbol,
@@ -21245,7 +21393,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "price": round(price, 6),
                     "Change_Pct": round(change_24h, 2),
                     "change_pct": round(change_24h, 2),
-                    "Change7d": round(change_7d, 2),
+                    "Change7d": round(change_7d, 2) if change_7d is not None else None,
                     "Volume": vol_24h,
                     "volume": vol_24h,
                     "MarketCap": round(mcap),
@@ -21255,7 +21403,13 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "RVOL": None,
                     "rvol": None,
                     "Close_Position": round(close_pos, 2),
-                    "BtcRelative7d": round(btc_alpha_7d, 2),
+                    "BtcRelative7d": round(btc_alpha_7d, 2) if btc_alpha_7d is not None else None,
+                    "btc_change_7d_pct": round(btc_7d, 2) if btc_7d is not None else None,
+                    "btc_relative_7d_status": "available" if btc_alpha_7d is not None else "unavailable",
+                    "context_data_status": "partial" if context_missing_fields else "ok",
+                    "context_missing_fields": context_missing_fields,
+                    "prior_6d_geometric_average_pct": round(trend_daily, 4) if trend_daily is not None else None,
+                    "prior_trend_model": "derived_7d_over_24h_geometric6d_proxy",
                     "score": score,
                     "grade": grade,
                     "isCrypto": True,
@@ -21386,9 +21540,11 @@ def _turtle_scan_wrapper() -> None:
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 35, "sort": "asc"})
                 if resp.status_code != 200:
                     continue
-                bars = resp.json().get("results", [])
+                from modules.stock_bars import completed_polygon_bars
+                bars = completed_polygon_bars(resp.json().get("results", []),
+                                              as_of=datetime.now(timezone.utc))
                 if len(bars) < 22:
-                    continue  # Brauchen mindestens 22 Bars (20 History + aktueller + 1 für ATR)
+                    continue  # 20 prior sessions + one completed signal session + ATR seed
 
                 highs = [b.get("h", 0) for b in bars]
                 lows = [b.get("l", 0) for b in bars]
@@ -21459,7 +21615,9 @@ def _turtle_scan_wrapper() -> None:
                     lookback=20,
                     minimum_periods=5,
                 )
-                rvol = _project_us_equity_rvol(rvol_raw)
+                # The signal candle is completed, so its full-session volume
+                # must not be amplified by today's intraday progress.
+                rvol = float(rvol_raw or 0.0)
                 if rvol >= 2.5:
                     score += 25
                 elif rvol >= 1.5:
@@ -21536,7 +21694,9 @@ def _turtle_scan_wrapper() -> None:
                     "Risk": round(risk_per_share, 2),
                     "RVOL": round(rvol, 2),
                     "RVOL_Raw": round(rvol_raw, 2),
-                    "RVOL_Basis": "intraday_pace" if _us_equity_expected_volume_fraction() < 1.0 else "full_session",
+                    "RVOL_Basis": "completed_signal_session",
+                    "bar_state": "completed_daily_breakout",
+                    "signal_bar_closed_at": bars[i].get("close_time"),
                     "Volume": volume,
                     "Dollar_Volume": round(volume * current_close),
                     "raw_score": round(raw_score, 2),
@@ -21708,8 +21868,9 @@ def _bear_scan_wrapper() -> None:
             # Full Snapshot holen und lastTrade vs day.close vergleichen
             if len(_raw_tickers) < 10:
                 print(f"[Bear] Losers endpoint nur {len(_raw_tickers)} Ticker — Extended Hours Modus")
-                _is_extended_hours = True
-                _diagnostics["extended_hours"] = True
+                _bear_session, _ = get_current_trading_session()
+                _is_extended_hours = _bear_session in ("Pre-Market", "After-Hours")
+                _diagnostics["extended_hours"] = _is_extended_hours
                 try:
                     _full_snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
                     _full_resp = rate_limited_get(_full_snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
@@ -21720,8 +21881,14 @@ def _bear_scan_wrapper() -> None:
                         _ah_losers = []
                         for _t in _all:
                             try:
-                                _lt = _t.get("lastTrade", {}).get("p", 0)
-                                _dc = _t.get("day", {}).get("c", 0)
+                                # Response size is not evidence of extended
+                                # hours; a quiet regular market keeps its
+                                # previous-close comparison (not lastTrade/day).
+                                _t = dict(_t)
+                                _lt = (_t.get("lastTrade", {}).get("p", 0) if _is_extended_hours
+                                       else _t.get("day", {}).get("c", 0) or _t.get("lastTrade", {}).get("p", 0))
+                                _dc = (_t.get("day", {}).get("c", 0) if _is_extended_hours
+                                       else _t.get("prevDay", {}).get("c", 0))
                                 if not _lt or not _dc or _dc <= 0:
                                     continue
                                 _ah_chg = ((_lt - _dc) / _dc) * 100
@@ -26264,8 +26431,11 @@ def search_tickers(q: str = Query(..., description="Search query (ticker or comp
 
 
 @app.get("/api/ticker-detail")
-def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. NVDA, AAPL, X:BTCUSD)")):
+def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. NVDA, AAPL, X:BTCUSD)"), direction: Optional[str] = None, scanner: Optional[str] = None):
     """Get detailed price data for a single ticker (30 days, key metrics)."""
+    requested_direction = str(direction or "").strip().upper()
+    if requested_direction and requested_direction not in {"LONG", "SHORT"}:
+        raise HTTPException(status_code=400, detail="direction must be LONG or SHORT")
     try:
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc", "adjusted": "true"})
@@ -26695,7 +26865,11 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
 
         # ── BI Scanner Cache Lookup: übernimm Grade/Score/Direction wenn vorhanden ──
         bi_scanner = None
-        item, bi_dir = _find_bi_signal_cache_row(ticker)
+        item, bi_dir = (
+            _find_bi_signal_cache_row(ticker, requested_direction)
+            if not scanner or str(scanner).lower() in {"bi_long", "bi_short"}
+            else (None, None)
+        )
         if item is not None and bi_dir is not None:
             bi_scanner = {
                 "grade": item.get("grade"),
@@ -26722,6 +26896,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
                 "indicators_green": item.get("bi_indicators_green"),
                 "indicators_total": item.get("bi_indicators_total"),
                 "indicator_contract_version": item.get("bi_indicator_contract_version"),
+                "indicator_checks": item.get("bi_indicator_checks"),
             }
 
         # Wenn BI Scanner Daten vorhanden → überschreibe signal_grade/score/confluence
@@ -28646,20 +28821,30 @@ def _enrich_perp_oi_history(perp_data: Dict[str, Dict[str, Any]]) -> Dict[str, D
     for sym, info in perp_data.items():
         if not isinstance(info, dict):
             continue
-        oi_now = float(info.get("oi_usdt") or 0)
+        oi_now = _alert_float(info.get("oi_usdt"))
+        if oi_now is not None and oi_now < 0:
+            oi_now = None
+        info["oi_usdt"] = oi_now
         prev = previous.get(sym, {}) if isinstance(previous, dict) else {}
-        oi_prev = float(prev.get("oi_usdt") or 0)
-        prev_ts = float(prev.get("timestamp") or 0)
-        if oi_now > 0 and oi_prev > 0:
+        prev = prev if isinstance(prev, dict) else {}
+        oi_prev = _alert_float(prev.get("oi_usdt"), 0.0) or 0.0
+        prev_ts = _alert_float(prev.get("timestamp"), 0.0) or 0.0
+        venue = str(info.get("best_chart_exchange") or info.get("best_exchange") or "").lower()
+        contract = str(info.get("best_contract_symbol") or "")
+        comparable = bool(venue and contract and prev.get("venue") == venue and prev.get("contract") == contract and 300 <= now - prev_ts <= 7200)
+        if oi_now is not None and oi_now > 0 and oi_prev > 0 and comparable:
             info["oi_change_pct"] = round(((oi_now - oi_prev) / oi_prev) * 100, 2)
             info["oi_history_age_seconds"] = int(max(0, now - prev_ts)) if prev_ts else None
         else:
-            info.setdefault("oi_change_pct", None)
-            info.setdefault("oi_history_age_seconds", None)
+            info["oi_change_pct"] = None
+            info["oi_history_age_seconds"] = None
+        info["oi_change_basis"] = "same_venue_previous_scan" if comparable else "no_comparable_baseline"
         next_history[sym] = {
             "oi_usdt": oi_now,
-            "volume24_usdt": float(info.get("volume24_usdt") or 0),
+            "volume24_usdt": _alert_float(info.get("volume24_usdt"), 0.0) or 0.0,
             "timestamp": now,
+            "venue": venue,
+            "contract": contract,
         }
 
     try:
@@ -29119,6 +29304,60 @@ def _fetch_coingecko_markets(pages=4):
     return all_coins
 
 
+def _funding_measurement(raw, *, source, unit="fraction", interval_hours=None, observed_at=None):
+    """Preserve unknown versus measured zero; never invent a settlement interval."""
+    rate = None if isinstance(raw, bool) else _alert_float(raw)
+    interval = None if isinstance(interval_hours, bool) else _alert_float(interval_hours)
+    if interval is not None and interval <= 0:
+        interval = None
+    fraction = rate / 100.0 if rate is not None and unit == "percent" else rate
+    return {
+        "funding_rate": rate,
+        "funding_rate_fraction": fraction,
+        "funding_rate_pct": fraction * 100.0 if fraction is not None else None,
+        "funding_rate_raw": rate,
+        "funding_rate_unit": unit,
+        "funding_available": rate is not None,
+        "funding_data_status": "ok" if rate is not None else "missing_or_invalid",
+        "funding_interval_hours": interval,
+        "funding_interval_known": interval is not None,
+        "funding_rate_available": rate is not None,
+        "funding_rate_pct_8h_equivalent": fraction * 100.0 * 8.0 / interval if fraction is not None and interval else None,
+        "funding_observed_at": observed_at,
+        "funding_source": source,
+    }
+
+
+def _refresh_crypto_funding(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Measure qualified candidates only; do not add per-symbol HTTP to ranking."""
+    enriched = dict(row)
+    exchange = str(row.get("exchange") or row.get("best_chart_exchange") or "").lower()
+    contract = str(row.get("contract") or row.get("best_contract_symbol") or "")
+    measurement: Dict[str, Any] = {}
+    if HAS_NEW_LISTING_SCANNER and exchange in {"binance", "bitget", "mexc"}:
+        measurement = fetch_funding_measurement(exchange, contract)
+    elif exchange == "bybit" and contract:
+        # Bybit reports minutes, not hours. Match the exact instrument.
+        payload = _ce_http_json("https://api.bybit.com/v5/market/instruments-info", {"category": "linear", "symbol": contract})
+        item = next((item for item in (payload or {}).get("result", {}).get("list", []) if item.get("symbol") == contract), {})
+        minutes = _alert_float(item.get("fundingInterval"))
+        measurement = {
+            "funding_rate": row.get("funding_rate_fraction"),
+            "funding_interval_hours": minutes / 60.0 if minutes and minutes > 0 else None,
+            "funding_source": "bybit:perpetual_funding+instrument",
+            "funding_source_timestamp": row.get("funding_observed_at"),
+        }
+    unit = row.get("funding_rate_unit") or "fraction"
+    raw = _alert_float(measurement.get("funding_rate"))
+    enriched.update(_funding_measurement(
+        raw * 100.0 if raw is not None and unit == "percent" else raw,
+        source=measurement.get("funding_source") or f"{exchange}:funding_unavailable",
+        unit=unit, interval_hours=measurement.get("funding_interval_hours"),
+        observed_at=measurement.get("funding_source_timestamp"),
+    ))
+    return enriched
+
+
 def fetch_mexc_funding_oi():
     """MEXC Perpetual Futures: Funding Rate + Open Interest for all contracts."""
     try:
@@ -29139,7 +29378,7 @@ def fetch_mexc_funding_oi():
             base = symbol.replace("_USDT", "")
             hold_vol = float(t.get("holdVol") or 0)
             amount24 = float(t.get("amount24") or 0)
-            fr = float(t.get("fundingRate") or 0)
+            funding = _funding_measurement(t.get("fundingRate"), source="mexc:perpetual_funding", observed_at=t.get("timestamp"))
             last_price = float(t.get("lastPrice") or t.get("last") or 0)
             contract_size = float(contract_sizes.get(symbol) or 0)
             oi_usdt = hold_vol * contract_size * last_price if contract_size > 0 and last_price > 0 else 0.0
@@ -29148,7 +29387,7 @@ def fetch_mexc_funding_oi():
             result[base] = {
                 "contract_symbol": symbol,
                 "chart_exchange": "mexc",
-                "funding_rate": fr,
+                **funding,
                 "hold_vol": hold_vol,
                 "contract_size": contract_size or None,
                 "volume24": vol_usdt,
@@ -29180,7 +29419,7 @@ def fetch_bitget_funding_oi():
             if not symbol.endswith("USDT"):
                 continue
             base = symbol.replace("USDT", "")
-            fr = float(t.get("fundingRate") or 0)
+            funding = _funding_measurement(t.get("fundingRate"), source="bitget:perpetual_funding", observed_at=t.get("ts"))
             hold_amount = float(t.get("holdingAmount") or 0)
             vol_usdt = float(t.get("usdtVolume") or 0)
             last_price = float(t.get("lastPr") or 0)
@@ -29192,7 +29431,7 @@ def fetch_bitget_funding_oi():
             result[base] = {
                 "contract_symbol": symbol,
                 "chart_exchange": "bitget",
-                "funding_rate": fr,
+                **funding,
                 "hold_amount": hold_amount,
                 "oi_usdt": oi_usdt,
                 "volume24_usdt": vol_usdt,
@@ -29225,7 +29464,9 @@ def fetch_binance_funding_oi():
                     for item in premiums:
                         symbol = str(item.get("symbol") or "")
                         if symbol.endswith("USDT"):
-                            funding_by_symbol[symbol] = float(item.get("lastFundingRate") or 0)
+                            value = _alert_float(item.get("lastFundingRate"))
+                            if value is not None:
+                                funding_by_symbol[symbol] = value
         except Exception:
             funding_by_symbol = {}
 
@@ -29244,7 +29485,7 @@ def fetch_binance_funding_oi():
             result[base] = {
                 "contract_symbol": symbol,
                 "chart_exchange": "binance",
-                "funding_rate": funding_by_symbol.get(symbol, 0),
+                **_funding_measurement(funding_by_symbol.get(symbol), source="binance:perpetual_funding"),
                 "oi_usdt": 0,
                 "volume24_usdt": vol_usdt,
                 "oi_ratio": 0,
@@ -29292,10 +29533,10 @@ def fetch_multi_exchange_perps():
         best, best_data, best_vol, fallback_contract, fallback_exchange = max(candidates, key=lambda item: item[2] or 0)
         best_contract = best_data.get("contract_symbol") or fallback_contract
         best_chart_exchange = best_data.get("chart_exchange") or fallback_exchange
-        best_fr = best_data.get("funding_rate", 0)
-        # Binance is often best for execution volume, but bulk OI is not available
-        # cheaply. Keep the strongest OI snapshot from Bitget/MEXC for positioning.
-        best_oi_usdt = best_data.get("oi_usdt", 0) or max(m.get("oi_usdt", 0) if m else 0, b.get("oi_usdt", 0) if b else 0)
+        best_fr = best_data.get("funding_rate") if best_data.get("funding_available") is not False else None
+        # OI/volume must describe the SAME venue. Other exchanges remain in
+        # their nested payloads, never silently mixed into execution-venue OI.
+        best_oi_usdt = best_data.get("oi_usdt", 0)
         best_oi_ratio = best_data.get("oi_ratio", 0)
         if not best_oi_ratio and best_oi_usdt and best_vol:
             best_oi_ratio = round(best_oi_usdt / best_vol, 2)
@@ -29305,15 +29546,13 @@ def fetch_multi_exchange_perps():
             "best_exchange": best,
             "best_contract_symbol": best_contract,
             "best_chart_exchange": best_chart_exchange,
-            "funding_rate": best_fr,
-            "funding_rate_fraction": best_fr,
-            "funding_rate_pct": (_alert_float(best_fr, 0.0) or 0.0) * 100.0,
-            "funding_rate_raw": best_fr,
-            "funding_rate_unit": "fraction",
-            "funding_interval_hours": best_data.get("funding_interval_hours") or 8.0,
-            "funding_source": f"{best_chart_exchange}:perpetual_funding",
+            **_funding_measurement(best_fr, source=f"{best_chart_exchange}:perpetual_funding",
+                                   interval_hours=best_data.get("funding_interval_hours"),
+                                   observed_at=best_data.get("funding_observed_at")),
             "oi_ratio": best_oi_ratio,
             "oi_usdt": best_oi_usdt,
+            "oi_source": f"{best_chart_exchange}:open_interest",
+            "oi_data_status": "ok" if best_oi_usdt else "missing",
             "volume24_usdt": max(mexc_vol, bitget_vol, binance_vol),
             "best_last_price": best_data.get("last_price"),
             "binance": bn,
@@ -29387,10 +29626,15 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase, pe
     c24 = abs(change_24h or 0)
     c7d_raw = change_7d or 0
     vm = vol_mcap_pct or 0
-    fr = abs((funding_rate or 0) * 100)
+    measured_funding = _alert_float(funding_rate)
+    fr = abs(measured_funding * 100) if measured_funding is not None else None
     perp_volume = _alert_float(perp_volume_24h, 0) or 0
     reasons = []
     hard_risk = False
+
+    if has_perp and measured_funding is None:
+        reasons.append("Funding-Daten fehlen - Crowding/Kosten nicht verifizierbar")
+        hard_risk = True
 
     # Verschärfte Schwellen — Trader brauchen ehrliche Warnungen
     if has_perp is False:
@@ -29408,7 +29652,7 @@ def _calculate_risk(change_24h, change_7d, vol_mcap_pct, funding_rate, phase, pe
         reasons.append(f"24h Change erhöht: {change_24h:+.1f}%")
     if vm > 60:
         reasons.append(f"Vol/MCap hoch: {vm:.0f}% — mögliche Euphorie")
-    if fr > 0.05:
+    if fr is not None and fr > 0.05:
         reasons.append(f"Funding Rate erhöht: {funding_rate*100:+.3f}% — Longs crowded")
     if abs(c7d_raw) > 30:
         reasons.append(f"7d Change extrem: {c7d_raw:+.1f}%")
@@ -29501,7 +29745,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 perp_data,
             )
             has_perp = bool(perp_info)
-            funding_rate = perp_info.get("funding_rate", 0)
+            funding_rate = _alert_float(perp_info.get("funding_rate")) if perp_info.get("funding_available") is not False else None
             oi_ratio = perp_info.get("oi_ratio", 0)
             best_exchange = perp_info.get("best_exchange", "")
             exchanges = perp_info.get("exchanges", [])
@@ -29540,12 +29784,9 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 "Change30d": round(change_30d, 2),
                 "VolMCapRatio": round(vol_mcap_ratio, 2),
                 "HasPerp": has_perp, "FundingRate": funding_rate,
-                "funding_rate_fraction": funding_rate,
-                "funding_rate_pct": (_alert_float(funding_rate, 0.0) or 0.0) * 100.0,
-                "funding_rate_raw": funding_rate,
-                "funding_rate_unit": "fraction",
-                "funding_interval_hours": perp_info.get("funding_interval_hours", 8.0) if perp_info else 8.0,
-                "funding_source": perp_info.get("funding_source") if perp_info else None,
+                **_funding_measurement(funding_rate, source=perp_info.get("funding_source"),
+                                       interval_hours=perp_info.get("funding_interval_hours"),
+                                       observed_at=perp_info.get("funding_observed_at")),
                 "OI_Ratio": oi_ratio,
                 "PerpVolume24h": perp_info.get("volume24_usdt", 0) if perp_info else 0,
                 "PerpOI": perp_info.get("oi_usdt", 0) if perp_info else 0,
@@ -29570,6 +29811,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 "volume_model": "turnover_proxy_pending_exchange_trigger",
                 "close_pos": round((execution_price - execution_low) / (execution_high - execution_low), 2) if execution_high > execution_low else 0.5,
                 "OI_ChangePct": perp_info.get("oi_change_pct") if perp_info else None,
+                "oi_snapshot_only": not perp_info or perp_info.get("oi_change_pct") is None,
                 "OI_HistoryAgeSeconds": perp_info.get("oi_history_age_seconds") if perp_info else None,
             }
 
@@ -29884,10 +30126,12 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 elif perp_oi_usdt > 1_000_000:
                     whale_score += 4
 
-                fr_pct = funding_rate * 100
+                fr_pct = base_entry.get("funding_rate_pct_8h_equivalent")
                 # Whale-Akkumulation = Preis stabil/steigend TROTZ neutraler/negativer FR
                 # Hohe positive FR = Longs überfüllt = Liquidations-Risiko (BEARISH)
-                if fr_pct >= 0.08:
+                if fr_pct is None:
+                    signals.append("Funding oder Intervall unbekannt - keine Akkumulationspunkte")
+                elif fr_pct >= 0.08:
                     whale_score -= 5  # Extrem overcrowded — Warnsignal
                     signals.append(f"FR +{fr_pct:.3f}% — Longs überfüllt, Liquidations-Risiko!")
                 elif fr_pct >= 0.03:
@@ -30534,7 +30778,9 @@ def _ce_round_price(value: Any) -> float:
         return round(price, 4)
     if abs(price) >= 0.01:
         return round(price, 6)
-    return round(price, 8)
+    # Match shared trade/Fibonacci precision; fixed decimals can collapse a
+    # valid micro-token's entry, stop and targets to the same price (or zero).
+    return float(f"{price:.6g}")
 
 
 def _ce_base_from_contract(contract: str) -> str:
@@ -30556,6 +30802,42 @@ def _ce_http_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: in
         return None
 
 
+def _ce_spread_measurement(bid_raw: Any, ask_raw: Any, *, source: str, source_timestamp: Any = None) -> Dict[str, Any]:
+    """Executable top-of-book spread in percent; zero is valid only for a locked book.
+
+    Provider time is retained as an unconverted source value. Retrieval time is
+    not substituted for the time at which the venue observed the quote.
+    """
+    bid = None if isinstance(bid_raw, bool) else _alert_float(bid_raw)
+    ask = None if isinstance(ask_raw, bool) else _alert_float(ask_raw)
+    valid = bid is not None and ask is not None and 0 < bid <= ask
+    spread = ((ask - bid) / (bid / 2.0 + ask / 2.0) * 100.0) if valid else None
+    return {
+        "spread_pct": spread,
+        "spread_available": valid,
+        "spread_bid": bid,
+        "spread_ask": ask,
+        "spread_source": source,
+        "spread_source_timestamp": source_timestamp,
+    }
+
+
+def _refresh_crypto_explosion_spread(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Binance's bulk24h response has no book; fetch only during deep checks."""
+    if str(row.get("exchange") or "").lower() != "binance":
+        return row
+    result = dict(row)
+    contract = str(row.get("contract") or "").upper()
+    source = "binance:fapi/v1/ticker/bookTicker"
+    quote = _ce_spread_measurement(None, None, source=source)
+    if contract:
+        payload = _ce_http_json("https://fapi.binance.com/fapi/v1/ticker/bookTicker", {"symbol": contract})
+        if isinstance(payload, dict) and payload.get("symbol") == contract:
+            quote = _ce_spread_measurement(payload.get("bidPrice"), payload.get("askPrice"), source=source, source_timestamp=payload.get("time"))
+    result.update(quote)
+    return result
+
+
 def _ce_normalized_row(
     *,
     exchange: str,
@@ -30566,7 +30848,7 @@ def _ce_normalized_row(
     high_24h: Any = 0.0,
     low_24h: Any = 0.0,
     open_interest: Any = 0.0,
-    funding_rate: Any = 0.0,
+    funding_rate: Any = None,
     spread_pct: Any = None,
 ) -> Optional[Dict[str, Any]]:
     base = _ce_base_from_contract(contract)
@@ -30602,13 +30884,8 @@ def _ce_normalized_row(
         "high_24h": high,
         "low_24h": low,
         "open_interest": _ce_float(open_interest),
-        "funding_rate": _ce_float(funding_rate),
-        "funding_rate_pct": _ce_float(funding_rate),
-        "funding_rate_raw": _ce_float(funding_rate),
-        "funding_rate_unit": "percent",
-        "funding_interval_hours": 8.0,
-        "funding_source": f"{exchange}:perpetual_funding",
-        "spread_pct": _ce_float(spread_pct, 0.0) if spread_pct is not None else None,
+        **_funding_measurement(funding_rate, source=f"{exchange}:perpetual_funding", unit="percent"),
+        "spread_pct": None if isinstance(spread_pct, bool) else _alert_float(spread_pct),
         "_cheap_rank": cheap_rank,
         "range_position_24h": round(range_pos, 3),
         "HasPerp": True,
@@ -30625,10 +30902,7 @@ def _fetch_bybit_perp_rows() -> List[Dict[str, Any]]:
         contract = str(item.get("symbol") or "").upper()
         if not contract.endswith("USDT"):
             continue
-        bid = _ce_float(item.get("bid1Price"))
-        ask = _ce_float(item.get("ask1Price"))
-        last = _ce_float(item.get("lastPrice"))
-        spread = ((ask - bid) / last) * 100 if bid > 0 and ask > bid and last > 0 else None
+        quote = _ce_spread_measurement(item.get("bid1Price"), item.get("ask1Price"), source="bybit:linear_ticker", source_timestamp=(payload or {}).get("time"))
         row = _ce_normalized_row(
             exchange="bybit",
             contract=contract,
@@ -30638,10 +30912,11 @@ def _fetch_bybit_perp_rows() -> List[Dict[str, Any]]:
             high_24h=item.get("highPrice24h"),
             low_24h=item.get("lowPrice24h"),
             open_interest=item.get("openInterest"),
-            funding_rate=_ce_float(item.get("fundingRate")) * 100,
-            spread_pct=spread,
+            funding_rate=_funding_measurement(item.get("fundingRate"), source="bybit")["funding_rate_pct"],
+            spread_pct=quote["spread_pct"],
         )
         if row:
+            row.update(quote)
             rows.append(row)
     return rows
 
@@ -30650,7 +30925,7 @@ def _fetch_binance_perp_rows() -> List[Dict[str, Any]]:
     tickers = _ce_http_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
     funding_rows = _ce_http_json("https://fapi.binance.com/fapi/v1/premiumIndex") or []
     funding_by_symbol = {
-        str(item.get("symbol") or "").upper(): _ce_float(item.get("lastFundingRate")) * 100
+        str(item.get("symbol") or "").upper(): _funding_measurement(item.get("lastFundingRate"), source="binance")["funding_rate_pct"]
         for item in funding_rows if isinstance(item, dict)
     }
     rows = []
@@ -30666,7 +30941,7 @@ def _fetch_binance_perp_rows() -> List[Dict[str, Any]]:
             turnover_usd=item.get("quoteVolume"),
             high_24h=item.get("highPrice"),
             low_24h=item.get("lowPrice"),
-            funding_rate=funding_by_symbol.get(contract, 0.0),
+            funding_rate=funding_by_symbol.get(contract),
         )
         if row:
             rows.append(row)
@@ -30681,6 +30956,7 @@ def _fetch_mexc_perp_rows() -> List[Dict[str, Any]]:
         contract = str(item.get("symbol") or "").upper()
         if not contract.endswith("_USDT"):
             continue
+        quote = _ce_spread_measurement(item.get("bid1"), item.get("ask1"), source="mexc:contract_ticker", source_timestamp=item.get("timestamp"))
         row = _ce_normalized_row(
             exchange="mexc",
             contract=contract,
@@ -30690,9 +30966,11 @@ def _fetch_mexc_perp_rows() -> List[Dict[str, Any]]:
             high_24h=item.get("high24Price"),
             low_24h=item.get("low24Price"),
             open_interest=item.get("holdVol"),
-            funding_rate=_ce_float(item.get("fundingRate")) * 100,
+            funding_rate=_funding_measurement(item.get("fundingRate"), source="mexc")["funding_rate_pct"],
+            spread_pct=quote["spread_pct"],
         )
         if row:
+            row.update(quote)
             rows.append(row)
     return rows
 
@@ -30705,6 +30983,7 @@ def _fetch_bitget_perp_rows() -> List[Dict[str, Any]]:
         contract = str(item.get("symbol") or "").upper()
         if not contract.endswith("USDT"):
             continue
+        quote = _ce_spread_measurement(item.get("bidPr"), item.get("askPr"), source="bitget:mix_tickers", source_timestamp=item.get("ts"))
         change_raw = _ce_float(item.get("change24h"))
         # AUDIT M-CryptoExplosion (change_raw): Bitget v2 liefert change24h
         # als DEZIMAL-FRAKTION (0.0523 = +5.23%). Die alte Heuristik
@@ -30732,9 +31011,11 @@ def _fetch_bitget_perp_rows() -> List[Dict[str, Any]]:
             turnover_usd=item.get("quoteVolume") or item.get("usdtVolume"),
             high_24h=item.get("high24h"),
             low_24h=item.get("low24h"),
-            funding_rate=_ce_float(item.get("fundingRate")) * 100,
+            funding_rate=_funding_measurement(item.get("fundingRate"), source="bitget")["funding_rate_pct"],
+            spread_pct=quote["spread_pct"],
         )
         if row:
+            row.update(quote)
             rows.append(row)
     return rows
 
@@ -30832,7 +31113,7 @@ def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[s
             status = "ok"
         else:
             markets = _fetch_coingecko_markets(pages=1)
-            btc = next((c for c in markets if str(c.get("symbol", "")).upper() == "BTC"), None)
+            btc = next((c for c in markets if c.get("id") == "bitcoin"), None)
             if not btc or btc.get("price_change_percentage_24h") is None:
                 raise ValueError("BTC market context missing")
             btc_change = _ce_float((btc or {}).get("price_change_percentage_24h"))
@@ -30894,9 +31175,15 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     range_position = (price - range_low) / max(breakout_level - range_low, price * 0.0001)
     high_24h = _ce_float(row.get("high_24h"))
     change24 = _ce_float(row.get("Change24h"))
-    funding_pct = _ce_float(row.get("funding_rate"))
+    funding_meta = _funding_measurement(row.get("funding_rate"), source=row.get("funding_source"), unit=row.get("funding_rate_unit") or "percent", interval_hours=row.get("funding_interval_hours"))
+    funding_available = row.get("funding_available") is not False and funding_meta["funding_rate_pct_8h_equivalent"] is not None
+    funding_pct = funding_meta["funding_rate_pct_8h_equivalent"] or 0.0
     turnover = _ce_float(row.get("turnover_24h_usd"))
-    spread_pct = _ce_float(row.get("spread_pct"), 0.0)
+    spread_pct = _alert_float(row.get("spread_pct"))
+    spread_available = not isinstance(row.get("spread_pct"), bool) and spread_pct is not None and spread_pct >= 0
+    # Same20bps ceiling as the existing crypto-long execution contract, in
+    # percent here (20bps =0.20%). A known but wide spread is not executable.
+    spread_execution_ok = spread_available and spread_pct <= _EARLY_MOVER_MAX_SPREAD_BPS / 100.0
     htf_streak, htf_streak_move = _ce_green_streak(bars4h[-8:]) if len(bars4h) >= 8 else (0, 0.0)
     recent_5m_move = ((price - bars5[-12]["close"]) / bars5[-12]["close"] * 100) if len(bars5) >= 12 and bars5[-12]["close"] > 0 else 0.0
 
@@ -30955,7 +31242,8 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
 
     entry = price if trigger_ok else max(price, breakout_level * 1.001)
     last_swing_low = min(b["low"] for b in bars5[-18:])
-    vrvp = build_vrvp_structure(bars4h[-60:] or bars15[-96:], entry, "LONG", timeframe="4H", num_bins=24, min_bars=20)
+    profile_bars, profile_timeframe = (bars4h[-60:], "4H") if len(bars4h) >= 20 else (bars15[-96:], "15M")
+    vrvp = build_vrvp_structure(profile_bars, entry, "LONG", timeframe=profile_timeframe, num_bins=24, min_bars=20)
     supports = [_ce_float(level.get("price")) for level in (vrvp or {}).get("supports", []) if _ce_float(level.get("price")) > 0]
     support_candidates = [p for p in supports + [last_swing_low, range_low, breakout_level - max(atr5, entry * 0.006)] if 0 < p < entry]
     nearest_support = max(support_candidates) if support_candidates else entry - max(atr5 * 1.6, entry * 0.018)
@@ -30999,12 +31287,11 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         ),
         "stop_source": "nearest support/VRVP invalidation",
     }
-    vrvp_atr = calculate_wilder_atr(bars4h[-60:] or bars15[-96:], period=14) or atr5
+    vrvp_atr = calculate_wilder_atr(profile_bars, period=14) or atr5
     setup = apply_vrvp_to_trade_setup(setup, vrvp, direction="LONG", asset_type="crypto", atr=vrvp_atr)
-    entry = _ce_float(setup.get("entry"))
-    stop = _ce_float(setup.get("stop"))
-    tp1 = _ce_float(setup.get("tp1"))
-    tp2 = _ce_float(setup.get("tp2"))
+    # Gate exactly the prices exposed by this producer, not higher-precision
+    # inputs that may lose geometry or the minimum R after output formatting.
+    entry, stop, tp1, tp2 = (_ce_round_price(setup.get(key)) for key in ("entry", "stop", "tp1", "tp2"))
     geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
     if not geometry.get("valid"):
         return None
@@ -31014,6 +31301,14 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     rr = float(geometry["rr"])
     if rr < 1.45:
         return None
+    for aliases, value in (
+        (("entry", "Entry"), entry), (("stop", "StopLoss", "stop_loss"), stop),
+        (("tp1", "TP1", "target1"), tp1), (("tp2", "TP2", "target2"), tp2),
+    ):
+        for alias in aliases:
+            if alias == aliases[0] or alias in setup:
+                setup[alias] = value
+    setup.update({"risk": risk, "rr": round(rr, 2), "rr_tp1": round(rr_tp1, 2), "rr_tp2": round(rr_tp2, 2)})
 
     target_quality = str(
         setup.get("target_quality") or "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
@@ -31023,7 +31318,9 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     structure_status = str(setup.get("structure_status") or "").upper()
     barrier_gate_active = bool(
         barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
-        or structure_status == "WAIT_BREAK_RECLAIM"
+        or setup.get("barrier_gate_active") is True
+        or structure_status == "REJECT"
+        or structure_status.startswith("WAIT")
     )
     target_tradeable = bool(
         not tp1_is_projection
@@ -31031,10 +31328,16 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         and not target_quality.startswith("WEAK_")
         and rr_tp1 + 1e-12 >= 1.35
     )
-    trigger_tradeable = bool(trigger_ok and target_tradeable and not barrier_gate_active)
+    trigger_tradeable = bool(trigger_ok and target_tradeable and not barrier_gate_active and funding_available and spread_execution_ok)
     trade_signal = "JETZT_TRADEN" if trigger_tradeable else "EXPLOSION_ARMED"
     risk_level = "LOW"
     risk_reasons = []
+    if not funding_available:
+        risk_reasons.append("funding rate or settlement interval missing; execution is fail-closed")
+    if not spread_available:
+        risk_reasons.append("bid/ask spread missing; execution is fail-closed")
+    elif not spread_execution_ok:
+        risk_reasons.append(f"spread exceeds existing {_EARLY_MOVER_MAX_SPREAD_BPS:.0f}bps crypto-long execution limit")
     if turnover < 5_000_000:
         risk_level = "MEDIUM"
         risk_reasons.append("perp volume only medium")
@@ -31050,6 +31353,8 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     if funding_pct >= 0.08:
         risk_level = "HIGH"
         risk_reasons.append("funding crowded")
+    if not funding_available or not spread_execution_ok:
+        risk_level = "HIGH"
     if not trigger_ok:
         risk_reasons.append("wait for 5m breakout confirmation")
     if barrier_gate_active:
@@ -31128,6 +31433,10 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "breakout_level": _ce_round_price(breakout_level),
         "range_low": _ce_round_price(range_low),
         "risk_level": risk_level,
+        "funding_available": funding_available,
+        "spread_execution_ok": spread_execution_ok,
+        "max_execution_spread_bps": _EARLY_MOVER_MAX_SPREAD_BPS,
+        "structure_timeframe": profile_timeframe,
         "risk_reasons": risk_reasons,
         "risk_flags": risk_reasons,
         "btc_context": btc_context,
@@ -31175,6 +31484,9 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             bars5 = _fetch_exchange_candles_any(contract, exchange, timeframe="5m", count=140)
             bars15 = _fetch_exchange_candles_any(contract, exchange, timeframe="15m", count=96)
             bars4h = _fetch_exchange_candles_any(contract, exchange, timeframe="4h", count=72)
+            row = _refresh_crypto_funding(row)
+            if len(_ce_completed_bars(bars5, "5m")) >= 50 and len(_ce_completed_bars(bars15, "15m")) >= 24:
+                row = _refresh_crypto_explosion_spread(row)
             scored = _score_crypto_explosion_candidate(row, bars5, bars15, bars4h)
             if scored:
                 results.append(scored)
@@ -31351,13 +31663,15 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
     if not coins:
         return []
 
-    btc = next((c for c in coins if c.get("id") == "bitcoin" or str(c.get("symbol", "")).upper() == "BTC"), None)
+    btc = next((c for c in coins if c.get("id") == "bitcoin"), None)
     if not btc:
         return []
 
-    btc_24h = float(btc.get("price_change_percentage_24h") or 0)
-    btc_7d = float(btc.get("price_change_percentage_7d_in_currency") or btc.get("price_change_percentage_7d") or 0)
-    btc_14d = float(btc.get("price_change_percentage_14d_in_currency") or 0)
+    btc_24h = _alert_float(btc.get("price_change_percentage_24h"))
+    btc_7d = _alert_float(btc.get("price_change_percentage_7d_in_currency"), _alert_float(btc.get("price_change_percentage_7d")))
+    btc_14d = _alert_float(btc.get("price_change_percentage_14d_in_currency"))
+    if btc_24h is None or btc_7d is None:
+        return []  # Missing reference is not a stagnant BTC regime.
     btc_regime = (
         "RISK_OFF" if btc_24h <= -1.5 or btc_7d <= -4
         else "STAGNANT" if abs(btc_24h) <= 1.5 and abs(btc_7d) <= 4
@@ -31385,13 +31699,15 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
             if price <= 0 or mcap < 5_000_000 or volume < 250_000:
                 continue
 
-            change_1h = float(coin.get("price_change_percentage_1h_in_currency") or 0)
-            change_24h = float(coin.get("price_change_percentage_24h") or 0)
-            change_7d = float(coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0)
-            change_14d = float(coin.get("price_change_percentage_14d_in_currency") or 0)
+            change_1h = _alert_float(coin.get("price_change_percentage_1h_in_currency"))
+            change_24h = _alert_float(coin.get("price_change_percentage_24h"))
+            change_7d = _alert_float(coin.get("price_change_percentage_7d_in_currency"), _alert_float(coin.get("price_change_percentage_7d")))
+            change_14d = _alert_float(coin.get("price_change_percentage_14d_in_currency"))
+            if change_24h is None or change_7d is None:
+                continue
             alpha_24h = round(change_24h - btc_24h, 2)
             alpha_7d = round(change_7d - btc_7d, 2)
-            alpha_14d = round(change_14d - btc_14d, 2)
+            alpha_14d = round(change_14d - btc_14d, 2) if change_14d is not None and btc_14d is not None else None
             vol_mcap = round((volume / mcap * 100), 2) if mcap > 0 else 0
 
             perp_match_symbol, perp_lookup, perp_price_gap_pct = _select_price_validated_perp(
@@ -31457,11 +31773,11 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "symbol": symbol,
                 "name": name,
                 "price": _round_crypto_price(price),
-                "change_1h": round(change_1h, 2),
+                "change_1h": round(change_1h, 2) if change_1h is not None else None,
                 "change_1d": round(change_24h, 2),
                 "change_5d": round(change_7d, 2),
                 "change_7d": round(change_7d, 2),
-                "change_14d": round(change_14d, 2),
+                "change_14d": round(change_14d, 2) if change_14d is not None else None,
                 "div_1d": alpha_24h,
                 "div_5d": alpha_7d,
                 "alpha_24h": alpha_24h,
@@ -31477,12 +31793,12 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "contract": contract,
                 "exchange": exchange,
                 "best_exchange": perp_lookup.get("best_exchange", ""),
-                "funding_rate": perp_lookup.get("funding_rate", 0),
-                "funding_rate_fraction": perp_lookup.get("funding_rate_fraction", perp_lookup.get("funding_rate", 0)),
+                "funding_rate": perp_lookup.get("funding_rate"),
+                "funding_rate_fraction": perp_lookup.get("funding_rate_fraction", perp_lookup.get("funding_rate")),
                 "funding_rate_pct": perp_lookup.get("funding_rate_pct"),
-                "funding_rate_raw": perp_lookup.get("funding_rate_raw", perp_lookup.get("funding_rate", 0)),
+                "funding_rate_raw": perp_lookup.get("funding_rate_raw", perp_lookup.get("funding_rate")),
                 "funding_rate_unit": perp_lookup.get("funding_rate_unit", "fraction"),
-                "funding_interval_hours": perp_lookup.get("funding_interval_hours", 8.0),
+                "funding_interval_hours": perp_lookup.get("funding_interval_hours"),
                 "funding_source": perp_lookup.get("funding_source"),
                 "oi_ratio": perp_lookup.get("oi_ratio", 0),
                 "score": score,
@@ -31494,6 +31810,8 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "entry_status": trade_action,
                 "signal_label": signal_label,
                 "signal_quality": "watch_only",
+                "context_only": True,
+                "score_is_probability": False,
                 "execution_trigger_ok": False,
                 "risk_flags": risk_flags,
                 "scanner_note": "BTC-Divergenz ist ein Watch-/Bias-Scanner: kein Trade ohne 5m Trigger, Retest oder Rejection.",
@@ -31610,7 +31928,7 @@ def _calculate_cmf(closes: List[float], highs: List[float], lows: List[float], v
     return 0
 
 
-def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, Any]]:
+def _fetch_daily_proxy_perf(ticker: str, limit: int = 30, now_utc: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """Fetch recent daily performance for a sector/theme proxy or representative stock."""
     if not ticker or not POLYGON_KEY:
         return None
@@ -31618,7 +31936,37 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
     resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": limit, "sort": "desc"}, timeout=15)
     if resp.status_code != 200:
         return None
-    bars = resp.json().get("results", [])
+    from zoneinfo import ZoneInfo
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    eastern = ZoneInfo("America/New_York")
+    now_et = current.astimezone(eastern)
+    sessions = {}
+    conflicts = set()
+    for raw in resp.json().get("results", []) or []:
+        try:
+            source_open = datetime.fromtimestamp(float(raw["t"]) / 1000.0, tz=timezone.utc)
+            session = source_open.astimezone(eastern).date()
+            values = {key: float(raw[key]) for key in ("o", "h", "l", "c", "v")}
+            if source_open > current or session > now_et.date():
+                continue
+            if (not all(math.isfinite(value) for value in values.values())
+                    or min(values[key] for key in ("o", "h", "l", "c")) <= 0
+                    or values["v"] < 0 or values["h"] < max(values["o"], values["l"], values["c"])
+                    or values["l"] > min(values["o"], values["h"], values["c"])):
+                continue
+            if session in conflicts:
+                continue
+            if session in sessions and sessions[session] != values:
+                conflicts.add(session)
+                sessions.pop(session, None)
+                continue
+            sessions[session] = values
+        except (TypeError, ValueError, KeyError, OverflowError, OSError):
+            continue
+    ordered_sessions = sorted(sessions, reverse=True)
+    bars = [sessions[session] for session in ordered_sessions]
     if len(bars) < 2:
         return None
 
@@ -31627,10 +31975,8 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
     if close <= 0 or prev <= 0:
         return None
 
-    idx_5 = min(5, len(bars) - 1)
-    idx_20 = min(20, len(bars) - 1)
-    base_5 = float(bars[idx_5].get("c", close) or close)
-    base_20 = float(bars[idx_20].get("c", close) or close)
+    base_5 = bars[5]["c"] if len(bars) >= 6 else None
+    base_20 = bars[20]["c"] if len(bars) >= 21 else None
     vol = float(bars[0].get("v", 0) or 0)
     vol_window = [float(b.get("v", 0) or 0) for b in bars[1:21]]
     avg_vol = historical_volume_baseline(
@@ -31646,21 +31992,33 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30) -> Optional[Dict[str, 
     # AUDIT S-4 (2026-06-10): calculate_obv liefert (liste, trend) — vorher wurde
     # das Tupel selbst als Serie behandelt (len==2) und obv_change blieb immer 0.
     obv_values, _obv_trend = calculate_obv(closes, volumes)
-    obv_change = 0.0
+    obv_change = None
     if len(obv_values) >= 6 and obv_values[-6] != 0:
         obv_change = (obv_values[-1] - obv_values[-6]) / abs(obv_values[-6]) * 100
 
-    cmf = _calculate_cmf(closes, highs, lows, volumes, period=20)
+    cmf = _calculate_cmf(closes, highs, lows, volumes, period=20) if len(closes) >= 20 else None
+    source_session = ordered_sessions[0]
+    in_progress = source_session == now_et.date() and now_et.hour < 16
+    fraction = _us_equity_expected_volume_fraction(current) if in_progress else 1.0
+    rvol = project_partial_rvol(vol / avg_vol, fraction) if avg_vol else None
+    rvol_basis = (
+        "unavailable" if rvol is None else "current_session_intraday_pace" if in_progress and fraction < 1.0
+        else "in_progress_session_unprojected" if in_progress else "completed_session"
+    )
     return {
         "ticker": ticker,
         "price": round(close, 2),
         "change_1d": round(((close - prev) / prev) * 100, 2),
-        "change_5d": round(((close - base_5) / base_5) * 100, 2) if base_5 > 0 else 0,
-        "change_20d": round(((close - base_20) / base_20) * 100, 2) if base_20 > 0 else 0,
+        "change_5d": round(((close - base_5) / base_5) * 100, 2) if base_5 is not None else None,
+        "change_20d": round(((close - base_20) / base_20) * 100, 2) if base_20 is not None else None,
         "volume": vol,
-        "rvol": round(_project_us_equity_rvol(vol / avg_vol), 2) if vol > 0 and avg_vol else 0,
-        "obv_change": round(obv_change, 2),
+        "rvol": round(rvol, 2) if rvol is not None else None,
+        "obv_change": round(obv_change, 2) if obv_change is not None else None,
         "cmf": cmf,
+        "source_session": source_session.isoformat(),
+        "bar_state": "in_progress_daily_aggregate" if in_progress else "completed_daily",
+        "rvol_basis": rvol_basis,
+        "history_bars": len(bars),
     }
 
 
@@ -31699,7 +32057,7 @@ def _narrative_representatives(tickers: List[str], direction: str, max_items: in
     for ticker in tickers[:8]:
         try:
             perf = _fetch_daily_proxy_perf(ticker, limit=25)
-            if perf:
+            if perf and perf.get("change_5d") is not None:
                 reps.append({
                     "ticker": ticker,
                     "change_1d": perf.get("change_1d", 0),
@@ -31745,9 +32103,12 @@ def _build_narrative_pulse(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _format_narrative_row(item: Dict[str, Any]) -> str:
+    def _metric(value, suffix="", precision=1):
+        number = _alert_float(value)
+        return "—" if number is None else f"{number:.{precision}f}{suffix}"
     reps = item.get("representatives") or []
     rep_text = ", ".join(
-        f"{html.escape(str(rep.get('ticker', '')))} {float(rep.get('change_5d', 0) or 0):+.1f}%"
+        f"{html.escape(str(rep.get('ticker', '')))} {_metric(rep.get('change_5d'), '%')}"
         for rep in reps
     ) or html.escape(", ".join(item.get("examples", [])[:3]) or "-")
     color = "#059669" if float(item.get("narrative_score", 0) or 0) >= 0 else "#dc2626"
@@ -31756,10 +32117,10 @@ def _format_narrative_row(item: Dict[str, Any]) -> str:
         f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(item.get('sector', item.get('narrative', ''))))}</b><br>"
         f"<span style='color:#64748b'>{html.escape(str(item.get('ticker', '')))} Proxy</span></td>"
         f"<td style='padding:8px;border-bottom:1px solid #eee;color:{color};font-weight:bold'>{float(item.get('narrative_score', 0) or 0):+.1f}</td>"
-        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_1d', 0) or 0):+.1f}%</td>"
-        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_5d', 0) or 0):+.1f}%</td>"
-        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('change_20d', 0) or 0):+.1f}%</td>"
-        f"<td style='padding:8px;border-bottom:1px solid #eee'>{float(item.get('rvol', 0) or 0):.1f}x</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_1d'), '%')}</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_5d'), '%')}</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_20d'), '%')}</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('rvol'), 'x')}</td>"
         f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(rep_text)}</td>"
         "</tr>"
     )
@@ -32013,14 +32374,18 @@ def _money_flow_wrapper() -> None:
                 rvol = perf["rvol"]
                 cmf = perf["cmf"]
                 obv_change = perf["obv_change"]
-                if obv_change > 10 and chg_5d < 2:
+                if obv_change is None or chg_5d is None:
+                    obv_signal = "UNBEKANNT"
+                elif obv_change > 10 and chg_5d < 2:
                     obv_signal = "ACCUMULATION"
                 elif obv_change < -10 and chg_5d > -2:
                     obv_signal = "DISTRIBUTION"
                 else:
                     obv_signal = "NEUTRAL"
 
-                if cmf > 0.1:
+                if cmf is None:
+                    cmf_signal = "UNBEKANNT"
+                elif cmf > 0.1:
                     cmf_signal = "BUYING"
                 elif cmf < -0.1:
                     cmf_signal = "SELLING"
@@ -32028,7 +32393,9 @@ def _money_flow_wrapper() -> None:
                     cmf_signal = "NEUTRAL"
 
                 # Flow signal
-                if chg_5d > 2 and rvol > 1.2:
+                if chg_5d is None or rvol is None:
+                    flow = "UNBEKANNT"
+                elif chg_5d > 2 and rvol > 1.2:
                     flow = "ZUFLUSS"
                 elif chg_5d < -2 and rvol > 1.2:
                     flow = "ABFLUSS"
@@ -32041,8 +32408,12 @@ def _money_flow_wrapper() -> None:
                     "ticker": ticker, "sector": name, "narrative": name, "narrative_type": cfg.get("type", "sector"),
                     "examples": cfg.get("examples", []),
                     "price": round(close, 2),
-                    "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2),
-                    "change_20d": round(chg_20d, 2), "volume": vol, "rvol": rvol,
+                    "change_1d": round(chg_1d, 2), "change_5d": round(chg_5d, 2) if chg_5d is not None else None,
+                    "change_20d": round(chg_20d, 2) if chg_20d is not None else None, "volume": vol, "rvol": rvol,
+                    "source_session": perf.get("source_session"),
+                    "bar_state": perf.get("bar_state"),
+                    "rvol_basis": perf.get("rvol_basis"),
+                    "history_bars": perf.get("history_bars"),
                     "narrative_score": _narrative_score({
                         "change_1d": chg_1d, "change_5d": chg_5d, "change_20d": chg_20d,
                         "rvol": rvol, "cmf": cmf, "obv_change": obv_change,
@@ -32053,7 +32424,7 @@ def _money_flow_wrapper() -> None:
                     "signal_label": "Achtung beobachten: Marktrotation, kein Einzeltrade-Signal",
                     "execution_trigger_ok": False,
                     "obv_signal": obv_signal,
-                    "obv_change": round(obv_change, 2),
+                    "obv_change": round(obv_change, 2) if obv_change is not None else None,
                     "cmf": cmf,
                     "cmf_signal": cmf_signal,
                 })
@@ -32061,7 +32432,7 @@ def _money_flow_wrapper() -> None:
                 print(f"[Warning] Error processing sector {name} ticker {ticker}: {e}")
                 continue
 
-        sectors.sort(key=lambda x: x.get("change_5d", 0), reverse=True)
+        sectors.sort(key=lambda x: (x.get("change_5d") is not None, float(x.get("change_5d") or 0)), reverse=True)
         save_cache_file(MONEY_FLOW_CACHE, sectors)
         narrative_payload = _build_narrative_pulse(sectors)
         save_cache_file(NARRATIVE_PULSE_CACHE, narrative_payload)
@@ -32247,7 +32618,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "funding_rate_pct": pump.get("funding_rate_pct", pump.get("funding_rate", 0)),
             "funding_rate_raw": pump.get("funding_rate_raw", pump.get("funding_rate", 0)),
             "funding_rate_unit": pump.get("funding_rate_unit", "percent"),
-            "funding_interval_hours": pump.get("funding_interval_hours", 8.0),
+            "funding_interval_hours": pump.get("funding_interval_hours"),
             "funding_source": f"{entry.get('exchange', '')}:perpetual_funding",
             "long_pct": pump.get("long_pct", 0),
             "red_streak": pump.get("red_streak", 0),
@@ -32313,7 +32684,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "funding_rate_pct": item.get("funding_rate_pct", item.get("funding_rate", 0)),
             "funding_rate_raw": item.get("funding_rate_raw", item.get("funding_rate", 0)),
             "funding_rate_unit": item.get("funding_rate_unit", "percent"),
-            "funding_interval_hours": item.get("funding_interval_hours", 8.0),
+            "funding_interval_hours": item.get("funding_interval_hours"),
             "funding_source": f"{item.get('exchange', '')}:perpetual_funding",
             "grade": item.get("grade", ""),
             "hours_tracked": item.get("hours_tracked", 0),
@@ -32808,19 +33179,23 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
     return normalized
 
 
-def _find_bi_signal_cache_row(ticker: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _find_bi_signal_cache_row(ticker: str, direction: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Find one current-contract BI signal for chart enrichment.
 
     Chart analysis must not resurrect a pre-contract cache row after the main
     BI list and mail paths have already rejected it.
     """
     wanted = str(ticker or "").strip().upper()
-    if not wanted:
+    requested_direction = str(direction or "").strip().upper()
+    if not wanted or (requested_direction and requested_direction not in {"LONG", "SHORT"}):
         return None, None
+    matches = []
     for cache_path, bi_direction in (
         (BI_CACHE_LONG, "LONG"),
         (BI_CACHE_SHORT, "SHORT"),
     ):
+        if requested_direction and requested_direction != bi_direction:
+            continue
         try:
             cached_results, _ = load_cache_file(cache_path)
             normalized = _normalize_keys(cached_results or [], _BI_KEY_MAP)
@@ -32832,13 +33207,15 @@ def _find_bi_signal_cache_row(ticker: str) -> Tuple[Optional[Dict[str, Any]], Op
                     isinstance(item, dict)
                     and str(item.get("ticker") or "").upper() == wanted
                 ):
-                    return item, bi_direction
+                    matches.append((item, bi_direction))
         except Exception as exc:
             print(
                 f"[Warning] Error loading BI Scanner cache for {wanted}: "
                 f"{_sanitized_exception_text(exc)}"
             )
-    return None, None
+    # A ticker alone cannot identify overlapping Long/Short signal snapshots.
+    # Never silently choose the first cache's direction.
+    return matches[0] if len(matches) == 1 else (None, None)
 
 
 def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -36792,6 +37169,20 @@ def get_volume_spikes():
 # ── ORB Scanner (Opening Range Breakout) ──
 ORB_CACHE = "/tmp/orb_scan_results.json"
 
+def _orb_completed_regular_bars(raw_bars, *, market_open_ms, as_of):
+    """Require real, uniquely determined 5m session candles for OR formation."""
+    from modules.stock_bars import completed_polygon_bars
+    bars = completed_polygon_bars(raw_bars, span="minute", multiplier=5, as_of=as_of)
+    interval_ms = 5 * 60 * 1000
+    bars = [bar for bar in bars if bar["t"] >= market_open_ms
+            and (bar["t"] - market_open_ms) % interval_ms == 0]
+    opening = [bar for bar in bars if bar["t"] < market_open_ms + 3 * interval_ms]
+    required = {market_open_ms + offset * interval_ms for offset in range(3)}
+    if {bar["t"] for bar in opening} != required:
+        return [], []
+    return bars, opening
+
+
 def _orb_scanner_wrapper() -> None:
     """
     ORB Scanner V2 — Professional Grade Opening Range Breakout
@@ -37009,18 +37400,14 @@ def _orb_scanner_wrapper() -> None:
                 if not bars or len(bars) < 2:
                     _dbg["no_bars"] += 1
                     continue
-                now_ms = int(now_et.timestamp() * 1000)
-                bars = [
-                    b for b in bars
-                    if b.get("t", 0) >= market_open_ms
-                    and b.get("t", 0) + 5 * 60 * 1000 <= now_ms
-                ]
+                bars, or_bars = _orb_completed_regular_bars(
+                    bars, market_open_ms=market_open_ms, as_of=now_et,
+                )
                 if len(bars) < 2:
                     _dbg["no_rth"] += 1
                     continue
 
                 # ── Opening Range bestimmen (9:30-9:45 = erste 3 5-Min Candles) ──
-                or_bars = [b for b in bars if b.get("t", 0) < or_end_ms]
                 if not or_bars or len(or_bars) < 3:
                     _dbg["no_or"] += 1
                     continue
@@ -37762,17 +38149,18 @@ def get_orb_results():
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
-# ── Fear & Greed Score (CNN-kompatibel, 0-100) ──
-# V2.5: Komplett neu — Skala wie CNN: 0 = Extreme Fear, 100 = Extreme Greed
-# Verwendet 7 Faktoren analog zu CNN, basierend auf verfügbaren Daten
-def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List[Dict]) -> tuple[int, str, Dict]:
+# Internal market-context heuristic; neither the CNN index nor a probability.
+def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List[Dict]) -> tuple[Optional[int], str, Dict]:
     """
-    Calculate Fear & Greed score compatible with CNN scale.
+    Calculate the internal Fear & Greed context score, not the CNN index.
     0 = Extreme Fear, 25 = Fear, 50 = Neutral, 75 = Greed, 100 = Extreme Greed
     Each factor produces a sub-score 0-100, final score is weighted average.
     """
     factors = {}
     weights = {}
+
+    def measured(row, key):
+        return _alert_float((row or {}).get(key), None)
 
     def get_index_data(ticker):
         for idx in indices_data:
@@ -37786,12 +38174,13 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     # ── Factor 1: VIX Level (Market Volatility) — Weight 20 ──
     # VIX < 12 = 100 (Extreme Greed), 12-15 = 75, 15-20 = 50, 20-25 = 25, 25-30 = 10, >30 = 0
-    if vix_data and "price" in vix_data:
-        vix = vix_data["price"]
+    real_vix = vix_data.get("is_vix_index") is True or vix_data.get("ticker") in {"I:VIX", "VIX"}
+    if real_vix and measured(vix_data, "price") is not None and measured(vix_data, "price") > 0:
+        vix = measured(vix_data, "price")
         if vix <= 12:
             factors["VIX Level"] = 100
         elif vix <= 15:
-            factors["VIX Level"] = 75 - (vix - 12) / 3 * 25  # 75→50
+            factors["VIX Level"] = 100 - (vix - 12) / 3 * 50  # continuous 100→50
         elif vix <= 20:
             factors["VIX Level"] = 50 - (vix - 15) / 5 * 25  # 50→25
         elif vix <= 25:
@@ -37804,8 +38193,8 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     # ── Factor 2: Market Momentum (S&P 500 vs 20D) — Weight 20 ──
     # SPY 20D change: > +5% = 100, +2-5% = 75, 0-2% = 55, -2-0% = 40, -5 to -2% = 20, < -5% = 0
-    if spy_data and "change_20d" in spy_data:
-        chg20 = spy_data["change_20d"]
+    if measured(spy_data, "change_20d") is not None:
+        chg20 = measured(spy_data, "change_20d")
         if chg20 >= 5:
             factors["Momentum"] = 100
         elif chg20 >= 2:
@@ -37824,8 +38213,8 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     # ── Factor 3: Market Breadth (A/D Ratio) — Weight 15 ──
     # A/D > 2.0 = 100, 1.5 = 80, 1.0 = 50, 0.7 = 30, 0.5 = 15, < 0.3 = 0
-    if breadth_data and "ad_ratio" in breadth_data:
-        ad = breadth_data["ad_ratio"]
+    if measured(breadth_data, "ad_ratio") is not None:
+        ad = measured(breadth_data, "ad_ratio")
         if ad >= 2.0:
             factors["Breadth"] = 100
         elif ad >= 1.5:
@@ -37842,7 +38231,7 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     # ── Factor 4: Index 5D Performance (Proxy für Strength) — Weight 15 ──
     # Durchschnitt der 5D-Changes aller Indizes
-    chg5_list = [idx.get("change_5d", 0) for idx in indices_data if "change_5d" in idx]
+    chg5_list = [measured(idx, "change_5d") for idx in indices_data if measured(idx, "change_5d") is not None]
     if chg5_list:
         avg_5d = sum(chg5_list) / len(chg5_list)
         if avg_5d >= 3:
@@ -37861,25 +38250,25 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
 
     # ── Factor 5: Nasdaq vs S&P Divergenz (Risk Appetite Proxy) — Weight 10 ──
     # Wenn Nasdaq besser als S&P = Risk On, umgekehrt = Risk Off
-    if qqq_data and spy_data:
-        qqq_5d = qqq_data.get("change_5d", 0)
-        spy_5d = spy_data.get("change_5d", 0)
+    if measured(qqq_data, "change_5d") is not None and measured(spy_data, "change_5d") is not None:
+        qqq_5d = measured(qqq_data, "change_5d")
+        spy_5d = measured(spy_data, "change_5d")
         diff = qqq_5d - spy_5d  # Positiv = Tech outperforms = Risk On
         factors["Risk Appetite"] = max(0, min(100, 50 + diff * 10))
         weights["Risk Appetite"] = 10
 
     # ── Factor 6: Small Cap Strength (Russell vs S&P) — Weight 10 ──
-    if iwm_data and spy_data:
-        iwm_5d = iwm_data.get("change_5d", 0)
-        spy_5d = spy_data.get("change_5d", 0)
+    if measured(iwm_data, "change_5d") is not None and measured(spy_data, "change_5d") is not None:
+        iwm_5d = measured(iwm_data, "change_5d")
+        spy_5d = measured(spy_data, "change_5d")
         diff = iwm_5d - spy_5d  # Positiv = Small Caps outperform = bullish breadth
         factors["Small Cap"] = max(0, min(100, 50 + diff * 12))
         weights["Small Cap"] = 10
 
     # ── Factor 7: VIX Trend (5D Change) — Weight 10 ──
     # VIX sinkend = Greed, VIX steigend = Fear
-    if vix_data and "change_5d" in vix_data:
-        vix_chg = vix_data["change_5d"]  # Positiv = VIX gestiegen = mehr Fear
+    if real_vix and measured(vix_data, "change_5d") is not None:
+        vix_chg = measured(vix_data, "change_5d")  # Positiv = VIX gestiegen = mehr Fear
         if vix_chg <= -15:
             factors["VIX Trend"] = 100
         elif vix_chg <= -5:
@@ -37899,14 +38288,19 @@ def _calculate_fear_score(vix_data: Dict, breadth_data: Dict, indices_data: List
     if total_weight > 0:
         score = sum(factors.get(k, 50) * weights[k] for k in weights) / total_weight
     else:
-        score = 50  # Neutral wenn keine Daten
+        score = None
 
-    score = max(0, min(100, round(score)))
+    score = max(0, min(100, round(score))) if score is not None else None
 
     # Details für Frontend
     details = {}
     for k, v in factors.items():
         details[k.lower().replace(" ", "_")] = round(v, 1)
+    details["coverage_weight"] = total_weight
+    details["partial_score"] = score
+    details["data_status"] = "ok" if total_weight == 100 else "partial" if total_weight else "unavailable"
+    if total_weight < 100:
+        return None, "DATEN UNVOLLSTAENDIG" if total_weight else "DATEN FEHLEN", details
 
     # Fear Level — CNN-kompatibel
     if score <= 20:
@@ -37928,7 +38322,7 @@ def _crash_monitor_wrapper() -> None:
     """Fetch VIX, major indices, and market breadth data with fear score."""
     try:
         print("[Crash Monitor] Starting scan...")
-        result = {"vix": {}, "indices": [], "breadth": {}, "fear_score": 0, "fear_level": ""}
+        result = {"vix": {}, "indices": [], "breadth": {}, "fear_score": None, "fear_level": ""}
 
         # Try VIX index first, fallback to UVXY ETF proxy
         vix_tickers = [
@@ -37954,8 +38348,8 @@ def _crash_monitor_wrapper() -> None:
                     if vix_price > 0:
                         chg = ((vix_price - vix_prev) / vix_prev * 100) if vix_prev else 0
                         # V3.4 FIX: Historische VIX-Daten für 5d/20d Change holen
-                        vix_5d = 0
-                        vix_20d = 0
+                        vix_5d = None
+                        vix_20d = None
                         try:
                             from datetime import timedelta
                             _end = datetime.now().strftime("%Y-%m-%d")
@@ -37974,16 +38368,16 @@ def _crash_monitor_wrapper() -> None:
                                 f"{_sanitized_exception_text(_vhist_err)}"
                             )
                         result["vix"] = {"ticker": "I:VIX", "name": "VIX", "price": round(vix_price, 2),
-                                         "change_1d": round(chg, 2), "change_5d": vix_5d, "change_20d": vix_20d}
+                                         "change_1d": round(chg, 2), "change_5d": vix_5d, "change_20d": vix_20d,
+                                         "is_vix_index": True, "data_kind": "vix_index"}
                         if vix_price >= 30: result["vix"]["level"] = "EXTREME"
                         elif vix_price >= 25: result["vix"]["level"] = "HIGH"
                         elif vix_price >= 20: result["vix"]["level"] = "ELEVATED"
                         else: result["vix"]["level"] = "LOW"
                         print(f"[Crash Monitor] VIX from snapshot: {vix_price}")
             if not result.get("vix", {}).get("price"):
-                # Fallback: Use UVXY daily change to estimate VIX level
-                # UVXY is 1.5x leveraged VIX futures - absolute price is useless due to decay
-                # Instead, use daily % change to estimate current VIX regime
+                # UVXY is a futures ETF proxy, not a measurement of spot VIX.
+                # Keep it separate; no price-to-VIX conversion or score input.
                 uvxy_url = f"https://api.polygon.io/v2/aggs/ticker/UVXY/range/1/day/2024-01-01/2099-12-31"
                 uvxy_resp = rate_limited_get(uvxy_url, params={"apiKey": POLYGON_KEY, "limit": 10, "sort": "desc"})
                 if uvxy_resp.status_code == 200:
@@ -37992,43 +38386,13 @@ def _crash_monitor_wrapper() -> None:
                         uvxy_today = bars[0]["c"]
                         uvxy_prev = bars[1]["c"]
                         uvxy_chg_pct = ((uvxy_today - uvxy_prev) / uvxy_prev * 100) if uvxy_prev else 0
-                        # Calculate avg 5-day volatility from UVXY as VIX proxy
-                        # Normal VIX ~15-18, elevated ~20-25, high ~25-30, extreme >30
-                        # Estimate from UVXY behavior:
-                        # - UVXY 5d avg abs change <3% → VIX ~14-16 (calm)
-                        # - UVXY 5d avg abs change 3-8% → VIX ~17-22 (normal)
-                        # - UVXY 5d avg abs change 8-15% → VIX ~22-28 (elevated)
-                        # - UVXY 5d avg abs change >15% → VIX ~28+ (fear)
-                        recent_changes = []
-                        for i in range(min(5, len(bars) - 1)):
-                            c1 = bars[i]["c"]
-                            c2 = bars[i + 1]["c"]
-                            if c2 > 0:
-                                recent_changes.append(abs((c1 - c2) / c2 * 100))
-                        avg_abs_change = sum(recent_changes) / len(recent_changes) if recent_changes else 0
-                        # Map avg absolute change to estimated VIX
-                        if avg_abs_change > 15:
-                            est_vix = min(45, 28 + (avg_abs_change - 15) * 0.5)
-                        elif avg_abs_change > 8:
-                            est_vix = 22 + (avg_abs_change - 8) * 0.86
-                        elif avg_abs_change > 3:
-                            est_vix = 17 + (avg_abs_change - 3) * 1.0
-                        else:
-                            est_vix = 13 + avg_abs_change * 1.3
-                        est_vix = round(max(12, min(50, est_vix)), 1)
-                        # V3.4: 5d/20d Change aus UVXY-Bars ableiten
-                        _uvxy_5d = 0
-                        _uvxy_20d = 0
+                        _uvxy_5d = None
                         if len(bars) >= 6:
-                            _uvxy_5d = round(((bars[0]["c"] - bars[5]["c"]) / bars[5]["c"] * 100) / 1.5, 2)
-                        result["vix"] = {"ticker": "UVXY", "name": "VIX (est.)", "price": est_vix,
-                                         "change_1d": round(uvxy_chg_pct / 1.5, 2),
-                                         "change_5d": _uvxy_5d, "change_20d": _uvxy_20d}
-                        if est_vix >= 30: result["vix"]["level"] = "EXTREME"
-                        elif est_vix >= 25: result["vix"]["level"] = "HIGH"
-                        elif est_vix >= 20: result["vix"]["level"] = "ELEVATED"
-                        else: result["vix"]["level"] = "LOW"
-                        print(f"[Crash Monitor] VIX estimated from UVXY volatility: {est_vix} (avg_abs_chg={avg_abs_change:.1f}%)")
+                            _uvxy_5d = round((bars[0]["c"] - bars[5]["c"]) / bars[5]["c"] * 100, 2)
+                        result["vix_proxy"] = {"ticker": "UVXY", "name": "Volatilitaets-ETF (kein VIX)",
+                                               "price": uvxy_today, "change_1d": round(uvxy_chg_pct, 2),
+                                               "change_5d": _uvxy_5d, "change_20d": None,
+                                               "is_vix_index": False, "data_kind": "volatility_etf_proxy"}
         except Exception as e:
             print(f"[Crash Monitor] VIX fetch error: {_sanitized_exception_text(e)}")
 
@@ -38045,12 +38409,13 @@ def _crash_monitor_wrapper() -> None:
                 close = bars[0]["c"]
                 prev = bars[1]["c"]
                 chg_1d = ((close - prev) / prev) * 100
-                chg_5d = ((close - bars[min(5, len(bars)-1)]["c"]) / bars[min(5, len(bars)-1)]["c"]) * 100 if len(bars) > 5 else 0
-                chg_20d = ((close - bars[min(20, len(bars)-1)]["c"]) / bars[min(20, len(bars)-1)]["c"]) * 100 if len(bars) > 20 else 0
+                chg_5d = ((close - bars[5]["c"]) / bars[5]["c"]) * 100 if len(bars) > 5 else None
+                chg_20d = ((close - bars[20]["c"]) / bars[20]["c"]) * 100 if len(bars) > 20 else None
 
                 entry = {"ticker": sym, "name": name, "description": desc,
                          "price": round(close, 2), "change_1d": round(chg_1d, 2),
-                         "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2)}
+                         "change_5d": round(chg_5d, 2) if chg_5d is not None else None,
+                         "change_20d": round(chg_20d, 2) if chg_20d is not None else None}
 
                 if False:  # VIX now handled separately above
                     pass
@@ -38109,8 +38474,8 @@ def _crash_monitor_wrapper() -> None:
                             excluded_non_common += 1
                             continue
 
-                        tod = t.get("todaysChangePerc", 0)
-                        if not isinstance(tod, (int, float)):
+                        tod = _alert_float(t.get("todaysChangePerc"), None)
+                        if tod is None:
                             continue
                         if tod > 0:
                             up += 1
@@ -38128,9 +38493,9 @@ def _crash_monitor_wrapper() -> None:
             print(f"[Crash Monitor] Breadth raw: {up} up, {down} down, {unchanged} unchanged")
 
             total = up + down + unchanged
-            ratio = round(up / down, 2) if down > 0 else (999.0 if up > 0 else 0)
+            ratio = round(up / down, 2) if down > 0 else (999.0 if up > 0 else 1.0 if unchanged > 0 else None)
             if total == 0:
-                breadth_signal = "MARKT GESCHLOSSEN"
+                breadth_signal = "DATEN FEHLEN"
             elif ratio > 1.5:
                 breadth_signal = "BULLISH"
             elif ratio < 0.7:
@@ -38140,11 +38505,12 @@ def _crash_monitor_wrapper() -> None:
             result["breadth"] = {
                 "advancing": up, "declining": down, "unchanged": unchanged,
                 "total": total, "ad_ratio": ratio,
-                "advancing_pct": round(up / total * 100, 1) if total > 0 else 0,
-                "declining_pct": round(down / total * 100, 1) if total > 0 else 0,
-                "unchanged_pct": round(unchanged / total * 100, 1) if total > 0 else 0,
+                "advancing_pct": round(up / total * 100, 1) if total > 0 else None,
+                "declining_pct": round(down / total * 100, 1) if total > 0 else None,
+                "unchanged_pct": round(unchanged / total * 100, 1) if total > 0 else None,
                 "breadth_signal": breadth_signal,
-                "market_open": total > 0,
+                "market_open": None,  # Snapshot coverage does not prove market-session state.
+                "data_available": total > 0,
                 "gainers_avg_chg": gainers_avg_chg,
                 "losers_avg_chg": losers_avg_chg,
                 "common_stock_filtered": True,
@@ -38165,6 +38531,12 @@ def _crash_monitor_wrapper() -> None:
         result["fear_score"] = fear_score
         result["fear_level"] = fear_level
         result["fear_details"] = fear_details
+        result["partial_fear_score"] = fear_details.pop("partial_score", None)
+        result["coverage_weight"] = fear_details.pop("coverage_weight", 0)
+        result["data_status"] = fear_details.pop("data_status", "unavailable")
+        result["context_only"] = True
+        result["score_is_probability"] = False
+        result["score_model"] = "internal_fear_greed_v2_not_cnn"
 
         save_cache_file(CRASH_MONITOR_CACHE, [result])
         print(f"[Crash Monitor] Done — fear_score={fear_score}, indices={len(result.get('indices',[]))}, vix={result.get('vix',{}).get('price','?')}")
@@ -38180,7 +38552,7 @@ def _crash_monitor_wrapper() -> None:
             "vix": {},
             "indices": [],
             "breadth": {},
-            "fear_score": 0,
+            "fear_score": None,
             "fear_level": "ERROR",
         }])
         raise
@@ -39533,6 +39905,127 @@ def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
     return stats
 
 
+def _bt_optional_report_number(value: Any) -> Optional[float]:
+    """Missing/invalid measurements are not a measured zero return."""
+    if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _bt_complete_r_average(trades: List[Dict[str, Any]]) -> Optional[float]:
+    values = [_bt_optional_report_number(trade.get("r_multiple")) for trade in trades]
+    return round(sum(values) / len(values), 2) if values and all(value is not None for value in values) else None
+
+
+def _bt_apply_report_data_quality(
+    result: Dict[str, Any],
+    all_trades: List[Dict[str, Any]],
+    decided: List[Dict[str, Any]],
+    source_quality: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Guard reporting claims, not live scanner/trading eligibility.
+
+    A profitable observed subset cannot validate the unobserved paths. Keep
+    its descriptive PnL, but never silently impute missing risk measurements.
+    """
+    invalid_metadata = source_quality is not None and not isinstance(source_quality, dict)
+    quality = dict(source_quality) if isinstance(source_quality, dict) else {}
+    sources = [quality] + [trade["data_quality"] for trade in all_trades if isinstance(trade.get("data_quality"), dict)]
+
+    def quality_values(source, key):
+        nonlocal invalid_metadata
+        values = source.get(key)
+        if values is None:
+            return []
+        if not isinstance(values, (list, tuple, set)) or any(not isinstance(value, str) for value in values):
+            invalid_metadata = True
+            return []
+        return values
+
+    failed_dates = sorted({day for source in sources for day in quality_values(source, "failed_fetch_dates")})
+    unavailable = sorted({ticker for source in sources for ticker in quality_values(source, "unavailable_tickers")})
+    missing_sessions = sorted(
+        {day for source in sources for day in quality_values(source, "missing_expected_sessions")}
+        | {day for trade in all_trades for day in quality_values(trade, "missing_expected_sessions")}
+    )
+    failed_counts = [len(failed_dates)]
+    for source in sources:
+        raw_count = source.get("failed_fetch_days")
+        if raw_count is None:
+            continue
+        count = _bt_optional_report_number(raw_count)
+        if count is None or count < 0 or not count.is_integer():
+            invalid_metadata = True
+        else:
+            failed_counts.append(int(count))
+    failed_days = max(failed_counts)
+    unresolved = int(result.get("unresolved") or 0)
+    missing_r = sum(_bt_optional_report_number(trade.get("r_multiple")) is None for trade in decided)
+    missing_pnl = sum(
+        _bt_optional_report_number(trade.get("pnl_pct")) is None
+        for trade in all_trades
+        if str(trade.get("outcome") or "").upper() not in {"NO_FILL", "UNRESOLVED"}
+    )
+    upper_rs = [_bt_optional_report_number(trade.get("r_multiple_upper", trade.get("r_multiple"))) for trade in decided]
+    missing_upper_r = sum(value is None for value in upper_rs)
+    limitations = []
+    if failed_days or unavailable:
+        limitations.append("Marktdaten fehlen: Abrufausfaelle oder nicht verfuegbare Ticker; die beobachtete Teilmenge ist nicht die vollstaendige Kohorte.")
+    if missing_sessions:
+        limitations.append("Erwartete Handelstage fehlen; die dazwischenliegenden Kurs- und Ausstiegspfade sind unbekannt.")
+    if unresolved:
+        limitations.append(f"{unresolved} nicht aufgeloeste Trades sind aus den Ergebniskennzahlen ausgeschlossen.")
+    if missing_r or missing_upper_r:
+        limitations.append("R-Messwerte fehlen; ohne definiertes Anfangsrisiko ist die vollstaendige R-Erwartung nicht berechenbar.")
+    if missing_pnl:
+        limitations.append("Abgeschlossene Ergebniszeilen ohne gueltigen PnL wurden nicht als Gewinn, Verlust oder Nulltrade bewertet.")
+    if invalid_metadata:
+        limitations.append("Datenqualitaetsangaben sind ungueltig; die Vollstaendigkeit der Auswertung ist nicht belegbar.")
+    if any(str(source.get("status") or "").upper() == "PARTIAL" for source in sources) and not limitations:
+        limitations.append("Die Datenquelle meldet eine unvollstaendige Auswertung.")
+    partial = bool(limitations)
+    quality.update({
+        "status": "PARTIAL" if partial else quality.get("status") or "NO_KNOWN_FETCH_OR_SESSION_GAP",
+        "failed_fetch_days": failed_days,
+        "failed_fetch_dates": failed_dates,
+        "unavailable_tickers": unavailable,
+        "missing_expected_sessions": missing_sessions,
+        "unresolved_trades": unresolved,
+        "missing_r_decided_trades": missing_r,
+        "missing_r_upper_decided_trades": missing_upper_r,
+        "missing_pnl_trades": missing_pnl,
+        "limitations": limitations,
+        "statistics_scope": "observed_decided_paths_only_not_complete_market_cohort" if partial else result.get("statistics_scope"),
+    })
+    result["data_quality"] = quality
+    result["avg_r"] = _bt_complete_r_average(decided)
+    if "avg_r_upper" in result:
+        complete_upper = bool(upper_rs) and not missing_upper_r
+        result["avg_r_upper"] = round(sum(upper_rs) / len(upper_rs), 2) if complete_upper else None
+        result["total_r_upper"] = round(sum(upper_rs), 2) if complete_upper else None
+    if result.get("stats_by_grade"):
+        result["stats_by_grade"] = {grade: dict(stats) for grade, stats in result["stats_by_grade"].items()}
+        for grade, stats in result["stats_by_grade"].items():
+            grade_trades = [trade for trade in decided if str(trade.get("grade") or "").upper() == str(grade).upper()]
+            stats["avg_r"] = _bt_complete_r_average(grade_trades)
+    if partial:
+        result["verdict"] = {
+            "status": "data_incomplete", "label": "DATEN UNVOLLSTÄNDIG", "color": "orange", "tradable": False,
+            "summary": "Nur diagnostische Ergebnisse der beobachteten Teilmenge; keine bestaetigte Edge und keine Handelsfreigabe.",
+            "reasons": limitations,
+        }
+        result["out_of_sample"] = {
+            **(result.get("out_of_sample") or {}),
+            "status": "data_incomplete", "robust": False, "diagnostic_only": True,
+            "limitations": limitations,
+        }
+    return result
+
+
 def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, crypto: bool = False) -> List[Dict[str, Any]]:
     rows = []
     for trade in trades[-150:]:
@@ -39544,12 +40037,12 @@ def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, cry
             "entry_price": _bt_round_price(entry_price, crypto),
             "exit_date": trade.get("exit_date") or "",
             "exit_price": _bt_round_price(exit_price, crypto),
-            "pnl_pct": round(_bt_float(trade.get("pnl_pct")), 2),
-            "r_multiple": round(_bt_float(trade.get("r_multiple")), 2),
+            "pnl_pct": _bt_optional_report_number(trade.get("pnl_pct")),
+            "r_multiple": _bt_optional_report_number(trade.get("r_multiple")),
             "exit_date_upper": trade.get("exit_date_upper") or trade.get("exit_date") or "",
             "exit_price_upper": _bt_round_price(trade.get("exit_price_upper", exit_price), crypto),
-            "pnl_pct_upper": round(_bt_float(trade.get("pnl_pct_upper", trade.get("pnl_pct"))), 2),
-            "r_multiple_upper": round(_bt_float(trade.get("r_multiple_upper", trade.get("r_multiple"))), 2),
+            "pnl_pct_upper": _bt_optional_report_number(trade.get("pnl_pct_upper", trade.get("pnl_pct"))),
+            "r_multiple_upper": _bt_optional_report_number(trade.get("r_multiple_upper", trade.get("r_multiple"))),
             "type": str(trade.get("direction") or direction or "LONG").upper(),
             "grade": str(trade.get("grade") or "").upper(),
             "outcome": trade.get("outcome") or trade.get("exit_reason") or "",
@@ -39561,6 +40054,10 @@ def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, cry
             "ambiguity_reason": trade.get("ambiguity_reason"),
             "ohlc_path_policy": trade.get("ohlc_path_policy"),
         })
+    for row in rows:
+        for key in ("pnl_pct", "r_multiple", "pnl_pct_upper", "r_multiple_upper"):
+            if row[key] is not None:
+                row[key] = round(row[key], 2)
     return rows
 
 
@@ -39579,7 +40076,9 @@ def _build_backtest_result(
     unresolved: Optional[int] = None,
     source_methodology: str = "",
     methodology_warnings: Optional[List[str]] = None,
+    data_quality: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    source_quality = data_quality if data_quality is not None else getattr(trades, "data_quality", None)
     all_trades = list(trades or [])
     no_fill_observed = sum(
         1 for trade in all_trades
@@ -39588,15 +40087,19 @@ def _build_backtest_result(
     unresolved_observed = sum(
         1 for trade in all_trades
         if str(trade.get("outcome") or "").upper() == "UNRESOLVED"
+        or (str(trade.get("outcome") or "").upper() not in {"", "NO_FILL"}
+            and _bt_optional_report_number(trade.get("pnl_pct")) is None)
     )
     physically_filled = [
         trade for trade in all_trades
         if str(trade.get("outcome") or "").upper() != "NO_FILL"
+        and trade.get("entry_filled") is not False
     ]
     decided = [
         trade for trade in all_trades
         if str(trade.get("outcome") or "").upper()
         not in {"", "NO_FILL", "UNRESOLVED"}
+        and _bt_optional_report_number(trade.get("pnl_pct")) is not None
     ]
     decided = sorted(decided, key=_bt_trade_sort_key)
     pcts = [_bt_float(t.get("pnl_pct")) for t in decided]
@@ -39612,7 +40115,7 @@ def _build_backtest_result(
     total_return = _bt_compounded_return(decided)
     max_drawdown = _bt_max_drawdown(decided)
     profit_factor = profit_factor_metrics(gross_profit, gross_loss)
-    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in decided) / total_trades, 2) if total_trades else 0
+    avg_r = _bt_complete_r_average(decided)
     out_of_sample = _bt_out_of_sample_summary(decided)
     verdict = _bt_apply_oos_verdict(
         _bt_backtest_verdict(
@@ -39620,7 +40123,7 @@ def _build_backtest_result(
             win_rate,
             avg_pnl,
             profit_factor["comparison_value"],
-            avg_r,
+            avg_r if avg_r is not None else 0,
             max_drawdown,
             total_return,
         ),
@@ -39665,7 +40168,7 @@ def _build_backtest_result(
     }
     if HAS_ADVANCED_BACKTESTS:
         result.update(backtest_uncertainty_metrics(decided))
-    return result
+    return _bt_apply_report_data_quality(result, all_trades, decided, source_quality)
 
 
 def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[str, Any], months: int) -> Dict[str, Any]:
@@ -39694,6 +40197,7 @@ def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[s
         unresolved=summary.get("unresolved", observed_unresolved),
         source_methodology=str(summary.get("methodology") or ""),
         methodology_warnings=summary.get("methodology_warnings") or [],
+        data_quality=summary.get("data_quality"),
     )
 
 
@@ -39871,6 +40375,7 @@ def _simulate_crypto_trade(
         fee_pct=max(float(fee_pct or 0), 0.0),
         first_bar_order_unknown=False,
         post_tp1_stop_offset=risk * 0.25,
+        session_calendar="24_7",
     )
     if not simulated:
         return None
@@ -40263,7 +40768,8 @@ def _indicator_unresolved_trade(position, dates):
         "entry_signal_date": position.get("signal_date"),
         "exit_date": None,
         "exit_price": None,
-        "pnl_pct": 0.0,
+        "pnl_pct": None,
+        "r_multiple": None,
         "type": f"{direction} (OPEN)",
         "outcome": "UNRESOLVED",
         "exit_reason": "END_OF_DATA",
@@ -40275,25 +40781,26 @@ def _indicator_unresolved_trade(position, dates):
 
 def _backtest_stats(trades, ticker, strategy, months):
     """Calculate backtest statistics from a list of trades."""
+    source_quality = getattr(trades, "data_quality", None)
     input_trades = sorted(trades or [], key=chronological_trade_key)
     no_fill = sum(
         1 for trade in input_trades
         if str((trade or {}).get("outcome") or "").upper() == "NO_FILL"
     )
-    unresolved = sum(
-        1 for trade in input_trades
-        if str((trade or {}).get("outcome") or "").upper() == "UNRESOLVED"
-    )
     unresolved_rows = [
         trade for trade in input_trades
         if str((trade or {}).get("outcome") or "").upper() == "UNRESOLVED"
+        or (str((trade or {}).get("outcome") or "").upper() != "NO_FILL"
+            and _bt_optional_report_number(trade.get("pnl_pct")) is None)
     ]
+    unresolved = len(unresolved_rows)
     # Legacy indicator backtests omit outcome because those rows are already
     # decided. Explicitly non-decided rows must not enter performance metrics.
     trades = [
         trade for trade in input_trades
         if str((trade or {}).get("outcome") or "").upper()
         not in {"NO_FILL", "UNRESOLVED"}
+        and _bt_optional_report_number(trade.get("pnl_pct")) is not None
     ]
     total_trades = len(trades)
     if total_trades == 0:
@@ -40307,7 +40814,7 @@ def _backtest_stats(trades, ticker, strategy, months):
             "out_of_sample": _bt_out_of_sample_summary([]),
             "worst_trade": 0, "trades": [], "timestamp": datetime.now().isoformat(),
             "total_input_trades": len(input_trades),
-            "total_filled": len(input_trades) - no_fill,
+            "total_filled": sum(str(trade.get("outcome") or "").upper() != "NO_FILL" and trade.get("entry_filled") is not False for trade in input_trades),
             "total_decided": 0,
             "no_fill": no_fill,
             "unresolved": unresolved,
@@ -40315,7 +40822,7 @@ def _backtest_stats(trades, ticker, strategy, months):
             "open_trades": unresolved_rows[-50:],
         }
         result.update(backtest_uncertainty_metrics([]))
-        return result
+        return _bt_apply_report_data_quality(result, input_trades, trades, source_quality)
     wins = [t for t in trades if t["pnl_pct"] > 0]
     losses_list = [t for t in trades if t["pnl_pct"] <= 0]
     win_rate = round(len(wins) / total_trades * 100, 1)
@@ -40328,7 +40835,7 @@ def _backtest_stats(trades, ticker, strategy, months):
     gross_profit = sum(t["pnl_pct"] for t in wins)
     gross_loss = abs(sum(t["pnl_pct"] for t in losses_list))
     profit_factor = profit_factor_metrics(gross_profit, gross_loss)
-    avg_r = round(sum(_bt_float(t.get("r_multiple")) for t in trades) / total_trades, 2) if any("r_multiple" in t for t in trades) else 0
+    avg_r = _bt_complete_r_average(trades)
     # Max Drawdown als % des Equity-Peaks (nicht in Prozentpunkten)
     max_dd = 0
     peak = 100  # Start-Equity = 100%
@@ -40348,7 +40855,7 @@ def _backtest_stats(trades, ticker, strategy, months):
             win_rate,
             avg_pnl,
             profit_factor["comparison_value"],
-            avg_r,
+            avg_r if avg_r is not None else 0,
             rounded_max_dd,
             total_return,
         ),
@@ -40368,7 +40875,7 @@ def _backtest_stats(trades, ticker, strategy, months):
         "out_of_sample": out_of_sample,
         "trades": trades[-50:],
         "total_input_trades": len(input_trades),
-        "total_filled": len(input_trades) - no_fill,
+        "total_filled": sum(str(trade.get("outcome") or "").upper() != "NO_FILL" and trade.get("entry_filled") is not False for trade in input_trades),
         "total_decided": total_trades,
         "no_fill": no_fill,
         "unresolved": unresolved,
@@ -40377,7 +40884,7 @@ def _backtest_stats(trades, ticker, strategy, months):
         "timestamp": datetime.now().isoformat(),
     }
     result.update(backtest_uncertainty_metrics(trades))
-    return result
+    return _bt_apply_report_data_quality(result, input_trades, trades, source_quality)
 
 
 def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"):

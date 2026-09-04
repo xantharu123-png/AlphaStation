@@ -12,6 +12,7 @@ Enthält:
 import logging
 import math
 import time
+from datetime import datetime, timedelta, timezone
 import requests
 from modules.indicators import (
     calculate_sma, calculate_ema, calculate_rsi_from_bars,
@@ -24,6 +25,9 @@ from modules.data_fetchers import rate_limited_get
 from modules.trade_levels import trade_geometry
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline
+from modules.bi_trade_plan import bi_consolidation_days
+from modules.fibonacci_levels import select_confirmed_swing_leg, project_fibonacci
+from modules.stock_bars import completed_polygon_bars
 
 
 log = logging.getLogger(__name__)
@@ -856,7 +860,7 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 # payload contract; append a new version instead of silently renaming them.
 BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v1"
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v2"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
@@ -901,6 +905,7 @@ class BreakoutAnalysisResult(tuple):
         hard_gate_failures=(),
         weighted_score_pct=0,
         contract_version=BI_STOCK_CONTRACT_VERSION,
+        consolidation_days=0,
     ):
         obj = super().__new__(cls, values)
         obj.indicator_checks = tuple(dict(item) for item in indicator_checks)
@@ -911,6 +916,7 @@ class BreakoutAnalysisResult(tuple):
         obj.hard_gate_failures = tuple(str(item) for item in hard_gate_failures)
         obj.weighted_score_pct = int(weighted_score_pct)
         obj.contract_version = str(contract_version)
+        obj.consolidation_days = int(consolidation_days)
         return obj
 
 
@@ -951,6 +957,7 @@ def _breakout_analysis_result(
     indicator_checks,
     indicator_contract_ok,
     hard_gate_failures=(),
+    consolidation_days=0,
 ):
     checks = tuple(indicator_checks)
     green_count = sum(1 for item in checks if item.get("passed") is True)
@@ -968,6 +975,7 @@ def _breakout_analysis_result(
         indicator_contract_ok=indicator_contract_ok,
         hard_gate_failures=hard_gate_failures,
         weighted_score_pct=weighted_score_pct,
+        consolidation_days=consolidation_days,
     )
 
 
@@ -1049,7 +1057,17 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     for b in bars:
         if b["close"] > 0:
             daily_ranges.append((b["high"] - b["low"]) / b["close"] * 100)
-    s1_available = len(daily_ranges) >= 15
+    # True Range includes gaps; narrow intraday candles after large overnight
+    # jumps are not an ATR contraction. Normalize by the previous close so
+    # that changing price levels do not manufacture contraction either.
+    true_ranges_pct = []
+    for previous, bar in zip(bars, bars[1:]):
+        previous_close = previous["close"]
+        if previous_close > 0:
+            tr = max(bar["high"] - bar["low"], abs(bar["high"] - previous_close),
+                     abs(bar["low"] - previous_close))
+            true_ranges_pct.append(tr / previous_close * 100)
+    s1_available = len(true_ranges_pct) >= 20
 
     avg_volume = _covered_volume_baseline(volumes)
     close = closes[-1] if closes else 0
@@ -1061,10 +1079,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # (IHS wird über price_flat + kein Score trotzdem nicht Grade A)
     sm_eligible = avg_volume >= 100_000 or crypto_mode
 
-    if len(daily_ranges) >= 15 and not is_penny_illiquid:
+    if s1_available and not is_penny_illiquid:
         # Vergleiche LETZTE 5 Tage vs VORHERIGE 15 Tage (sensitiver als Halbierung)
-        recent_atr = sum(daily_ranges[-5:]) / 5
-        prior_atr = sum(daily_ranges[-20:-5]) / max(1, len(daily_ranges[-20:-5]))
+        recent_atr = sum(true_ranges_pct[-5:]) / 5
+        prior_atr = sum(true_ranges_pct[-20:-5]) / 15
 
         if prior_atr > 0:
             atr_ratio = recent_atr / prior_atr
@@ -1083,7 +1101,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         else:
             details.append(" ATR-Squeeze: Keine Prior-ATR Daten")
     else:
-        details.append(" ATR-Squeeze: Nicht genug Daten (min 15 Tage)")
+        details.append(" ATR-Squeeze: Nicht genug Daten (min 21 Tage) oder illiquide")
 
     indicator_checks.append(_bi_indicator_check(
         1,
@@ -1353,19 +1371,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
     # Der aktuelle Bar ist bereits in max/min enthalten und muss deshalb als
     # erster Range-Tag zaehlen. Der alte Startwert 0 war um einen Tag zu klein.
-    range_days = 1
-    max_range_high = highs[-1]
-    min_range_low = lows[-1]
-
-    for i in range(n - 2, -1, -1):
-        max_range_high = max(max_range_high, highs[i])
-        min_range_low = min(min_range_low, lows[i])
-        total_range = ((max_range_high - min_range_low) / current_price) * 100 if current_price > 0 else 99
-
-        if total_range < 6:  # Range < 6% gilt als echte Konsolidierung
-            range_days += 1
-        else:
-            break
+    range_days = bi_consolidation_days(bars)
 
     if not is_penny_illiquid:
         if range_days >= 15:
@@ -2156,59 +2162,56 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     s18_available = n >= 20
     s18_passed = False
     if n >= 20:
-        # Finde Swing High/Low der letzten 30 Bars fuer Fib
-        lookback = min(30, n)
-        swing_high = max(highs[-lookback:])
-        swing_low = min(lows[-lookback:])
-        fib_range = swing_high - swing_low
-
-        if fib_range > 0 and current_price > 0:
-            # Alle Fib-Level berechnen
-            fib_levels = {
-                "23.6%": swing_high - fib_range * 0.236,
-                "38.2%": swing_high - fib_range * 0.382,
-                "50.0%": swing_high - fib_range * 0.500,
-                "61.8%": swing_high - fib_range * 0.618,
-                "78.6%": swing_high - fib_range * 0.786,
-            }
-            tolerance = fib_range * 0.03  # 3% der Range als Toleranz
-
-            # Direktional filtern: Long = obere Fibs (23.6%, 38.2%), Short = untere Fibs (61.8%, 78.6%)
-            if direction == "long":
-                # Für Long-Breakout: Preis sollte nahe 23.6% oder 38.2% sein (obere Range)
-                bullish_fibs = {"23.6%": fib_levels["23.6%"], "38.2%": fib_levels["38.2%"]}
-                near_fibs = [name for name, level in bullish_fibs.items() if abs(current_price - level) < tolerance]
-                # Auch 50% akzeptieren (mittlere Stärke)
-                if not near_fibs and abs(current_price - fib_levels["50.0%"]) < tolerance:
-                    near_fibs = ["50.0%"]
-            else:
-                # Für Short-Breakdown: Preis sollte nahe 61.8% oder 78.6% sein (untere Range)
-                bearish_fibs = {"61.8%": fib_levels["61.8%"], "78.6%": fib_levels["78.6%"]}
-                near_fibs = [name for name, level in bearish_fibs.items() if abs(current_price - level) < tolerance]
-                if not near_fibs and abs(current_price - fib_levels["50.0%"]) < tolerance:
-                    near_fibs = ["50.0%"]
-
-            if near_fibs:
-                s18_passed = True
-                score += 10
-                details.append(f" Fib-Confluence: Preis nahe {', '.join(near_fibs)} ({'bullisch' if direction == 'long' else 'baerisch'})")
-            else:
-                # Prüfe ob Range-Boundary nahe Fib
-                range_h = max(highs[-min(15, n):])
-                range_l = min(lows[-min(15, n):])
-                boundary = range_h if direction == "long" else range_l
-                near_boundary_fibs = [name for name, level in fib_levels.items() if abs(boundary - level) < tolerance]
-                if near_boundary_fibs:
-                    s18_passed = True
-                    score += 5
-                    details.append(f" Range-Boundary nahe Fib {', '.join(near_boundary_fibs)}")
-                else:
-                    details.append(f" Kein relevantes Fib-Level in der Naehe")
+        # The analyzer's contract is an ordered sequence of completed bars.
+        # This ordinal clock is used ONLY for pivot chronology in the shared
+        # pure Fibonacci core; it is not exchange timestamp/freshness evidence
+        # and is never exposed as such in a signal payload.
+        fib_bars = [
+            {**bar, "timestamp": datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+             "close_time": datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(days=i)}
+            for i, bar in enumerate(bars[-30:])
+        ]
+        cutoff = fib_bars[-1]["close_time"]
+        leg = select_confirmed_swing_leg(
+            fib_bars, as_of=cutoff, direction=direction, timeframe="1D",
+            timestamp_mode="close",
+        )
+        if leg is not None:
+            # A later breach of the leg origin invalidates the projection.
+            # An old upward leg cannot remain bullish through a lower low.
+            tail = fib_bars[leg.end_pivot_index + 1:]
+            origin_breached = (
+                any(bar["low"] < leg.start_price for bar in tail)
+                if direction == "long"
+                else any(bar["high"] > leg.start_price for bar in tail)
+            )
+            if origin_breached:
+                leg = None
+        if leg is None:
+            details.append(" Fib: Kein intakter bestaetigter Swing in Signalrichtung")
         else:
-            details.append(f" Fib: Range zu klein")
+            levels = project_fibonacci(leg, retracements=(0.236, 0.382, 0.5, 0.618, 0.786), extensions=())
+            tolerance = leg.magnitude * 0.03
+            near = [
+                item for item in levels
+                if float(item.provenance["ratio"]) in (0.236, 0.382, 0.5)
+                and abs(current_price - item.midpoint) < tolerance
+            ]
+            boundary = max(highs[-15:]) if direction == "long" else min(lows[-15:])
+            boundary_near = [item for item in levels if abs(boundary - item.midpoint) < tolerance]
+            if near or boundary_near:
+                s18_passed = True
+                score += 10 if near else 5
+                matched = near or boundary_near
+                labels = ", ".join(f"{float(item.provenance['ratio']) * 100:.1f}%" for item in matched)
+                details.append(
+                    f" Fib-Confluence: {'Preis' if near else 'Range-Boundary'} nahe {labels}; "
+                    f"bestaetigter {leg.direction}-Swing (Projektion, keine eigenstaendige Barriere)"
+                )
+            else:
+                details.append(" Kein relevantes Fib-Level am bestaetigten Swing")
     else:
         details.append(" Fib: Nicht genug Daten (min 20 Tage)")
-
     indicator_checks.append(_bi_indicator_check(
         18,
         available=s18_available,
@@ -2654,6 +2657,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
         indicator_checks=indicator_checks,
         indicator_contract_ok=indicator_contract_ok,
         hard_gate_failures=hard_gate_failures,
+        consolidation_days=range_days,
     )
 
 
@@ -3144,17 +3148,9 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
         if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return {"error": "No data", "patterns": []}
         
-        # Konvertiere zu unserem Format
-        prices = []
-        for bar in data["results"]:
-            prices.append({
-                "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d %H:%M" if span == "hour" else "%Y-%m-%d"),
-                "open": bar["o"],
-                "high": bar["h"],
-                "low": bar["l"],
-                "close": bar["c"],
-                "volume": bar["v"]
-            })
+        # Forming bars must not confirm a pivot or move a trade's invalidation.
+        prices = completed_polygon_bars(data["results"], span=span,
+                                        multiplier=multiplier, as_of=datetime.now(timezone.utc))
         
         if len(prices) < 20:
             return {"error": "Not enough data", "patterns": []}
@@ -3236,7 +3232,8 @@ def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
         if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
             return None
         
-        raw_bars = data["results"]
+        raw_bars = completed_polygon_bars(data["results"], span=span,
+                                          multiplier=multiplier, as_of=datetime.now(timezone.utc))
         if len(raw_bars) < 60:
             return None
         
@@ -4164,9 +4161,11 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
     swing_highs = []
     swing_lows = []
     for i in range(sw, n - sw):
-        if highs[i] >= max(highs[i-sw:i]) and highs[i] >= max(highs[i+1:i+sw+1]):
+        # One contiguous plateau is one test, not many independent touches.
+        # The strict left comparison chooses its first qualifying pivot.
+        if highs[i] > max(highs[i-sw:i]) and highs[i] >= max(highs[i+1:i+sw+1]):
             swing_highs.append({"price": highs[i], "idx": i, "time": ohlcv_data[i].get("time")})
-        if lows[i] <= min(lows[i-sw:i]) and lows[i] <= min(lows[i+1:i+sw+1]):
+        if lows[i] < min(lows[i-sw:i]) and lows[i] <= min(lows[i+1:i+sw+1]):
             swing_lows.append({"price": lows[i], "idx": i, "time": ohlcv_data[i].get("time")})
 
     # ── Equal Highs → Buyside Liquidity ──
@@ -4183,6 +4182,14 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
         # Fix 5: Nur Equal Highs (2+ touches) = echte Liquidität
         if len(cluster) >= 2:
             max_p = max(c["price"] for c in cluster)
+            last_sweep = max(
+                (index for index in range(min(c["idx"] for c in cluster) + 1, n)
+                 if highs[index] > max_p + tol), default=-1,
+            )
+            cluster = [touch for touch in cluster if touch["idx"] > last_sweep]
+            if len(cluster) < 2:
+                continue
+            max_p = max(c["price"] for c in cluster)
             if max_p > current_price:
                 dist_pct = (max_p - current_price) / current_price * 100
                 if dist_pct < 10:  # Max 10% Entfernung
@@ -4191,6 +4198,7 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
                         "touches": len(cluster), "strength": min(5, len(cluster)),
                         "dist_pct": round(dist_pct, 2),
                         "label": f"BSL ${max_p:.2f} ({len(cluster)}x)",
+                        "state": "active", "last_touch_index": max(c["idx"] for c in cluster),
                     })
 
     # ── Equal Lows → Sellside Liquidity ──
@@ -4206,6 +4214,14 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
         
         if len(cluster) >= 2:
             min_p = min(c["price"] for c in cluster)
+            last_sweep = max(
+                (index for index in range(min(c["idx"] for c in cluster) + 1, n)
+                 if lows[index] < min_p - tol), default=-1,
+            )
+            cluster = [touch for touch in cluster if touch["idx"] > last_sweep]
+            if len(cluster) < 2:
+                continue
+            min_p = min(c["price"] for c in cluster)
             if min_p < current_price:
                 dist_pct = (current_price - min_p) / current_price * 100
                 if dist_pct < 10:
@@ -4214,6 +4230,7 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
                         "touches": len(cluster), "strength": min(5, len(cluster)),
                         "dist_pct": round(dist_pct, 2),
                         "label": f"SSL ${min_p:.2f} ({len(cluster)}x)",
+                        "state": "active", "last_touch_index": max(c["idx"] for c in cluster),
                     })
 
     buyside.sort(key=lambda x: x["dist_pct"])

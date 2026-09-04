@@ -4,6 +4,7 @@ Pre-Market Module — PM Evaluation, Session Bars, SPY Tracking (V70.0)
 import os
 import json
 import time
+import math
 import datetime as dt
 from datetime import datetime, timedelta
 try:
@@ -17,6 +18,31 @@ from modules.strategies import classify_pm_setup
 
 # Constants
 PM_TRACKER_FILE = "/tmp/alpha_station_pm_tracker.json"
+
+
+def _completed_regular_session_bars(bars, start_ts, end_ts, *, now_ts=None):
+    """Keep completed 5m bars inside [session open, session close)."""
+    cutoff = min(float(end_ts), float(time.time() if now_ts is None else now_ts))
+    selected = {}
+    conflicts = set()
+    for bar in bars or []:
+        try:
+            timestamp = float(bar.get("t", 0)) / 1000.0
+            o, h, l, c = (float(bar[key]) for key in ("o", "h", "l", "c"))
+            if not all(math.isfinite(x) and x > 0 for x in (timestamp, o, h, l, c)):
+                continue
+            if not (start_ts <= timestamp < end_ts) or timestamp + 300 > cutoff:
+                continue
+            if h < max(o, l, c) or l > min(o, h, c) or timestamp in conflicts:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        if timestamp in selected and selected[timestamp] != bar:
+            selected.pop(timestamp)
+            conflicts.add(timestamp)
+        else:
+            selected[timestamp] = bar
+    return [selected[stamp] for stamp in sorted(selected)]
 
 
 def _simulate_pm_setup(session_bars, setup, direction, fee_pct=0.25):
@@ -332,7 +358,7 @@ def evaluate_pm_setups(poly_key, date_str, setups_data):
             rs_end_et = et_tz.localize(trade_date.replace(hour=16, minute=0))
             rs_end_ts = rs_end_et.astimezone(pytz.utc).timestamp()
             
-            session_bars = [b for b in bars if rs_start_ts <= b.get("t", 0) / 1000 <= rs_end_ts]
+            session_bars = _completed_regular_session_bars(bars, rs_start_ts, rs_end_ts)
             
             if not session_bars:
                 continue

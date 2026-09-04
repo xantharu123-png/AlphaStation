@@ -25,7 +25,7 @@ def _bi_contract_fields(green=17):
         "BI_IndicatorsTotal": 20,
         "BI_IndicatorsRequired": 17,
         "BI_IndicatorContractOK": True,
-        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+        "BI_IndicatorContractVersion": api._BI_INDICATOR_CONTRACT_VERSION,
     }
 
 
@@ -93,7 +93,7 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     audit = api._build_alert_audit_for_cache("stock_strategy", str(cache_file))
 
     assert audit["rows_checked"] == 4
-    assert audit["alertable_now_count"] == 1
+    assert audit["alertable_now_count"] == 1, audit
     assert audit["grade_counts"]["A"] == 2
     assert audit["grade_counts"]["B"] == 1
     assert audit["grade_counts"]["S"] == 1
@@ -325,7 +325,10 @@ def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
 
     audit = api._build_alert_audit_for_cache("biotech", str(cache_file))
 
-    assert audit["alertable_now_count"] == 1
+    # The real invalidation now remains behind the support zone. This fixture
+    # has a valid plan but insufficient mail R/R; enrichment must not force mail.
+    assert audit["alertable_now_count"] == 0
+    assert audit["suppression_counts"]["trade_rr_below_threshold"] == 1
     row = json.loads(cache_file.read_text())["results"][0]
     assert row["Signal_Direction"] == "LONG"
     assert row["Entry"] > row["StopLoss"]

@@ -28,7 +28,7 @@ def _bi_row(ticker="VALID", *, green=17, available=20, contract_ok=True):
         "BI_IndicatorsTotal": 20,
         "BI_IndicatorsRequired": 17,
         "BI_IndicatorContractOK": contract_ok,
-        "BI_IndicatorContractVersion": "stock-bi-20-v1",
+        "BI_IndicatorContractVersion": api._BI_INDICATOR_CONTRACT_VERSION,
     }
 
 
@@ -64,6 +64,7 @@ def test_bi_row_contract_accepts_exact_complete_17_of_20():
         lambda row: row.update(BI_IndicatorsRequired=16),
         lambda row: row.update(BI_IndicatorContractOK=False),
         lambda row: row.update(BI_IndicatorContractVersion="legacy-score-only"),
+        lambda row: row.update(BI_IndicatorContractVersion="stock-bi-20-v1"),
         lambda row: row["BI_IndicatorChecks"].pop(),
         lambda row: row["BI_IndicatorChecks"][0].update(passed=False),
         lambda row: row["BI_IndicatorChecks"][1].update(id=1),
@@ -120,12 +121,20 @@ def test_chart_cache_lookup_never_resurrects_legacy_bi_row(monkeypatch):
     monkeypatch.setattr(api, "load_cache_file", lambda *_a, **_k: (rows, None))
 
     legacy, legacy_direction = api._find_bi_signal_cache_row("LEGACY")
-    valid, valid_direction = api._find_bi_signal_cache_row("GOOD")
+    valid, valid_direction = api._find_bi_signal_cache_row("GOOD", direction="LONG")
 
     assert legacy is None and legacy_direction is None
     assert valid["ticker"] == "GOOD"
     assert valid["bi_indicators_green"] == 17
     assert valid_direction == "LONG"
+
+
+def test_chart_cache_lookup_requires_direction_for_ambiguous_ticker(monkeypatch):
+    monkeypatch.setattr(api, "load_cache_file", lambda *_a, **_k: ([_bi_row("BOTH")], None))
+    assert api._find_bi_signal_cache_row("BOTH") == (None, None)
+    row, direction = api._find_bi_signal_cache_row("BOTH", direction="SHORT")
+    assert row["ticker"] == "BOTH"
+    assert direction == "SHORT"
 
 
 def test_check_and_alert_rejects_invalid_bi_cache_before_any_mail_side_effect(

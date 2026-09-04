@@ -761,12 +761,13 @@ def build_level_zones(
     atr_by_timeframe: Optional[Mapping[str, Any]] = None,
     atr_zone_fraction: float = 0.10,
 ) -> Tuple[LevelZone, ...]:
-    """Cluster causal evidence into adaptive zones without crossing the price.
+    """Cluster causal evidence into immutable adaptive price zones.
 
     ``spread`` is an absolute price distance.  The adaptive half-width is the
     maximum of the supplied evidence width, two ticks, 0.75 spreads and the
-    configured ATR fraction. Evidence below and above ``reference_price`` is
-    clustered independently, preventing support/resistance cross-merges.
+    configured ATR fraction. Membership and bounds depend only on evidence and
+    those market-noise inputs, never on the current quote. The quote classifies
+    the finished zone; it cannot split, clip, or move its invalidation boundary.
     """
     reference = _safe_float(reference_price)
     if reference is None or reference <= 0:
@@ -778,11 +779,7 @@ def build_level_zones(
         _normalized_timeframe(key): max(0.0, _safe_float(value, 0.0) or 0.0)
         for key, value in (atr_by_timeframe or {}).items()
     }
-    epsilon = max(math.ulp(reference) * 16, tick * 1e-6)
-
-    expanded: Dict[str, List[Tuple[LevelEvidence, float, float]]] = {
-        "support": [], "resistance": [], "overlap": []
-    }
+    expanded: List[Tuple[LevelEvidence, float, float]] = []
     for item in sorted(tuple(evidence), key=_evidence_sort_key):
         if not isinstance(item, LevelEvidence):
             raise TypeError("build_level_zones accepts LevelEvidence objects")
@@ -797,20 +794,12 @@ def build_level_zones(
         )
         lower = max(math.ulp(center), center - half_width)
         upper = center + half_width
-        if item.upper < reference:
-            side = "support"
-            upper = min(upper, reference - epsilon)
-            lower = min(lower, upper)
-        elif item.lower > reference:
-            side = "resistance"
-            lower = max(lower, reference + epsilon)
-            upper = max(upper, lower)
-        else:
-            side = "overlap"
-        expanded[side].append((item, lower, upper))
+        expanded.append((item, lower, upper))
 
     zones: List[LevelZone] = []
-    for side in ("support", "overlap", "resistance"):
+    # One physical zone can contain evidence that previously acted as support
+    # and resistance. Splitting it at the quote would manufacture room to trade.
+    for group in (expanded,):
         members: List[Tuple[LevelEvidence, float, float]] = []
         cluster_lower = cluster_upper = 0.0
 
@@ -877,12 +866,8 @@ def build_level_zones(
                 flags.append("projection_only")
             if len(key_strengths) == 1:
                 flags.append("single_independent_source")
-            # Zone identity belongs to the causal evidence, not to the current
-            # quote. ``side`` and the clipped adaptive bounds can change as the
-            # market crosses a level; including either would make a persisted
-            # break/reclaim gate lose the zone it refers to at exactly that
-            # transition. The evidence tuple remains deterministic while the
-            # presentation/classification fields are free to move with price.
+            # Zone identity and bounds belong to the causal evidence. Only its
+            # classification relative to the quote may change without new data.
             identity = "|".join(
                 f"{item.independence_key}:{item.source_family}:{item.timeframe}:"
                 f"{item.source_name}:{format(item.lower, '.12g')}:"
@@ -891,6 +876,11 @@ def build_level_zones(
                 for item in items
             )
             zone_id = "lz_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+            side = (
+                "support" if cluster_upper < reference
+                else "resistance" if cluster_lower > reference
+                else "overlap"
+            )
             zones.append(LevelZone(
                 zone_id=zone_id,
                 lower=cluster_lower,
@@ -910,7 +900,7 @@ def build_level_zones(
             members = []
             cluster_lower = cluster_upper = 0.0
 
-        for row in sorted(expanded[side], key=lambda value: (
+        for row in sorted(group, key=lambda value: (
             value[1], value[2], _evidence_sort_key(value[0])
         )):
             if not members:

@@ -610,9 +610,12 @@ def test_trade_geometry_uses_signed_blended_rr_for_both_directions():
 
 def test_bi_backtest_uses_signed_live_trade_geometry():
     from modules import backtests
+    from modules import bi_trade_plan
 
     source = inspect.getsource(backtests.run_bi_v2_backtest)
-    assert "geometry = trade_geometry(" in source
+    assert "plan = build_bi_trade_plan(" in source
+    assert '"rr_planned": plan["geometry"]["rr"]' in source
+    assert "geometry = trade_geometry(" in inspect.getsource(bi_trade_plan.build_bi_trade_plan)
     assert "risk = abs(est_entry - stop_price)" not in source
     assert "reward_blended = 0.5 * abs" not in source
 

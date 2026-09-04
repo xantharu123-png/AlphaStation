@@ -982,6 +982,27 @@ def _candidate_prices(vrvp: Dict[str, Any], side: str, target: bool) -> List[Tup
     return candidates
 
 
+def _stop_zone_candidates(vrvp: Dict[str, Any], side: str, entry: float) -> List[Dict[str, Any]]:
+    """Retain each causal zone and its outer invalidation edge, not its POC."""
+    candidates = []
+    key = "supports" if side == "LONG" else "resistances"
+    for level in vrvp.get(key) or []:
+        if not _is_stop_anchor(level, side):
+            continue
+        lower = _safe_float(level.get("zone_low", level.get("lower")))
+        upper = _safe_float(level.get("zone_high", level.get("upper")))
+        # A zone overlapping the entry has not established support/resistance
+        # on the invalidation side. It must not tighten an existing stop.
+        if side == "LONG" and upper is not None and upper < entry:
+            boundary = lower
+        elif side == "SHORT" and lower is not None and lower > entry:
+            boundary = upper
+        else:
+            continue
+        candidates.append({**level, "zone_low": lower, "zone_high": upper, "invalidation_boundary": boundary})
+    return sorted(candidates, key=lambda item: item["invalidation_boundary"], reverse=side == "LONG")
+
+
 def _target_level_candidate(
     level: Dict[str, Any],
     vrvp: Dict[str, Any],
@@ -1512,6 +1533,31 @@ def _persist_target_provenance(
         value = candidate.get(key)
         if value not in (None, ""):
             setup[f"{prefix}_{suffix}"] = value
+    setup[f"{prefix}_causal_structure_validated"] = candidate.get("causal_structure_validated") is True
+
+
+def trade_level_quality(setup: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Describe evidence for each price without upgrading a projection label."""
+    result = {}
+    for prefix in ("stop", "tp1", "tp2"):
+        source = str(setup.get(f"{prefix}_source") or "")
+        projected = setup.get(f"{prefix}_is_projection") is True or any(
+            word in source.lower() for word in ("projection", "fallback", "estimated")
+        )
+        confirmed = bool(
+            setup.get(f"{prefix}_causal_structure_validated") is True
+            and setup.get(f"{prefix}_zone_id")
+            and setup.get(f"{prefix}_timeframe")
+            and setup.get(f"{prefix}_confirmed_at")
+        )
+        result[prefix] = {
+            "quality": "projection" if projected else "confirmed_zone" if confirmed else "unverified",
+            "source": source or None,
+            "timeframe": setup.get(f"{prefix}_timeframe"),
+            "zone_id": setup.get(f"{prefix}_zone_id"),
+            "confirmed_at": setup.get(f"{prefix}_confirmed_at"),
+        }
+    return result
 
 
 def apply_vrvp_to_trade_setup(
@@ -1554,30 +1600,21 @@ def apply_vrvp_to_trade_setup(
     used: List[str] = []
     # Stop only moves to a nearby VRVP invalidation zone when it does not widen
     # risk too aggressively. Otherwise we keep the existing structure stop.
-    stop_candidates = _candidate_prices(vrvp, side, target=False)
+    stop_candidates = _stop_zone_candidates(vrvp, side, entry)
     if stop_candidates:
-        if side == "LONG":
-            valid_stops = [(p, s) for p, s in stop_candidates if p < entry]
-            valid_stops.sort(key=lambda x: x[0], reverse=True)
-            for support, source in valid_stops:
-                proposed = support - max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
-                new_risk = entry - proposed
-                if new_risk >= risk * 0.80 and new_risk <= risk * profile["max_stop_mult"]:
-                    stop = proposed
-                    enriched["stop_source"] = f"{source} invalidation"
-                    used.append("stop")
-                    break
-        else:
-            valid_stops = [(p, s) for p, s in stop_candidates if p > entry]
-            valid_stops.sort(key=lambda x: x[0])
-            for resistance, source in valid_stops:
-                proposed = resistance + max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
-                new_risk = proposed - entry
-                if new_risk >= risk * 0.80 and new_risk <= risk * profile["max_stop_mult"]:
-                    stop = proposed
-                    enriched["stop_source"] = f"{source} invalidation"
-                    used.append("stop")
-                    break
+        for candidate in stop_candidates:
+            boundary = float(candidate["invalidation_boundary"])
+            buffer = max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
+            proposed = boundary - buffer if side == "LONG" else boundary + buffer
+            new_risk = entry - proposed if side == "LONG" else proposed - entry
+            if proposed > 0 and risk * 0.80 <= new_risk <= risk * profile["max_stop_mult"]:
+                stop = proposed
+                enriched["stop_source"] = f"{_level_source(candidate)} invalidation"
+                enriched["stop_is_projection"] = False
+                enriched["stop_invalidation_boundary"] = boundary
+                _persist_target_provenance(enriched, "stop", candidate)
+                used.append("stop")
+                break
         risk = (entry - stop) if side == "LONG" else (stop - entry)
 
     # Recalculate all reward floors after a possible structural stop change.
@@ -1913,10 +1950,18 @@ def apply_vrvp_to_trade_setup(
         enriched["tp2_is_projection"] = True
         enriched["tp2_structure"] = "risk_projection_fallback"
 
+    # Validate the actual prices delivered to consumers, not higher precision
+    # values that can round to a zero-risk or duplicate-target plan afterwards.
+    entry, stop, tp1, tp2 = (round_trade_price(value) for value in (entry, stop, tp1, tp2))
     geometry = trade_geometry(entry, stop, tp1, tp2, side)
     if not geometry["valid"]:
         enriched["vrvp_applied"] = False
         enriched["vrvp_geometry_errors"] = list(geometry.get("errors") or [])
+        enriched["structure_status"] = "REJECT"
+        enriched["structure_reason"] = "rounded_trade_geometry_invalid"
+        enriched["trade_action"] = "NO_TRADE"
+        enriched["entry_status"] = "NO_TRADE"
+        enriched["signal_quality"] = "blocked_structure"
         return enriched
 
     _set_level_aliases(enriched, "entry", entry)
@@ -1928,6 +1973,23 @@ def apply_vrvp_to_trade_setup(
     rr_tp1 = float(geometry["rr_tp1"])
     rr_tp2 = float(geometry["rr_tp2"])
     rr = float(geometry["rr"])
+
+    # Rounding can increase risk just across the release threshold. Preserve
+    # every existing gate and tighten it if the delivered prices have less room.
+    final_barrier = enriched.get("nearest_barrier")
+    if isinstance(final_barrier, dict) and str(enriched.get("structure_status") or "").upper() != "REJECT":
+        final_boundary = _barrier_zone_geometry(final_barrier, side, entry)
+        if final_boundary is not None:
+            distance = float(final_boundary["distance"])
+            final_floor = max(risk * 1.5, entry * profile["min_tp_pct"], atr_value * 0.70)
+            final_barrier = {**final_barrier, "distance_r": round(distance / risk, 2),
+                             "distance_pct": round(distance / entry * 100, 2),
+                             "minimum_reward": round_trade_price(final_floor),
+                             "minimum_rr": round(final_floor / risk, 2)}
+            enriched["nearest_barrier"] = final_barrier
+            if distance + max(math.ulp(entry) * 16, entry * 1e-12) < final_floor:
+                final_barrier["below_minimum_reward"] = True
+                _attach_barrier_gate(enriched, final_barrier, side)
 
     enriched["risk"] = round_trade_price(risk)
     enriched["rr"] = round(rr, 2)
@@ -1946,8 +2008,12 @@ def apply_vrvp_to_trade_setup(
     old_model = str(enriched.get("level_model") or "structure_first_v2")
     if used and "vrvp" not in old_model.lower():
         enriched["level_model"] = f"{old_model}+vrvp"
-    if selected_tp1_family == "vrvp" or selected_tp2_family == "vrvp":
-        enriched["target_quality"] = "STRUCTURAL_VRVP"
+    if str(enriched.get("structure_status") or "").upper() != "REJECT":
+        if selected_tp1 and enriched.get("tp2_is_projection") is True:
+            enriched["target_quality"] = "STRUCTURAL_TP1_PROJECTION_TP2"
+        elif selected_tp1_family == "vrvp" or selected_tp2_family == "vrvp":
+            enriched["target_quality"] = "STRUCTURAL_VRVP"
+    enriched["level_quality"] = trade_level_quality(enriched)
     if used:
         notes = list(enriched.get("notes") or [])
         notes.append(f"VRVP {vrvp.get('timeframe')} als Support/Resistance-Konfluenz genutzt")

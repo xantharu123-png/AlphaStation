@@ -719,7 +719,10 @@ def test_stop_and_first_plus_one_r_touch_is_be_path_ambiguous(
     signal = _signal(ticker)
     assert signal["status"] == "STOP_HIT"
     assert signal["outcome_detail"] == expected_detail
-    assert signal["max_favorable_r"] == pytest.approx(1.0)
+    # The +1R high/low may have followed the stop; only the open is a proven
+    # pre-exit favorable bound. The path ambiguity remains explicitly recorded.
+    assert signal["max_favorable_r"] == pytest.approx(0.0)
+    assert signal["path_extrema_evidence_mode"] == "terminal_intrabar_bounds"
     assert signal["be_trigger_at"] is None
     assert signal["be_activated_at"] is None
     assert tracker._managed_be_was_triggered(signal) is False
@@ -2699,7 +2702,10 @@ def test_completed_interval_starting_after_be_delivery_is_causally_resolved(
         "completed_interval_open_or_entry_level"
     )
     assert tracker._breakeven_after_mfe_resolution(signal) == (0.0, False)
-    assert tracker._managed_5050_be_resolution(signal) == (0.5, False)
+    # TP1 and BE are both inside this interval; their order is not known even
+    # though the interval is completely after delivery of the BE instruction.
+    assert signal["be_exit_tp1_order"] == "unknown"
+    assert tracker._managed_5050_be_resolution(signal) == (None, True)
 
 
 def test_evaluate_crypto_spot_stop_tp_and_expiry(tracker):

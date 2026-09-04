@@ -24,6 +24,7 @@ if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 import modules.scanners as scanners
+import modules.bi_trade_plan as bi_plan
 from modules.trade_levels import trade_geometry as real_trade_geometry
 
 
@@ -63,7 +64,11 @@ class _ContractResult(tuple):
         obj.indicator_contract_ok = True
         obj.hard_gate_failures = []
         obj.weighted_score_pct = round(float(values[1]) / max(1.0, float(values[2])) * 100, 1)
-        obj.contract_version = "stock-bi-20-v1"
+        obj.contract_version = scanners.BI_STOCK_CONTRACT_VERSION
+        # Explicit analysis metadata replaces production parsing human text.
+        import re
+        match = re.search(r"Konsolidierung:\s*(\d+)\s*Tage", " ".join(str(x) for x in values[3]))
+        obj.consolidation_days = int(match.group(1)) if match else 0
         return obj
 
 
@@ -133,8 +138,8 @@ def _patch_scan_io(monkeypatch, bars_by_ticker, analyze_result=None, analyze_log
     monkeypatch.setattr(scanners, "calculate_short_bonus_signals",
                         lambda *a, **k: {"bonus_score": 0, "details": []})
     # VRVP fuer deterministische Level-Tests neutralisieren
-    monkeypatch.setattr(scanners, "build_vrvp_structure", lambda *a, **k: None)
-    monkeypatch.setattr(scanners, "apply_vrvp_to_trade_setup", lambda setup, vrvp, **k: setup)
+    monkeypatch.setattr(bi_plan, "build_vrvp_structure", lambda *a, **k: None)
+    monkeypatch.setattr(bi_plan, "apply_vrvp_to_trade_setup", lambda setup, vrvp, **k: setup)
 
     if analyze_result is not None:
         def fake_analyze(bars, direction="long"):
@@ -284,7 +289,7 @@ def test_h2_short_tp_formula_guarantees_geometry(monkeypatch):
         monkeypatch, {"TEST": bars},
         analyze_result=(True, 70, 188, [" Solide Konsolidierung: 15 Tage"], "high", "B", 2, 2),
     )
-    monkeypatch.setattr(scanners, "trade_geometry", spy_geometry)
+    monkeypatch.setattr(bi_plan, "trade_geometry", spy_geometry)
     scanners._bi_background_scan("k", direction="short", candidates=["TEST"])
 
     assert geo_calls, "Level muessen bewertet worden sein"
@@ -362,7 +367,7 @@ def test_h2_geometry_mini_fuzz_500_both_directions(monkeypatch):
             geo_log.append(res)
             return res
 
-        monkeypatch.setattr(scanners, "trade_geometry", spy_geometry)
+        monkeypatch.setattr(bi_plan, "trade_geometry", spy_geometry)
 
         import io, contextlib
         buf = io.StringIO()
@@ -487,6 +492,7 @@ def test_m1_analysis_excludes_partial_bar(monkeypatch):
 def test_m1_after_close_bar_counts(monkeypatch):
     """Nach US-Close ist der heutige Bar komplett und MUSS in die Analyse."""
     base = _flat_bars(n=50, seed=5)
+    base[-1]["volume"] = 1_000_000  # prior sessions are 250k; true RVOL is 4x
     end_day = _real_datetime(2026, 6, 10).date()
     _attach_ts(base, end_day=end_day)
 
@@ -494,10 +500,13 @@ def test_m1_after_close_bar_counts(monkeypatch):
     monkeypatch.setattr(scanners, "datetime", _FakeDatetime)
 
     log = []
-    _patch_scan_io(monkeypatch, {"TEST": base},
+    saved = _patch_scan_io(monkeypatch, {"TEST": base},
                    analyze_result=(True, 80, 188, ["ok"], "high", "B", 2, 2), analyze_log=log)
     scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
     assert log[0]["bars"][-1]["date"] == "2026-06-10", "Kompletter heutiger Bar muss drin bleiben"
+    assert saved["results"][0]["Volumen"] == 1_000_000
+    assert saved["results"][0]["AvgVolumen"] == 250_000
+    assert saved["results"][0]["RVOL"] == 4.0
 
 
 def test_stock_bi_requires_36_complete_bars_and_passes_up_to_50(monkeypatch):
@@ -566,7 +575,7 @@ def test_stock_bi_scanner_rejects_16_and_publishes_17_of_20(monkeypatch):
     assert row["BI_IndicatorsTotal"] == 20
     assert row["BI_IndicatorsRequired"] == 17
     assert row["BI_IndicatorContractOK"] is True
-    assert row["BI_IndicatorContractVersion"] == "stock-bi-20-v1"
+    assert row["BI_IndicatorContractVersion"] == scanners.BI_STOCK_CONTRACT_VERSION
     assert len(row["BI_IndicatorChecks"]) == 20
 
 

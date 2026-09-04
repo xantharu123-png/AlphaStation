@@ -94,7 +94,9 @@ def test_bi_and_biotech_backtests_use_canonical_wilder_atr():
     bi_source = inspect.getsource(backtests.run_bi_v2_backtest)
     biotech_source = inspect.getsource(backtests.run_biotech_backtest)
 
-    assert "calculate_wilder_atr(window, period=5)" in bi_source
+    from modules.bi_trade_plan import build_bi_trade_plan
+    assert "build_bi_trade_plan(" in bi_source
+    assert "calculate_wilder_atr(analysis_bars, period=5)" in inspect.getsource(build_bi_trade_plan)
     assert "calculate_wilder_atr(window, period=10)" in biotech_source
     assert "tr_values" not in bi_source
     assert "tr_values" not in biotech_source
@@ -179,7 +181,9 @@ def test_live_scanner_and_chart_paths_share_canonical_wilder_atr():
 
     assert "calculate_wilder_atr(analysis_window, period=5)" in autotrader_source
     assert "_tr_vals" not in autotrader_source
-    assert "calculate_wilder_atr(bars, period=5)" in bi_source
+    from modules.bi_trade_plan import build_bi_trade_plan
+    assert "build_bi_trade_plan(" in bi_source
+    assert "calculate_wilder_atr(analysis_bars, period=5)" in inspect.getsource(build_bi_trade_plan)
     assert "or (bars[-1]" not in bi_source
     assert "calculate_atr_14(ohlcv_data)" in wyckoff_source
     assert "atr_vals" not in wyckoff_source

@@ -670,6 +670,9 @@ def test_backtest_does_not_exit_at_untraded_average_target():
         {"date": "2026-01-01", "open": 99, "high": 101, "low": 98, "close": 100},
         {"date": "2026-01-02", "open": 100.2, "high": 106, "low": 99, "close": 105},
         {"date": "2026-01-03", "open": 106, "high": 111, "low": 104, "close": 110},
+        # Full third holding session: the signal day itself is not a holding
+        # bar. An unfinished alternative path must otherwise stay UNRESOLVED.
+        {"date": "2026-01-04", "open": 110, "high": 111, "low": 109, "close": 110},
     ]
 
     trade = simulate_trade(bars, 0, _two_target_strategy())
@@ -680,7 +683,11 @@ def test_backtest_does_not_exit_at_untraded_average_target():
     assert trade["tp1_hit"] is True
     assert trade["r_multiple"] == 0.45
     assert trade["exit_reason_upper"] == "TP1+EOD"
-    assert trade["r_multiple_upper"] == 1.45
+    # The runner's EOD close pays the same exit slippage as the TP1 leg.
+    entry = 100 * 1.0005
+    blended_exit = (entry * 1.05 + 110) * .9995 / 2
+    expected_r = ((blended_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple_upper"] == round(expected_r, 2) == 1.44
     assert trade["intrabar_ambiguous"] is True
 
 

@@ -58,15 +58,37 @@ class _FakeResp:
 
 
 def test_h4_turtle_row_has_native_targets_and_trade_setup(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 9, 4, 14, 0, tzinfo=timezone.utc)  # Friday 10:00 ET
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(api, "datetime", FixedDatetime)
     # 24 ruhige Basis-Bars + frischer Breakout-Bar ueber dem 20T-Hoch (10.0)
     flat = [{"h": 10.0, "l": 9.4, "c": 9.7, "o": 9.6, "v": 1_000_000} for _ in range(24)]
     breakout = {"h": 10.6, "l": 10.0, "c": 10.5, "o": 10.05, "v": 3_000_000}
     bars = flat + [breakout]
+    # Source timestamps are Polygon session openings at midnight New York.
+    # The last bar is yesterday's completed session, not a forming bar today.
+    eastern = ZoneInfo("America/New_York")
+    session = datetime(2026, 9, 3, tzinfo=eastern)
+    sessions = []
+    while len(sessions) < len(bars):
+        if session.weekday() < 5:
+            sessions.append(session)
+        session -= timedelta(days=1)
+    for bar, session in zip(bars, reversed(sessions)):
+        bar["t"] = int(session.timestamp() * 1000)
     snapshot = {
         "tickers": [{
             "ticker": "TUTL",
             "day": {"c": 10.5, "h": 10.6, "l": 10.0, "o": 10.05, "v": 3_000_000},
-            "prevDay": {"c": 10.3},
+            "prevDay": {"c": 10.5},
         }]
     }
 
@@ -107,6 +129,9 @@ def test_h4_turtle_row_has_native_targets_and_trade_setup(monkeypatch):
     assert setup["rr_tp2"] == pytest.approx(2.5)
     assert setup["stop"] < setup["entry"] < setup["tp1"] < setup["tp2"]
     assert row["Trade_Setup_Source"] == "turtle_r_multiple"
+    assert row["RVOL"] == pytest.approx(3.0)
+    assert row["RVOL_Basis"] == "completed_signal_session"
+    assert datetime.fromisoformat(row["signal_bar_closed_at"]) == datetime(2026, 9, 3, 20, tzinfo=timezone.utc)
 
     # Kernziel des Fixes: Trade-Level-Normalisierung sieht native Level,
     # kein estimated/NO_TRADE-Plan mehr.

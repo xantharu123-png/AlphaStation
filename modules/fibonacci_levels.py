@@ -56,7 +56,9 @@ def _round_level_price(price: float) -> float:
         return round(value, 3)
     if abs(value) >= 0.01:
         return round(value, 5)
-    return round(value, 8)
+    # Keep the same micro-price precision as executable trade levels. A fixed
+    # eight-decimal format turns valid sub-cent token projections into zero.
+    return float(f"{value:.6g}")
 
 
 def _ratio_label(ratio: float) -> str:

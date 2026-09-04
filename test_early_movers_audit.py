@@ -1484,5 +1484,9 @@ def test_multi_exchange_perps_prefers_binance_execution_liquidity(monkeypatch):
     assert fet["best_chart_exchange"] == "binance"
     assert fet["best_contract_symbol"] == "FETUSDT"
     assert fet["volume24_usdt"] == 32_000_000
-    assert fet["oi_usdt"] == 8_000_000
+    # Other-venue OI must not be divided by Binance's execution volume.
+    assert fet["oi_usdt"] == 0
+    assert fet["oi_ratio"] == 0
+    assert fet["oi_data_status"] == "missing"
+    assert fet["bitget"]["oi_usdt"] == 8_000_000
     assert "Binance" in fet["exchanges"]

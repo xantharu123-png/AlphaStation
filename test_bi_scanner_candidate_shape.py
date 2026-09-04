@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import modules.scanners as scanners
+import modules.bi_trade_plan as bi_plan
 
 
 class _ContractResult(tuple):
@@ -25,7 +26,7 @@ class _ContractResult(tuple):
         obj.indicator_contract_ok = True
         obj.hard_gate_failures = []
         obj.weighted_score_pct = 63.8
-        obj.contract_version = "stock-bi-20-v1"
+        obj.contract_version = scanners.BI_STOCK_CONTRACT_VERSION
         return obj
 
 
@@ -56,6 +57,10 @@ def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
             return {"results": _bars()}
 
     monkeypatch.setattr(scanners, "rate_limited_get", lambda *args, **kwargs: Response())
+    # This tests candidate shape, not whether these synthetic bars offer a
+    # confirmed structural target. Plan/barrier integrity has its own tests.
+    monkeypatch.setattr(bi_plan, "build_vrvp_structure", lambda *a, **k: None)
+    monkeypatch.setattr(bi_plan, "apply_vrvp_to_trade_setup", lambda plan, *a, **k: plan)
     monkeypatch.setattr(
         scanners,
         "analyze_breakout_imminent",

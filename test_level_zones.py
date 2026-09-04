@@ -249,18 +249,19 @@ def test_adaptive_zones_merge_confluence_without_double_counting_fib_ratios():
     assert zone.lower < 100.0 < zone.upper
 
 
-def test_support_and_resistance_are_never_clustered_across_reference_price():
+def test_overlapping_physical_zones_are_not_split_at_live_reference_price():
     zones = build_level_zones(
         [_evidence(99.99, name="below"), _evidence(100.01, family="vrvp", name="above")],
         reference_price=100.0,
         tick_size=0.01,
     )
 
-    assert len(zones) == 2
-    assert zones[0].side_at_reference == "support"
-    assert zones[0].upper < 100.0
-    assert zones[1].side_at_reference == "resistance"
-    assert zones[1].lower > 100.0
+    assert len(zones) == 1
+    assert zones[0].side_at_reference == "overlap"
+    assert zones[0].lower == pytest.approx(99.97)
+    assert zones[0].upper == pytest.approx(100.03)
+    decision = select_trade_structure(classify_for_trade(_snapshot(zones), entry=100, direction="LONG"), stop=98)
+    assert decision.status == "WAIT_BREAK_RECLAIM"
 
 
 def test_input_zone_crossing_reference_remains_overlap():
@@ -282,15 +283,15 @@ def test_input_zone_crossing_reference_remains_overlap():
     assert zone.upper == pytest.approx(100.2)
 
 
-def test_zone_id_is_stable_when_reference_crosses_and_clips_level():
+def test_zone_id_and_bounds_are_stable_when_reference_crosses_level():
     evidence = [_evidence(101.0, name="stable resistance")]
 
     below = build_level_zones(evidence, reference_price=100.0, tick_size=1.0)[0]
     above = build_level_zones(evidence, reference_price=102.0, tick_size=1.0)[0]
 
-    assert below.side_at_reference == "resistance"
-    assert above.side_at_reference == "support"
-    assert (below.lower, below.upper) != (above.lower, above.upper)
+    assert below.side_at_reference == "overlap"
+    assert above.side_at_reference == "overlap"
+    assert (below.lower, below.upper) == (above.lower, above.upper) == (99.0, 103.0)
     assert below.zone_id == above.zone_id
 
 

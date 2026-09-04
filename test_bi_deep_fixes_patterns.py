@@ -266,12 +266,10 @@ def test_m2_liq_far_no_hit():
 
 
 def test_m2_liq_near_hit():
-    """Buyside-Pool 0.3% unterm Range-High (Equal Highs an der Boundary): hit JA."""
+    """The later 101 high consumes the old 100.7 pool; proximity cannot revive it."""
     bars = gen_liq_series(pool_high=100.7)
     iv, sc, mx, det, conf, gr, fires, hits = analyze_breakout_imminent(bars, direction="long")
-    liq_det = [d for d in det if "Liq nahe Range-High" in d]
-    assert liq_det, \
-        f"Pool binnen 3% muss hit geben: {[d for d in det if 'Liq' in d]}"
+    assert not analyze_breakout_imminent(bars).indicator_checks[16]["passed"]
 
 
 def test_m2_ob_near_vs_far_hit():

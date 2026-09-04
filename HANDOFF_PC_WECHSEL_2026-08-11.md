@@ -441,3 +441,36 @@ scheiterte mangels uebertragenem privaten Schluessel. Daher wurden bewusst kein
 Pull, kein Repair und kein Neustart versucht. Nach Wiederherstellung der
 Zugaenge gelten weiterhin Backup-, Realtime-Quote-, Legacy-Kohorten-, Health-
 und Vier-Augen-Gates aus 15.4.
+
+## 16. Scanner-Remediation 04./05.09.2026
+
+Aktuelle fachliche Referenz: `AUDIT_REMEDIATION_2026-09-04.md`. Die alten
+Commit-/Servermeldungen in Abschnitt 15 sind historische Momentaufnahmen,
+nicht der aktuelle Git- oder Deploymentstatus. Basis dieses Pakets war
+`47eca9ac05ecbf599e85a16658f2a8d367feb3c5` auf `main`.
+
+- BI bleibt strikt mindestens 17/20, jetzt Contract `stock-bi-20-v2`; keine
+  unter-17-Watchlist, kein solches Tracking und keine solche Mail.
+- Shared-Level-Grenzen, Struktur-Stop, gerichtete Preisrundung, Fibonacci-
+  Chronologie, fertige Kerzen, RVOL-Bezug und venuegleiche Crypto-Messwerte
+  wurden mit Gegenbeispielen und Regressionen korrigiert.
+- Tracker `causal-legs-extrema-v2`: keine spaeteren Gewinne nach vollem Exit,
+  keine Post-Exit-Extrema. Rohhistorie und Produktionsdaten wurden nicht
+  automatisch repariert. Backtestmodell und echte Versand-/Fillpfade bleiben
+  getrennte Modelle, keine Netto-Kontorendite.
+- Alle 20 Scheduler-/Cache-Eintraege sowie 13 oeffentliche Aktien- und 11
+  generische Crypto-Strategien sind im Audit eingeordnet. Inventur, tiefer
+  technischer Test und empirische Profitabilitaet sind getrennt ausgewiesen.
+- Reales Frontend wurde mit ausschliesslich synthetischen lokalen Antworten
+  auf Desktop und 390x844 geprueft. Auswahl-Snapshot/Richtung/20 BI-Faktoren
+  und Unknown-Zustaende stimmen im geprueften Ablauf.
+- `output/` und Mailarchive bleiben privat/lokal. Keine Server-Aenderung,
+  echte Mail, Order, produktive DB-Migration oder Cron-Aktivierung ausgefuehrt.
+  Additive Tracker-Schemafelder sind im Code enthalten und werden erst beim
+  jeweiligen Runtime-Start angelegt; vor dem Server-Rollout DBs sichern.
+
+Finale Tests, Git-Abnahme und offene Rollout-Gates stehen im Auditbericht.
+Nach serverseitigem Pull sind Revision, Bundle, Services und Health separat
+zu pruefen. Nach Wechsel auf v2 kann die BI-Liste bis zum naechsten gueltigen
+Scan korrekt leer sein. Positive neue Netto-Erwartung ist noch nachzuweisen;
+alte Archivverluste sind keine Messung der neuen Version.

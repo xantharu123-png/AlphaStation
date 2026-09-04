@@ -39,6 +39,9 @@ def _candidate(price=9.95, change=4.0):
         "high_24h": 10.4,
         "low_24h": 9.1,
         "funding_rate": 0.01,
+        "funding_rate_unit": "percent",
+        "funding_interval_hours": 8,
+        "spread_pct": 0.02,
         "HasPerp": True,
         "isCrypto": True,
     }
@@ -79,7 +82,8 @@ def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
 
     assert scored is not None
     assert scored["trade_signal"] == "EXPLOSION_ARMED"
-    assert scored["trade_decision"] == "WAIT_FOR_TRIGGER"
+    assert scored["trade_decision"] == "WAIT_FOR_BREAK_RECLAIM"
+    assert scored["barrier_gate_active"] is True
     assert scored["tp2"] > scored["tp1"] > scored["entry"] > scored["stop"]
     assert scored["risk_reward"] >= 1.45
 

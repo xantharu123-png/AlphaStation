@@ -849,5 +849,7 @@ def test_recent_payload_exposes_normalized_origin_and_mfe(tracker):
     assert recent[0]["public_signal_ref"] is None
     assert recent[0]["origin_evidence"] == "direct_post_send"
     assert recent[0]["delivery_accepted_at"] is None
-    assert recent[0]["mfe"] == pytest.approx(0.2)
+    # Open/entry is 100, stop 95. The day's high 101 may occur after the
+    # terminal stop, so only the proven pre-exit lower bound (0R) is reported.
+    assert recent[0]["mfe"] == pytest.approx(0.0)
     assert recent[0]["max_favorable_r"] == recent[0]["mfe"]

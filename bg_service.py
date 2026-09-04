@@ -5505,7 +5505,7 @@ def _fetch_crash_monitor(poly_key):
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=400)
-        result = {"spy": {}, "vix": {}, "sectors": [], "breadth": {}, "signals": [], "fear_score": 0}
+        result = {"spy": {}, "vix": {}, "sectors": [], "breadth": {}, "signals": [], "fear_score": None}
         fear = 0
 
         # SPY
@@ -5526,17 +5526,8 @@ def _fetch_crash_monitor(poly_key):
                 sma50 = sum(closes[-50:]) / 50
                 sma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
 
-                # RSI
-                rsi_data = closes[-100:]
-                gains, losses_l = [], []
-                for i in range(1, 15):
-                    d = rsi_data[i] - rsi_data[i-1]
-                    gains.append(max(0, d)); losses_l.append(max(0, -d))
-                ag = sum(gains)/14; al = sum(losses_l)/14
-                for i in range(15, len(rsi_data)):
-                    d = rsi_data[i] - rsi_data[i-1]
-                    ag = (ag*13 + max(0, d))/14; al = (al*13 + max(0, -d))/14
-                rsi = 100 - (100 / (1 + ag/max(0.001, al)))
+                from modules.indicators import calculate_rsi_from_bars
+                rsi = calculate_rsi_from_bars([{"close": c} for c in closes[-100:]])
 
                 high_252 = max(highs[-252:]) if len(highs) >= 252 else max(highs)
                 drawdown = ((current - high_252) / high_252) * 100
@@ -5578,10 +5569,11 @@ def _fetch_crash_monitor(poly_key):
                     params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
                 if vr.status_code == 200:
                     vb = vr.json().get("results", [])
-                    if vb and len(vb) >= 10:
+                    if vb and len(vb) >= 20:
                         vc = vb[-1]["c"]; va20 = sum(b["c"] for b in vb[-20:])/20
                         spike = vc/max(0.01, va20)
-                        result["vix"] = {"ticker": vix_etf, "price": round(vc, 2), "spike_ratio": round(spike, 2)}
+                        result["vix"] = {"ticker": vix_etf, "price": round(vc, 2), "spike_ratio": round(spike, 2),
+                                         "data_kind": "volatility_etf_proxy", "is_vix_index": False, "baseline_bars": 20}
                         if spike > 1.5: fear += 12
                         elif spike > 1.2: fear += 7
                         break
@@ -5594,22 +5586,35 @@ def _fetch_crash_monitor(poly_key):
                                      params={"apiKey": poly_key}, timeout=30)
             if snap.status_code == 200:
                 tickers = snap.json().get("tickers", [])
-                adv = dec = 0
+                adv = dec = observed = 0
                 for t in tickers:
-                    td = t.get("todaysChangePerc", 0) or 0
+                    td = _safe_float(t.get("todaysChangePerc"), None)
+                    if td is None:
+                        continue
+                    observed += 1
                     if td > 0: adv += 1
                     elif td < 0: dec += 1
-                ad_ratio = adv / max(1, dec)
-                result["breadth"] = {"advancing": adv, "declining": dec, "ad_ratio": round(ad_ratio, 2)}
-                if ad_ratio < 0.4: fear += 12
-                elif ad_ratio < 0.6: fear += 8
-                elif ad_ratio < 0.8: fear += 4
+                ad_ratio = adv / dec if dec > 0 else None
+                if observed:
+                    result["breadth"] = {"advancing": adv, "declining": dec, "observed": observed,
+                                         "ad_ratio": round(ad_ratio, 2) if ad_ratio is not None else None}
+                if ad_ratio is not None:
+                    if ad_ratio < 0.4: fear += 12
+                    elif ad_ratio < 0.6: fear += 8
+                    elif ad_ratio < 0.8: fear += 4
         except Exception as e:
             log.debug(f"Non-critical error: {e}")
 
-        result["fear_score"] = min(100, fear)
+        available = {key: bool(result[key]) for key in ("spy", "vix", "breadth")}
+        complete = all(available.values()) and result["spy"].get("sma200") is not None
+        result["component_availability"] = available
+        result["data_status"] = "ok" if complete else "partial" if any(available.values()) else "unavailable"
+        result["partial_fear_score"] = min(100, fear) if any(available.values()) else None
+        result["fear_score"] = min(100, fear) if complete else None
+        result["score_is_probability"] = False
+        result["context_only"] = True
         cache_write("crash_monitor", result)
-        _update_status("crash_monitor", "ok", f"Fear: {fear}/100")
+        _update_status("crash_monitor", "ok" if complete else "error", f"Fear data: {result['data_status']}")
         log.info(f"  Fear Score: {fear}/100")
         return result
     except Exception as e:
@@ -6671,6 +6676,78 @@ def _is_leveraged_token_symbol(symbol):
     return False
 
 
+def _btc_change_fields(coin):
+    """Comparable measured percentage changes; a true zero is not missing."""
+    result = {}
+    for tf in ("1h", "24h", "7d", "14d", "30d"):
+        primary = coin.get(f"price_change_percentage_{tf}_in_currency")
+        if primary is None:
+            primary = coin.get(f"price_change_percentage_{tf}")
+        result[f"change_{tf}"] = _safe_float(primary, None)
+    return result
+
+
+def _coingecko_ohlc_rsi(ohlc, period=14, now_ts=None):
+    """RSI on completed CoinGecko OHLC (timestamps are candle CLOSE times).
+
+    days=30 without an interval returns 4H, not daily candles. Reject a gap,
+    duplicate, future candle, invalid geometry or a changing/unknown cadence.
+    """
+    from modules.indicators import calculate_rsi_from_bars
+    now_ts = time.time() if now_ts is None else now_ts
+    parsed = []
+    for row in ohlc if isinstance(ohlc, list) else []:
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            return None, None
+        vals = [_safe_float(v, None) for v in row[:5]]
+        if any(v is None for v in vals) or any(v <= 0 for v in vals[1:]):
+            return None, None
+        ts, op, high, low, close = vals
+        if not low <= min(op, close) <= max(op, close) <= high:
+            return None, None
+        ts /= 1000
+        if ts <= now_ts:
+            parsed.append((ts, close))
+    parsed.sort()
+    if len(parsed) < period + 1:
+        return None, None
+    steps = [b[0] - a[0] for a, b in zip(parsed, parsed[1:])]
+    cadence = steps[0]
+    labels = {1800: "30m", 3600: "1H", 14400: "4H", 86400: "1D", 345600: "4D"}
+    if cadence not in labels or any(step != cadence for step in steps):
+        return None, None
+    if now_ts - parsed[-1][0] > cadence + 3600:
+        return None, None
+    return calculate_rsi_from_bars([{"close": close} for _, close in parsed], period), labels[cadence]
+
+
+def _timestamped_oi_delta(current, previous, elapsed_hours):
+    """An OI change is comparable to a 24h rule only for a measured 23-25h lag."""
+    current, previous = _safe_float(current, None), _safe_float(previous, None)
+    elapsed_hours = _safe_float(elapsed_hours, None)
+    if current is None or previous is None or current < 0 or previous <= 0 or elapsed_hours is None or elapsed_hours <= 0:
+        return None, False
+    return round((current - previous) / previous * 100, 1), 23 <= elapsed_hours <= 25
+
+
+def _oi_history_reference(payload, now_ts):
+    """Keep 48h of measured snapshots and prefer an actual approximately-24h reference."""
+    history = payload.get("history", []) if isinstance(payload, dict) else []
+    if not history and isinstance(payload, dict) and isinstance(payload.get("values"), dict):
+        history = [payload]
+    valid = []
+    for sample in history if isinstance(history, list) else []:
+        if not isinstance(sample, dict) or not isinstance(sample.get("values"), dict):
+            continue
+        ts = _safe_float(sample.get("timestamp"), None)
+        if ts is not None and 0 < now_ts - ts <= 48 * 3600:
+            valid.append({"timestamp": ts, "values": sample["values"]})
+    valid.sort(key=lambda sample: sample["timestamp"])
+    day = [s for s in valid if 23 <= (now_ts - s["timestamp"]) / 3600 <= 25]
+    reference = min(day, key=lambda s: abs(now_ts - s["timestamp"] - 86400)) if day else valid[-1] if valid else None
+    return valid, reference["values"] if reference else {}, (now_ts - reference["timestamp"]) / 3600 if reference else None
+
+
 def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak):
     """H-7 Audit-Fix: Einheitliche, pure Timing-/Gate-Logik für BTC-Divergenz-Shorts.
 
@@ -6689,7 +6766,7 @@ def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak
         timing_quality: 5=JETZT SHORTEN, 4=JETZT, 3=BEREIT, 2=WATCH/BEOBACHTEN,
                         0=ZU FRÜH, -1=ZU SPÄT. btc_gate=True nur bei BTC-Schwäche.
     """
-    no_stop_note = " · ⚠️ kein definierter Stop — Beobachtungssignal"
+    no_stop_note = " · kein Einstiegssignal, kein definierter Stop"
     cp = close_pos if close_pos is not None else 0.5
     price_near_high = cp >= 0.70
     price_mid_range = 0.40 <= cp < 0.70
@@ -6707,9 +6784,9 @@ def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak
         return ("⚪ ZU FRÜH", 0, False)
 
     if exh_score >= 65 and price_near_high and change_1h < -1.5:
-        return ("🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
+        return ("🔴 SHORT-KONTEXT — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
     if exh_score >= 65 and price_near_high and change_1h < -0.5:
-        return ("🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
+        return ("🟠 SHORT-KONTEXT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
     if exh_score >= 65 and price_near_high:
         return ("🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze", 3, True)
     if exh_score >= 65 and price_mid_range:
@@ -6813,20 +6890,18 @@ def _run_btc_divergence(poly_key=None):
         # BTC Benchmark
         btc_data = None
         for c in all_coins:
-            if c.get("symbol", "").lower() == "btc" or c.get("id") == "bitcoin":
+            if c.get("id") == "bitcoin":
                 btc_data = {
                     "price": c.get("current_price", 0),
-                    "change_1h": c.get("price_change_percentage_1h_in_currency") or 0,
-                    "change_24h": c.get("price_change_percentage_24h") or 0,
-                    "change_7d": c.get("price_change_percentage_7d_in_currency") or 0,
-                    "change_14d": c.get("price_change_percentage_14d_in_currency") or 0,
-                    "change_30d": c.get("price_change_percentage_30d_in_currency") or 0,
+                    **_btc_change_fields(c),
                     "market_cap": c.get("market_cap", 0),
                 }
                 break
 
-        if not btc_data:
-            _atomic_write_json(div_progress, {"status": "error", "detail": "BTC nicht gefunden", "timestamp": time.time()})
+        if not btc_data or any(btc_data.get(f"change_{tf}") is None for tf in ("7d", "14d", "30d")):
+            _atomic_write_json(div_progress, {"status": "error", "detail": "BTC Benchmark unvollstaendig", "timestamp": time.time()})
+            _atomic_write_json("/tmp/div_scan_results.json", {"results": [], "btc": btc_data, "data_status": "missing_btc_benchmark", "ts": time.time()})
+            _update_status("btc_divergence", "error", "BTC Benchmark unvollstaendig")
             return
 
         btc_7d = btc_data.get("change_7d", 0)
@@ -6859,45 +6934,28 @@ def _run_btc_divergence(poly_key=None):
         # ── FIX 3: Real RSI via CoinGecko OHLC (Top-Hits) ──
         # Wird NACH dem Scan für Top-Kandidaten nachgeladen
         def _calc_rsi_from_ohlc(coin_id, days=30, period=14):
-            """Berechne echten RSI aus CoinGecko OHLC-Daten.
-            days=30 gibt Daily Candles (days=14 gibt nur 4h-Kerzen bei CoinGecko)."""
+            """Measured RSI and candle timeframe; 30 days auto-granularity = 4H."""
             try:
                 ohlc_resp = req.get(f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
                                     params={"vs_currency": "usd", "days": days},
                                     timeout=15)
                 if ohlc_resp.status_code != 200:
-                    return None
+                    return None, None
                 ohlc = ohlc_resp.json()  # [[ts, open, high, low, close], ...]
-                if not ohlc or len(ohlc) < period + 1:
-                    return None
-                closes = [c[4] for c in ohlc if len(c) >= 5]
-                gains, losses = [], []
-                for i in range(1, len(closes)):
-                    diff = closes[i] - closes[i - 1]
-                    gains.append(max(0, diff))
-                    losses.append(max(0, -diff))
-                if len(gains) < period:
-                    return None
-                avg_gain = sum(gains[:period]) / period
-                avg_loss = sum(losses[:period]) / period
-                for i in range(period, len(gains)):
-                    avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-                    avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-                if avg_loss == 0:
-                    return 100.0
-                rs = avg_gain / avg_loss
-                rsi = 100 - (100 / (1 + rs))
-                return round(rsi, 1)
+                return _coingecko_ohlc_rsi(ohlc, period)
             except Exception:
-                return None
+                return None, None
 
         # ── FIX 5: OI Change Delta 24h (Cache-basiert) ──
         oi_cache_file = "/tmp/oi_cache_prev.json"
         oi_prev = {}
+        oi_elapsed_hours = None
+        oi_history = []
         try:
             if os.path.exists(oi_cache_file):
                 with open(oi_cache_file, "r") as f:
-                    oi_prev = json.load(f)
+                    oi_payload = json.load(f)
+                    oi_history, oi_prev, oi_elapsed_hours = _oi_history_reference(oi_payload, time.time())
         except Exception:
             pass
 
@@ -6962,12 +7020,12 @@ def _run_btc_divergence(poly_key=None):
                 price = coin.get("current_price") or 0
                 if price <= 0: continue
 
-                change_1h = coin.get("price_change_percentage_1h_in_currency") or 0
-                change_24h = coin.get("price_change_percentage_24h") or 0
-                change_7d = (coin.get("price_change_percentage_7d_in_currency")
-                             or coin.get("price_change_percentage_7d") or 0)
-                change_14d = coin.get("price_change_percentage_14d_in_currency") or 0
-                change_30d = coin.get("price_change_percentage_30d_in_currency") or 0
+                measured_changes = _btc_change_fields(coin)
+                if any(value is None for value in measured_changes.values()):
+                    continue
+                change_1h, change_24h, change_7d, change_14d, change_30d = (
+                    measured_changes[f"change_{tf}"] for tf in ("1h", "24h", "7d", "14d", "30d")
+                )
                 market_cap = coin.get("market_cap") or 0
                 vol_24h = coin.get("total_volume") or 0
                 high_24h = coin.get("high_24h") or price
@@ -6978,8 +7036,8 @@ def _run_btc_divergence(poly_key=None):
 
                 # Multi-Timeframe Divergenz
                 div_7d = change_7d - btc_7d
-                div_14d = (change_14d - btc_14d) if change_14d else 0
-                div_30d = (change_30d - btc_30d) if change_30d else 0
+                div_14d = change_14d - btc_14d
+                div_30d = change_30d - btc_30d
 
                 best_div = max(div_7d, div_14d, div_30d)
                 best_tf = "7d"
@@ -7055,7 +7113,7 @@ def _run_btc_divergence(poly_key=None):
                 timing_pct = {5: 100, 4: 85, 3: 60, 2: 35, 0: 5, -1: 0}.get(_timing_quality, 0)
                 # pos_pct: Linear 0-100 statt ×130 Cliff
                 # cp 0.0→0%, 0.5→50%, 0.8→80%, 1.0→100% (glatter Verlauf)
-                pos_pct = min(100, max(0, (cp or 0.3)) * 100)
+                pos_pct = min(100, max(0, cp) * 100)
                 kern_score = exh_pct * 0.40 + timing_pct * 0.35 + pos_pct * 0.25
 
                 # Schritt 2: Volume als Skalierung (0.5 - 1.2)
@@ -7088,15 +7146,13 @@ def _run_btc_divergence(poly_key=None):
                         liq_factor = 0.80  # Short Squeeze Gefahr
 
                 # ── FIX 5: OI Change Delta 24h ──
-                oi_delta_pct = None
                 oi_now = oi_current.get(symbol, 0)
                 oi_before = oi_prev.get(symbol, 0)
-                if oi_now > 0 and oi_before > 0:
-                    oi_delta_pct = round(((oi_now - oi_before) / oi_before) * 100, 1)
+                oi_delta_pct, oi_24h_comparable = _timestamped_oi_delta(oi_now, oi_before, oi_elapsed_hours)
 
                 # OI-Faktor: OI steigt stark + Preis nahe High = Longs überhebelt → Short gut
                 oi_factor = 1.0
-                if oi_delta_pct is not None:
+                if oi_delta_pct is not None and oi_24h_comparable:
                     if oi_delta_pct >= 20 and cp >= 0.7:
                         oi_factor = 1.15  # OI explodiert bei Highs → überhebelt
                     elif oi_delta_pct >= 10:
@@ -7136,7 +7192,14 @@ def _run_btc_divergence(poly_key=None):
                     "TimingQuality": _timing_quality,
                     "btc_gate": _btc_gate,  # H-7: False = BTC stark, kein Short-Timing
                     "SellProb": sell_prob,
-                    "RVOL": rvol,
+                    "SellScore": sell_prob,
+                    "score_is_probability": False,
+                    "context_only": True,
+                    "executable": False,
+                    "RVOL": None,
+                    "TurnoverProxy": rvol,
+                    "volume_metric_kind": "turnover_vs_market_cap_bucket_not_historical_rvol",
+                    "ohlc_evidence_kind": "rolling_24h_range_approximation",
                     "UpperWick%": round(upper_wick_pct, 1),
                     "ClosePos": close_pos,
                     "MarketCap": market_cap,
@@ -7156,7 +7219,10 @@ def _run_btc_divergence(poly_key=None):
                     "DomFactor": round(dom_factor, 2),
                     # Neue Felder V4 (Fix 3 + 5)
                     "RSI14": None,  # Wird für Top-Hits nachgeladen
+                    "RSITimeframe": None,
                     "OI_Delta%": oi_delta_pct,
+                    "OI_Delta_Hours": round(oi_elapsed_hours, 3) if oi_elapsed_hours is not None else None,
+                    "OI_24h_Comparable": oi_24h_comparable,
                     "OI_Factor": round(oi_factor, 2),
                 })
             except Exception:
@@ -7181,9 +7247,10 @@ def _run_btc_divergence(poly_key=None):
             if not coin_id:
                 continue
             try:
-                rsi_val = _calc_rsi_from_ohlc(coin_id, days=30, period=14)
+                rsi_val, rsi_timeframe = _calc_rsi_from_ohlc(coin_id, days=30, period=14)
                 if rsi_val is not None:
                     r["RSI14"] = rsi_val
+                    r["RSITimeframe"] = rsi_timeframe
                     rsi_loaded += 1
                     # AUDIT FIX: RSI in SellProb einrechnen (nicht nur anzeigen!)
                     old_sp = r["SellProb"]
@@ -7195,6 +7262,7 @@ def _run_btc_divergence(poly_key=None):
                         r["SellProb"] = max(0, old_sp - 15)    # Überverkauft → kein Short!
                     elif rsi_val <= 45:
                         r["SellProb"] = max(0, old_sp - 5)     # Neutral-niedrig
+                    r["SellScore"] = r["SellProb"]
                 time.sleep(1.5)  # CoinGecko Rate Limit
             except Exception:
                 pass
@@ -7206,7 +7274,8 @@ def _run_btc_divergence(poly_key=None):
         # ── FIX 5: OI Cache speichern für nächsten Delta-Vergleich ──
         if oi_current:
             try:
-                _atomic_write_json(oi_cache_file, oi_current)
+                oi_history.append({"values": oi_current, "timestamp": time.time()})
+                _atomic_write_json(oi_cache_file, {"history": oi_history[-512:]})
             except Exception as e:
                 log.debug(f"Non-critical error: {e}")
 

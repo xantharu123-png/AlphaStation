@@ -170,3 +170,18 @@ def test_unverifiable_history_fails_closed_without_fixed_percent_levels():
     assert info["available"] is False
     assert info["availability_reason"] == "insufficient_completed_timestamped_bars"
     assert info["zone_provenance"]["fixed_percent_cluster_used"] is False
+
+
+def test_legacy_fib_adapter_uses_directional_confirmed_leg_not_period_extrema():
+    values = [(110, 105), (111, 106), (120, 115), (109, 100), (100, 90),
+              (91, 80), (95, 86), (98, 91), (101, 94)]
+    bars = [_tuple_bar(BASE + timedelta(days=index), high, low, (high + low) / 2)
+            for index, (high, low) in enumerate(values)]
+    cutoff = BASE + timedelta(days=len(bars))
+    _, long_info = calculate_sr_from_historical(bars, 100, as_of=cutoff, direction="LONG")
+    _, short_info = calculate_sr_from_historical(bars, 100, as_of=cutoff, direction="SHORT")
+    assert long_info["fib_382"] is None
+    assert long_info["fibonacci_provenance"]["available"] is False
+    assert short_info["fib_382"] == 95.28
+    assert short_info["fibonacci_provenance"]["leg"]["start_price"] == 120
+    assert short_info["fibonacci_provenance"]["leg"]["end_price"] == 80

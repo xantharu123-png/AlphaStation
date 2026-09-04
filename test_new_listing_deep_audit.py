@@ -539,7 +539,8 @@ def test_generate_short_signal_propagates_nested_structure_wait(monkeypatch):
     assert _is_tradeable_short_signal(signal) is False
 
 
-def test_funding_telemetry_declares_raw_fraction_and_canonical_percent():
+def test_funding_telemetry_declares_raw_fraction_and_canonical_percent(monkeypatch):
+    monkeypatch.setattr(new_listing_scanner, "fetch_binance_candles", lambda *_a, **_kw: [])
     as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
     candles = _completed_listing_vrvp_bars(as_of)[-12:]
     _score, _details, pump_data = calculate_listing_exhaustion(
@@ -565,11 +566,13 @@ def test_funding_telemetry_declares_raw_fraction_and_canonical_percent():
         as_of=as_of,
     )
     assert default_interval["funding_rate_raw"] == 0.001
-    assert default_interval["funding_rate_pct"] == 0.1
+    assert default_interval["funding_rate_pct"] is None
     assert default_interval["funding_rate"] == default_interval["funding_rate_pct"]
     assert default_interval["funding_rate_unit"] == "fraction"
-    assert default_interval["funding_interval_hours"] == 8.0
-    assert default_interval["funding_source_interval_hours"] == 8.0
+    assert default_interval["funding_interval_hours"] is None
+    assert default_interval["funding_source_interval_hours"] is None
+    assert default_interval["funding_available"] is False
+    assert default_interval["funding_data_status"] == "missing_interval"
 
 
 def test_pump_still_running_is_watch_not_tradeable_short():

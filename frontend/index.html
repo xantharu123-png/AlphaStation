@@ -885,7 +885,7 @@ function AuthPage({ onLogin, onRegister }) {
 
                     {/* USP Pills */}
                     <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 36 }}>
-                        {['Long & Short Breakouts live', 'BI Scanner (20+ Indikatoren)', 'Crypto & Whale Tracking', 'Paper Auto-Trader (Elite)', 'Biotech & FDA Tracker', 'After Hours & Crash Monitor'].map((usp, i) => (
+                        {['Long & Short Breakouts live', 'BI Scanner (17 von 20 Checks)', 'Crypto & Whale Tracking', 'Paper Auto-Trader (Elite)', 'Biotech & FDA Tracker', 'After Hours & Crash Monitor'].map((usp, i) => (
                             <span key={i} style={{ padding: '6px 16px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 20, fontSize: 13, color: '#60a5fa', fontWeight: 500 }}>{usp}</span>
                         ))}
                     </div>
@@ -911,7 +911,7 @@ Mehr erfahren ↓
                         { value: 'Breit', label: 'Marktuniversum', sub: 'NYSE, Nasdaq & Krypto' },
                         { value: '15+', label: 'Scanner & Strategien', sub: 'Long, Short, Biotech...' },
                         { value: 'ab 5 Min', label: 'Scanintervall', sub: 'Planabhängig' },
-                        { value: '20+', label: 'Indikatoren pro Scan', sub: 'BI Scanner Analyse' },
+                        { value: '17/20', label: 'Bestätigungen mindestens', sub: 'Stock-BI · keine Gewinnwahrscheinlichkeit' },
                     ].map((s, i) => (
                         <div key={i} style={{ padding: '30px 16px', background: 'rgba(15,23,42,0.6)', textAlign: 'center' }}>
                             <div style={{ fontSize: 30, fontWeight: 800, background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', marginBottom: 4 }}>{s.value}</div>
@@ -972,10 +972,10 @@ Mehr erfahren ↓
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(59,130,246,0.12)', background: 'rgba(15,23,42,0.5)' }}>
                             <div style={{ padding: '40px 36px' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>HERZSTÜCK</div>
-                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>BI Scanner — 20+ Indikatoren in einem Scan</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der BI Scanner ist kein normaler Screener. Er analysiert jeden Ticker gleichzeitig mit über 20 technischen Indikatoren: EMA-Crossovers, RSI, MACD, VWAP, Bollinger Bands, ATR, Volumen-Profil, Support/Resistance, Fibonacci und mehr. Erst wenn mehrere Indikatoren gleichzeitig übereinstimmen (Confluence), schlägt der Scanner an. Long und Short — du siehst sofort die Richtung und die Stärke des Signals.</p>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Stock-BI — mindestens 17 von 20 Checks bestätigt</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Stock-BI prüft 20 benannte Faktoren zu Kompression, Volumenfluss, Momentum und Marktstruktur, darunter ATR, RSI, Stochastic, MACD, Liquidität und Fibonacci. Alle Checks müssen berechenbar und mindestens 17 bestätigt sein; zusätzliche Risikofilter können den Einstieg blockieren. Long und Short werden getrennt geprüft. Die Faktoren sind teilweise verwandt: 17/20 bedeutet keine 85% Gewinnwahrscheinlichkeit.</p>
                                 <div style={{ display: 'flex', gap: 24 }}>
-                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>20+</div><div style={{ fontSize: 12, color: '#64748b' }}>Indikatoren</div></div>
+                                    <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>20</div><div style={{ fontSize: 12, color: '#64748b' }}>benannte Checks</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>S-D</div><div style={{ fontSize: 12, color: '#64748b' }}>Confluence Grade</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#3b82f6' }}>L / S</div><div style={{ fontSize: 12, color: '#64748b' }}>Long & Short</div></div>
                                 </div>
@@ -2744,6 +2744,30 @@ function renderAdaptiveLevelBoundaries({ sr = {}, createPriceLine, LineStyle }) 
     });
 }
 
+function formatBacktestMetric(value, digits = 2, suffix = '', signed = false) {
+    if (value == null || value === '' || typeof value === 'boolean') return '—';
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    return `${signed && n >= 0 ? '+' : ''}${n.toFixed(digits)}${suffix}`;
+}
+
+function backtestMetricClass(value) {
+    if (value == null || value === '' || typeof value === 'boolean' || !Number.isFinite(Number(value))) return 'text-gray-500';
+    return Number(value) >= 0 ? 'color-positive' : 'color-negative';
+}
+
+function formatFundingRate(row) {
+    if (!row || row.funding_available === false) return 'Nicht verfügbar';
+    let raw = row.funding_rate_pct;
+    if (typeof raw === 'boolean' || raw === '') return 'Nicht verfügbar';
+    if (raw == null) {
+        raw = row.funding_rate ?? row.FundingRate;
+        if (raw == null || raw === '' || typeof raw === 'boolean') return 'Nicht verfügbar';
+        raw = Number(raw) * (row.funding_rate_unit === 'fraction' || row.FundingRate != null ? 100 : 1);
+    }
+    return Number.isFinite(Number(raw)) ? `${Number(raw).toFixed(3)}%` : 'Nicht verfügbar';
+}
+
 // DetailSidebar Component
 function DetailSidebar({ ticker, onClose, scannerData }) {
     const [tickerData, setTickerData] = useState(null);
@@ -2886,20 +2910,28 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // Fetch ticker detail data (metrics) — skip for crypto
     useEffect(() => {
         if (isCrypto) { setLoading(false); return; }
+        const controller = new AbortController();
+        const selectedDirection = scannerData?.direction || scannerData?.BI_Direction || scannerData?.trade_setup?.direction || '';
+        setTickerData(null);
         const fetchData = async () => {
             try {
                 setLoading(true);
                 setAiData(null);
-                const res = await fetch(`${API}/api/ticker-detail?ticker=${ticker}`);
-                if (res.ok) setTickerData(await res.json());
+                const params = new URLSearchParams({ticker, direction: selectedDirection, scanner: scannerData?.scanner || ''});
+                const res = await fetch(`${API}/api/ticker-detail?${params}`, {signal: controller.signal});
+                if (res.ok) {
+                    const payload = await res.json();
+                    if (!controller.signal.aborted) setTickerData(payload);
+                }
             } catch (err) {
-                console.error('Error fetching detail:', err);
+                if (err.name !== 'AbortError') console.error('Error fetching detail:', err);
             } finally {
-                setLoading(false);
+                if (!controller.signal.aborted) setLoading(false);
             }
         };
         fetchData();
-    }, [ticker, isCrypto]);
+        return () => controller.abort();
+    }, [ticker, isCrypto, scannerData]);
 
     // Fetch chart data — Exchange-Crypto nutzt exchange-chart, fallback nutzt Daily-Krypto-Kontext, Stocks nutzen Chart-API
     // V2.8: AbortController verhindert Race Conditions bei schnellem Timeframe-Wechsel
@@ -3030,6 +3062,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         scannerData?.PerpChartExchange,
         scannerData?.perp_chart_exchange,
         scannerData?.BestExchange,
+        scannerData?.direction,
+        scannerData?.BI_Direction,
+        scannerData?.trade_setup?.direction,
         cryptoPerpSymbol,
         cryptoPerpExchange,
         cryptoPerpExchangeRaw,
@@ -3113,6 +3148,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             const setupForChart = (() => {
                 const scannerSetup = scannerData?.trade_setup || null;
                 const detailSetup = tickerData?.trade_setup || null;
+                if (scannerData?.selected_snapshot && scannerSetup) return scannerSetup;
                 if (detailSetup?.starter_plan) return detailSetup;
                 return scannerSetup || detailSetup;
             })();
@@ -3349,7 +3385,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 // V4.0: Pivot-Marker entfernt (nur Noise) — Pivots werden intern genutzt
 
                 // V2.6b: Richtung bestimmen — nur passende Patterns anzeigen
-                const _viewDir = (tickerData?.confluence?.direction || scannerData?.trade_setup?.direction || scannerData?.direction || '').toUpperCase();
+                const _viewDir = (scannerData?.trade_setup?.direction || scannerData?.direction || tickerData?.confluence?.direction || '').toUpperCase();
 
                 // Chart pattern markers + Linien-Zeichnung
                 // V4: Marker-Dedup — nur 1 Marker pro Kerze (höchste Priorität gewinnt)
@@ -3502,8 +3538,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         );
     }
 
-    const d = tickerData || {};
     const cd = scannerData || {};  // crypto data from Early Movers
+    const liveDetail = tickerData || {};
+    const d = cd.selected_snapshot ? {...liveDetail,
+        signal_grade: cd.release_grade || cd.grade || cd.BI_Grade,
+        signal_score: cd.score ?? cd.BI_Score,
+        confluence: {direction: cd.direction},
+        bi_scanner: String(cd.scanner || '').startsWith('bi_') ? {grade_label: cd.grade_label} : null,
+    } : liveDetail;
     const sidebarCompanyName = stockCompanyName({...d, ...cd, ticker});
     const quality = cd._quality || d._quality || null;
     const tradeHealth = cd.trade_health || d.trade_health || null;
@@ -3533,6 +3575,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     };
     const firstFiniteChange = (...values) => {
         for (const value of values) {
+            if (value == null || value === '' || typeof value === 'boolean') continue;
             const n = Number(value);
             if (Number.isFinite(n)) return n;
         }
@@ -3547,17 +3590,17 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const stockQuotePrice = firstFiniteNumber(
         d.price, cd.price, cd.Price, cd.Preis, cd.current_price, cd.CurrentPrice, cd.close, cd.Close
     );
-    const stockQuoteChange = firstFiniteChange(
-        d.change_1d, cd.change_pct, cd.ChangePct, cd.ChangePct1D, cd.change_percent, cd.ChangePercent, cd['Change %'], cd['Änderung%']
-    );
+    const stockQuoteChange = firstFiniteNumber(d.price) != null ? firstFiniteChange(d.change_1d) : firstFiniteChange(
+        cd.change_pct, cd.ChangePct, cd.ChangePct1D, cd.change_percent, cd.ChangePercent, cd['Change %'], cd['Änderung%']);
     const price = Number(_chartPrice ?? stockQuotePrice) || 0;
-    const change = Number(_chartChange ?? stockQuoteChange) || 0;
-    const priceSourceLabel = _chartPrice ? `${chartData?.timeframe || timeframe} Chart` : 'Scanner';
-    const changeClass = change >= 0 ? 'color-positive' : 'color-negative';
+    const change = _chartChange ?? stockQuoteChange;
+    const priceSourceLabel = _chartPrice ? `${chartData?.timeframe || timeframe} Chart` : firstFiniteNumber(d.price) != null ? 'Aktuelle Detailabfrage' : 'Scanner-Snapshot';
+    const changeClass = change == null ? 'text-gray-500' : change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = (() => {
         const scannerSetup = cd.trade_setup || null;
         const detailSetup = d.trade_setup || null;
+        if (cd.selected_snapshot && scannerSetup) return scannerSetup;
         if (detailSetup?.starter_plan) return detailSetup;
         return scannerSetup || detailSetup;
     })();
@@ -3603,7 +3646,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             : (finalWaitRetest || finalWaitTrigger || finalWaitContinuation || tradeSignal === 'WARTEN' || normalizedSetupAction.includes('WAIT'))
                 ? 'text-amber-800'
                 : 'text-sky-800';
-    const viewDirection = (d.confluence?.direction || activeTradeSetup?.direction || cd.direction || '').toUpperCase();
+    const viewDirection = (activeTradeSetup?.direction || cd.direction || d.confluence?.direction || '').toUpperCase();
     const personalPositionTicker = String(ticker || cd.ticker || cd.symbol || d.ticker || '')
         .trim()
         .toUpperCase()
@@ -3691,12 +3734,13 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return !position?.scanner || !personalPositionScanner || String(position.scanner).toLowerCase() === personalPositionScanner;
     }) || null;
     const formatSidebarPrice = (value) => {
+        if (value == null || value === '' || typeof value === 'boolean') return '-';
         const n = Number(value);
         if (!Number.isFinite(n) || n <= 0) return '-';
         if (n >= 100) return `$${n.toFixed(2)}`;
         if (n >= 1) return `$${n.toFixed(4)}`;
         if (n >= 0.01) return `$${n.toFixed(6)}`;
-        return `$${n.toFixed(8)}`;
+        return `$${n.toPrecision(6)}`;
     };
     const formatPctValue = (value, digits = 1) => {
         const n = Number(value);
@@ -3777,6 +3821,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const targetQualityKey = String(targetQualityRaw || '').toUpperCase();
     const targetWeak = targetQualityKey.startsWith('WEAK') || levelRiskFlags.some(flag => ['weak_structural_targets', 'targets_too_close', 'duplicate_targets', 'target_plan_invalid'].includes(flag));
     const targetProjection = targetQualityKey.startsWith('PROJECTION_ONLY');
+    const targetMixed = targetQualityKey === 'STRUCTURAL_TP1_PROJECTION_TP2';
     const targetVrvp = targetQualityKey.includes('VRVP') || levelRiskFlags.includes('vrvp_target_confirmed');
     const targetFirstBarrier = targetQualityKey === 'STRUCTURAL_FIRST_BARRIER';
     const targetStructural = targetQualityKey === 'STRUCTURAL' || targetFirstBarrier;
@@ -3784,6 +3829,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         ? 'Nur Projektion - kein Strukturziel'
         : targetWeak
         ? 'Zielzonen schwach'
+        : targetMixed
+        ? 'TP1: bestaetigte Zone · TP2: Projektion'
         : targetVrvp
             ? 'VRVP/Volume-Profile bestaetigt'
             : targetFirstBarrier
@@ -3791,14 +3838,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 : targetStructural
                 ? 'Strukturziele OK'
                 : 'Zielquelle pruefen';
-    const targetQualityTone = targetProjection || targetWeak
+    const targetQualityTone = targetProjection || targetWeak || targetMixed
         ? 'text-amber-700'
         : targetVrvp
             ? 'text-cyan-700'
             : targetStructural
                 ? 'text-emerald-700'
                 : 'text-gray-600';
-    const targetQualityBoxTone = targetProjection || targetWeak
+    const targetQualityBoxTone = targetProjection || targetWeak || targetMixed
         ? 'border-amber-200 bg-amber-50 text-amber-900'
         : targetVrvp
             ? 'border-cyan-200 bg-cyan-50 text-cyan-900'
@@ -4174,7 +4221,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <h2 className="text-2xl font-bold">{ticker}</h2>
                         {sidebarCompanyName && <div className="text-sm text-gray-500 mt-0.5">{sidebarCompanyName}</div>}
                         <p className="text-2xl font-bold mt-1">
-                            ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change.toFixed(2)}%)</span>
+                            ${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)} <span className={`text-lg font-semibold ${changeClass}`}>({change == null ? 'Änderung unbekannt' : `${change.toFixed(2)}%`})</span>
                         </p>
                         <div className="text-[11px] text-gray-400 mt-0.5">Preis: {priceSourceLabel}</div>
                     </div>
@@ -4185,6 +4232,30 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <button onClick={onClose} className="text-2xl font-bold hover:text-red-500">×</button>
                     </div>
                 </div>
+
+                {cd.selected_snapshot && (
+                    <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900" data-testid="selected-signal-snapshot">
+                        <div className="font-semibold">Ausgewählter Scannerplan · {cd.scanner} · {viewDirection}</div>
+                        <div className="mt-1">Datenstand: {cd.snapshot_at || 'nicht übermittelt'} · {cd.bi_indicator_contract_version || cd.BI_IndicatorContractVersion || 'Version nicht übermittelt'}</div>
+                        <div className="mt-1">Die Planlevels bleiben unverändert. Chart und Kurs zeigen die aktuelle Analyse, keine erneute Handelsfreigabe.</div>
+                    </div>
+                )}
+
+                {Array.isArray(cd.bi_indicator_checks || cd.BI_IndicatorChecks) && (
+                    <details className="mb-3 rounded-lg border border-gray-200 p-3 text-xs" data-testid="bi-indicator-evidence">
+                        <summary className="cursor-pointer font-semibold">Warum dieses BI-Signal? {cd.bi_indicators_green ?? cd.BI_IndicatorsGreen}/20 bestätigt</summary>
+                        <div className="mt-2 space-y-2">
+                            {(cd.bi_indicator_checks || cd.BI_IndicatorChecks).map((check, idx) => (
+                                <div key={check.key || idx} className="border-t border-gray-100 pt-2">
+                                    <span className={check.available !== true ? 'text-gray-500' : check.passed === true ? 'text-emerald-700' : 'text-red-700'}>
+                                        {check.available !== true ? 'Nicht berechenbar' : check.passed === true ? 'Bestätigt' : 'Nicht bestätigt'}
+                                    </span> · {check.name || check.key}
+                                    {check.reason && <div className="text-gray-500 mt-0.5">{check.reason}</div>}
+                                </div>
+                            ))}
+                        </div>
+                    </details>
+                )}
 
                 {/* Grade + Confluence — BI Scanner Grade hat Vorrang (kommt direkt vom Backend) */}
                 <div className="mb-4">
@@ -4510,7 +4581,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Short-Indikatoren</h4>
                     <div className="grid grid-cols-2 gap-2">
-                        <div><span className="text-gray-500">Funding Rate</span> <span className={`font-semibold ${(scannerData.funding_rate||0) > 0.05 ? 'color-negative' : (scannerData.funding_rate||0) > 0 ? 'text-yellow-600' : ''}`}>{scannerData.funding_rate != null ? `${scannerData.funding_rate.toFixed(3)}%` : '–'}</span></div>
+                        <div><span className="text-gray-500">Funding Rate</span> <span className="font-semibold">{formatFundingRate(scannerData)}</span><div className="text-gray-500">{scannerData.funding_interval_hours ? `pro ${scannerData.funding_interval_hours}h` : 'Abrechnungsintervall unbekannt'}</div></div>
                         <div><span className="text-gray-500">Long %</span> <span className={`font-semibold ${(scannerData.long_pct||50) > 65 ? 'color-negative' : ''}`}>{scannerData.long_pct != null ? `${scannerData.long_pct.toFixed(0)}%` : '–'}</span></div>
                         <div><span className="text-gray-500">Red Candles</span> <span className={`font-semibold ${(scannerData.red_streak||0) >= 4 ? 'color-negative' : ''}`}>{scannerData.red_streak || '–'}</span></div>
                         <div><span className="text-gray-500">Vol Ratio</span> <span className="font-semibold">{scannerData.vol_ratio || '–'}x</span></div>
@@ -4814,7 +4885,7 @@ function App() {
             setScannerItemData(null);
         } else if (tickerOrObj.ticker) {
             setSelectedTicker(tickerOrObj.ticker);
-            setScannerItemData(tickerOrObj);
+            setScannerItemData(JSON.parse(JSON.stringify(tickerOrObj)));
         }
     }, []);
     const [schedulerStatus, setSchedulerStatus] = useState(null);
@@ -4939,7 +5010,7 @@ function App() {
             groups: [
                 { title: 'AKTIEN SCANNER', items: [
                     { id: 'scanner', name: 'Aktien Scanner', desc: 'Haupt-Scanner mit Grading', svg: 'M3 12L9 6L13 10L21 2M21 2H15M21 2V8', color: '#3b82f6' },
-                    { id: 'bi-scanner', name: 'BI Scanner', desc: '20+ Indikatoren Analyse', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
+                    { id: 'bi-scanner', name: 'BI Scanner', desc: 'Mindestens 17 von 20 Checks', svg: 'M3 3H21V21H3ZM8 12H16M12 8V16', color: '#8b5cf6' },
                     { id: 'short-scanner', name: 'Short Scanner', desc: 'Breakdowns & Downgrades', svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444' },
                     { id: 'volume-spikes', name: 'Aktien Volume Spikes', desc: 'Ungewoehnliches Aktien-Volumen', svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1' },
                     { id: 'penny-stocks', name: 'Pennystock Signale', desc: 'Bestaetigte Entries und aktive Exit-Signale', svg: 'M13 2L3 14H11L9 22L21 8H13L13 2Z', color: '#0f766e' },
@@ -5813,6 +5884,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
     const [liveInfo, setLiveInfo] = useState(scanCache.bi_live_info || null);
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
     const pollRef = useRef(null);
+    const directionRef = useRef(direction);
+    directionRef.current = direction;
 
     // Cleanup polling on unmount
     useEffect(() => {
@@ -5840,8 +5913,10 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
     const startLivePolling = ({ previousStamp = null, notify = true } = {}) => {
         if (pollRef.current) clearTimeout(pollRef.current);
+        const pollDirection = direction;
         let sawLiveState = false;
         const poll = async (attempt = 0) => {
+            if (directionRef.current !== pollDirection) return;
             if (attempt > 900) {
                 setIsScanning(false);
                 updateScanCache('bi_scanning', false);
@@ -5851,6 +5926,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 const res = await fetch(`${API}/api/bi-results?direction=${direction}`);
                 if (res.ok) {
                     const data = await res.json();
+                    if (directionRef.current !== pollDirection) return;
                     const { items } = applyBiPayload(data);
                     const running = !!(data.scan_running || data.partial);
                     sawLiveState = sawLiveState || running;
@@ -5895,11 +5971,17 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
     // Load results on mount / direction change + auto-detect running scan
     useEffect(() => {
+        const controller = new AbortController();
+        setResults([]);
+        setDiagnostics(null);
+        setLiveInfo(null);
+        setIsScanning(false);
         const fetchResults = async () => {
             try {
-                const response = await fetch(`${API}/api/bi-results?direction=${direction}`);
+                const response = await fetch(`${API}/api/bi-results?direction=${direction}`, {signal: controller.signal});
                 if (response.ok) {
                     const data = await response.json();
+                    if (controller.signal.aborted) return;
                     applyBiPayload(data);
                     if (data.scan_running || data.partial) {
                         setIsScanning(true);
@@ -5907,10 +5989,10 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                         startLivePolling({ previousStamp: data.cached_at || null, notify: false });
                     }
                 }
-            } catch (err) { console.error('Error:', err); }
+            } catch (err) { if (err.name !== 'AbortError') console.error('Error:', err); }
         };
         fetchResults();
-        return () => { if (pollRef.current) clearTimeout(pollRef.current); };
+        return () => { controller.abort(); if (pollRef.current) clearTimeout(pollRef.current); };
     }, [direction]);
 
     return (
@@ -5983,7 +6065,14 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             const indicatorsGreen = Number(item.bi_indicators_green ?? item.BI_IndicatorsGreen ?? 0);
                             const indicatorsTotal = Number(item.bi_indicators_total ?? item.BI_IndicatorsTotal ?? 20);
                             return (
-                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.ticker)}>
+                                <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({
+                                    ...item, scanner: `bi_${direction.toLowerCase()}`, direction: direction.toUpperCase(),
+                                    selected_snapshot: true, snapshot_at: item.data_timestamp || item.scan_timestamp || liveInfo?.cached_at || null,
+                                    trade_setup: {...(item.trade_setup || {}), direction: direction.toUpperCase(),
+                                        entry: item.trade_setup?.entry ?? item.entry,
+                                        stop: item.trade_setup?.stop ?? item.stop_loss,
+                                        tp1: item.trade_setup?.tp1 ?? item.tp1, tp2: item.trade_setup?.tp2 ?? item.tp2},
+                                })}>
                                     <td className="py-3 px-2 font-semibold">
                                         <StockIdentity row={item} ticker={item.ticker} />
                                         {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
@@ -6387,7 +6476,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="btc_divergenz" />
             <div className="p-3 rounded-lg bg-orange-50 border border-orange-100 text-sm text-orange-900">
-                Signal-Only Modus: BTC-Divergenz zeigt keine Watchliste mehr. Ein Coin erscheint hier erst, wenn relative Staerke/Schwaeche plus echter Entry-Trigger zu einem handelbaren Signal werden.
+                BTC-Divergenz liefert relativen Marktkontext, keinen eigenen Entry-Trigger oder vollständigen Tradeplan. Im Signal-Only-Modus bleiben solche Kontextzeilen ausgeblendet; eine leere Liste bedeutet hier nicht automatisch fehlende Marktdaten.
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -6442,11 +6531,13 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const lastLoadedCachedAtRef = useRef(scanCache.em_cached_at || null);
 
     const formatPrice = (price) => {
-        if (price === null || price === undefined) return '–';
+        if (price == null || price === '' || typeof price === 'boolean') return '-';
+        price = Number(price);
+        if (!Number.isFinite(price) || price <= 0) return '-';
         if (price >= 100) return `$${price.toFixed(2)}`;
         if (price >= 1) return `$${price.toFixed(4)}`;
         if (price >= 0.01) return `$${price.toFixed(6)}`;
-        return `$${price.toFixed(8)}`;
+        return `$${price.toPrecision(6)}`;
     };
 
     const phaseIcon = (p) => p === 1 ? '\u{1F7E2}' : p === 2 ? '\u{1F7E1}' : '\u{1F534}';
@@ -6613,6 +6704,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
         if (q.includes('WEAK') || f.some(flag => ['weak_structural_targets', 'targets_too_close', 'duplicate_targets', 'target_plan_invalid'].includes(flag))) return 'Zielzonen schwach';
         if (q.includes('VRVP') || f.includes('vrvp_target_confirmed')) return 'VRVP/Volume-Profile Ziel';
         if (q === 'STRUCTURAL_FIRST_BARRIER') return 'Erste Gegenbarriere (strukturell)';
+        if (q === 'STRUCTURAL_TP1_PROJECTION_TP2') return 'TP1: Zone · TP2: Projektion';
         if (q === 'STRUCTURAL') return 'Strukturziel';
         return 'Zielquelle unklar';
     };
@@ -7356,6 +7448,10 @@ function SignalPerformanceTab() {
 
             {perf && !forbidden && hasSignals && (
                 <>
+                    <div className="card border border-blue-200 bg-blue-50 text-blue-900 px-4 py-3 rounded-lg text-sm">
+                        <b>Versandkohorte, keine Kontorendite:</b> Diese Auswertung umfasst erfasste Mail-Signale, nicht automatisch alle Treffer in der App. R-Werte beschreiben Preiswege ohne allgemeine Rundum-Kosten für Spread, Gebühren und Funding; einzelne modellierte Gap-/Slippage-Effekte sind davon getrennt.
+                        <div className="text-xs mt-1">Auswertungsmodell: {perf.evaluation_model_version || 'Legacy / nicht ausgewiesen'}. Historische Zeilen wurden nicht rückwirkend als neue Strategie umetikettiert.</div>
+                    </div>
                     {matureOnly ? (
                         <div className="card border border-emerald-200 bg-emerald-50 text-emerald-900 px-4 py-3 rounded-lg text-sm">
                             <b>Im Zeitraum ausgereifte Versandkohorte:</b> {cohort.matured_in_window ?? cohort.included_signals ?? total.signals ?? 0} Signale. Im selben Zeitraum wurden {cohort.created_in_window ?? 0} neue Signale erstellt.
@@ -7810,13 +7906,14 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
     const lastLoadedCachedAtRef = useRef(scanCache.crypto_trade_signals_cached_at || null);
 
     const formatPrice = (price) => {
+        if (price == null || price === '' || typeof price === 'boolean') return '-';
         const p = Number(price);
-        if (!Number.isFinite(p)) return '-';
+        if (!Number.isFinite(p) || p <= 0) return '-';
         if (Math.abs(p) >= 100) return `$${p.toFixed(2)}`;
         if (Math.abs(p) >= 10) return `$${p.toFixed(3)}`;
         if (Math.abs(p) >= 1) return `$${p.toFixed(4)}`;
         if (Math.abs(p) >= 0.01) return `$${p.toFixed(6)}`;
-        return `$${p.toFixed(8)}`;
+        return `$${p.toPrecision(6)}`;
     };
     const formatPct = (v) => {
         const n = Number(v);
@@ -8812,7 +8909,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     }
                     setCrashError(null);
                     if (cm.fear_score !== undefined) {
-                        const fd = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                        const fd = { score: cm.fear_score ?? null, vix: cm.vix?.price ?? null, level: cm.fear_level || '', dataStatus: cm.data_status, coverage: cm.coverage_weight, proxy: cm.vix_proxy };
                         setFearData(fd);
                         setIndices(cm.indices || []);
                         setBreadth(cm.breadth || null);
@@ -8865,7 +8962,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                     return;
                                 }
                                 setCrashError(null);
-                                const fearData = { score: cm.fear_score || 0, vix: cm.vix?.price || 0, level: cm.fear_level || '' };
+                                const fearData = { score: cm.fear_score ?? null, vix: cm.vix?.price ?? null, level: cm.fear_level || '', dataStatus: cm.data_status, coverage: cm.coverage_weight, proxy: cm.vix_proxy };
                                 setFearData(fearData);
                                 setIndices(cm.indices || []);
                                 setBreadth(cm.breadth || null);
@@ -8893,10 +8990,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
         }
     };
 
-    const fearLevel = fearData?.score ?? 50;
-    // V2.5: CNN-kompatible Skala — 0 = Extreme Fear, 100 = Extreme Greed
-    const fearText = fearData?.level || (fearLevel <= 20 ? 'EXTREME ANGST' : fearLevel <= 40 ? 'ANGST' : fearLevel <= 60 ? 'NEUTRAL' : fearLevel <= 80 ? 'GIER' : 'EXTREME GIER');
-    const fearColor = fearLevel <= 20 ? '#dc2626' : fearLevel <= 40 ? '#d97706' : fearLevel <= 60 ? '#6b7280' : fearLevel <= 80 ? '#2563eb' : '#059669';
+    const fearLevel = fearData?.score ?? null;
+    const fearText = fearLevel == null ? 'DATEN UNVOLLSTÄNDIG' : fearData?.level || (fearLevel <= 20 ? 'EXTREME ANGST' : fearLevel <= 40 ? 'ANGST' : fearLevel <= 60 ? 'NEUTRAL' : fearLevel <= 80 ? 'GIER' : 'EXTREME GIER');
+    const fearColor = fearLevel == null ? '#6b7280' : fearLevel <= 20 ? '#dc2626' : fearLevel <= 40 ? '#d97706' : fearLevel <= 60 ? '#6b7280' : fearLevel <= 80 ? '#2563eb' : '#059669';
 
     return (
         <div className="space-y-6">
@@ -8910,10 +9006,12 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 <div className="card border border-gray-200 p-6 rounded-lg">
                     <div className="text-center">
                         <div className="fear-score-display" style={{ color: fearColor }}>
-                            {fearLevel.toFixed(0)}
+                            {fearLevel == null ? '—' : fearLevel.toFixed(0)}
                         </div>
                         <p className="text-lg font-semibold mt-2">{fearText}</p>
-                        <p className="text-sm text-gray-600">Fear & Greed Index</p>
+                        <p className="text-sm text-gray-600">Interner Marktstress-Score · kein CNN-Index und keine Verlustwahrscheinlichkeit</p>
+                        {fearLevel == null && <p className="text-sm text-amber-600 mt-2">Fehlende Messwerte werden nicht als Entwarnung gewertet.</p>}
+                        {fearData.proxy && <p className="text-xs text-gray-500 mt-2">Volatilitäts-ETF {fearData.proxy.symbol || 'UVXY'} separat verfügbar; sein Preis ersetzt keinen VIX-Indexstand.</p>}
                     </div>
                 </div>
             )}
@@ -8973,7 +9071,7 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <span className="font-semibold color-positive">{breadth.advancing}</span>
                             </div>
                             <div className="momentum-bar">
-                                <div className="momentum-bar-fill" style={{ width: `${breadth.advancing_pct || 50}%`, backgroundColor: '#059669' }}></div>
+                                <div className="momentum-bar-fill" style={{ width: `${breadth.advancing_pct ?? 0}%`, backgroundColor: '#059669' }}></div>
                             </div>
                         </div>
                         <div>
@@ -8982,15 +9080,15 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <span className="font-semibold color-negative">{breadth.declining}</span>
                             </div>
                             <div className="momentum-bar">
-                                <div className="momentum-bar-fill" style={{ width: `${breadth.declining_pct || 50}%`, backgroundColor: '#dc2626' }}></div>
+                                <div className="momentum-bar-fill" style={{ width: `${breadth.declining_pct ?? 0}%`, backgroundColor: '#dc2626' }}></div>
                             </div>
                         </div>
                         <div className="flex justify-between items-center mt-4 pt-3 border-t border-gray-100">
                             <div className="text-sm text-gray-600">
-                                A/D Ratio: <span className="font-semibold">{breadth.ad_ratio?.toFixed(2)}</span>
+                                A/D Ratio: <span className="font-semibold">{breadth.ad_ratio == null ? 'Nicht verfügbar' : breadth.ad_ratio.toFixed(2)}</span>
                             </div>
                             <span className={`signal-badge ${breadth.breadth_signal === 'BULLISH' ? 'signal-bullish' : breadth.breadth_signal === 'BEARISH' ? 'signal-bearish' : 'signal-neutral'}`}>
-                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : breadth.breadth_signal === 'MARKT GESCHLOSSEN' ? 'Markt geschlossen' : 'Neutral'}
+                                {breadth.breadth_signal === 'BULLISH' ? 'Bullisch' : breadth.breadth_signal === 'BEARISH' ? 'Bärisch' : breadth.breadth_signal === 'MARKT GESCHLOSSEN' ? 'Markt geschlossen' : breadth.breadth_signal === 'NEUTRAL' ? 'Neutral' : 'Nicht verfügbar'}
                             </span>
                         </div>
                         {breadth.unchanged > 0 && (
@@ -9183,16 +9281,16 @@ function BacktestTab() {
     const requiresTicker = selectedStrategy.requires_ticker !== false;
     const isUniverseBacktest = !requiresTicker;
     const formatBtPrice = (value) => {
+        if (value == null || value === '' || typeof value === 'boolean') return '-';
         const n = Number(value);
         if (!Number.isFinite(n) || n <= 0) return '-';
         if (n >= 100) return `$${n.toFixed(2)}`;
         if (n >= 1) return `$${n.toFixed(3)}`;
         if (n >= 0.01) return `$${n.toFixed(5)}`;
-        return `$${n.toFixed(8)}`;
+        return `$${n.toPrecision(6)}`;
     };
     const formatBtPct = (value) => {
-        const n = Number(value || 0);
-        return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+        return formatBacktestMetric(value, 2, '%', true);
     };
     const numberOr = (value, fallback) => {
         const n = Number(value);
@@ -9413,6 +9511,13 @@ function BacktestTab() {
 
             {results && !error && (
                 <>
+                    {(results.data_quality?.status === 'PARTIAL' || Number(results.unresolved) > 0) && (
+                        <div role="status" data-testid="backtest-data-coverage" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
+                            <div className="font-bold">Datenabdeckung unvollständig</div>
+                            <div className="mt-1">Ungeklärte Signale: {formatBacktestMetric(results.unresolved, 0)} · Fetch-Ausfalltage: {formatBacktestMetric(results.data_quality?.failed_fetch_days, 0)} · Fehlende Sitzungen: {results.data_quality?.missing_expected_sessions?.length ?? '—'}</div>
+                            <p className="mt-2">Kennzahlen berücksichtigen nur beobachtete, entschiedene Verläufe. Ungeklärte Fälle sind weder 0R noch abgeschlossene Trades. Diese Teilstichprobe bestätigt keinen vollständigen Handelsvorteil.</p>
+                        </div>
+                    )}
                     {verdict && (
                         <div
                             className="rounded-lg p-4"
@@ -9448,14 +9553,14 @@ function BacktestTab() {
                             <div className="flex flex-wrap items-center justify-between gap-2">
                                 <div className="font-semibold">Chronologischer Holdout</div>
                                 <span className={`px-2 py-1 rounded text-xs font-bold ${outOfSample.status === 'pass' ? 'bg-green-50 text-green-700' : outOfSample.status === 'fail' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'}`}>
-                                    {outOfSample.status === 'pass' ? 'BESTAETIGT' : outOfSample.status === 'fail' ? 'NICHT BESTAETIGT' : 'NOCH ZU KLEIN'}
+                                    {outOfSample.status === 'data_incomplete' ? 'DATEN UNVOLLSTÄNDIG' : outOfSample.status === 'pass' ? 'BESTAETIGT' : outOfSample.status === 'fail' ? 'NICHT BESTAETIGT' : 'NOCH ZU KLEIN'}
                                 </span>
                             </div>
                             {outOfSample.holdout ? (
                                 <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-3 text-xs">
                                     <div><span className="text-gray-500">Split:</span> {outOfSample.split_date || '-'}</div>
                                     <div><span className="text-gray-500">Trades:</span> {outOfSample.holdout.total_trades ?? 0}</div>
-                                    <div><span className="text-gray-500">Avg PnL:</span> {formatBtPct(outOfSample.holdout.avg_pnl ?? 0)}</div>
+                                    <div><span className="text-gray-500">Avg PnL:</span> {formatBtPct(outOfSample.holdout.avg_pnl)}</div>
                                     <div><span className="text-gray-500">PF:</span> {outOfSample.holdout.profit_factor_display || outOfSample.holdout.profit_factor || '-'}</div>
                                     <div><span className="text-gray-500">Drawdown:</span> {(outOfSample.holdout.max_drawdown ?? 0).toFixed(1)}%</div>
                                 </div>
@@ -9519,9 +9624,9 @@ function BacktestTab() {
                                 <div><span className="font-semibold">Signale:</span> {results.total_signals ?? results.total_trades}</div>
                                 <div><span className="font-semibold">No Fill:</span> {results.no_fill ?? 0}</div>
                                 <div><span className="font-semibold">Ticker:</span> {results.n_tickers ?? '-'}</div>
-                                <div><span className="font-semibold">Sum PnL:</span> {formatBtPct(results.sum_pnl ?? results.total_return ?? 0)}</div>
+                                <div><span className="font-semibold">Sum PnL:</span> {formatBtPct(results.sum_pnl ?? results.total_return)}</div>
                                 <div><span className="font-semibold">Profit Factor:</span> {results.profit_factor_display || ((results.profit_factor ?? 0).toFixed ? (results.profit_factor ?? 0).toFixed(2) : results.profit_factor)}</div>
-                                <div><span className="font-semibold">Avg R:</span> {(results.avg_r ?? 0).toFixed ? (results.avg_r ?? 0).toFixed(2) : results.avg_r}</div>
+                                <div><span className="font-semibold">Avg R:</span> {formatBacktestMetric(results.avg_r)}</div>
                             </div>
                             {results.note && <div className="mt-2 text-xs text-blue-700">{results.note}</div>}
                             {results.methodology && <div className="mt-1 text-xs text-blue-700">{results.methodology}</div>}
@@ -9548,8 +9653,8 @@ function BacktestTab() {
                                             <td className="py-2 px-2 font-semibold">{grade}</td>
                                             <td className="py-2 px-2 text-right">{stat.total ?? 0}</td>
                                             <td className="py-2 px-2 text-right">{(stat.win_rate ?? 0).toFixed(1)}%</td>
-                                            <td className={`py-2 px-2 text-right ${(stat.avg_pnl ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatBtPct(stat.avg_pnl ?? 0)}</td>
-                                            <td className="py-2 px-2 text-right">{(stat.avg_r ?? 0).toFixed(2)}</td>
+                                            <td className={`py-2 px-2 text-right ${backtestMetricClass(stat.avg_pnl)}`}>{formatBtPct(stat.avg_pnl)}</td>
+                                            <td className="py-2 px-2 text-right">{formatBacktestMetric(stat.avg_r)}</td>
                                             <td className="py-2 px-2 text-right">{stat.profit_factor_display || ((stat.profit_factor ?? 0).toFixed ? (stat.profit_factor ?? 0).toFixed(2) : stat.profit_factor)}</td>
                                         </tr>
                                     ))}
@@ -9589,8 +9694,8 @@ function BacktestTab() {
                                             <td className="py-3 px-2 text-right">{formatBtPrice(trade.entry_price)}</td>
                                             <td className="py-3 px-2">{trade.exit_date}</td>
                                             <td className="py-3 px-2 text-right">{formatBtPrice(trade.exit_price)}</td>
-                                            <td className={`py-3 px-2 text-right font-semibold ${(trade.pnl_pct ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatBtPct(trade.pnl_pct ?? 0)}</td>
-                                            <td className="py-3 px-2 text-right">{(trade.r_multiple ?? 0).toFixed ? (trade.r_multiple ?? 0).toFixed(2) : trade.r_multiple}</td>
+                                            <td className={`py-3 px-2 text-right font-semibold ${backtestMetricClass(trade.pnl_pct)}`}>{formatBtPct(trade.pnl_pct)}</td>
+                                            <td className="py-3 px-2 text-right">{formatBacktestMetric(trade.r_multiple)}</td>
                                             <td className="py-3 px-2 text-center text-xs">{trade.grade || '-'}</td>
                                             <td className="py-3 px-2 text-center text-xs">{trade.outcome || '-'}</td>
                                             <td className="py-3 px-2 text-center text-xs">{trade.type || 'LONG'}</td>
@@ -10014,7 +10119,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <td className={`py-3 px-2 text-right font-semibold ${item.pump_pct > 0 ? 'color-positive' : 'color-negative'}`}>{item.pump_pct ? `+${item.pump_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right color-negative">{item.from_ath_pct ? `-${item.from_ath_pct}%` : '—'}</td>
                                 <td className="py-3 px-2 text-right"><span className={`signal-badge ${getExhaustionColor(item.exhaustion_score)}`}>{item.exhaustion_score?.toFixed(0)}</span></td>
-                                <td className={`py-3 px-2 text-right font-semibold ${item.funding_rate > 0.05 ? 'color-negative' : item.funding_rate > 0 ? 'text-yellow-600' : ''}`}>{item.funding_rate ? `${item.funding_rate.toFixed(3)}%` : '—'}</td>
+                                <td className="py-3 px-2 text-right font-semibold" title={item.funding_interval_hours ? `pro ${item.funding_interval_hours}h` : 'Abrechnungsintervall unbekannt'}>{formatFundingRate(item)}</td>
                                 <td className="py-3 px-2 text-center">
                                     <span className={`signal-badge ${item.trade_signal === 'JETZT_TRADEN' || item.trade_action === 'SHORT_NOW' ? 'signal-bearish' : item.trade_signal === 'NICHT_TRADEN' ? 'signal-neutral' : 'signal-lightdiv'}`}>{item.trade_signal === 'JETZT_TRADEN' || item.trade_action === 'SHORT_NOW' ? 'JETZT SHORTEN' : item.trade_signal || item.signal || 'BEOBACHTEN'}{item.confirmations >= 3 ? ` (${item.confirmations})` : ''}</span>
                                     {item.signal_label && <div className="text-[11px] text-gray-500 mt-1">{item.signal_label}</div>}

@@ -102,7 +102,12 @@ def _valid_bars(bars: Sequence[Dict[str, Any]]) -> List[Dict[str, float]]:
         if not isinstance(raw, dict):
             continue
         item = _bar(raw)
-        if item["close"] <= 0 or item["high"] < item["low"] or item["volume"] < 0:
+        if (
+            min(item[key] for key in ("open", "high", "low", "close")) <= 0
+            or item["high"] < max(item["open"], item["low"], item["close"])
+            or item["low"] > min(item["open"], item["high"], item["close"])
+            or item["volume"] < 0
+        ):
             continue
         result.append(item)
     return result
@@ -123,12 +128,19 @@ def _completed_bars(
 ) -> List[Dict[str, float]]:
     """Return sorted, de-duplicated bars whose interval has fully closed."""
     completed: Dict[float, Dict[str, float]] = {}
+    conflicted = set()
     for item in _valid_bars(bars):
         timestamp = _timestamp_seconds(item.get("timestamp"))
         if timestamp <= 0 or timestamp + timeframe_seconds > now_ts:
             continue
         normalized = dict(item)
         normalized["timestamp"] = timestamp
+        if timestamp in conflicted:
+            continue
+        if timestamp in completed and completed[timestamp] != normalized:
+            completed.pop(timestamp)
+            conflicted.add(timestamp)
+            continue
         completed[timestamp] = normalized
     return [completed[key] for key in sorted(completed)]
 

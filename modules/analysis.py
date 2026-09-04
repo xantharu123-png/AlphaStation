@@ -1864,20 +1864,29 @@ def calculate_sr_from_historical(
         else:
             session_reason = "previous_daily_session_unavailable"
 
-    fib_levels = {
-        "fib_236": period_low + price_range * 0.236,
-        "fib_382": period_low + price_range * 0.382,
-        "fib_500": period_low + price_range * 0.500,
-        "fib_618": period_low + price_range * 0.618,
-        "fib_786": period_low + price_range * 0.786,
-    }
+    # Even the legacy presentation adapter must use the same chronological
+    # anchors as the chart/BI engine. Independent period extrema can be in the
+    # reverse order and do not constitute a directional retracement leg.
+    from modules.fibonacci_levels import project_fibonacci, select_confirmed_swing_leg
+
+    fib_leg = select_confirmed_swing_leg(
+        completed, as_of=cutoff, direction=side, timeframe=normalized_timeframe,
+        minimum_move_atr=1.0 if atr > 0 else 0.0, atr=atr, timestamp_mode="close",
+    )
+    ratio_keys = {0.236: "fib_236", 0.382: "fib_382", 0.5: "fib_500", 0.618: "fib_618", 0.786: "fib_786"}
+    fib_levels = dict.fromkeys(ratio_keys.values())
+    if fib_leg is not None:
+        for projected in project_fibonacci(fib_leg):
+            key = ratio_keys.get(projected.provenance.get("ratio"))
+            if key is not None:
+                fib_levels[key] = projected.midpoint
     fib_info = {
         "period_high": _smart_round_sr(period_high),
         "period_low": _smart_round_sr(period_low),
         "prev_day_high": previous_day["high"],
         "prev_day_low": previous_day["low"],
         "prev_day_close": previous_day["close"],
-        **{name: _smart_round_sr(value) for name, value in fib_levels.items()},
+        **{name: _smart_round_sr(value) if value is not None else None for name, value in fib_levels.items()},
         "supports_detail": supports_detail,
         "resistances_detail": resistances_detail,
         "consolidation_zones": [],
@@ -1915,7 +1924,11 @@ def calculate_sr_from_historical(
         "fibonacci_provenance": {
             "projection_only": True,
             "used_as_structural_evidence": False,
-            "anchor": "completed_period_high_low_display_only",
+            "anchor": "confirmed_chronological_swing_leg",
+            "available": fib_leg is not None,
+            "unavailable_reason": None if fib_leg is not None else "no_confirmed_directional_swing_leg",
+            "direction": side,
+            "leg": fib_leg.to_dict() if fib_leg is not None else None,
         },
     }
     return (supports, resistances), fib_info

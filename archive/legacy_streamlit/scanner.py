@@ -4621,7 +4621,7 @@ def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak
         timing_quality: 5=JETZT SHORTEN, 4=JETZT, 3=BEREIT, 2=WATCH/BEOBACHTEN,
                         0=ZU FRÜH, -1=ZU SPÄT. btc_gate=True nur bei BTC-Schwäche.
     """
-    no_stop_note = " · ⚠️ kein definierter Stop — Beobachtungssignal"
+    no_stop_note = " · kein Einstiegssignal, kein definierter Stop"
     cp = close_pos if close_pos is not None else 0.5
     price_near_high = cp >= 0.70
     price_mid_range = 0.40 <= cp < 0.70
@@ -4639,9 +4639,9 @@ def _btc_div_signal_status(exh_score, close_pos, change_1h, change_24h, btc_weak
         return ("⚪ ZU FRÜH", 0, False)
 
     if exh_score >= 65 and price_near_high and change_1h < -1.5:
-        return ("🔴 JETZT SHORTEN — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
+        return ("🔴 SHORT-KONTEXT — Nahe High, 1h kippt ({:+.1f}%){}".format(change_1h, no_stop_note), 5, True)
     if exh_score >= 65 and price_near_high and change_1h < -0.5:
-        return ("🟢 JETZT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
+        return ("🟠 SHORT-KONTEXT — Nahe High, erste Schwäche (1h {:+.1f}%){}".format(change_1h, no_stop_note), 4, True)
     if exh_score >= 65 and price_near_high:
         return ("🟡 BEREIT — Nahe High, warte auf rote 1h-Kerze", 3, True)
     if exh_score >= 65 and price_mid_range:

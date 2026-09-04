@@ -705,3 +705,36 @@ und ersetzt nicht den mehrtaegigen DU-Paper-Soak.
   P0/P1/P2 = 0/0/0. Live-Trading bleibt blockiert; realer mehrtaegiger DU-Soak,
   echte TWS/Gateway-Event-/Disconnect-Pruefung, Deployment und der visuelle
   Browser-Smoke nach den letzten UI-Aenderungen stehen noch aus.
+
+## 16. Scanner-Vertraege nach Audit 04./05.09.2026
+
+Neueste bounded Audit-/Abnahmereferenz: `AUDIT_REMEDIATION_2026-09-04.md`.
+Historische Testzahlen, Bundle-Hashes und Serverstaende oben beschreiben nur
+ihren jeweiligen damaligen Stand. Die aktuellen fachlichen Invarianten sind:
+
+- BI `stock-bi-20-v2`: mindestens 17 von 20 bestaetigt, alle 20 auswertbar,
+  harte Gegenindikationen blockieren unabhaengig vom gewichteten Score.
+  Keine unter-17-Kandidatenliste, kein unter-17-Tracking oder Mailversand.
+- Physische Support-/Resistance-Grenzen duerfen nicht durch die aktuelle
+  Quote zugeschnitten oder verschoben werden. Strukturinvalidierung hat
+  Vorrang vor einem naeheren ATR-Fallback; Rundung darf sie nicht entwerten.
+  Stop, TP1 und TP2 tragen eigene Provenienz. Fibonacci ist nur bei kausal
+  bestaetigtem, chronologischem Swing verfuegbar und bleibt eine Projektion.
+- Abgeschlossene Tagesdaten werden nicht mit einem fremden heutigen
+  Intraday-Volumenfaktor hochgerechnet. Fehlende Daten sind unbekannt, nicht
+  null, neutral oder ein erfuellter Indikator. Funding und OI behalten Venue,
+  Intervall, Einheit und vergleichbare Zeitbasis.
+- Ergebnisarithmetik `causal-legs-extrema-v2` endet am belegten Exit.
+  Ungeklaerte Reihenfolge und unvollstaendige Pfade duerfen keine erfundene
+  Rendite erhalten. Historische Produktionszeilen werden nicht still neu
+  geschrieben; fuer Repairs gelten die getrennten Evidenz-/Backup-Gates.
+- Ein ausgewaehlter BI-Plan bleibt als datierter Snapshot erhalten. Eine
+  neue Detailquote erzeugt weder eine andere Richtung noch eine erneute
+  Handelsfreigabe. Interne Scores sind keine Gewinnwahrscheinlichkeiten.
+- App-Signale, Mail-Signale, Shadow, Daily-Backtest und Broker-Fills sind
+  verschiedene Kohorten. Technisch gruene Tests oder 17/20 beweisen keinen
+  Handelsvorteil. Massgeblich ist prospektiv bestaetigte Netto-Erwartung samt
+  Risiko, Datenabdeckung und Unsicherheit, getrennt nach Modellversion.
+
+Dieses Paket aktiviert weder Live-Trading noch den frueheren Root-Cron.
+Deployment und echte neue Forward-Ergebnisse bleiben separate Nachweise.

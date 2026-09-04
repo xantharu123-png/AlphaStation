@@ -7,8 +7,10 @@ Backtesting-Engine für verschiedene Strategien:
 - Trade Simulation + Statistiken
 """
 import time
+import math
 import datetime as dt
 from datetime import datetime, timedelta
+from functools import lru_cache
 from modules.data_fetchers import rate_limited_get, fetch_grouped_daily
 from modules.scorers import calculate_setup_score
 from modules.strategies import BACKTEST_STRATEGY_RULES
@@ -19,6 +21,7 @@ from modules.scanners import _compute_biotech_technical_from_bars
 from modules.data_fetchers import fetch_backtest_daily_data
 from modules.trade_levels import trade_geometry
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
+from modules.bi_trade_plan import BI_PLAN_VERSION, build_bi_trade_plan
 from modules.volume_metrics import historical_volume_baseline
 from modules.vrvp_levels import calculate_wilder_atr
 
@@ -92,6 +95,85 @@ def _initial_universe_average_volume(bars, window_size, lookback=20, minimum_per
     )
 
 
+@lru_cache(maxsize=8192)
+def _daily_session_gap(previous_date, current_date, calendar="us_equity"):
+    """Return unobserved expected sessions between two daily observations.
+
+    Stock studies use the existing NYSE calendar. 24/7 is only an explicit
+    asset contract, never inferred from a ticker. Undated legacy fixtures are
+    still calculable but cannot claim verified market-data coverage.
+    """
+    if calendar not in {"us_equity", "24_7"}:
+        raise ValueError("session_calendar must be us_equity or 24_7")
+    try:
+        previous = dt.date.fromisoformat(str(previous_date)[:10])
+        current = dt.date.fromisoformat(str(current_date)[:10])
+    except (TypeError, ValueError):
+        return {"coverage": "legacy_bar_sequence_unverified", "missing_sessions": ()}
+    if current <= previous:
+        return {"coverage": "invalid_daily_date_order", "missing_sessions": (),
+                "reason": "NON_INCREASING_DAILY_DATES"}
+    if (current - previous).days == 1:
+        return {"coverage": "expected_session_gaps_checked", "missing_sessions": ()}
+    try:
+        # Optional tracker import stays lazy, preserving defensive API startup.
+        from modules.signal_tracker import _is_us_equity_session
+    except ImportError:
+        if calendar == "us_equity":
+            return {"coverage": "calendar_unavailable", "missing_sessions": (),
+                    "reason": "SESSION_CALENDAR_UNAVAILABLE"}
+    missing = []
+    cursor = previous + timedelta(days=1)
+    while cursor < current:
+        if calendar == "24_7" or _is_us_equity_session(cursor):
+            missing.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return {"coverage": "missing_expected_sessions" if missing else "expected_session_gaps_checked",
+            "missing_sessions": tuple(missing),
+            **({"reason": "MISSING_EXPECTED_SESSION"} if missing else {})}
+
+
+class _BacktestTradeList(list):
+    """Preserve strategy->list compatibility while carrying empty-cohort quality."""
+    data_quality = None
+
+
+def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers=()):
+    inherited = getattr(trades, "data_quality", None) or {}
+    failed = set(failed_fetch_dates) | set(inherited.get("failed_fetch_dates") or ())
+    unavailable = set(unavailable_tickers) | set(inherited.get("unavailable_tickers") or ())
+    missing = set(inherited.get("missing_expected_sessions") or ())
+    affected = 0
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        quality = trade.get("data_quality") or {}
+        failed.update(quality.get("failed_fetch_dates") or ())
+        unavailable.update(quality.get("unavailable_tickers") or ())
+        missing.update(trade.get("missing_expected_sessions") or ())
+        if trade.get("evaluation_status") in {
+            "MISSING_EXPECTED_SESSION", "NON_INCREASING_DAILY_DATES", "SESSION_CALENDAR_UNAVAILABLE",
+        }:
+            affected += 1
+    partial = bool(failed or unavailable or missing or affected)
+    return {
+        "status": "PARTIAL" if partial else "NO_KNOWN_FETCH_OR_SESSION_GAP",
+        "failed_fetch_days": len(failed), "failed_fetch_dates": sorted(failed),
+        "unavailable_tickers": sorted(unavailable),
+        "missing_expected_sessions": sorted(missing), "coverage_unresolved_trades": affected,
+        "statistics_scope": "observed_decided_paths_only_not_complete_market_cohort",
+    }
+
+
+def _attach_backtest_data_quality(results, *, failed_fetch_dates=(), unavailable_tickers=()):
+    for trades in results.values():
+        quality = _backtest_data_quality(trades, failed_fetch_dates=failed_fetch_dates,
+                                         unavailable_tickers=unavailable_tickers)
+        trades.data_quality = quality
+        for trade in trades:
+            trade["data_quality"] = quality
+
+
 def _simulate_50_50_daily_path(
     bars,
     start_idx,
@@ -108,6 +190,7 @@ def _simulate_50_50_daily_path(
     prefer_target=False,
     first_bar_order_unknown=False,
     post_tp1_stop_offset=0.0,
+    session_calendar="us_equity",
 ):
     """Simulate one deterministic ordering of a two-target daily-OHLC trade."""
     direction = str(direction or "").upper()
@@ -121,6 +204,11 @@ def _simulate_50_50_daily_path(
     tp1_price = float(tp1_price)
     tp2_price = float(tp2_price)
     post_tp1_stop_offset = max(0.0, float(post_tp1_stop_offset or 0.0))
+    if (not all(math.isfinite(value) for value in (entry_price, stop_price, tp1_price, tp2_price,
+             float(exit_slippage), float(fee_pct), float(trail_fraction), post_tp1_stop_offset))
+            or min(entry_price, stop_price, tp1_price, tp2_price) <= 0
+            or not 0 <= exit_slippage < 1 or fee_pct < 0 or not 0 <= trail_fraction <= 1):
+        return None
     if direction == "LONG":
         geometry_valid = stop_price < entry_price < tp1_price < tp2_price
     else:
@@ -139,10 +227,31 @@ def _simulate_50_50_daily_path(
     exit_reason = None
     exit_date = None
     ambiguity_reasons = set()
+    session_coverage = "legacy_bar_sequence_unverified"
+    missing_expected_sessions = []
 
     def _level_fill(level):
         multiplier = 1.0 - exit_slippage if direction == "LONG" else 1.0 + exit_slippage
         return float(level) * multiplier
+
+    def _trailed_stop():
+        if direction == "LONG":
+            return max(entry_price + (tp1_price - entry_price) * trail_fraction,
+                       entry_price + post_tp1_stop_offset)
+        return min(entry_price - (entry_price - tp1_price) * trail_fraction,
+                   entry_price - post_tp1_stop_offset)
+
+    def _unresolved(reason, bar_index):
+        return {
+            "exit_date": bars[bar_index].get("date"), "exit_price": None,
+            "exit_reason": "UNRESOLVED", "outcome": "UNRESOLVED",
+            "pnl_pct": None, "r_multiple": None, "bars_held": bars_held,
+            "tp1_hit": tp1_hit, "is_winner": False, "ambiguity_reasons": sorted(ambiguity_reasons),
+            "evaluation_status": reason, "evaluation_model_version": "daily-causal-exits-v2",
+            "roundtrip_fee_pct": fee_pct, "exit_slippage_fraction": exit_slippage,
+            "session_calendar": session_calendar, "session_coverage": session_coverage,
+            "missing_expected_sessions": list(missing_expected_sessions),
+        }
 
     for day_offset in range(int(max_hold)):
         bar_idx = start_idx + day_offset
@@ -150,9 +259,19 @@ def _simulate_50_50_daily_path(
             break
 
         bar = bars[bar_idx]
-        bar_open = float(bar.get("open") or 0)
-        bar_high = float(bar.get("high") or 0)
-        bar_low = float(bar.get("low") or 0)
+        if bar_idx > 0:
+            coverage = _daily_session_gap(bars[bar_idx-1].get("date"), bar.get("date"), session_calendar)
+            session_coverage = coverage["coverage"]
+            missing_expected_sessions = list(coverage["missing_sessions"])
+            if coverage.get("reason"):
+                return _unresolved(coverage["reason"], bar_idx)
+        try:
+            bar_open, bar_high, bar_low, bar_close = (float(bar[key]) for key in ("open", "high", "low", "close"))
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return _unresolved("INVALID_OHLC", bar_idx)
+        if (not all(math.isfinite(value) and value > 0 for value in (bar_open, bar_high, bar_low, bar_close))
+                or bar_high < max(bar_open, bar_low, bar_close) or bar_low > min(bar_open, bar_high, bar_close)):
+            return _unresolved("INVALID_OHLC", bar_idx)
         bars_held += 1
 
         if direction == "LONG":
@@ -178,8 +297,22 @@ def _simulate_50_50_daily_path(
             exit_date = bar.get("date")
             break
 
+        # The open precedes every intrabar extreme for an existing position.
+        # Apply executable limit targets before a later reversal can hit its stop.
+        if bar_open > 0 and not trigger_touch_first_bar:
+            open_tp2 = bar_open >= tp2_price if direction == "LONG" else bar_open <= tp2_price
+            open_tp1 = bar_open >= tp1_price if direction == "LONG" else bar_open <= tp1_price
+            if open_tp2:
+                exit_price = (_level_fill(tp1_price) + _level_fill(tp2_price)) / 2
+                exit_reason, exit_date, tp1_hit = "BLENDED_TP", bar.get("date"), True
+                break
+            if open_tp1 and not tp1_hit:
+                tp1_hit = True
+                current_stop = _trailed_stop()
+                stop_possible = bar_low <= current_stop if direction == "LONG" else bar_high >= current_stop
+
         entry_order_unknown = bool(first_bar_order_unknown and day_offset == 0 and stop_possible)
-        target_and_stop = bool(stop_possible and (tp1_possible or tp2_possible))
+        target_and_stop = bool(stop_possible and ((tp1_possible and not tp1_hit) or tp2_possible))
         if entry_order_unknown:
             ambiguity_reasons.add("entry_bar_pre_post_fill_order_unknown")
         if target_and_stop:
@@ -214,12 +347,22 @@ def _simulate_50_50_daily_path(
                     trailed_stop_hit = bar_high >= current_stop
                 if stop_possible or trailed_stop_hit:
                     ambiguity_reasons.add("same_bar_tp1_and_trailed_stop")
+                close_through_trail = (bar_close <= current_stop if direction == "LONG"
+                                       else bar_close >= current_stop)
+                if close_through_trail:
+                    # Unlike the unordered low/high, the close is necessarily
+                    # after the TP1 touch. Even the favorable path must have
+                    # crossed the newly active stop before this session ended.
+                    exit_price = (_level_fill(tp1_price) + _level_fill(current_stop)) / 2
+                    exit_reason, exit_date = "TP1_STOP", bar.get("date")
+                    break
                 # Favorable bound: the adverse extreme may have preceded TP1.
                 # The runner therefore remains open into the next bar.
                 continue
             if effective_stop_possible:
-                exit_price = _level_fill(current_stop)
-                exit_reason = "STOP"
+                runner_exit = _level_fill(current_stop)
+                exit_price = (_level_fill(tp1_price) + runner_exit) / 2 if tp1_hit else runner_exit
+                exit_reason = "TP1_STOP" if tp1_hit else "STOP"
                 exit_date = bar.get("date")
                 break
         else:
@@ -262,8 +405,10 @@ def _simulate_50_50_daily_path(
         return None
 
     if exit_reason is None:
+        if bars_held < int(max_hold):
+            return _unresolved("INCOMPLETE_HOLDING_WINDOW", min(start_idx + bars_held - 1, len(bars) - 1))
         last_bar_idx = min(start_idx + max_hold - 1, len(bars) - 1)
-        runner_exit = float(bars[last_bar_idx].get("close") or entry_price)
+        runner_exit = _level_fill(float(bars[last_bar_idx].get("close") or entry_price))
         exit_price = (_level_fill(tp1_price) + runner_exit) / 2 if tp1_hit else runner_exit
         exit_reason = "TP1+EOD" if tp1_hit else "EOD"
         exit_date = bars[last_bar_idx].get("date")
@@ -287,6 +432,11 @@ def _simulate_50_50_daily_path(
         "tp1_hit": tp1_hit,
         "is_winner": pnl_pct > 0,
         "ambiguity_reasons": sorted(ambiguity_reasons),
+        "evaluation_model_version": "daily-causal-exits-v2",
+        "roundtrip_fee_pct": fee_pct,
+        "exit_slippage_fraction": exit_slippage,
+        "session_calendar": session_calendar, "session_coverage": session_coverage,
+        "missing_expected_sessions": list(missing_expected_sessions),
     }
 
 
@@ -305,6 +455,7 @@ def _simulate_50_50_daily_exit(
     fee_pct=0.2,
     first_bar_order_unknown=False,
     post_tp1_stop_offset=0.0,
+    session_calendar="us_equity",
 ):
     """Return conservative and favorable bounds for an unresolved daily path."""
     shared = dict(
@@ -321,6 +472,7 @@ def _simulate_50_50_daily_exit(
         fee_pct=fee_pct,
         first_bar_order_unknown=first_bar_order_unknown,
         post_tp1_stop_offset=post_tp1_stop_offset,
+        session_calendar=session_calendar,
     )
     lower = _simulate_50_50_daily_path(**shared, prefer_target=False)
     upper = _simulate_50_50_daily_path(**shared, prefer_target=True)
@@ -328,6 +480,26 @@ def _simulate_50_50_daily_exit(
         return None
 
     ambiguity_reasons = sorted(set(lower["ambiguity_reasons"]) | set(upper["ambiguity_reasons"]))
+    if lower["exit_reason"] == "UNRESOLVED" or upper["exit_reason"] == "UNRESOLVED":
+        # Even if one hypothetical ordering has exited, its alternate path may
+        # still be open. Do not turn the missing tail into a neutral or decided R.
+        result = dict(lower)
+        unresolved_path = lower if lower["exit_reason"] == "UNRESOLVED" else upper
+        result.update({
+            "outcome": "UNRESOLVED", "exit_reason": "UNRESOLVED", "exit_price": None,
+            "pnl_pct": None, "r_multiple": None, "is_winner": False,
+            "exit_date_upper": upper["exit_date"], "exit_price_upper": None,
+            "exit_reason_upper": upper["exit_reason"], "pnl_pct_upper": None,
+            "r_multiple_upper": None, "tp1_hit_upper": upper["tp1_hit"], "is_winner_upper": False,
+            "intrabar_ambiguous": bool(ambiguity_reasons),
+            "ambiguity_reason": ",".join(ambiguity_reasons) if ambiguity_reasons else None,
+            "evaluation_status": (lower.get("evaluation_status") or upper.get("evaluation_status")
+                                  or "INCOMPLETE_HOLDING_WINDOW"),
+            "ohlc_path_policy": "lower_stop_first_upper_target_first",
+            "session_coverage": unresolved_path["session_coverage"],
+            "missing_expected_sessions": unresolved_path["missing_expected_sessions"],
+        })
+        return result
     # The favorable path is an upper bound, never a second performance claim.
     if upper["r_multiple"] < lower["r_multiple"]:
         upper = dict(lower)
@@ -349,6 +521,8 @@ def _simulate_50_50_daily_exit(
 
 def _backtest_uncertainty_metrics(trades):
     """Summarize conservative results and favorable OHLC-path bounds."""
+    trades = [trade for trade in (trades or [])
+              if str(trade.get("outcome") or "").upper() not in {"NO_FILL", "UNRESOLVED"}]
     if not trades:
         return {
             "ambiguous_trades": 0,
@@ -495,6 +669,10 @@ def evaluate_rule_signal(bars, signal_idx, strategy):
 
 def conservative_trade_exit_index(trade, date_to_index, fallback_index):
     """Return the later lower/upper-path exit so simulated trades cannot overlap."""
+    if str(trade.get("outcome") or "").upper() == "UNRESOLVED":
+        # A data gap is not an exit; do not reopen this instrument while the
+        # unresolved first position might still be occupied.
+        return max([fallback_index, *date_to_index.values()])
     candidates = [fallback_index]
     for key in ("exit_date", "exit_date_upper"):
         raw_exit_date = trade.get(key)
@@ -576,6 +754,8 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     1. Lade alle Tage → baue per-Ticker History auf
     2. Scanne Signale und simuliere Trades mit vollständiger History
     """
+    from modules.signal_tracker import _is_us_equity_session
+
     if strategies is None:
         strategies = list(BACKTEST_STRATEGY_RULES.keys())
     
@@ -587,7 +767,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     trading_days = []
     current = start_dt
     while current <= end_dt:
-        if current.weekday() < 5:
+        if _is_us_equity_session(current.date()):
             trading_days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
     
@@ -600,6 +780,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     ticker_history = {}  # ticker → list of bars (chronologisch)
     total_tickers_seen = set()
     failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
+    failed_fetch_dates = []
     
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -614,6 +795,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
             # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
             # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
             failed_fetch_days += 1
+            failed_fetch_dates.append(date_str)
             continue
         if not day_data:
             continue
@@ -670,7 +852,7 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     # PASS 2: Signale erkennen + Trades simulieren
     # (Jetzt hat jeder Ticker seine VOLLSTÄNDIGE History)
     # ============================================================
-    all_results = {s: [] for s in strategies}
+    all_results = {s: _BacktestTradeList() for s in strategies}
     tickers_with_data = [t for t, bars in ticker_history.items() if len(bars) >= 30]
     seen_signals = set()  # Dedup: max 1 Signal pro Strategie/Ticker/Tag
     
@@ -729,23 +911,114 @@ def run_full_backtest_grouped(poly_key, strategies=None, months=6, min_price=5.0
     if progress_callback:
         progress_callback(1.0, f"[OK] Fertig! {len(total_tickers_seen)} Aktien gescannt")
 
+    _attach_backtest_data_quality(all_results, failed_fetch_dates=failed_fetch_dates)
     return all_results, len(total_tickers_seen)
+
+
+def _simulate_bi_plan_daily(bars, start_idx, plan, direction, *, horizon_bars=10):
+    """Execute the production plan against future daily bars, with explicit limits.
+
+    Signal-close market orders use the next open; a daily study has no SMTP or
+    quote evidence and never pretends to reproduce the live-delivery pipeline.
+    """
+    # Keep the optional tracker dependency off the generic simulator/API import
+    # path: a tracker outage must not prevent the entire application starting.
+    from modules.signal_tracker import validate_fill_quality
+
+    side = direction.upper()
+    entry, stop, tp1, tp2 = (float(plan[key]) for key in ("Entry", "StopLoss", "TP1", "TP2"))
+    method = plan["entry_method"]
+    result = {
+        "entry_target": entry, "stop_target": stop, "tp1_target": tp1, "tp2_target": tp2,
+        "entry_method": method, "plan_version": plan["plan_version"],
+        "execution_model": "daily_next_session_50_50_be_after_tp1_v2",
+        "live_delivery_equivalent": False, "entry_filled": False,
+        "outcome": "UNRESOLVED", "exit_reason": "UNRESOLVED", "pnl_pct": None,
+        "r_multiple": None, "is_winner": False, "bars_held": 0,
+        "evaluation_status": "INCOMPLETE_ENTRY_WINDOW",
+    }
+    observed = 0
+    for index in range(start_idx, min(len(bars), start_idx + horizon_bars)):
+        bar = bars[index]
+        observed += 1
+        result["exit_date"] = bar["date"]
+        if index > 0:
+            coverage = _daily_session_gap(bars[index-1].get("date"), bar.get("date"), "us_equity")
+            result.update(session_calendar="us_equity", session_coverage=coverage["coverage"],
+                          missing_expected_sessions=list(coverage["missing_sessions"]))
+            if coverage.get("reason"):
+                return dict(result, evaluation_status=coverage["reason"])
+        try:
+            opening, high, low, closing = (float(bar[key]) for key in ("open", "high", "low", "close"))
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return dict(result, evaluation_status="INVALID_OHLC")
+        if (not all(math.isfinite(value) and value > 0 for value in (opening, high, low, closing))
+                or high < max(opening, low, closing) or low > min(opening, high, closing)):
+            return dict(result, evaluation_status="INVALID_OHLC")
+        if ((side == "LONG" and (opening <= stop or opening >= tp1))
+                or (side == "SHORT" and (opening >= stop or opening <= tp1))):
+            return dict(result, outcome="NO_FILL", exit_reason="NO_FILL", evaluation_status="OPEN_INVALIDATED_PLAN")
+        fill = None
+        intrabar = False
+        if method == "market_at_signal":
+            fill = opening
+        elif method == "stop_breakout":
+            if opening >= entry:
+                fill = opening
+            elif high >= entry:
+                fill, intrabar = entry, True
+                if low <= stop:
+                    return dict(result, evaluation_status="ENTRY_STOP_ORDER_UNRESOLVED")
+        elif method == "limit_pullback":
+            if opening >= entry:
+                fill = opening
+            elif high >= entry:
+                fill, intrabar = entry, True
+                if low <= tp1:
+                    return dict(result, evaluation_status="LIMIT_ENTRY_TARGET_ORDER_UNRESOLVED")
+        else:
+            return dict(result, evaluation_status="UNKNOWN_ENTRY_METHOD")
+        if fill is None:
+            invalidated = low <= stop if side == "LONG" else high >= stop
+            if invalidated:
+                return dict(result, outcome="NO_FILL", exit_reason="NO_FILL", evaluation_status="PLAN_INVALIDATED_BEFORE_ENTRY")
+            continue
+        # Adverse assumed slippage for market/stop execution; a passive sell
+        # limit cannot execute below its limit price.
+        slippage = .001
+        if method != "limit_pullback":
+            fill *= 1 + slippage if side == "LONG" else 1 - slippage
+        quality = validate_fill_quality("bi_long" if side == "LONG" else "bi_short", entry, fill, stop, tp1, tp2, side)
+        if not quality.get("valid"):
+            return dict(result, outcome="NO_FILL", exit_reason="NO_FILL", evaluation_status="FILL_QUALITY_REJECTED")
+        simulated = _simulate_50_50_daily_exit(
+            bars, index, horizon_bars, side, fill, stop, tp1, tp2,
+            fee_pct=.2, exit_slippage=slippage, first_bar_order_unknown=intrabar,
+        )
+        result.update(entry_filled=True, actual_entry=fill, entry_date=bar["date"])
+        if simulated is not None:
+            result.update(simulated)
+            result["outcome"] = simulated["exit_reason"]
+            if result["outcome"] != "UNRESOLVED":
+                result["evaluation_status"] = "DECIDED"
+        return result
+    if observed >= horizon_bars:
+        result.update(outcome="NO_FILL", exit_reason="NO_FILL", evaluation_status="ENTRY_NOT_REACHED")
+    return result
 
 
 def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                         min_price=5.0, min_volume=200000, progress_callback=None):
     """
-     Breakout Imminent V2.1 Backtest — Rolling-Window Analyse (Pro-Reweighted).
+     BI historical study: production signal/plan, separately labelled daily fills.
 
-    V2.1 Upgrades:
-    - Signal-Gewichte rebalanciert: Smart Money BOOSTED, Dead Stock CUT
-    - Minervini Volume Confirmation: Breakout-Volume >= 1.4x Avg (40% über Normal)
-    - Löst Grade-B-Inversion (tote Aktien kommen nicht mehr auf hohe Scores)
+    The strict indicator contract and plan prices are shared with production.
+    Daily data cannot reproduce the exact mail, quote or BE-update timestamps.
 
     Für jeden Tag im Backtest-Zeitraum:
     1. Nimm 50-Tage Fenster als Input für analyze_breakout_imminent()
-    2. Bei gültigem Signal + Volume Confirmation → Breakout-Retest Entry
-    3. Simuliere Trade mit 3-Phase System (Breakout → Retest → Management)
+    2. Gemeinsamer Produktionsplan und explizite Stop-/Limit-/Markt-Entry-Methode
+    3. Folgesession-Fill, 50/50-Management, BE nach TP1 als eigene Daily-Variante
     4. Tracke Ergebnis nach Grade (S/A/B/C)
 
     Args:
@@ -760,20 +1033,22 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     Returns:
         dict mit trades, stats_by_grade, summary
     """
+    from modules.signal_tracker import _infer_stock_horizon_bars, _is_us_equity_session
+
     end_dt = datetime.now() - timedelta(days=1)
     window_size = 50  # 50 Bars für MACD (braucht 35+) und bessere Pattern-Erkennung
-    breakout_wait_bars = 7
-    retest_wait_bars = 15
-    trade_hold_bars = 20
-    setup_observation_bars = max(breakout_wait_bars, retest_wait_bars)
-    start_dt = end_dt - timedelta(days=months * 30 + window_size + 20)  # +window+buffer
+    trade_hold_bars = _infer_stock_horizon_bars("bi_long" if direction.lower() == "long" else "bi_short", None, None)
+    # 90 completed sessions for the shared structural profile, not just the
+    # 50 indicator bars. Calendar padding includes weekends and holidays.
+    structure_window = 90
+    start_dt = end_dt - timedelta(days=months * 30 + 150)
     test_start = (end_dt - timedelta(days=months * 30)).strftime("%Y-%m-%d")
 
     # Generiere Handelstage (Mo-Fr)
     trading_days = []
     current = start_dt
     while current <= end_dt:
-        if current.weekday() < 5:
+        if _is_us_equity_session(current.date()):
             trading_days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
 
@@ -786,6 +1061,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     ticker_history = {}
     total_tickers_seen = set()
     failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
+    failed_fetch_dates = []
 
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -800,6 +1076,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
             # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
             failed_fetch_days += 1
+            failed_fetch_dates.append(date_str)
             continue
         if not day_data:
             continue
@@ -903,283 +1180,36 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if not is_valid:
                 continue
 
-            # Grade-Filter: C+ traden (D zu schwach)
-            if grade == "D":
-                continue
-
-            # SMART MONEY MINIMUM: Min 2 Boosted-Signale müssen feuern ([*] oder [OK])
-            # Das ist der WR-Booster — ohne Smart Money = kein Trade
-            if sm_hits < 2:
-                continue
-
-            # Qualitäts-Filter (identisch zum Live-Scanner)
-            range_high = max(b["high"] for b in window[-15:])
-            range_low = min(b["low"] for b in window[-15:])
-            range_size = range_high - range_low
-            range_pct = (range_size / range_low * 100) if range_low > 0 else 0
-
-            if range_pct < 2.0:
-                continue
-
-            _adr_bars = [b for b in window[-10:] if b["close"] > 0]
-            avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in _adr_bars) / len(_adr_bars) if _adr_bars else 0
-            if avg_daily_range < 0.3:
-                continue
-
-            # ============================================
-            # BREAKOUT-RETEST ENTRY V3.1 (Post-Audit Fix)
-            # ============================================
-            # Fixes: #1 Phase-2 Logik, #2 Risk-Calc, #3 Stop-Weite,
-            #        #4 Same-Day Entry, #5-8 HIGH Issues
-            # ============================================
-            atr_5 = calculate_wilder_atr(window, period=5)
-            if atr_5 <= 0:
-                continue
-            breakout_threshold = atr_5 * 0.25  # ATR-basiert statt fixer 0.5% (#20)
-
-            # Stop ATR×1.2 für alle Grades (bewährt — NICHT ändern!)
-            stop_atr_mult = 1.2
-
-            # V2.8: Grade C bekommt engere Targets (realistischer für schwächere Signale)
-            # Grade B+: TP1=1.0×Range, TP2=2.0×Range (Standard)
-            # Grade C:  TP1=0.7×Range, TP2=1.4×Range (näher → höhere TP1 Rate → mehr Teilgewinne)
-            tp1_mult = 0.7 if grade == "C" else 1.0
-            tp2_mult = 1.4 if grade == "C" else 2.0
-
-            if direction == "long":
-                breakout_level = round(range_high, 4)
-                retest_zone_upper = round(range_high + atr_5 * 0.15, 4)  # Knapp über Range-High
-                retest_zone_lower = round(range_high - atr_5 * 0.3, 4)   # Leicht unter Range-High
-                stop_price = round(range_high - atr_5 * stop_atr_mult, 4)
-                tp1_price = round(range_high + range_size * tp1_mult, 4)
-                tp2_price = round(range_high + range_size * tp2_mult, 4)
-            else:
-                breakout_level = round(range_low, 4)
-                retest_zone_upper = round(range_low + atr_5 * 0.3, 4)
-                retest_zone_lower = round(range_low - atr_5 * 0.15, 4)
-                stop_price = round(range_low + atr_5 * stop_atr_mult, 4)
-                tp1_price = round(range_low - range_size * tp1_mult, 4)
-                tp2_price = round(range_low - range_size * tp2_mult, 4)
-
-            # FIX #6: Validierung Stop auf korrekter Seite
-            if direction == "long" and stop_price >= range_high:
-                continue
-            if direction == "short" and stop_price <= range_low:
-                continue
-
-            # Risk/Reward uses the same signed geometry as live and alert paths.
-            est_entry = (retest_zone_upper + retest_zone_lower) / 2
-            geometry = trade_geometry(
-                est_entry,
-                stop_price,
-                tp1_price,
-                tp2_price,
-                direction.upper(),
+            # Scanner and historical study consume the same plan builder.
+            # Execution remains explicitly a daily approximation, not SMTP replay.
+            signal_day = bars[idx-1]["date"]
+            as_of = datetime.fromisoformat(str(signal_day)[:10]).replace(
+                hour=23, minute=59, second=59, tzinfo=dt.timezone.utc,
             )
-            if not geometry["valid"]:
-                continue
-            risk = geometry["risk"]
-            rr = geometry["rr"] or 0
-
-            if rr < 2.0:  # FIX #5: Min 2.0:1 R:R (realistischer mit weiterem Stop)
-                continue
-
-            if est_entry <= 0 or stop_price <= 0 or risk < (atr_5 * 0.25):
-                continue
-
-            # === BREAKOUT-RETEST TRADE SIMULATION V3.1 ===
-            slippage = 0.001
-
-            trade_result = {
-                "ticker": ticker,
-                "signal_date": bars[idx-1]["date"],
-                "grade": grade,
-                "score": bi_score,
-                "max_score": bi_max,
-                "confidence": confidence,
-                "smart_money_fires": sm_fires,
-                "smart_money_hits": sm_hits,
-                "direction": direction.upper(),
-                "entry_target": round(est_entry, 4),
-                "stop_target": stop_price,
-                "tp1_target": tp1_price,
-                "tp2_target": tp2_price,
-                "rr_planned": rr,
-                "range_pct": round(range_pct, 1),
-                "breakout_wait_bars": breakout_wait_bars,
-                "retest_wait_bars": retest_wait_bars,
-                "trade_hold_bars": trade_hold_bars,
-            }
-
-            # === VOLUME AVERAGE für Breakout-Confirmation ===
-            avg_vol_20 = historical_volume_baseline(
-                (b.get("volume") for b in window),
-                lookback=20,
-                minimum_periods=10,
+            plan = build_bi_trade_plan(
+                bars[max(0, idx-structure_window):idx], direction=direction,
+                range_days=getattr(result, "consolidation_days", None),
+                live_price=float(window[-1]["close"]), as_of=as_of,
             )
-            if avg_vol_20 is None:
+            if not plan.get("accepted"):
                 continue
-
-            # === BREAKOUT-FILTER (V2.8 — Grade-abhängig für C) ===
-            # Grade B+: Standard Minervini 1.4x Volume
-            # Grade C:  Strengerer Filter 1.6x (schwächere Signale brauchen stärkere Bestätigung)
-            if grade == "C":
-                vol_multiplier = 1.6    # Strengere Confirmation für schwache Signale
-            else:
-                vol_multiplier = 1.4    # Standard Minervini für B/A/S
-            min_rr = 2.0           # Standard R:R Minimum
-
-            if rr < min_rr:
-                continue
-
-            # === TREND CONFIRMATION (Weinstein Stage 2 Filter) ===
-            # 20-Tage-MA muss in Richtung des Trades zeigen
-            w_closes = [b["close"] for b in window]
-            ma_20_current = sum(w_closes[-20:]) / 20 if len(w_closes) >= 20 else sum(w_closes) / len(w_closes)
-            ma_20_prev = sum(w_closes[-40:-20]) / 20 if len(w_closes) >= 40 else ma_20_current
-            if direction == "long":
-                trend_ok = ma_20_current > ma_20_prev  # MA steigt = bullischer Trend
-                price_above_ma = window[-1]["close"] > ma_20_current  # Preis über MA
-            else:
-                trend_ok = ma_20_current < ma_20_prev  # MA fällt = bärischer Trend
-                price_above_ma = window[-1]["close"] < ma_20_current  # Preis unter MA
-
-            # V2.8: Grade C braucht BEIDE Trend-Bedingungen (strenger)
-            # Grade B+: Eine reicht (wie bisher)
-            if grade == "C":
-                if not (trend_ok and price_above_ma):
-                    continue  # Grade C: Nur MIT Trend traden
-            else:
-                if not (trend_ok or price_above_ma):
-                    continue  # Grade B+: Eine Bedingung reicht
-
-            # Count and cool down only fully qualified signals. The old order
-            # counted candidates that later failed volume/trend validation and
-            # then suppressed a valid signal for seven bars.
             signals_found += 1
-
-            # 3-Phase Simulation:
-            # Phase 1: Breakout bestätigt (Close über/unter Range + ATR-Threshold + Volume)
-            # Phase 2: Pullback in die Retest-Zone (zwischen upper/lower)
-            # Phase 3: Trade Management (Stop/TP/Breakeven)
-            entry_filled = False
-            breakout_confirmed = False
-            breakout_extreme = None
-            actual_entry = None
-            entry_date = None
-            entry_idx = None
-            last_observed_idx = idx - 1
-
-            for day_offset in range(1, setup_observation_bars + 1):
-                future_idx = idx + day_offset - 1
-                if future_idx >= len(bars):
-                    break
-
-                future_bar = bars[future_idx]
-                last_observed_idx = future_idx
-
-                # === PHASE 1: Breakout-Bestätigung ===
-                if not breakout_confirmed:
-                    # Volume Confirmation: grade-abhängig (B+: 2.0x, C: 1.4x)
-                    vol_ok = future_bar["volume"] >= avg_vol_20 * vol_multiplier
-
-                    if direction == "long" and future_bar["close"] > breakout_level + breakout_threshold and vol_ok:
-                        breakout_confirmed = True
-                        breakout_extreme = future_bar["high"]
-                        # Daily OHLC cannot prove breakout-before-retest inside
-                        # one candle. A valid retest must occur on a later bar.
-                        continue
-                    elif direction == "short" and future_bar["close"] < breakout_level - breakout_threshold and vol_ok:
-                        breakout_confirmed = True
-                        breakout_extreme = future_bar["low"]
-                        continue
-                    elif day_offset >= breakout_wait_bars:
-                        break
-                    else:
-                        continue  # Kein Breakout → nächster Tag
-
-                # === PHASE 2: Pullback in Retest-Zone ===
-                if not entry_filled:
-                    retest_entry = _bi_retest_close_entry(
-                        future_bar,
-                        direction,
-                        retest_zone_lower,
-                        retest_zone_upper,
-                        stop_price,
-                        breakout_extreme,
-                        slippage,
-                    )
-                    if retest_entry is not None:
-                        actual_entry = retest_entry
-                        entry_filled = True
-                        entry_date = future_bar["date"]
-                        entry_idx = future_idx
-                        break
-
-                    if direction == "long":
-                        breakout_extreme = max(float(breakout_extreme), float(future_bar["high"]))
-                    else:
-                        breakout_extreme = min(float(breakout_extreme), float(future_bar["low"]))
-
-                    if day_offset >= retest_wait_bars and not entry_filled:
-                        break
-                    if not entry_filled:
-                        continue
-
-            simulated = None
-            if entry_filled and actual_entry is not None and entry_idx is not None:
-                live_geometry = trade_geometry(
-                    actual_entry,
-                    stop_price,
-                    tp1_price,
-                    tp2_price,
-                    direction.upper(),
-                )
-                if live_geometry["valid"]:
-                    # The retest fill is modelled at the daily close. The bar's
-                    # prior high/low cannot be reused as post-entry execution,
-                    # so management starts on the next complete bar.
-                    simulated = _simulate_50_50_daily_exit(
-                        bars,
-                        entry_idx + 1,
-                        trade_hold_bars,
-                        direction.upper(),
-                        actual_entry,
-                        stop_price,
-                        tp1_price,
-                        tp2_price,
-                        trail_fraction=0.66,
-                        exit_slippage=slippage,
-                        fee_pct=0.2,
-                        first_bar_order_unknown=False,
-                    )
-
-            if not entry_filled:
-                trade_result["outcome"] = "NO_FILL"
-                trade_result["pnl_pct"] = 0
-                trade_result["r_multiple"] = 0
-                trade_result["is_winner"] = False
-                blocked_until[ticker] = max(blocked_until.get(ticker, -1), last_observed_idx)
-            elif simulated is None:
-                trade_result["outcome"] = "UNRESOLVED"
-                trade_result["pnl_pct"] = 0
-                trade_result["r_multiple"] = 0
-                trade_result["is_winner"] = False
-                trade_result["actual_entry"] = round(actual_entry, 4)
-                trade_result["entry_date"] = entry_date
-                trade_result["evaluation_status"] = "NO_POST_ENTRY_DATA_OR_INVALID_GEOMETRY"
+            trade_result = _simulate_bi_plan_daily(
+                bars, idx, plan, direction, horizon_bars=trade_hold_bars,
+            )
+            trade_result.update({
+                "ticker": ticker, "signal_date": signal_day, "grade": grade,
+                "score": bi_score, "max_score": bi_max, "confidence": confidence,
+                "smart_money_fires": sm_fires, "smart_money_hits": sm_hits,
+                "direction": direction.upper(), "rr_planned": plan["geometry"]["rr"],
+                "trade_hold_bars": trade_hold_bars, "entry_wait_bars": trade_hold_bars,
+            })
+            if trade_result["outcome"] == "UNRESOLVED":
                 blocked_until[ticker] = len(bars) - 1
             else:
-                trade_result["actual_entry"] = round(actual_entry, 4)
-                trade_result["entry_date"] = entry_date
-                trade_result.update(simulated)
-                trade_result["outcome"] = simulated["exit_reason"]
                 blocked_until[ticker] = conservative_trade_exit_index(
-                    trade_result,
-                    date_to_index,
-                    entry_idx,
+                    trade_result, date_to_index, idx,
                 )
-
             all_trades.append(trade_result)
 
     # ============================================================
@@ -1239,7 +1269,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     )
     filled_trades = [
         t for t in all_trades
-        if str(t.get("outcome") or "").upper() != "NO_FILL"
+        if t.get("entry_filled") is True
     ]
     no_fill_count = sum(
         1 for t in all_trades
@@ -1273,19 +1303,28 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "failed_fetch_days": failed_fetch_days,
+        "data_quality": _backtest_data_quality(all_trades, failed_fetch_dates=failed_fetch_dates),
         "n_midcap": len(sorted_midcap),
         "n_largecap": len(sorted_largecap),
         "direction": direction,
         "months": months,
         "setup_horizons": {
-            "breakout_wait_bars": breakout_wait_bars,
-            "retest_wait_bars": retest_wait_bars,
+            "entry_wait_bars": trade_hold_bars,
             "trade_hold_bars": trade_hold_bars,
         },
-        "methodology": "daily_breakout_then_later_retest_close_fill",
+        "methodology": "shared_production_bi_plan_daily_execution_variant",
+        "plan_version": BI_PLAN_VERSION,
+        "parity_scope": "scanner_contract_and_plan_not_entire_universe_gate_parity",
+        "execution_model": "daily_next_session_50_50_be_after_tp1_v2",
+        "live_delivery_equivalent": False,
         "methodology_warnings": [
             "daily_ohlc_intrabar_path_bounded_when_ambiguous",
             "current_static_universe_survivorship_bias",
+            "signal_close_market_orders_use_next_session_open",
+            "be_after_tp1_is_not_live_delivered_be_after_plus_one_r",
+            "smtp_quote_and_delivery_filters_not_simulated",
+            "live_liquidity_spac_pump_rvol_grade_and_universe_gates_not_fully_replayed",
+            "structural_history_uses_up_to_90_completed_sessions",
         ],
     }
     summary.update(_backtest_uncertainty_metrics(decided_trades))
@@ -1332,6 +1371,8 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     Returns:
         dict mit trades, stats_by_grade, summary
     """
+    from modules.signal_tracker import _is_us_equity_session
+
     end_dt = datetime.now() - timedelta(days=1)
     trade_hold_bars = 15
     window_size = 50  # 50 Bars für technische Indikatoren (SMA50 braucht 50)
@@ -1345,7 +1386,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     trading_days = []
     current = start_dt
     while current <= end_dt:
-        if current.weekday() < 5:
+        if _is_us_equity_session(current.date()):
             trading_days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
 
@@ -1358,6 +1399,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
     ticker_history = {}
     total_tickers_seen = set()
     failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
+    failed_fetch_dates = []
 
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -1372,6 +1414,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
             # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
             failed_fetch_days += 1
+            failed_fetch_dates.append(date_str)
             continue
         if not day_data:
             continue
@@ -1678,6 +1721,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "failed_fetch_days": failed_fetch_days,
+        "data_quality": _backtest_data_quality(all_trades, failed_fetch_dates=failed_fetch_dates),
         "n_biotech_universe": len(biotech_set),
         "months": months,
         "trade_hold_bars": trade_hold_bars,
@@ -1813,7 +1857,8 @@ def simulate_trade(bars, signal_idx, strategy):
     }
     result.update(simulated)
     for key in ("exit_price", "exit_price_upper", "pnl_pct", "pnl_pct_upper", "r_multiple", "r_multiple_upper"):
-        result[key] = round(float(result[key]), 2)
+        if result.get(key) is not None:
+            result[key] = round(float(result[key]), 2)
     return result
 
 
@@ -1844,12 +1889,13 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     
     test_start = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
     
-    all_results = {s: [] for s in strategies}
+    all_results = {s: _BacktestTradeList() for s in strategies}
     ticker_data_cache = {}
     seen_signals = set()  # Dedup per strategy, ticker and signal date.
     
     total_tickers = len(tickers)
     skipped_no_data = 0
+    unavailable_tickers = []
     skipped_too_short = 0
     total_signals = 0
     
@@ -1862,6 +1908,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
             bars = fetch_backtest_daily_data(poly_key, ticker, start_date, end_date)
             if not bars:
                 skipped_no_data += 1
+                unavailable_tickers.append(ticker)
                 continue
             if len(bars) < 30:
                 skipped_too_short += 1
@@ -1924,11 +1971,16 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
         loaded = len(ticker_data_cache)
         progress_callback(1.0, f"[OK] Fertig! {loaded} geladen, {skipped_no_data} keine Daten, {skipped_too_short} zu kurz, {total_signals} Signale")
     
+    _attach_backtest_data_quality(all_results, unavailable_tickers=unavailable_tickers)
     return all_results
 
 
 def compute_backtest_stats(trades):
     """Berechnet Performance-Statistiken für eine Liste von Trades."""
+    data_quality = _backtest_data_quality(trades or ())
+    # Preserve attached coverage even for an empty strategy list.
+    if isinstance(trades, _BacktestTradeList):
+        data_quality = _backtest_data_quality(trades)
     input_trades = list(trades or [])
     no_fill_count = sum(
         1 for trade in input_trades
@@ -1938,7 +1990,9 @@ def compute_backtest_stats(trades):
         1 for trade in input_trades
         if str((trade or {}).get("outcome") or "").upper() == "UNRESOLVED"
     )
-    total_filled = max(0, len(input_trades) - no_fill_count)
+    total_filled = sum(1 for trade in input_trades
+                       if str((trade or {}).get("outcome") or "").upper() != "NO_FILL"
+                       and (trade or {}).get("entry_filled") is not False)
     # Legacy callers may omit ``outcome``. Only rows that explicitly declare
     # themselves non-decided are excluded from performance mathematics.
     trades = [
@@ -1961,6 +2015,7 @@ def compute_backtest_stats(trades):
             "no_fill": no_fill_count,
             "unresolved": unresolved_count,
             "statistics_scope": "decided_filled_trades_only",
+            "data_quality": data_quality,
         }
         empty.update(_backtest_uncertainty_metrics([]))
         return empty
@@ -2036,6 +2091,7 @@ def compute_backtest_stats(trades):
         "no_fill": no_fill_count,
         "unresolved": unresolved_count,
         "statistics_scope": "decided_filled_trades_only",
+        "data_quality": data_quality,
     }
     stats.update(_backtest_uncertainty_metrics(trades))
     return stats

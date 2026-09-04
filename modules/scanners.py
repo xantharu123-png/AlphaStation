@@ -36,6 +36,7 @@ from modules.patterns import (
 )
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
 from modules.trade_levels import trade_geometry
+from modules.bi_trade_plan import build_bi_trade_plan
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -1437,214 +1438,53 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _above_sma20_pct = (_cur - _sma20) / _sma20 * 100 if _sma20 > 0 else 0
                     candidate["above_sma20_pct"] = round(_above_sma20_pct, 1)
 
-                # H-2b (BI-Audit 10.06.): Fenster-Kohaerenz Analyse ↔ Level.
-                # Die Signale rechnen auf dem ADAPTIVEN Konsolidierungsfenster —
-                # Entry/Stop/TP muessen dasselbe Fenster nutzen, sonst ist die
-                # Entry-Referenz ein Spike statt der Konsolidierung (Fuzz-Befund:
-                # 22% der validen Longs mit Entry >5% ueber Kurs, median 12,4%).
-                # patterns liefert range_days in den Details ("... Konsolidierung:
-                # N Tage" bzw. "... ignoriert (N Tage)"). Fenster OHNE laufenden
-                # Tag (_session_bars enden mit dem letzten kompletten Handelstag).
-                _range_days = 0
-                for _det in details:
-                    _m_rd = re.search(r"Konsolidierung:\s*(\d+)\s*Tage", str(_det))
-                    if not _m_rd:
-                        _m_rd = re.search(r"ignoriert\s*\((\d+)\s*Tage\)", str(_det))
-                    if _m_rd:
-                        _range_days = int(_m_rd.group(1))
-                        break
-                if _range_days >= 5:
-                    _range_bars = _session_bars[-_range_days:]
-                else:
-                    _range_bars = _session_bars[-15:]  # Fallback: 15 komplette Tage
-                range_high = max(b["high"] for b in _range_bars)
-                range_low = min(b["low"] for b in _range_bars)
-                range_size = range_high - range_low
-                range_pct = (range_size / range_low * 100) if range_low > 0 else 0
-
-                if range_pct < 1.0:
-                    range_fail += 1
-                    continue
-
-                _atr_bars = _session_bars[-10:]
-                avg_daily_range = sum((b["high"] - b["low"]) / b["close"] * 100 for b in _atr_bars if b["close"] > 0) / max(1, len(_atr_bars))
-                if avg_daily_range < 0.3:
-                    atr_fail += 1
+                # One pure plan builder is used by production and backtests.
+                # An accepted plan still needs the independent mail execution
+                # checks; these fields do not claim a quote or an actual fill.
+                plan = build_bi_trade_plan(
+                    _session_bars, direction=direction,
+                    range_days=getattr(result, "consolidation_days", None),
+                    live_price=all_bars[-1]["close"],
+                    as_of=dt.datetime.now(dt.timezone.utc),
+                )
+                if not plan.get("accepted"):
+                    reason = plan.get("reason")
+                    if reason == "range_too_narrow":
+                        range_fail += 1
+                    elif reason == "atr_too_small":
+                        atr_fail += 1
+                    elif reason == "entry_too_extended":
+                        ext_fail += 1
+                        print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended")
+                    else:
+                        rr_fail += 1
                     continue
 
                 grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — BASIS", "D": "D — SCHWACH"}
-                grade_label = grade_map.get(grade, grade)
-
-                candidate["Alpha"] = bi_score
-                candidate["BI_Score"] = bi_score
-                candidate["BI_MaxScore"] = max_score
-                candidate["BI_Details"] = details
-                candidate["BI_Confidence"] = confidence
-                candidate["BI_Direction"] = direction.upper()
-                candidate["BI_Grade"] = grade
-                candidate["BI_GradeLabel"] = grade_label
+                candidate.update({
+                    "Alpha": bi_score, "BI_Score": bi_score, "BI_MaxScore": max_score,
+                    "BI_Details": details, "BI_Confidence": confidence,
+                    "BI_Direction": direction.upper(), "BI_Grade": grade,
+                    "BI_GradeLabel": grade_map.get(grade, grade),
+                })
                 candidate.update(contract_payload)
-
-                atr_5 = calculate_wilder_atr(bars, period=5)
-                if atr_5 <= 0:
-                    atr_fail += 1
-                    continue
-
-                if direction == "long":
-                    breakout_buffer = max(atr_5 * 0.1, range_size * 0.02)
-                    invalidation_buffer = max(atr_5 * 0.9, range_size * 0.10)
-                    candidate["Entry"] = round(range_high + breakout_buffer, 2)
-                    candidate["StopLoss"] = round(range_high - invalidation_buffer, 2)
-                    _risk_long = max(0.01, candidate["Entry"] - candidate["StopLoss"])
-                    candidate["TP1"] = round(range_high + max(range_size * 0.75, _risk_long * 1.35), 2)
-                    candidate["TP2"] = round(range_high + max(range_size * 1.618, _risk_long * 2.25), 2)
-                    candidate["level_model"] = "bi_structure_first_v2"
-                    candidate["stop_source"] = "range_high_retest_invalidation"
-                    candidate["tp1_source"] = "range_extension"
-                    candidate["tp2_source"] = "range_extension"
-                else:
-                    # V2.6b AUDIT: SHORT Entry — verbesserte Berechnung
-                    _current = bars[-1]["close"]
-                    _range_mid = (range_high + range_low) / 2
-
-                    # H-2 (BI-Audit 10.06.): Short-Extension-Gate — vorher toter Code
-                    # (Range inkl. letzter Kerze ⇒ Extension ≡ 0). Mit dem adaptiven
-                    # Fenster (ohne laufenden Tag) kann der LIVE-Kurs real unter
-                    # range_low liegen: zu weit drunter = Breakdown verpasst (Chase).
-                    # Gate VOR der Breakdown/Pullback-Zweigwahl und auf dem LIVE-Kurs:
-                    # ein Intraday-Crash (letzter KOMPLETTER Close noch in der Range)
-                    # darf nicht in den Pullback-Zweig durchrutschen.
-                    _live_close_s = all_bars[-1]["close"]
-                    _atr_pct_s = atr_5 / _live_close_s if _live_close_s > 0 else 0
-                    if _live_close_s < range_low * (1 - max(2 * _atr_pct_s, 0.03)):
-                        ext_fail += 1
-                        print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended "
-                              f"(Kurs {_live_close_s:.2f} zu weit unter Range-Low {range_low:.2f})")
-                        continue
-
-                    _near_low = _current < _range_mid  # Preis in unterer Hälfte = Breakdown
-                    if _near_low:
-                        # BREAKDOWN-SHORT: Preis nahe/unter Range-Low → Entry bei aktuellem Preis
-                        candidate["Entry"] = round(_current, 2)
-                        reclaim_stop = min(range_high, max(range_low + atr_5 * 0.75, _current + atr_5 * 1.2))
-                        candidate["StopLoss"] = round(reclaim_stop, 2)
-                        candidate["stop_source"] = "breakdown_reclaim_invalidation"
-                    else:
-                        # PULLBACK-SHORT: Preis nahe Range-High → Entry bei Resistance
-                        candidate["Entry"] = round(range_high * 0.995, 2)
-                        candidate["StopLoss"] = round(range_high + atr_5 * 0.5, 2)
-                        candidate["stop_source"] = "range_high_reclaim_invalidation"
-                    risk_short = max(0.01, candidate["StopLoss"] - candidate["Entry"])
-                    # TP basiert auf Support/Range-Extensions, nicht auf reiner R:R-Optimierung.
-                    # H-2 (BI-Audit 10.06.): Formel-Absicherung — mit dem adaptiven
-                    # Range-Fenster (Pre-Breakdown) kann Entry unter range_low liegen.
-                    # min() garantiert Stop > Entry > TP1 > TP2 strukturell
-                    # (alter bi_short-TP1-Befund, der durch die Fensteraenderung
-                    # sonst zurueckkommen koennte).
-                    if candidate["Entry"] > range_low and (candidate["Entry"] - range_low) >= risk_short * 1.15:
-                        candidate["TP1"] = round(range_low, 2)  # TP1 = Range-Low (logisches Ziel)
-                    else:
-                        candidate["TP1"] = round(max(0.01, min(
-                            range_low - range_size * 0.272,
-                            candidate["Entry"] - 0.5 * risk_short,
-                        )), 2)
-                    candidate["TP2"] = round(max(0.01, min(
-                        range_low - range_size * 0.618,
-                        candidate["TP1"] - 0.25 * risk_short,
-                    )), 2)
-                    candidate["level_model"] = "bi_structure_first_v2"
-                    candidate["tp1_source"] = "range_low_support_or_extension"
-                    candidate["tp2_source"] = "range_extension"
-
-                _vrvp = build_vrvp_structure(
-                    _session_bars,
-                    candidate.get("Entry"),
-                    direction.upper(),
-                    timeframe="1D",
-                    num_bins=24,
-                    min_bars=30,
-                    lookback=90,
-                    as_of=dt.datetime.now(dt.timezone.utc),
-                    date_session_context="us_equity_regular",
-                )
-                _vrvp_atr = calculate_wilder_atr(_session_bars, period=14, lookback=90) or atr_5
-                _setup = apply_vrvp_to_trade_setup(
-                    {
-                        "Entry": candidate.get("Entry"),
-                        "StopLoss": candidate.get("StopLoss"),
-                        "TP1": candidate.get("TP1"),
-                        "TP2": candidate.get("TP2"),
-                        "direction": direction.upper(),
-                        "level_model": candidate.get("level_model"),
-                        "stop_source": candidate.get("stop_source"),
-                        "tp1_source": candidate.get("tp1_source"),
-                        "tp2_source": candidate.get("tp2_source"),
-                    },
-                    _vrvp,
-                    direction=direction.upper(),
-                    asset_type="stock_swing",
-                    atr=_vrvp_atr,
-                )
-                candidate["Entry"] = _setup.get("Entry", candidate.get("Entry"))
-                candidate["StopLoss"] = _setup.get("StopLoss", candidate.get("StopLoss"))
-                candidate["TP1"] = _setup.get("TP1", candidate.get("TP1"))
-                candidate["TP2"] = _setup.get("TP2", candidate.get("TP2"))
-                candidate["trade_setup"] = _setup
-                candidate["level_model"] = _setup.get("level_model", candidate.get("level_model"))
-                candidate["stop_source"] = _setup.get("stop_source", candidate.get("stop_source"))
-                candidate["tp1_source"] = _setup.get("tp1_source", candidate.get("tp1_source"))
-                candidate["tp2_source"] = _setup.get("tp2_source", candidate.get("tp2_source"))
-                candidate["vrvp_applied"] = _setup.get("vrvp_applied", False)
-                candidate["VRVP_POC"] = _setup.get("vrvp_poc")
-                candidate["VRVP_VAH"] = _setup.get("vrvp_vah")
-                candidate["VRVP_VAL"] = _setup.get("vrvp_val")
-
-                # H-2a (BI-Audit 10.06.): Long-Extension-Gate — Entry zu weit ueber
-                # dem aktuellen Kurs = "imminent"-Trigger, der nie sauber ausloest
-                # (Chase-Schutz; Fuzz: 22% der validen Longs mit Entry >5% ueber
-                # Kurs, Fantasie-R:R p95=15,2). Check auf dem FINALEN Entry
-                # (nach VRVP) gegen den LIVE-Kurs.
-                _live_close = all_bars[-1]["close"]
-                if direction == "long" and _live_close > 0 and candidate.get("Entry"):
-                    _atr_pct_l = atr_5 / _live_close
-                    _entry_ext = (candidate["Entry"] - _live_close) / _live_close
-                    if _entry_ext > max(2 * _atr_pct_l, 0.03):
-                        ext_fail += 1
-                        print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended "
-                              f"(Entry {_entry_ext * 100:.1f}% ueber Kurs, "
-                              f"Limit {max(2 * _atr_pct_l, 0.03) * 100:.1f}%)")
-                        continue
-
-                _geometry = trade_geometry(
-                    candidate.get("Entry"),
-                    candidate.get("StopLoss"),
-                    candidate.get("TP1"),
-                    candidate.get("TP2"),
-                    direction.upper(),
-                )
-                if not _geometry.get("valid") or (_geometry.get("rr") is not None and _geometry["rr"] < 1.2):
-                    rr_fail += 1
-                    continue
-                candidate["RiskReward"] = round(_geometry["rr"], 1)
-                candidate["RangeHigh"] = round(range_high, 2)
-                candidate["RangeLow"] = round(range_low, 2)
-
-                # V2.8: Volumen-Daten — letzten KOMPLETTEN Handelstag verwenden
-                # all_bars[-1] kann heutiger partieller Bar sein (z.B. 1K um 10 Uhr)
-                # Fix: Prüfe ob letzter Bar heute ist → dann all_bars[-2] für Volume/RVOL
-                _today_str = datetime.now().strftime("%Y-%m-%d")
-                _last_bar_is_today = len(all_bars) >= 2 and all_bars[-1].get("date", "") == _today_str
-                _vol_bar_idx = -2 if _last_bar_is_today else -1  # Letzter kompletter Tag
-
-                if len(all_bars) >= abs(_vol_bar_idx):
-                    _last_vol = all_bars[_vol_bar_idx]["volume"]
-                else:
-                    _last_vol = all_bars[-1]["volume"] if all_bars else 0
-
-                # Avg Vol: Immer auf abgeschlossene Tage basieren (heute raus)
-                _vol_bars = all_bars[:-1] if _last_bar_is_today else all_bars
+                candidate.update({
+                    key: plan.get(key) for key in (
+                        "Entry", "StopLoss", "TP1", "TP2", "RiskReward", "RangeHigh", "RangeLow",
+                        "level_model", "stop_source", "tp1_source", "tp2_source", "vrvp_applied",
+                        "entry_method", "plan_version",
+                    )
+                })
+                candidate["trade_setup"] = {key: value for key, value in plan.items() if key != "geometry"}
+                candidate["VRVP_POC"] = plan.get("vrvp_poc")
+                candidate["VRVP_VAH"] = plan.get("vrvp_vah")
+                candidate["VRVP_VAL"] = plan.get("vrvp_val")
+                # Use the same completed signal bar as the indicator contract.
+                # Today's bar is valid after close; the signal's own volume
+                # must not enter its historical comparison denominator.
+                _last_vol = _session_bars[-1]["volume"]
                 _avg_vol_20 = historical_volume_baseline(
-                    [b.get("volume") for b in _vol_bars],
+                    [b.get("volume") for b in _session_bars[:-1]],
                     lookback=20,
                     minimum_periods=10,
                 ) or 0.0
@@ -1652,6 +1492,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["Volumen"] = int(_last_vol)
                 candidate["AvgVolumen"] = int(_avg_vol_20)
                 candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0
+                candidate["RVOL_Basis"] = "completed_signal_vs_prior_20_sessions"
+                candidate["signal_bar_date"] = _session_bars[-1].get("date")
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
 
@@ -2457,195 +2299,7 @@ def _biotech_technical_score(poly_key, ticker):
         if not bars or len(bars) < 21:
             return {"technical_score": 0, "details": {}}
 
-        tech_score = 0
-        details = {}
-
-        closes = [b["c"] for b in bars]
-        volumes = [b["v"] for b in bars]
-        highs = [b["h"] for b in bars]
-        lows = [b["l"] for b in bars]
-
-        current_price = closes[-1]
-        last_vol = volumes[-1]
-        avg_vol_20 = historical_volume_baseline(
-            volumes[:-1], lookback=20, minimum_periods=10
-        )
-
-        # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
-        rvol = last_vol / avg_vol_20 if last_vol > 0 and avg_vol_20 else 0.0
-        details["RVOL"] = round(rvol, 2)
-        # FIX 1: Track RVOL direction for bonus calculation
-        details["rvol_up_day"] = closes[-1] > closes[-2] if len(closes) >= 2 else True
-        if rvol >= 3.0:
-            # FIX 2: Check direction — high volume on UP day = accumulation, DOWN day = distribution
-            if closes[-1] > closes[-2]:  # High volume on UP day = accumulation
-                tech_score += 6
-                details["vol_signal"] = " Extrem hohes Volumen (Accumulation)"
-            else:  # High volume on DOWN day = distribution
-                tech_score += 1  # Minimal score, not a buy signal
-                details["vol_signal"] = " Extrem hohes Volumen (Distribution) — Vorsicht!"
-        elif rvol >= 1.5:
-            tech_score += 3  # FIX 2: Moderate volume (was 2 for 1.5-2.0, now unified)
-            details["vol_signal"] = " Erhöhtes Volumen"
-        elif rvol >= 0.5:
-            details["vol_signal"] = " Normal"
-        else:
-            # V3: RVOL < 0.5x = praktisch kein Volumen → Penalty
-            # Wenn niemand handelt, ist der Catalyst eingepreist oder irrelevant
-            tech_score -= 3
-            details["vol_signal"] = " Sehr niedriges Volumen"
-
-        # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
-        if len(volumes) >= 20:
-            recent_values = [v for v in volumes[-5:] if isinstance(v, (int, float)) and v > 0]
-            prior_values = [v for v in volumes[-20:-5] if isinstance(v, (int, float)) and v > 0]
-            if len(recent_values) >= 3 and len(prior_values) >= 8:
-                vol_recent = sum(recent_values) / len(recent_values)
-                vol_prior = sum(prior_values) / len(prior_values)
-                vol_trend = vol_recent / vol_prior
-                details["vol_trend"] = round(vol_trend, 2)
-                if vol_trend >= 2.0:
-                    tech_score += 4
-                elif vol_trend >= 1.5:
-                    tech_score += 3
-                elif vol_trend >= 1.2:
-                    tech_score += 1
-            else:
-                details["vol_trend"] = None
-
-        # 3. Price Position — nahe Highs = bullish (max 4 pts)
-        high_90d = max(highs)
-        low_90d = min(lows)
-        range_90d = high_90d - low_90d
-        if range_90d > 0:
-            pos_90d = (current_price - low_90d) / range_90d * 100
-            details["pos_90d"] = round(pos_90d, 1)
-            if pos_90d >= 80:
-                tech_score += 4
-            elif pos_90d >= 60:
-                tech_score += 2
-            elif pos_90d <= 20:
-                tech_score += 0  # Am Boden = könnte Value sein, aber riskant
-
-        # 4. Tight Range (Akkumulation) — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
-        if len(closes) >= 10:
-            recent_closes = closes[-10:]
-            range_10d = (max(recent_closes) - min(recent_closes)) / max(0.01, min(recent_closes)) * 100
-            details["range_10d%"] = round(range_10d, 1)
-            if range_10d <= 5:
-                tech_score += 3
-                details["consolidation"] = " Tight Consolidation"
-            elif range_10d <= 10:
-                tech_score += 1
-                details["consolidation"] = " Moderate Range"
-            else:
-                details["consolidation"] = " Weit gespreizt"
-
-        # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
-        # V3: Abwärtstrend bekommt jetzt PENALTY statt 0. Begründung:
-        # Long-Grade bei klarem Downtrend (BCRX unter allen EMAs) ist irreführend.
-        # Ein Trader der "Grade B LONG" sieht, erwartet einen Aufwärtstrend.
-        if len(closes) >= 50:
-            sma20 = sum(closes[-20:]) / 20
-            sma50 = sum(closes[-50:]) / 50
-            if sma20 > sma50:
-                tech_score += 3
-                details["trend"] = " Aufwärtstrend"
-            elif sma20 > sma50 * 0.97:
-                tech_score += 1
-                details["trend"] = " Seitwärts"
-            else:
-                tech_score -= 3  # V3: Abwärtstrend bestraft den Score
-                details["trend"] = " Abwärtstrend"
-
-        # ── CHART HEALTH (separate Metrik, beeinflusst Score NICHT) ──
-        # Gibt dem Trader eine schnelle Einschätzung ob der Chart tradebar ist,
-        # ohne gute Catalyst-Trades zu verstecken.
-        # Skala: 0-10 (10 = perfekter Chart, 0 = aktiver Crash)
-        chart_health = 10  # Start bei "perfekt", dann Abzüge
-
-        # A) Drawdown vom 90d-High
-        drawdown_pct = 0
-        if range_90d > 0:
-            drawdown_pct = (high_90d - current_price) / max(0.01, high_90d) * 100
-            details["drawdown%"] = round(drawdown_pct, 1)
-            if drawdown_pct >= 30:
-                chart_health -= 4
-                details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
-            elif drawdown_pct >= 20:
-                chart_health -= 3
-                details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
-            elif drawdown_pct >= 15:
-                chart_health -= 2
-                details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
-            elif drawdown_pct <= 5:
-                details["drawdown"] = " Nahe Highs"
-            else:
-                details["drawdown"] = " Normaler Pullback (−{:.0f}%)".format(drawdown_pct)
-
-        # B) Trend — V2.7: Fix startswith("") war immer True (Emoji verloren)
-        if "Abwärtstrend" in details.get("trend", ""):
-            chart_health -= 2
-
-        # C) Bearish Price Action letzte 5 Tage
-        if len(closes) >= 6:
-            red_days = sum(1 for i in range(-5, 0) if closes[i] < closes[i-1])
-            if red_days >= 4:
-                chart_health -= 2
-                details["recent_action"] = f" {red_days}/5 rote Tage"
-            elif red_days >= 3:
-                chart_health -= 1
-                details["recent_action"] = f" {red_days}/5 rote Tage"
-
-        # D) Price Position (schon berechnet: pos_90d)
-        if details.get("pos_90d", 50) <= 20:
-            chart_health -= 1
-
-        chart_health = max(0, min(10, chart_health))
-        details["chart_health"] = chart_health
-
-        # Chart Health Label für Tabelle
-        if chart_health >= 8:
-            details["chart_health_label"] = " Stark"
-        elif chart_health >= 6:
-            details["chart_health_label"] = " OK"
-        elif chart_health >= 4:
-            details["chart_health_label"] = " Schwach"
-        else:
-            details["chart_health_label"] = " Kritisch"
-
-        details["price"] = current_price
-        # NACHAUDIT N11: avg_vol_20 kann None sein (Baseline fail-closed) —
-        # int(None) wuerde den kompletten Technik-Score still auf 0 werfen.
-        details["avg_vol"] = int(avg_vol_20 or 0)
-        details["high_90d"] = high_90d
-        details["low_90d"] = low_90d
-
-        # V69: Candlestick-Pattern-Erkennung für BioTech
-        candle_data = analyze_candles(bars)
-        details["candle_analysis"] = candle_data
-        details["candle_patterns"] = candle_data.get("patterns", [])
-        details["candle_trend"] = candle_data.get("trend", "unknown")
-        details["candle_volume_trend"] = candle_data.get("volume_trend", "neutral")
-        details["breakout_ready"] = candle_data.get("breakout_ready", False)
-        details["support"] = candle_data.get("support", 0)
-        details["resistance"] = candle_data.get("resistance", 0)
-
-        # Candlestick-Bonus auf tech_score (max +5 extra)
-        _candle_bonus = 0
-        _bullish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bullish"]
-        _bearish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bearish"]
-        if _bullish_p:
-            _candle_bonus += 2  # Bullische Patterns = gut für Catalyst-Play
-        if candle_data.get("breakout_ready"):
-            _candle_bonus += 2  # Enge Range + steigendes Vol = Breakout imminent
-        if candle_data.get("volume_trend") == "accumulation":
-            _candle_bonus += 1
-        if _bearish_p and not _bullish_p:
-            _candle_bonus -= 2  # Nur bearisch = Vorsicht
-        tech_score += max(-2, _candle_bonus)
-
-        return {"technical_score": min(20, max(0, tech_score)), "details": details}
+        return _compute_biotech_technical_from_bars(bars)
     except Exception:
         return {"technical_score": 0, "details": {}}
 
@@ -3844,25 +3498,42 @@ def _biotech_quick_scan(poly_key):
 
 
 def _compute_biotech_technical_from_bars(bars):
+    """Canonical completed-bar technical score for live and offline Biotech.
+
+    The caller is responsible for a causal completed-bar window. This helper
+    performs no I/O and accepts Polygon or canonical OHLCV field names.
+    Catalyst, event-date and mail execution gates remain separate.
     """
-    Berechnet den BioTech Technical Score aus einem Bar-Fenster (offline, kein API-Call).
+    normalized = []
+    try:
+        for raw in bars or []:
+            bar = {key: float(raw.get(key, raw.get(alias, 0)) or 0)
+                   for key, alias in (("o", "open"), ("h", "high"), ("l", "low"),
+                                      ("c", "close"), ("v", "volume"))}
+            if (not all(math.isfinite(value) for value in bar.values())
+                    or min(bar[key] for key in ("o", "h", "l", "c")) <= 0
+                    or bar["h"] < max(bar["o"], bar["c"], bar["l"])
+                    or bar["l"] > min(bar["o"], bar["c"], bar["h"]) or bar["v"] < 0):
+                return {"technical_score": 0, "rvol": 0, "details": {}, "data_status": "invalid_ohlcv"}
+            # Candle/ATR helpers consume canonical names, while this score's
+            # historical implementation uses Polygon aliases. Keep both views
+            # identical so the live Polygon path cannot silently score zero.
+            canonical = {alias: bar[key] for key, alias in
+                         (("o", "open"), ("h", "high"), ("l", "low"),
+                          ("c", "close"), ("v", "volume"))}
+            normalized.append({**raw, **bar, **canonical})
+    except (TypeError, ValueError):
+        return {"technical_score": 0, "rvol": 0, "details": {}, "data_status": "invalid_ohlcv"}
+    bars = normalized
+    if len(bars) < 21:
+        return {"technical_score": 0, "rvol": 0, "details": {}, "data_status": "insufficient_history"}
+    tech_score = 0
+    details = {}
 
-    NACHAUDIT: Diese Backtest-Variante ist NICHT identisch mit dem Live-Score
-    _biotech_technical_score(): RVOL-Punkte ohne Up/Down-Richtungscheck, keine
-    -3-Penalties (RVOL<0.5, Downtrend), kein Candle-Bonus. Backtest-Ergebnisse
-    auf Distribution-/Low-Volume-Tagen fallen dadurch bis ~6 Punkte zu gut aus —
-    Kalibrierungen gegen Live-Schwellen entsprechend konservativ interpretieren
-    (oder beide Pfade auf eine gemeinsame Bars-Funktion zusammenfuehren).
-
-    Returns: dict mit technical_score (max 20), rvol, details
-    """
-    if not bars or len(bars) < 20:
-        return {"technical_score": 0, "rvol": 0, "details": {}}
-
-    closes = [b["close"] for b in bars]
-    volumes = [b["volume"] for b in bars]
-    highs = [b["high"] for b in bars]
-    lows = [b["low"] for b in bars]
+    closes = [b["c"] for b in bars]
+    volumes = [b["v"] for b in bars]
+    highs = [b["h"] for b in bars]
+    lows = [b["l"] for b in bars]
 
     current_price = closes[-1]
     last_vol = volumes[-1]
@@ -3870,18 +3541,29 @@ def _compute_biotech_technical_from_bars(bars):
         volumes[:-1], lookback=20, minimum_periods=10
     )
 
-    tech_score = 0
-    details = {}
-
-    # 1. Unusual Volume (max 6 pts)
+    # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
     rvol = last_vol / avg_vol_20 if last_vol > 0 and avg_vol_20 else 0.0
     details["RVOL"] = round(rvol, 2)
+    # FIX 1: Track RVOL direction for bonus calculation
+    details["rvol_up_day"] = closes[-1] > closes[-2] if len(closes) >= 2 else True
     if rvol >= 3.0:
-        tech_score += 6
-    elif rvol >= 2.0:
-        tech_score += 4
+        # FIX 2: Check direction — high volume on UP day = accumulation, DOWN day = distribution
+        if closes[-1] > closes[-2]:  # High volume on UP day = accumulation
+            tech_score += 6
+            details["vol_signal"] = " Extrem hohes Volumen (Accumulation)"
+        else:  # High volume on DOWN day = distribution
+            tech_score += 1  # Minimal score, not a buy signal
+            details["vol_signal"] = " Extrem hohes Volumen (Distribution) — Vorsicht!"
     elif rvol >= 1.5:
-        tech_score += 2
+        tech_score += 3  # FIX 2: Moderate volume (was 2 for 1.5-2.0, now unified)
+        details["vol_signal"] = " Erhöhtes Volumen"
+    elif rvol >= 0.5:
+        details["vol_signal"] = " Normal"
+    else:
+        # V3: RVOL < 0.5x = praktisch kein Volumen → Penalty
+        # Wenn niemand handelt, ist der Catalyst eingepreist oder irrelevant
+        tech_score -= 3
+        details["vol_signal"] = " Sehr niedriges Volumen"
 
     # 2. Volume Trend — steigendes Volumen = Akkumulation (max 4 pts)
     if len(volumes) >= 20:
@@ -3902,8 +3584,8 @@ def _compute_biotech_technical_from_bars(bars):
             details["vol_trend"] = None
 
     # 3. Price Position — nahe Highs = bullish (max 4 pts)
-    high_90d = max(highs[-min(90, len(highs)):])
-    low_90d = min(lows[-min(90, len(lows)):])
+    high_90d = max(highs)
+    low_90d = min(lows)
     range_90d = high_90d - low_90d
     if range_90d > 0:
         pos_90d = (current_price - low_90d) / range_90d * 100
@@ -3912,26 +3594,128 @@ def _compute_biotech_technical_from_bars(bars):
             tech_score += 4
         elif pos_90d >= 60:
             tech_score += 2
+        elif pos_90d <= 20:
+            tech_score += 0  # Am Boden = könnte Value sein, aber riskant
 
-    # 4. Tight Range — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
+    # 4. Tight Range (Akkumulation) — niedrige Volatilität = Ruhe vor Sturm (max 3 pts)
     if len(closes) >= 10:
         recent_closes = closes[-10:]
         range_10d = (max(recent_closes) - min(recent_closes)) / max(0.01, min(recent_closes)) * 100
         details["range_10d%"] = round(range_10d, 1)
         if range_10d <= 5:
             tech_score += 3
+            details["consolidation"] = " Tight Consolidation"
         elif range_10d <= 10:
             tech_score += 1
+            details["consolidation"] = " Moderate Range"
+        else:
+            details["consolidation"] = " Weit gespreizt"
 
     # 5. Trend Direction — SMA20 > SMA50 = Aufwärtstrend (max 3 pts)
+    # V3: Abwärtstrend bekommt jetzt PENALTY statt 0. Begründung:
+    # Long-Grade bei klarem Downtrend (BCRX unter allen EMAs) ist irreführend.
+    # Ein Trader der "Grade B LONG" sieht, erwartet einen Aufwärtstrend.
     if len(closes) >= 50:
         sma20 = sum(closes[-20:]) / 20
         sma50 = sum(closes[-50:]) / 50
         if sma20 > sma50:
             tech_score += 3
+            details["trend"] = " Aufwärtstrend"
         elif sma20 > sma50 * 0.97:
             tech_score += 1
+            details["trend"] = " Seitwärts"
+        else:
+            tech_score -= 3  # V3: Abwärtstrend bestraft den Score
+            details["trend"] = " Abwärtstrend"
 
-    return {"technical_score": min(20, tech_score), "rvol": round(rvol, 2), "details": details}
+    # ── CHART HEALTH (separate Metrik, beeinflusst Score NICHT) ──
+    # Gibt dem Trader eine schnelle Einschätzung ob der Chart tradebar ist,
+    # ohne gute Catalyst-Trades zu verstecken.
+    # Skala: 0-10 (10 = perfekter Chart, 0 = aktiver Crash)
+    chart_health = 10  # Start bei "perfekt", dann Abzüge
+
+    # A) Drawdown vom 90d-High
+    drawdown_pct = 0
+    if range_90d > 0:
+        drawdown_pct = (high_90d - current_price) / max(0.01, high_90d) * 100
+        details["drawdown%"] = round(drawdown_pct, 1)
+        if drawdown_pct >= 30:
+            chart_health -= 4
+            details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
+        elif drawdown_pct >= 20:
+            chart_health -= 3
+            details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
+        elif drawdown_pct >= 15:
+            chart_health -= 2
+            details["drawdown"] = " −{:.0f}% vom High".format(drawdown_pct)
+        elif drawdown_pct <= 5:
+            details["drawdown"] = " Nahe Highs"
+        else:
+            details["drawdown"] = " Normaler Pullback (−{:.0f}%)".format(drawdown_pct)
+
+    # B) Trend — V2.7: Fix startswith("") war immer True (Emoji verloren)
+    if "Abwärtstrend" in details.get("trend", ""):
+        chart_health -= 2
+
+    # C) Bearish Price Action letzte 5 Tage
+    if len(closes) >= 6:
+        red_days = sum(1 for i in range(-5, 0) if closes[i] < closes[i-1])
+        if red_days >= 4:
+            chart_health -= 2
+            details["recent_action"] = f" {red_days}/5 rote Tage"
+        elif red_days >= 3:
+            chart_health -= 1
+            details["recent_action"] = f" {red_days}/5 rote Tage"
+
+    # D) Price Position (schon berechnet: pos_90d)
+    if details.get("pos_90d", 50) <= 20:
+        chart_health -= 1
+
+    chart_health = max(0, min(10, chart_health))
+    details["chart_health"] = chart_health
+
+    # Chart Health Label für Tabelle
+    if chart_health >= 8:
+        details["chart_health_label"] = " Stark"
+    elif chart_health >= 6:
+        details["chart_health_label"] = " OK"
+    elif chart_health >= 4:
+        details["chart_health_label"] = " Schwach"
+    else:
+        details["chart_health_label"] = " Kritisch"
+
+    details["price"] = current_price
+    # NACHAUDIT N11: avg_vol_20 kann None sein (Baseline fail-closed) —
+    # int(None) wuerde den kompletten Technik-Score still auf 0 werfen.
+    details["avg_vol"] = int(avg_vol_20 or 0)
+    details["high_90d"] = high_90d
+    details["low_90d"] = low_90d
+
+    # V69: Candlestick-Pattern-Erkennung für BioTech
+    candle_data = analyze_candles(bars)
+    details["candle_analysis"] = candle_data
+    details["candle_patterns"] = candle_data.get("patterns", [])
+    details["candle_trend"] = candle_data.get("trend", "unknown")
+    details["candle_volume_trend"] = candle_data.get("volume_trend", "neutral")
+    details["breakout_ready"] = candle_data.get("breakout_ready", False)
+    details["support"] = candle_data.get("support", 0)
+    details["resistance"] = candle_data.get("resistance", 0)
+
+    # Candlestick-Bonus auf tech_score (max +5 extra)
+    _candle_bonus = 0
+    _bullish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bullish"]
+    _bearish_p = [p for p in candle_data.get("patterns", []) if p.get("type") == "bearish"]
+    if _bullish_p:
+        _candle_bonus += 2  # Bullische Patterns = gut für Catalyst-Play
+    if candle_data.get("breakout_ready"):
+        _candle_bonus += 2  # Enge Range + steigendes Vol = Breakout imminent
+    if candle_data.get("volume_trend") == "accumulation":
+        _candle_bonus += 1
+    if _bearish_p and not _bullish_p:
+        _candle_bonus -= 2  # Nur bearisch = Vorsicht
+    tech_score += max(-2, _candle_bonus)
+
+    return {"technical_score": min(20, max(0, tech_score)), "rvol": round(rvol, 2),
+            "details": details, "technical_model": "biotech_completed_bar_v2"}
 
 
