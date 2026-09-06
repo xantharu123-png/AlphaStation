@@ -23454,36 +23454,67 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=
     return bool(sent)
 
 
-def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
-    """Entwarnung nach gemeldeter Haenge-Episode: Scan laeuft wieder.
+def _send_stuck_recovery_mail(
+    name, episode_sec, episode_started_at, *, recovered_at=None, run_seconds=None,
+    warning_delivered=False,
+) -> str:
+    """Return sent/already_sent/unannounced/warning_pending/failed.
 
-    Einmal je Episode (Dedupe-Key am Episode-Start, kein Doppel-Versand auch
-    nach Neustart); Mark erst NACH erfolgreichem Versand — schlaegt der
-    Versand fehl, meldet der naechste erfolgreiche Lauf erneut. Unterdrueckt
-    nur, wenn die Warnung der Episode bewusst throttle-gedeckelt war —
-    bei gescheiterter Warnung (kein Throttle-Mark) ist die Entwarnung
-    trotzdem willkommen (30.07.)."""
-    if (
-        _email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC)
-        and not _email_dedupe_active(f"stuck_scan_{name}_{int(episode_started_at)}", 7 * 86400)
-    ):
-        _log_watchdog_event("recovery", name, stuck_min=max(1, int(episode_sec // 60)),
-                            mailed=False, throttled=True)
-        return False  # Warnung war throttle-gedeckelt: Entwarnung waere kontext-los
+    Only a delivered soft OR hard warning for this incident warrants a
+    recovery email. An unrelated six-hour throttle is not incident history.
+    The caller retains genuine delivery failures separately from active
+    incidents, with a frozen successful-completion timestamp.
+    """
     minutes = max(1, int(episode_sec // 60))
     dedupe_key = f"stuck_recovery_{name}_{int(episode_started_at)}"
     if _email_dedupe_active(dedupe_key, 7 * 86400):
-        return False
+        return "already_sent"
+    episode_id = int(episode_started_at)
+    with _scan_lock:
+        state = _scan_status.get(name) or {}
+        delivery = state.get("_stuck_warning_delivery", {}).get(episode_id, {})
+        # Warning SMTP and its delivered mark must finish before an incident
+        # is classified as unannounced. Completion can race with SMTP.
+        if delivery.get("in_flight", 0):
+            return "warning_pending"
+        announced = bool(warning_delivered or delivery.get("announced")) or any(
+            _email_dedupe_active(f"{prefix}_{name}_{episode_id}", 7 * 86400)
+            for prefix in ("stuck_scan", "stuck_scan_hard")
+        )
+        pending = state.get("_pending_stuck_recoveries", {}).get(episode_id)
+        if announced and pending is not None:
+            # Dedupe expiration must not erase confirmed announcement history,
+            # including when recovery SMTP subsequently raises an exception.
+            pending["warning_delivered"] = True
+    if not announced:
+        _log_watchdog_event(
+            "recovery", name, stuck_min=minutes, mailed=False,
+            throttled=_email_dedupe_active(f"stuck_throttle_{name}", _STUCK_WARN_THROTTLE_SEC),
+        )
+        return "unannounced"
     subject = f"Scan-Waechter: {name} laeuft wieder"
     rendered_at = datetime.now(timezone.utc)
+    completed_at = (
+        datetime.fromtimestamp(float(recovered_at), timezone.utc)
+        if recovered_at is not None else rendered_at
+    )
+    runtime_html = (
+        f"<p>Laufzeit des erfolgreichen Durchlaufs: {max(0.0, float(run_seconds)) / 60:.1f} Min.</p>"
+        if run_seconds is not None else ""
+    )
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
     <h2 style="color:#15803d">Scan-Waechter — Entwarnung</h2>
     <p style="color:#666">{_mail_timestamp_dual(rendered_at)}</p>
-    <p><b>{name} laeuft wieder — Episode beendet nach ca. {minutes} Min.</b></p>
-    <p>Der zuletzt gemeldete Haenger ist beendet: der Scan ist erfolgreich
-    durchgelaufen. <b>Kein Neustart noetig</b> — der Scheduler arbeitet
-    normal weiter.</p>
+    <p><b>{name}: erfolgreicher Abschluss bestaetigt.</b></p>
+    <p>Abgeschlossen: {_mail_timestamp_dual(completed_at)}.</p>
+    <p>Zeit bis zum erfolgreichen Abschluss: ca. {minutes} Min seit Beginn
+    der Warnperiode. Darin koennen fehlgeschlagene Laeufe und Wartepausen
+    enthalten sein; es ist nicht zwingend die Laufzeit eines einzelnen Scans.</p>
+    {runtime_html}
+    <p><b>Kein Neustart noetig</b> wegen dieser abgeschlossenen Warnperiode.
+    Diese Meldung belegt den genannten Abschluss, nicht den Zustand anderer
+    oder spaeterer Scans.</p>
     <p style="color:#999;font-size:12px;margin-top:20px">
         Automatische Entwarnung des Scan-Waechters (einmalig je Haenge-Episode).<br>
         Kein Trading-Signal, keine Handelsaufforderung.
@@ -23499,7 +23530,7 @@ def _send_stuck_recovery_mail(name, episode_sec, episode_started_at):
     if sent:
         _email_dedupe_mark(dedupe_key)
     _log_watchdog_event("recovery", name, stuck_min=minutes, mailed=bool(sent))
-    return bool(sent)
+    return "sent" if sent else "failed"
 
 
 def _scan_watchdog_check(name, now=None):
@@ -23522,6 +23553,7 @@ def _scan_watchdog_check(name, now=None):
         stuck_sec = now - started_at
         if stuck_sec <= timeout_min * 60:
             return None
+        hard = stuck_sec > _stuck_hard_cap_sec(name)
         with _scan_lock:
             current = _scan_status.get(name)
             if current is None or current.get("_started_at") != started_at:
@@ -23532,50 +23564,63 @@ def _scan_watchdog_check(name, now=None):
             )
             first = not current.get("_timeout_logged")
             current["_timeout_logged"] = True
-            # Episode-Marker fuer die Entwarnungs-Mail: ueberlebt Hartdeckel-
-            # Reset und Folge-Runs, wird erst nach echtem Erfolg geloest.
+            # One incident spans failed retries until the first real success.
+            # Warning and recovery must use the SAME incident identity.
             current.setdefault("_episode_started_at", started_at)
-        if stuck_sec > _stuck_hard_cap_sec(name):
-            with _scan_lock:
-                current = _scan_status.get(name)
-                if current is None or current.get("_started_at") != started_at:
-                    return None
-                current.setdefault("_episode_started_at", started_at)
+            episode_started_at = float(current["_episode_started_at"])
+            if hard:
                 hard_first = not current.get("_hard_timeout_logged")
                 current["_hard_timeout_logged"] = True
                 current["last_error"] = (
                     f"Scan haengt seit {max(1, int(stuck_sec // 60))} Min; "
                     "kontrollierter Dienst-Neustart erforderlich; kein Parallelstart"
                 )
-            if hard_first:
+                should_warn = hard_first
+            else:
+                should_warn = first
+            if not should_warn:
+                return None
+            episode_id = int(episode_started_at)
+            delivery = current.setdefault("_stuck_warning_delivery", {}).setdefault(
+                episode_id, {"in_flight": 0, "announced": False},
+            )
+            # Register intent atomically with the incident before completion
+            # can race warning delivery. Soft/hard sends may overlap.
+            delivery["in_flight"] += 1
+        sent = False
+        try:
+            if hard:
                 print(
                     f"[Scheduler] WATCHDOG: {name} Hartdeckel nach {int(stuck_sec)}s; "
                     "Worker bleibt exklusiv, kontrollierter Neustart erforderlich"
                 )
-                try:
-                    _send_stuck_scan_mail(
-                        name,
-                        stuck_sec,
-                        timeout_min,
-                        hard=True,
-                        episode_key=f"stuck_scan_hard_{name}_{int(started_at)}",
-                    )
-                except Exception as exc:
-                    print(f"[Scheduler] Stuck-Mail (hard) fehlgeschlagen: {exc}")
-                return "stuck_hard"
-            return None
-        if first:
-            print(f"[Scheduler] WATCHDOG: {name} exceeds {timeout_min}min; "
-                  "no overlapping restart")
-            try:
-                _send_stuck_scan_mail(
-                    name, stuck_sec, timeout_min, hard=False,
-                    episode_key=f"stuck_scan_{name}_{int(started_at)}",
-                )
-            except Exception as exc:
-                print(f"[Scheduler] Stuck-Mail fehlgeschlagen: {exc}")
-            return "stuck"
-        return None
+            else:
+                print(f"[Scheduler] WATCHDOG: {name} exceeds {timeout_min}min; "
+                      "no overlapping restart")
+            prefix = "stuck_scan_hard" if hard else "stuck_scan"
+            sent = _send_stuck_scan_mail(
+                name, stuck_sec, timeout_min, hard=hard,
+                episode_key=f"{prefix}_{name}_{episode_id}",
+            )
+        except Exception as exc:
+            print(f"[Scheduler] Stuck-Mail fehlgeschlagen: {exc}")
+        finally:
+            with _scan_lock:
+                current = _scan_status.get(name)
+                if current is not None:
+                    deliveries = current.get("_stuck_warning_delivery", {})
+                    delivery = deliveries.get(episode_id)
+                    if delivery is not None:
+                        delivery["in_flight"] = max(0, delivery["in_flight"] - 1)
+                        delivery["announced"] = bool(delivery["announced"] or sent)
+                        pending = current.get("_pending_stuck_recoveries", {}).get(episode_id)
+                        if pending is not None and delivery["announced"]:
+                            pending["warning_delivered"] = True
+                        if not delivery["in_flight"] and current.get("_episode_started_at") != episode_started_at:
+                            deliveries.pop(episode_id, None)
+                        if not deliveries:
+                            current.pop("_stuck_warning_delivery", None)
+        return "stuck_hard" if hard else "stuck"
     except Exception as exc:  # Defensive: Waechter darf Scheduler nie abbrechen
         print(f"[Scheduler] Watchdog-Fehler bei {name}: {exc}")
         return None
@@ -23633,7 +23678,7 @@ def _run_scan_safe(name, func, timeout_min=None):
             print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}")
             _print_sanitized_traceback()
         finally:
-            recovery = None
+            recoveries = []
             with _scan_lock:
                 state = _scan_status.get(name)
                 if state is not None and state.get("_run_id") == run_id:
@@ -23646,26 +23691,55 @@ def _run_scan_safe(name, func, timeout_min=None):
                     if succeeded:
                         state["last_run"] = datetime.now().isoformat()
                         state.pop("last_error", None)
-                        # Entwarnung erst nach dem echten Ende desselben Workers.
+                        # Completion ends the incident even when SMTP fails.
+                        # Retry delivery separately: never resurrect a healthy
+                        # incident or inflate its duration by the retry delay.
                         episode_started = state.pop("_episode_started_at", None)
                         if episode_started is not None:
-                            recovery = (time.time() - float(episode_started), float(episode_started))
+                            recovered_at = time.time()
+                            delivery = state.get("_stuck_warning_delivery", {}).get(int(episode_started), {})
+                            state.setdefault("_pending_stuck_recoveries", {}).setdefault(
+                                int(episode_started), {
+                                    "started_at": float(episode_started),
+                                    "recovered_at": recovered_at,
+                                    "run_seconds": max(0.0, recovered_at - start_t),
+                                    "warning_delivered": bool(delivery.get("announced")),
+                                },
+                            )
+                            if not delivery.get("in_flight", 0):
+                                deliveries = state.get("_stuck_warning_delivery", {})
+                                deliveries.pop(int(episode_started), None)
+                                if not deliveries:
+                                    state.pop("_stuck_warning_delivery", None)
+                        recoveries = list(state.get("_pending_stuck_recoveries", {}).items())
                     else:
                         state["last_error"] = error_text or "Unbekannter Scan-Fehler"
-                if _scan_threads.get(name) is threading.current_thread():
-                    _scan_threads.pop(name, None)
-            if recovery is not None:
+            for episode_key, recovery in recoveries:
                 try:
-                    sent_rec = _send_stuck_recovery_mail(name, recovery[0], recovery[1])
-                    if not sent_rec:
-                        # Versand fehlgeschlagen (oder Dedupe): Marker wieder
-                        # offen lassen, damit der naechste Erfolg erneut meldet.
+                    outcome = _send_stuck_recovery_mail(
+                        name,
+                        max(0.0, recovery["recovered_at"] - recovery["started_at"]),
+                        recovery["started_at"],
+                        recovered_at=recovery["recovered_at"],
+                        run_seconds=recovery["run_seconds"],
+                        warning_delivered=recovery.get("warning_delivered", False),
+                    )
+                    if outcome in ("sent", "already_sent", "unannounced"):
                         with _scan_lock:
-                            st_retry = _scan_status.get(name)
-                            if st_retry is not None and not st_retry.get("running"):
-                                st_retry["_episode_started_at"] = recovery[1]
+                            current = _scan_status.get(name)
+                            if current is not None:
+                                pending = current.get("_pending_stuck_recoveries", {})
+                                if pending.get(episode_key) == recovery:
+                                    pending.pop(episode_key, None)
+                                if not pending:
+                                    current.pop("_pending_stuck_recoveries", None)
                 except Exception as rec_exc:
                     print(f"[Scheduler] Entwarnungs-Mail fehlgeschlagen: {rec_exc}")
+            # Keep this scanner's worker exclusive through notice delivery, so
+            # a new run cannot concurrently deliver the same pending recovery.
+            with _scan_lock:
+                if _scan_threads.get(name) is threading.current_thread():
+                    _scan_threads.pop(name, None)
 
     t = threading.Thread(target=_worker, daemon=True)
     with _scan_lock:

@@ -474,3 +474,21 @@ Nach serverseitigem Pull sind Revision, Bundle, Services und Health separat
 zu pruefen. Nach Wechsel auf v2 kann die BI-Liste bis zum naechsten gueltigen
 Scan korrekt leer sein. Positive neue Netto-Erwartung ist noch nachzuweisen;
 alte Archivverluste sind keine Messung der neuen Version.
+
+## 17. Scan-Waechter-Nachtrag 07.09.2026
+
+Referenz: `AUDIT_SCAN_WAECHTER_2026-09-07.md`. Wiederholte BI-Entwarnungen
+wurden auf vermischte Zustellausgaenge und wiedereroeffnete Episoden
+zurueckgefuehrt und mit isolierten Gegenproben korrigiert. Versand-Retry und
+aktive Stoerung sind getrennt; Abschlusszeitpunkt und bestaetigte Warnzustellung
+bleiben fuer den Retry erhalten. Eine Entwarnung benoetigt eine zugehoerige
+versandte weiche oder harte Warnung. Kein Eingriff in 17/20, Scanner-Budgets,
+Trading-Regeln, DB-Schema oder Cron.
+
+Live-Health am 07.09. ca. 01:21 MESZ meldete auf Port 8000 weiterhin Revision
+`47eca9ac05ec`, Bundle `b7bc31f215b9` (HTTP 200, healthy). Das vorherige Paket
+`8a9ada3` ist damit nicht als laufend nachgewiesen; Dateisystem-HEAD ist separat
+zu pruefen. Port 80 lieferte fuer /api/health HTTP 404, SSH-Key wurde abgewiesen.
+Kein Rollout durchgefuehrt. Reale lange BI-Laeufe bleiben anhand Journald zu
+klaeren; 599 Minuten in der alten Mail waren nicht zwingend eine Worker-Laufzeit.
+Abnahme und sichere lesende Serverpruefung stehen im neuen Bericht.

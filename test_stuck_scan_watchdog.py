@@ -243,10 +243,10 @@ def test_api_recovery_mail_deduped_per_episode(monkeypatch, tmp_path):
     Voraussetzung: die Episode wurde angekuendigt (Warn-Key aktiv, 30.07.)."""
     sent, started_at = _setup_api(monkeypatch, tmp_path)
     api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(started_at)}")
-    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started_at) is True
-    assert api._send_stuck_recovery_mail("crypto_explosion", 45 * 60, started_at) is False
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started_at) == "sent"
+    assert api._send_stuck_recovery_mail("crypto_explosion", 45 * 60, started_at) == "already_sent"
     assert len(sent) == 1
-    assert "Episode beendet nach ca. 40 Min" in sent[0]["body"]
+    assert "erfolgreichen Abschluss: ca. 40 Min" in sent[0]["body"]
 
 
 def test_bg_recovery_decision_pure():
@@ -327,20 +327,20 @@ def test_hard_timeout_mail_bypasses_soft_warning_throttle(monkeypatch, tmp_path)
     assert "kontrollierten Neustart" in sent[0]["subject"]
 
 
-def test_recovery_mail_suppressed_only_when_warn_throttled(monkeypatch, tmp_path):
-    """Entwarnungs-Logik: unterdrueckt NUR bei throttle-gedeckelter Warnung;
-    bei gescheiterter oder versandter Warnung geht die Entwarnung raus."""
+def test_recovery_mail_requires_delivered_warning_for_same_episode(monkeypatch, tmp_path):
+    """No contextless all-clear: failed/throttled warnings never warrant one.
+    A delivered warning for this episode does, despite another throttle."""
     sent, started = _setup_api(monkeypatch, tmp_path)
     s1, s2, s3 = started, started - 3600, started - 7200
-    # 1) Warn-Versand war gescheitert (kein Mark) => Entwarnung willkommen
-    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s1) is True
+    # 1) Warn-Versand war gescheitert (kein Mark) => keine Entwarnung
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s1) == "unannounced"
     # 2) Warnung throttle-gedeckelt => Entwarnung unterdrueckt (kontext-los)
     api._email_dedupe_mark("stuck_throttle_crypto_explosion")
-    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s2) is False
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s2) == "unannounced"
     # 3) Episode angekuendigt (Warn-Key) => Entwarnung trotz Throttle
     api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(s3)}")
-    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s3) is True
-    assert len(sent) == 2
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, s3) == "sent"
+    assert len(sent) == 1
 
 
 # ── Teil 5: Waechter-Ereignis-Log (JSONL, Wochenreport-Quelle, 30.07.) ───────
@@ -412,7 +412,7 @@ def test_recovery_event_logged(monkeypatch, tmp_path):
     """Entwarnung => Event kind=recovery mit Episode-Dauer."""
     sent, started = _setup_api(monkeypatch, tmp_path)
     api._email_dedupe_mark(f"stuck_scan_crypto_explosion_{int(started)}")
-    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started) is True
+    assert api._send_stuck_recovery_mail("crypto_explosion", 40 * 60, started) == "sent"
     evs = _wd_events()
     assert [e["kind"] for e in evs] == ["recovery"]
     assert evs[0]["mailed"] is True
