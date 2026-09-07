@@ -24,6 +24,8 @@ from modules.performance_metrics import chronological_trade_key, profit_factor_m
 from modules.bi_trade_plan import BI_PLAN_VERSION, build_bi_trade_plan
 from modules.volume_metrics import historical_volume_baseline
 from modules.vrvp_levels import calculate_wilder_atr
+from modules.backtest_methodology import backtest_methodology, limit_backtest_report, MOMENTUM_DAILY_MODEL
+from modules.momentum_daily_backtest import daily_bar_is_explicitly_incomplete
 
 
 # ── Backtest Universes (kopiert aus scanner.py) ──
@@ -136,6 +138,7 @@ def _daily_session_gap(previous_date, current_date, calendar="us_equity"):
 class _BacktestTradeList(list):
     """Preserve strategy->list compatibility while carrying empty-cohort quality."""
     data_quality = None
+    methodology = None
 
 
 def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers=()):
@@ -153,6 +156,7 @@ def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers
         missing.update(trade.get("missing_expected_sessions") or ())
         if trade.get("evaluation_status") in {
             "MISSING_EXPECTED_SESSION", "NON_INCREASING_DAILY_DATES", "SESSION_CALENDAR_UNAVAILABLE",
+            "INCOMPLETE_DAILY_BAR",
         }:
             affected += 1
     partial = bool(failed or unavailable or missing or affected)
@@ -166,12 +170,15 @@ def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers
 
 
 def _attach_backtest_data_quality(results, *, failed_fetch_dates=(), unavailable_tickers=()):
-    for trades in results.values():
+    for strategy_name, trades in results.items():
+        methodology = backtest_methodology(strategy_name, BACKTEST_STRATEGY_RULES.get(strategy_name))
+        trades.methodology = methodology
         quality = _backtest_data_quality(trades, failed_fetch_dates=failed_fetch_dates,
                                          unavailable_tickers=unavailable_tickers)
         trades.data_quality = quality
         for trade in trades:
             trade["data_quality"] = quality
+            trade.update(methodology)
 
 
 def _simulate_50_50_daily_path(
@@ -259,6 +266,8 @@ def _simulate_50_50_daily_path(
             break
 
         bar = bars[bar_idx]
+        if daily_bar_is_explicitly_incomplete(bar):
+            return _unresolved("INCOMPLETE_DAILY_BAR", bar_idx)
         if bar_idx > 0:
             coverage = _daily_session_gap(bars[bar_idx-1].get("date"), bar.get("date"), session_calendar)
             session_coverage = coverage["coverage"]
@@ -592,6 +601,13 @@ def evaluate_rule_signal(bars, signal_idx, strategy):
     """
     if signal_idx < 1 or signal_idx >= len(bars):
         return None
+
+    selection_model = (strategy or {}).get("selection_model")
+    if selection_model == MOMENTUM_DAILY_MODEL:
+        from modules.momentum_daily_backtest import evaluate_daily_momentum
+        return evaluate_daily_momentum(bars, signal_idx)
+    if selection_model:
+        raise ValueError(f"Unsupported backtest selection model: {selection_model}")
 
     signal_rules = dict((strategy or {}).get("signal") or {})
     unsupported = set(signal_rules) - _BASE_RULE_SIGNAL_KEYS - _STRUCTURAL_RULE_SIGNAL_KEYS
@@ -1856,6 +1872,7 @@ def simulate_trade(bars, signal_idx, strategy):
         "target_model": "50_50_tp1_tp2",
     }
     result.update(simulated)
+    result.update(backtest_methodology(rule=strategy))
     for key in ("exit_price", "exit_price_upper", "pnl_pct", "pnl_pct_upper", "r_multiple", "r_multiple_upper"):
         if result.get(key) is not None:
             result[key] = round(float(result[key]), 2)
@@ -1977,6 +1994,11 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
 
 def compute_backtest_stats(trades):
     """Berechnet Performance-Statistiken für eine Liste von Trades."""
+    methodology = getattr(trades, "methodology", None)
+    if not methodology:
+        first = next(iter(trades or ()), {})
+        strategy_name = first.get("strategy") if isinstance(first, dict) else None
+        methodology = backtest_methodology(strategy_name, BACKTEST_STRATEGY_RULES.get(strategy_name))
     data_quality = _backtest_data_quality(trades or ())
     # Preserve attached coverage even for an empty strategy list.
     if isinstance(trades, _BacktestTradeList):
@@ -2018,7 +2040,8 @@ def compute_backtest_stats(trades):
             "data_quality": data_quality,
         }
         empty.update(_backtest_uncertainty_metrics([]))
-        return empty
+        empty.update(methodology)
+        return limit_backtest_report(empty)
     
     winners = [t for t in trades if t["is_winner"]]
     losers = [t for t in trades if not t["is_winner"]]
@@ -2094,6 +2117,7 @@ def compute_backtest_stats(trades):
         "data_quality": data_quality,
     }
     stats.update(_backtest_uncertainty_metrics(trades))
-    return stats
+    stats.update(methodology)
+    return limit_backtest_report(stats)
 
 

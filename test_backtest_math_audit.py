@@ -424,8 +424,9 @@ def test_backtest_stats_keep_non_decided_only_sample_out_of_performance():
     assert stats["no_fill"] == 1
     assert stats["unresolved"] == 1
     assert stats["statistics_scope"] == "decided_filled_trades_only"
-    assert stats["win_rate"] == 0
-    assert stats["total_r"] == 0
+    assert stats["win_rate"] is None
+    assert stats["total_r"] is None
+    assert stats["performance_available"] is False
 
 
 def test_conservative_exit_index_uses_later_ohlc_path():

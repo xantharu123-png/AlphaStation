@@ -53,7 +53,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path == "/api/run-backtest":
             # Return a fixture, never run any strategy or touch a database.
-            return self.send_json({
+            payload = {
                 "total_trades": 1, "total_signals": 3, "unresolved": 2, "no_fill": 0,
                 "win_rate": 100, "total_return": 1, "avg_pnl": 1, "max_drawdown": 0,
                 "avg_r": None, "profit_factor_display": "∞", "n_tickers": 1,
@@ -61,7 +61,23 @@ class Handler(BaseHTTPRequestHandler):
                 "verdict": {"status": "data_incomplete", "label": "DATEN UNVOLLSTÄNDIG", "color": "orange", "tradable": False, "summary": "Synthetischer Teil-Datensatz, keine Freigabe.", "reasons": []},
                 "out_of_sample": {"status": "data_incomplete", "total_trades": 1},
                 "trades": [{"ticker": "QADEMO", "entry_date": "2026-09-01", "exit_date": "2026-09-03", "entry_price": 1.012e-8, "exit_price": 1.02212e-8, "pnl_pct": 1, "r_multiple": None, "outcome": "EOD", "type": "LONG"}],
-            })
+            }
+            request = json.loads(body or b"{}")
+            if request.get("strategy") == "Momentum Breakout Long":
+                # Deliberately contradictory verdict proves the frontend cannot
+                # promote a proxy result to a live/paper release.
+                payload.update({
+                    "methodology_label": "QA: Tagesdaten-Näherungsmodell – kein Live-Replay",
+                    "methodology_warnings": [
+                        "Nächster Tagesopen, fester 5%-Stop, Ziele 1,5R/2,5R; keine Live-Struktur-Exits.",
+                        "Historische 5-Minuten-Trigger, 4H-Prüfungen und tatsächliche Fills fehlen.",
+                    ],
+                    "live_equivalent": False,
+                    "live_validation_eligible": False,
+                    "paper_autotrade_release_eligible": False,
+                    "verdict": {"status": "approved", "tradable": True, "label": "QA ABSICHTLICH WIDERSPRÜCHLICH", "reasons": []},
+                })
+            return self.send_json(payload)
         if self.path == "/__qa/error":
             ERRORS.append(body.decode(errors="replace")[:2000])
             return self.send_json({"ok": True})
@@ -79,7 +95,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/strategies":
             return self.send_json({"strategies": [], "categories": {}})
         if path == "/api/backtest-strategies":
-            return self.send_json({"strategies": [{"id": "sma_crossover", "name": "QA – fehlende R / partielle Daten", "requires_ticker": False, "category": "QA", "direction": "long"}]})
+            return self.send_json({"strategies": [
+                {"id": "sma_crossover", "name": "QA – fehlende R / partielle Daten", "requires_ticker": False, "category": "QA", "direction": "long"},
+                {"id": "Momentum Breakout Long", "name": "QA – Momentum-Modellgrenze", "requires_ticker": False, "category": "QA", "direction": "long"},
+            ]})
         if path == "/api/scheduler-status":
             return self.send_json({"running": False, "scans": {}})
         if path == "/api/bi-results":

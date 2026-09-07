@@ -788,15 +788,9 @@ def classify_pm_setup(pm_change, gap_pct, pm_position, rs_vs_spy, atr_pct=5.0, v
 BACKTEST_STRATEGY_RULES = {
     "Breakout Long": {
         "direction": "long",
-        "description": "Daily live-signal proxy: 20D breakout proximity, Change >=2%, RVOL >=1.5, close hold and controlled wick",
-        "signal": {
-            "change_pct_min": 2.0, "change_pct_max": 50.0,
-            "close_pos_min": 0.65,
-            "rvol_min": 1.5,
-            "breakout_lookback_days": 20,
-            "breakout_proximity_min": -0.01,
-            "upper_wick_pct_max": 38.0,
-        },
+        "description": "Gemeinsame Momentum-Tagesauswahl; Tages-Exits nur Modell, keine Live-Freigabe",
+        "selection_model": "stock_momentum_daily_selection_v1",
+        "signal": {},
         "entry": "next_open",
         "stop_pct": 0.05,
         "tp1_rr": 1.5,

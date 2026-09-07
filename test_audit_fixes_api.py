@@ -145,18 +145,21 @@ def test_h4_turtle_row_has_native_targets_and_trade_setup(monkeypatch):
 # ══════════════════════════════════════════════════════════════
 
 def test_h5_momentum_breakout_backtest_rule_matches_live():
+    from modules.stock_momentum_contract import MOMENTUM_SCAN_FILTERS, MOMENTUM_MIN_DOLLAR_VOLUME
     # Genau der Pfad aus _run_backtest: erst Alias aufloesen, dann Regel laden.
     effective_key = api.BACKTEST_STRATEGY_ALIASES.get("Momentum Breakout Long", "Momentum Breakout Long")
     rule = api.BACKTEST_RULES[effective_key]
-    sig = rule["signal"]
-    # Live-Filter seit S-1: Change >= 2%, RVOL >= 1.5, ClosePos >= 0.5 —
-    # vorher testete der Backtest Change >= 3% OHNE RVOL-Bedingung.
-    assert sig["change_pct_min"] == pytest.approx(2.0)
-    assert sig["close_pos_min"] == pytest.approx(0.65)
-    assert sig["rvol_min"] == pytest.approx(1.5)
-    assert sig["breakout_lookback_days"] == 20
-    assert sig["breakout_proximity_min"] == pytest.approx(-0.01)
-    assert sig["upper_wick_pct_max"] == pytest.approx(38.0)
+    # One shared selection contract replaces the old 20D-proximity proxy.
+    # Its actual daily/live same-input behavior is covered by the parity tests;
+    # fixed next-open exits remain explicitly a proxy, not live execution.
+    assert rule["selection_model"] == "stock_momentum_daily_selection_v1"
+    assert rule["signal"] == {}
+    live = api.PUBLIC_STOCK_STRATEGIES["Momentum Breakout Long"]
+    for key, bounds in MOMENTUM_SCAN_FILTERS.items():
+        assert live["filters"][key] == bounds
+    assert live["min_dollar_volume"] == MOMENTUM_MIN_DOLLAR_VOLUME
+    assert rule["entry"] == "next_open"
+    assert rule["stop_pct"] == pytest.approx(0.05)
     assert rule["direction"] == "long"
     # Der oeffentliche Name muss bewusst auf genau eine kanonische Regel zeigen.
     assert effective_key == "Breakout Long"

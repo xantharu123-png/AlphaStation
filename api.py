@@ -140,6 +140,15 @@ from modules.stock_execution import (
     stock_swing_4h_execution_state,
     stock_swing_4h_short_execution_state,
 )
+from modules.stock_momentum_contract import (
+    CONFIRMATION_BUFFER as _MOMENTUM_CONFIRMATION_BUFFER,
+    MOMENTUM_CONTRACT_VERSION,
+    MOMENTUM_BREAKOUT_TYPES,
+    MOMENTUM_SCAN_FILTERS,
+    MOMENTUM_MIN_DOLLAR_VOLUME,
+    evaluate_momentum_breakout,
+    cap_momentum_score,
+)
 from modules.email_dedupe import (
     email_delivery_claim as _shared_email_delivery_claim,
     email_delivery_mark as _shared_email_delivery_mark,
@@ -511,17 +520,10 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
     public_strategies = {
         "Momentum Breakout Long": _clone_stock_strategy(
             "Breakout Long",
-            filters={
-                # AUDIT S-1 (2026-06-10): RVOL-Floor 1.5 ist Kern-Geschaeftsregel fuer
-                # Breakout-Signale — nicht senken. Change >= 2% verhindert Flat-Day-Fakes.
-                "Change %": (2.0, 200.0),
-                "RVOL": (1.5, 100.0),
-                "Close Position": (0.50, 1.0),
-                "Preis": (5.0, 100000.0),
-            },
-            description="Konsolidierter Momentum-Scanner für Breakout-, Early- und Whale-Setups.",
-            logic="Breakout + Trendhaltigkeit + sauberes Volumenprofil = priorisierter Momentum-Kandidat.",
-            min_dollar_volume=750000,
+            filters=dict(MOMENTUM_SCAN_FILTERS),
+            description="Echter Ausbruch ueber das vorherige 10D-/20D-Hoch, mit abgeschlossener 5m-Bestaetigung.",
+            logic="Kurs und abgeschlossener 5m-Close bestaetigen den Widerstandsbruch; reine Range-Staerke oder EMA-Reclaim reichen nicht.",
+            min_dollar_volume=MOMENTUM_MIN_DOLLAR_VOLUME,
             max_results=150,
             merged_from=["Breakout Long", "Early Momentum", "Whale Watch", "Volume Surge"],
             display_group="Momentum",
@@ -801,7 +803,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 7
+STOCK_STRATEGY_CACHE_VERSION = 8
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -4445,40 +4447,136 @@ def _candle_epoch_seconds(bar: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _execution_candle_number(value: Any) -> Optional[float]:
+    """Read a finite measurement without turning booleans/missing data into zero."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _execution_candle_timestamp(value: Any) -> Optional[float]:
+    """Read exchange open/close times in seconds, ms, us, ns or aware ISO form."""
+    number = _execution_candle_number(value)
+    if number is None and isinstance(value, (str, datetime)):
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                return None
+            number = stamp.timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    if number is None or number <= 0:
+        return None
+    if number >= 1e18:
+        number /= 1e9
+    elif number >= 1e15:
+        number /= 1e6
+    elif number >= 1e12:
+        number /= 1e3
+    try:
+        datetime.fromtimestamp(number, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return number
+
+
+def _execution_candle_values(bar: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """Validate supplied prices; a time/close-only compatibility row stays sparse."""
+    values = {}
+    for name, alias in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v")):
+        supplied = [bar[key] for key in (name, alias) if key in bar]
+        if not supplied:
+            continue
+        numbers = [_execution_candle_number(value) for value in supplied]
+        if any(value is None for value in numbers) or len(set(numbers)) != 1:
+            return None
+        value = numbers[0]
+        if value < 0 or (name != "volume" and value == 0):
+            return None
+        values[name] = value
+    if "close" not in values:
+        return None
+    if any(name in values for name in ("open", "high", "low")):
+        if not all(name in values for name in ("open", "high", "low")):
+            return None
+        if values["high"] < max(values["open"], values["close"], values["low"]) or values["low"] > min(values["open"], values["close"]):
+            return None
+    return values
+
+
 def _completed_candles_only(
     bars: List[Dict[str, Any]],
     timeframe: str,
     now_ts: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Use only closed candles for execution checks.
+    """Return a deterministic, uniquely known completed market-data prefix.
 
-    Live 5m bars can start bullish/bearish and then completely reverse before close.
-    Trigger, no-chase and alert gates therefore must ignore the still-forming bar.
+    Every interval must have closed; a source flag cannot override its clock.
+    Invalid/conflicting observations poison their timestamp instead of choosing
+    whichever duplicate arrived last. Sparse time/close rows remain supported
+    for temporal-only callers, without fabricating missing OHLC or volume.
     """
-    if not bars:
-        return []
-    ordered = list(bars)
-    if len(ordered) >= 2:
-        timestamped = [
-            (_candle_epoch_seconds(bar), index, bar)
-            for index, bar in enumerate(ordered)
-        ]
-        if all(timestamp is not None for timestamp, _, _ in timestamped):
-            ordered = [
-                bar
-                for _, _, bar in sorted(
-                    timestamped,
-                    key=lambda item: (item[0], item[1]),
-                )
-            ]
     seconds = _timeframe_seconds(timeframe)
-    if not seconds:
-        return ordered
-    now_value = float(now_ts if now_ts is not None else time.time())
-    latest_ts = _candle_epoch_seconds(ordered[-1])
-    if latest_ts is not None and latest_ts + seconds > now_value:
-        return ordered[:-1]
-    return ordered
+    now_value = _execution_candle_number(now_ts if now_ts is not None else time.time())
+    if not seconds or now_value is None or now_value <= 0:
+        return []
+    try:
+        datetime.fromtimestamp(now_value, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return []
+    grouped: Dict[float, List[Any]] = {}
+    true_flags = {"true", "1", "yes", "y", "closed", "complete", "completed", "final"}
+    false_flags = {"false", "0", "no", "n", "open", "incomplete"}
+    for bar in bars or []:
+        if not isinstance(bar, dict):
+            continue
+        stamps = [_execution_candle_timestamp(bar[key]) for key in
+                  ("timestamp", "open_time", "openTime", "time", "t", "ts", "start")
+                  if bar.get(key) is not None and bar.get(key) != ""]
+        if not stamps or any(stamp is None for stamp in stamps) or len(set(stamps)) != 1:
+            continue
+        opened_at = stamps[0]
+        # Future rows have no bearing on the completed prefix or its conflicts.
+        if opened_at + seconds > now_value:
+            continue
+        bucket = grouped.setdefault(opened_at, [])
+        closes = [_execution_candle_timestamp(bar[key]) for key in
+                  ("close_time", "closeTime", "close_timestamp", "end_time", "end", "T")
+                  if bar.get(key) is not None and bar.get(key) != ""]
+        invalid = any(stamp is None or stamp < opened_at or stamp > now_value for stamp in closes)
+        if len(set(closes)) > 1:
+            invalid = True
+        for key in ("is_closed", "complete", "completed", "final", "is_final", "confirm"):
+            if key in bar and str(bar[key]).strip().lower() not in true_flags:
+                invalid = True
+        for key in ("partial_source_bar", "partial", "is_partial"):
+            if key in bar and str(bar[key]).strip().lower() not in false_flags:
+                invalid = True
+        values = _execution_candle_values(bar)
+        if invalid or values is None:
+            bucket.append(None)
+            continue
+        closed_at = max([opened_at + seconds, *closes])
+        signature = (closed_at, tuple(sorted(values.items())))
+        normalized = {**bar, **values, "timestamp": opened_at}
+        # Non-price metadata cannot select a winner by input order either.
+        try:
+            stable_key = json.dumps(normalized, sort_keys=True, default=str, allow_nan=False)
+        except (TypeError, ValueError):
+            bucket.append(None)
+            continue
+        bucket.append((signature, stable_key, normalized))
+    completed = []
+    for opened_at in sorted(grouped):
+        bucket = grouped[opened_at]
+        if any(item is None for item in bucket) or len({item[0] for item in bucket}) != 1:
+            continue
+        completed.append(min(bucket, key=lambda item: item[1])[2])
+    return completed
 
 
 def _crypto_candle_freshness(
@@ -6394,6 +6492,7 @@ def _stock_breakout_freshness_state(
     *,
     bars: Optional[List[Dict[str, Any]]] = None,
     daily_close_confirmed_mode: bool = False,
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Classify whether a stock breakout is fresh, held, retested, or stale."""
     enriched = dict(row)
@@ -6411,8 +6510,21 @@ def _stock_breakout_freshness_state(
         enriched["Breakout_Freshness_Reason"] = "missing_breakout_level"
         return enriched
 
-    recent = list(bars) if bars is not None else _fetch_recent_stock_5m_bars(ticker, limit=96)
-    recent = [bar for bar in recent if isinstance(bar, dict) and _alert_float(bar.get("close"), None)]
+    cutoff = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    try:
+        source_bars = list(bars) if bars is not None else _fetch_recent_stock_5m_bars(ticker, limit=96)
+        completed = normalize_completed_bars(source_bars, timeframe="5m", as_of=cutoff)
+    except (req.RequestException, TypeError, ValueError, OverflowError, OSError):
+        enriched["Breakout_Freshness_Status"] = "DATA_UNAVAILABLE"
+        enriched["Breakout_Freshness_Reason"] = "intraday_provider_or_bar_data_unavailable"
+        return enriched
+    recent = [
+        {"open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close,
+         "timestamp": int(bar.opened_at.timestamp() * 1000), "close_time": bar.closed_at}
+        for bar in completed
+    ]
     if len(recent) < 3:
         enriched["Breakout_Freshness_Status"] = "DATA_UNAVAILABLE"
         enriched["Breakout_Freshness_Reason"] = "missing_completed_5m_bars"
@@ -6420,7 +6532,9 @@ def _stock_breakout_freshness_state(
 
     direction = str(_infer_alert_direction(enriched) or "LONG").upper()
     is_short = direction == "SHORT"
-    confirmation_level = breakout_level * (0.999 if is_short else 1.001)
+    confirmation_level = breakout_level * (
+        1 - _MOMENTUM_CONFIRMATION_BUFFER if is_short else 1 + _MOMENTUM_CONFIRMATION_BUFFER
+    )
 
     def _confirmed(close: float) -> bool:
         return close <= confirmation_level if is_short else close >= confirmation_level
@@ -6434,6 +6548,10 @@ def _stock_breakout_freshness_state(
 
     latest = recent[-1]
     latest_close = float(latest.get("close") or 0)
+    enriched["Breakout_Confirmation_Close"] = latest_close
+    enriched["Breakout_Confirmation_Closed_At"] = latest["close_time"].isoformat().replace("+00:00", "Z")
+    enriched["Breakout_Confirmation_Timeframe"] = "5m"
+    enriched["Breakout_Confirmation_Age_Seconds"] = max(0.0, (cutoff - latest["close_time"]).total_seconds())
     latest_high = float(latest.get("high", latest_close) or latest_close)
     latest_low = float(latest.get("low", latest_close) or latest_close)
     latest_open = float(latest.get("open", latest_close) or latest_close)
@@ -6450,6 +6568,13 @@ def _stock_breakout_freshness_state(
     if failed:
         enriched["Breakout_Freshness_Status"] = "FAILED_BREAKOUT"
         enriched["Breakout_Freshness_Reason"] = "latest_close_lost_breakout_level"
+        return enriched
+
+    # A previous cross does not keep a currently lost/unconfirmed level green.
+    # This applies equally to fresh, held, retested and daily-close branches.
+    if not _confirmed(latest_close):
+        enriched["Breakout_Freshness_Status"] = "NOT_CONFIRMED"
+        enriched["Breakout_Freshness_Reason"] = "latest_close_not_confirming_breakout_level"
         return enriched
 
     if not crosses:
@@ -9159,6 +9284,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "orb_range_break_stale",
         "orb_tp1_already_reached",
         "orb_invalid_target_geometry",
+        "invalid_momentum_inputs",
     }
     no_trade_prefixes = (
         "grade_below",
@@ -15822,6 +15948,39 @@ def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
     )
 
 
+def _stock_momentum_row_contract_valid(row: Dict[str, Any], *, as_of: Optional[datetime] = None) -> bool:
+    """Reject legacy/unconfirmed Momentum entry rows, not personal positions."""
+    strategy = str(row.get("Strategy") or row.get("strategy") or "")
+    canonical = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(strategy), strategy)
+    if canonical != "Momentum Breakout Long":
+        return True
+    if (
+        type(row.get("Momentum_Contract_Version")) is not int
+        or row.get("Momentum_Contract_Version") != MOMENTUM_CONTRACT_VERSION
+        or row.get("Momentum_Execution_Confirmed") is not True
+        or row.get("Momentum_Breakout_Type") not in MOMENTUM_BREAKOUT_TYPES
+        or str(_infer_alert_direction(row) or "").upper() != "LONG"
+        or row.get("Breakout_Confirmation_Timeframe") != "5m"
+        or row.get("Breakout_Freshness_Status") not in {"FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"}
+    ):
+        return False
+    level = _alert_float(row.get("Breakout_Level"))
+    close = _alert_float(row.get("Breakout_Confirmation_Close"))
+    price = _alert_float(_extract_alert_price(row))
+    if any(value is None or not math.isfinite(value) or value <= 0 for value in (level, close, price)):
+        return False
+    if min(price, close) < level * (1 + _MOMENTUM_CONFIRMATION_BUFFER):
+        return False
+    timestamp = _stock_market_timestamp_seconds(row.get("Breakout_Confirmation_Closed_At"))
+    if timestamp is None:
+        return False
+    cutoff = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    age = cutoff.timestamp() - timestamp
+    return 0 <= age <= _MAIL_TRIGGER_MAX_AGE_SEC
+
+
 def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool:
     """True for rows that should survive the user-facing scanner filter.
 
@@ -15830,6 +15989,9 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     while the mail gate remains stricter and only sends confirmed entries.
     """
     if not isinstance(row, dict):
+        return False
+
+    if scanner_name in {"strategy_scan", "stock_strategy"} and not _stock_momentum_row_contract_valid(row):
         return False
 
     action = str(row.get("trade_action") or row.get("action") or "").upper()
@@ -18325,83 +18487,14 @@ def _stock_momentum_breakout_gate(
     rvol: float,
     close_pos: float,
 ) -> tuple[bool, List[str]]:
-    """Require actual daily structure for Momentum Breakout Long.
-
-    Huge RVOL after a selloff is not a breakout by itself. This gate prevents
-    dead-cat bounces or stale chart mismatches from being labelled as momentum.
-    """
+    """Daily selection only; the live wrapper also requires completed 5m proof."""
     if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Momentum Breakout Long"):
         return True, []
 
-    reasons: List[str] = []
-    if not history_metrics.get("history_ok"):
-        reasons.append("not_enough_daily_history")
-
-    ema20 = _alert_float(history_metrics.get("ema20"))
-    ema50 = _alert_float(history_metrics.get("ema50"))
-    rsi14 = _alert_float(history_metrics.get("rsi14"))
-    high10 = _alert_float(history_metrics.get("high_10d"))
-    high20 = _alert_float(history_metrics.get("high_20d"))
-    breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
-    breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
-    change5d = _alert_float(history_metrics.get("change_5d"))
-    range_pos = _alert_float(history_metrics.get("range_pos"))
-
-    near_20d_breakout = bool(high20 and breakout20 is not None and breakout20 >= -0.25)
-    near_10d_breakout = bool(high10 and breakout10 is not None and breakout10 >= -0.15)
-    # AUDIT S-1 (2026-06-10): RVOL >= 1.5 ist die nicht verhandelbare Mindest-
-    # Volumenbestaetigung fuer ALLE Breakout-Aeste (Geschaeftsregel).
-    holds_20d_breakout = bool(
-        near_20d_breakout
-        and change_pct >= -0.2
-        and rvol >= 1.5
-        and close_pos >= 0.50
+    selected = evaluate_momentum_breakout(
+        history_metrics, price=price, change_pct=change_pct, rvol=rvol, close_pos=close_pos,
     )
-    holds_10d_breakout = bool(
-        near_10d_breakout
-        and change_pct >= 0.4
-        and rvol >= 1.5
-        and close_pos >= 0.52
-    )
-    range_breakout = bool(
-        range_pos is not None
-        and range_pos >= 78
-        and change_pct >= 1.0
-        and rvol >= 1.5
-        and close_pos >= 0.55
-    )
-    trend_reclaim = bool(
-        ema20
-        and price > ema20
-        and (not ema50 or price > ema50 or ema20 >= ema50)
-        and change_pct >= 1.5
-        and rvol >= 1.5
-        and close_pos >= 0.58
-    )
-
-    if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
-        if change_pct < -0.2:
-            reasons.append("daily_momentum_too_small")
-        if rvol < 1.5:
-            reasons.append("rvol_below_breakout_threshold")
-        if close_pos < 0.50:
-            reasons.append("daily_close_not_near_high")
-
-    if ema20 and price <= ema20 and not (holds_10d_breakout or holds_20d_breakout):
-        reasons.append("price_below_ema20")
-    if ema20 and ema50 and price <= ema50 and ema20 < ema50 and not holds_20d_breakout:
-        reasons.append("no_ema20_50_trend_reclaim")
-    if rsi14 is not None and rsi14 < 45:
-        reasons.append("rsi_too_weak_for_momentum")
-    if rsi14 is not None and rsi14 > 90 and not holds_20d_breakout:
-        reasons.append("rsi_overheated")
-
-    if not (holds_20d_breakout or holds_10d_breakout or range_breakout or trend_reclaim):
-        reasons.append("no_momentum_breakout_structure")
-    if change5d is not None and change5d < -8 and not (holds_10d_breakout or holds_20d_breakout or trend_reclaim):
-        reasons.append("bounce_after_recent_selloff")
-
-    return not reasons, reasons
+    return selected["eligible"], selected["reasons"]
 
 
 def _stock_reversal_ad_gate(
@@ -20549,7 +20642,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             if not force and now - _last_partial_publish < 1.5:
                 return
             preview = sorted(
-                (dict(row) for row in results if isinstance(row, dict)),
+                (dict(row) for row in results if isinstance(row, dict) and _stock_momentum_row_contract_valid(row)),
                 key=lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0))),
             )[:max_results]
             partial_diag = dict(scan_diag)
@@ -20773,12 +20866,43 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             _reject(f"momentum:{_reason}")
                         continue
                     _stage("momentum_breakout_gate")
+                    _is_momentum_contract = (
+                        _normalize_strategy_key(strategy_name) == _normalize_strategy_key("Momentum Breakout Long")
+                    )
+                    _momentum_confirmation = {}
+                    _momentum_selection = None
+                    if _is_momentum_contract:
+                        if _history_direction != "LONG":
+                            _reject("momentum:incoherent_signal_direction")
+                            continue
+                        _momentum_selection = evaluate_momentum_breakout(
+                            history_metrics, price=price, change_pct=change_pct,
+                            rvol=rvol_effective, close_pos=close_pos,
+                        )
+                        # Intraday proof belongs to the scanner contract, before
+                        # publication, not only to the independent mail pipeline.
+                        _momentum_confirmation = _stock_breakout_freshness_state(
+                            {"ticker": ticker, "direction": "LONG",
+                             "Breakout_Level": _momentum_selection["breakout_level"]},
+                            as_of=scan_now_utc,
+                        )
+                        _confirmation_status = _momentum_confirmation.get("Breakout_Freshness_Status")
+                        _confirmation_age = _alert_float(_momentum_confirmation.get("Breakout_Confirmation_Age_Seconds"))
+                        if _confirmation_status not in {"FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"}:
+                            _reject(f"momentum:intraday_{str(_confirmation_status or 'unavailable').lower()}")
+                            continue
+                        if _confirmation_age is None or _confirmation_age > _MAIL_TRIGGER_MAX_AGE_SEC:
+                            _reject("momentum:intraday_confirmation_stale")
+                            continue
+                        _stage("momentum_completed_5m_confirmation")
                     _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
                     _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
                     _range_pos = _alert_float(history_metrics.get("range_pos"))
                     _ema20_metric = _alert_float(history_metrics.get("ema20"))
                     _ema50_metric = _alert_float(history_metrics.get("ema50"))
-                    if _breakout20 is not None and _breakout20 >= -0.25:
+                    if _is_momentum_contract:
+                        _momentum_breakout_type = _momentum_selection["breakout_type"]
+                    elif _breakout20 is not None and _breakout20 >= -0.25:
                         _momentum_breakout_type = "20D_HIGH_BREAKOUT"
                     elif _breakout10 is not None and _breakout10 >= -0.15:
                         _momentum_breakout_type = "10D_HIGH_BREAKOUT"
@@ -20897,6 +21021,15 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             _strat_score = min(_strat_score, 64)
                         elif _bq_status == "WICK_WATCH":
                             _strat_score = min(_strat_score, 74)
+                        _strat_grade = _strategy_score_to_grade(_strat_score)
+
+                    if _is_momentum_contract:
+                        # Last scoring operation: MDR/other bonuses may never
+                        # promote a legacy non-breakout above its semantic cap.
+                        _strat_score = cap_momentum_score(
+                            _strat_score, breakout_type=_momentum_breakout_type,
+                            continuation_status=str(_breakout_quality.get("status") or ""),
+                        )
                         _strat_grade = _strategy_score_to_grade(_strat_score)
 
                     _breakout_reason_parts: List[str] = []
@@ -21027,6 +21160,11 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     # bereits geladenen daily_bars — KEINE neuen API-Calls.
                     # DISTRIBUTION = Falling Knife -> Reject; BULLISH_DIVERGENCE
                     # -> +8 Score-Bonus (Cap 100) + ad_divergence-Flag in der Row.
+                    if _is_momentum_contract:
+                        strategy_row.update(_momentum_confirmation)
+                        strategy_row["Momentum_Contract_Version"] = MOMENTUM_CONTRACT_VERSION
+                        strategy_row["Momentum_Execution_Confirmed"] = True
+                        strategy_row["Momentum_Analysis_As_Of"] = scan_now_utc.isoformat().replace("+00:00", "Z")
                     _ad_ok, _ad_block_reasons, _ad_info = _stock_reversal_ad_gate(
                         strategy_name,
                         daily_bars,
@@ -21156,6 +21294,15 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
+        # History/provider calls can outlive the existing 15-minute proof
+        # budget. Do not publish an expired start-of-scan confirmation as new.
+        _current_momentum_results = []
+        for _candidate in results:
+            if _stock_momentum_row_contract_valid(_candidate):
+                _current_momentum_results.append(_candidate)
+            else:
+                _reject("momentum:confirmation_expired_before_publication")
+        results = _current_momentum_results
         scan_diag["max_results"] = max_results
         results = results[:max_results]
         _enrich_stock_business_quality_rows(results)
@@ -31162,20 +31309,13 @@ def _ce_completed_bars(
     timeframe: str = "",
     now_ts: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
+    """Require measured OHLCV and retain source completion evidence until checked."""
     parsed = []
-    for b in bars or []:
-        close = _ce_float(b.get("close", b.get("c")))
-        high = _ce_float(b.get("high", b.get("h", close)))
-        low = _ce_float(b.get("low", b.get("l", close)))
-        open_ = _ce_float(b.get("open", b.get("o", close)))
-        volume = _ce_float(b.get("volume", b.get("v", 0)))
-        ts = int(_ce_float(b.get("timestamp", b.get("t", 0))))
-        if close <= 0 or high <= 0 or low <= 0 or high < low:
+    for bar in _completed_candles_only(bars, timeframe, now_ts=now_ts):
+        if not all(name in bar for name in ("open", "high", "low", "close", "volume")):
             continue
-        parsed.append({"timestamp": ts, "open": open_, "high": high, "low": low, "close": close, "volume": volume})
-    if any(bar.get("timestamp") for bar in parsed):
-        parsed.sort(key=lambda bar: bar.get("timestamp") or 0)
-    return _completed_candles_only(parsed, timeframe, now_ts=now_ts) if timeframe else parsed
+        parsed.append({name: bar[name] for name in ("timestamp", "open", "high", "low", "close", "volume")})
+    return parsed
 
 
 def _ce_median(values: List[float], default: float = 0.0) -> float:
@@ -41010,26 +41150,73 @@ def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"
 
 def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
     """Run backtest — supports indicator strategies + all BACKTEST_STRATEGY_RULES."""
+    from modules.backtest_methodology import attach_backtest_methodology
+    from modules.momentum_daily_backtest import daily_bar_is_explicitly_incomplete
+
+    requested_strategy = strategy
+    strategy = BACKTEST_STRATEGY_ALIASES.get(strategy, strategy)
+    rule = BACKTEST_RULES.get(strategy)
+    input_provenance = {}
+
+    def described(result):
+        result = attach_backtest_methodology(result, requested_strategy, rule)
+        result["model_provenance"].update(input_provenance)
+        return result
+
     try:
-        requested_strategy = strategy
-        strategy = BACKTEST_STRATEGY_ALIASES.get(strategy, strategy)
         # Fetch daily bars from Polygon
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
         resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": months * 22 + 60, "sort": "desc"})
         if resp.status_code != 200:
-            return {"error": f"Keine Daten fuer {ticker}"}
-        bars = resp.json().get("results", [])
+            return described({"error": f"Keine Daten fuer {ticker}"})
+        raw_bars = resp.json().get("results", [])
+        cutoff = datetime.now(timezone.utc)
+        adapted = []
+        invalid_ohlcv_bars = 0
+        for raw in raw_bars:
+            try:
+                # Unlike level-only consumers, an execution model must never
+                # substitute a missing open with the close or invent volume.
+                values = [raw[key] for key in ("o", "h", "l", "c", "v")]
+                if any(isinstance(value, bool) for value in values):
+                    raise ValueError("boolean OHLCV")
+                open_, high, low, close, volume = [float(value) for value in values]
+                if (not all(math.isfinite(value) for value in (open_, high, low, close, volume))
+                        or min(open_, high, low, close) <= 0 or volume < 0
+                        or high < max(open_, close, low) or low > min(open_, close, high)):
+                    raise ValueError("invalid OHLCV")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                invalid_ohlcv_bars += 1
+                continue
+            if daily_bar_is_explicitly_incomplete(raw):
+                continue
+            try:
+                # Polygon daily aggregates carry the UTC calendar date of
+                # their session. Completion still uses the US session close.
+                if isinstance(raw["t"], bool):
+                    raise ValueError("boolean timestamp")
+                session_date = datetime.fromtimestamp(float(raw["t"]) / 1000, tz=timezone.utc).date().isoformat()
+            except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                continue
+            for bar in _daily_level_bars([{**raw, "date": session_date}]):
+                for key in ("is_closed", "complete", "completed", "final"):
+                    if key in raw:
+                        bar[key] = raw[key]
+                adapted.append(bar)
+        bars = normalize_completed_bars(adapted, timeframe="1D", as_of=cutoff)
+        input_provenance.update({"data_cutoff_at": cutoff.isoformat(), "completed_daily_bars_only": True,
+                                 "input_bars": len(raw_bars), "completed_bars": len(bars),
+                                 "excluded_invalid_ohlcv_bars": invalid_ohlcv_bars,
+                                 "excluded_open_future_invalid_or_duplicate_bars": len(raw_bars) - len(bars)})
         if len(bars) < 60:
-            return {"error": f"Zu wenige Daten fuer {ticker} ({len(bars)} Bars)"}
+            return described({"error": f"Zu wenige abgeschlossene Daten fuer {ticker} ({len(bars)} Bars)"})
 
-        # Reverse to chronological
-        bars = list(reversed(bars))
-        opens = [b["o"] for b in bars]
-        highs = [b["h"] for b in bars]
-        lows = [b["l"] for b in bars]
-        closes = [b["c"] for b in bars]
-        volumes = [b.get("v", 0) for b in bars]
-        dates = [datetime.fromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d") for b in bars]
+        opens = [b.open for b in bars]
+        highs = [b.high for b in bars]
+        lows = [b.low for b in bars]
+        closes = [b.close for b in bars]
+        volumes = [b.volume for b in bars]
+        dates = [b.opened_at.date().isoformat() for b in bars]
 
         trades = []
         position = None
@@ -41348,7 +41535,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 signal_metrics = evaluate_backtest_rule_signal(
                     canonical_bars,
                     signal_index,
-                    strategy,
+                    rule,
                 )
                 if signal_metrics is None:
                     continue
@@ -41356,7 +41543,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 trade = simulate_rule_trade(
                     canonical_bars,
                     signal_index,
-                    strategy,
+                    rule,
                 )
                 if trade is None:
                     continue
@@ -41378,7 +41565,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 )
 
         else:
-            return {"error": f"Unbekannte Strategie: {strategy}"}
+            return described({"error": f"Unbekannte Strategie: {strategy}"})
 
         # A filled trade still open at the end of the sample is censored, not
         # a fictional last-close exit. It is disclosed but excluded from PnL.
@@ -41388,11 +41575,11 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         stats = _backtest_stats(trades, ticker, strategy, months)
         if requested_strategy != strategy:
             stats["requested_strategy"] = requested_strategy
-        return stats
+        return described(stats)
 
     except Exception as e:
         print(f"[Backtest] calculation failed: {_sanitized_exception_text(e)}")
-        return {"error": "backtest_calculation_failed", "ticker": ticker, "strategy": strategy}
+        return described({"error": "backtest_calculation_failed", "ticker": ticker, "strategy": strategy})
 
 
 @app.post("/api/run-backtest")
@@ -41426,6 +41613,12 @@ def run_backtest(request: BacktestRequest):
             error="backtest_failed",
         )
         raise
+
+    # All historical engines, including empty/error results, disclose that
+    # their verdict is not an automatic live or paper-trading release.
+    from modules.backtest_methodology import attach_backtest_methodology
+    _rule_name = BACKTEST_STRATEGY_ALIASES.get(request.strategy, request.strategy)
+    result = attach_backtest_methodology(result, request.strategy, BACKTEST_RULES.get(_rule_name))
 
     # Cache result
     try:
@@ -41499,14 +41692,21 @@ def list_backtest_strategies():
     ]
     rule_strats = []
     for name, rule in BACKTEST_RULES.items():
+        from modules.backtest_methodology import backtest_methodology
         rule_strats.append({
             "id": name,
             "name": name,
             "category": "Single-Ticker Scanner-Regeln",
             "direction": rule.get("direction", "long"),
             "requires_ticker": True,
+            **backtest_methodology(name, rule),
         })
-    return {"strategies": scanner_strats + crypto_strats + indicator_strats + rule_strats}
+    from modules.backtest_methodology import backtest_methodology
+    entries = scanner_strats + crypto_strats + indicator_strats + rule_strats
+    return {"strategies": [
+        {**backtest_methodology(entry["id"], BACKTEST_RULES.get(entry["id"])), **entry}
+        for entry in entries
+    ]}
 
 
 @app.get("/api/backtest-results")
@@ -41519,10 +41719,12 @@ def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma
         try:
             with open(cache_key, "r") as f:
                 data = json.load(f)
-            return {"status": "success", "data": data.get("results", {}), "cached_at": data.get("cached_at")}
+            from modules.backtest_methodology import describe_cached_backtest
+            return {"status": "success", "data": describe_cached_backtest(data.get("results", {}), strategy), "cached_at": data.get("cached_at")}
         except Exception as e:
             print(f"[Warning] {e}")
-    return {"status": "success", "data": {}, "cached_at": None}
+    from modules.backtest_methodology import attach_backtest_methodology
+    return {"status": "success", "data": attach_backtest_methodology({"data_available": False}, strategy), "cached_at": None}
 
 # ── Auto-Trader Endpoints ──
 _autotrader_thread = None

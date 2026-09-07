@@ -207,8 +207,11 @@ mit Zeitstempel verwenden.
 ### 5.1 Aktien-Swing
 
 - Primaerer Kontext: Daily plus 4H-Struktur.
-- Ein 5m-Trigger ist fuer einen mehrtaegigen Swing optional und darf das Setup nicht
-  nachtraeglich in einen Intraday-Trade umdeuten.
+- Ein 5m-Trigger ist fuer einen mehrtaegigen Swing grundsaetzlich optional und darf
+  das Setup nicht nachtraeglich in einen Intraday-Trade umdeuten. Die ausdrueckliche
+  Ausnahme ist Momentum Breakout Long (Vertrag ab 07.09.2026, Abschnitt 17):
+  dort bestaetigt eine abgeschlossene 5m-Kerze den aktuellen Strukturbruch;
+  sie aendert weder den Daily-Strukturbezug noch den vereinbarten Trade-Horizont.
 - Momentum Breakout braucht einen aktuellen, frischen Strukturbruch oder einen
   bestaetigten Retest; ein Tage alter Spike ist kein neuer Breakout.
 - Mehrere bereits gelaufene 4H-Impulse, vertikale Extension, rote Rejection,
@@ -738,3 +741,35 @@ ihren jeweiligen damaligen Stand. Die aktuellen fachlichen Invarianten sind:
 
 Dieses Paket aktiviert weder Live-Trading noch den frueheren Root-Cron.
 Deployment und echte neue Forward-Ergebnisse bleiben separate Nachweise.
+
+## 17. Bestaetigter Momentum-Breakout und Modellgrenzen, 07.09.2026
+
+Vom Nutzer nach dem Scanner-Nachaudit mit "alles machen" beauftragt.
+Referenz: `AUDIT_SCANNER_CONTRACTS_2026-09-07.md`.
+
+- Momentum Breakout Long akzeptiert nur echte Ausbrueche ueber vorherige
+  10-/20-Tages-Hochs. Die bisherige Bestaetigungsschwelle von 0,1 Prozent
+  wird fuer Preis und abgeschlossenen 5m-Schluss konsistent verwendet.
+  Range-Staerke und reine EMA-Rueckeroberung sind keine Momentum-Signale;
+  keine neue Watchlist und kein Ersatzsignal bei fehlender Bestaetigung.
+- Tagesplus mindestens 2 Prozent, RVOL mindestens 1,5 und bestehende
+  Liquiditaets-/Struktur-/Risikogates bleiben bestehen. Score-Boni duerfen
+  harte Auswahlregeln oder nachgelagerte Bewertungsdeckel nicht umgehen.
+  App-Vertrag, Mail-Freigabe und Positionsverwaltung bleiben getrennt;
+  bestehende Positionen werden nicht durch neue Scannerfilter geloescht.
+- Bestaetigungen haben eine belegte Schlusszeit. Offene, zukuenftige,
+  widerspruechlich doppelte und physikalisch unmoegliche Kerzen sind keine
+  Entscheidungsgrundlage. Ein "geschlossen"-Flag ersetzt nicht die Uhr.
+- Die gemeinsame Momentum-Tagesauswahl ist nur ein Teil des Live-Vertrags.
+  Daily-Backtests mit naechstem Open, Prozent-Stop und festen R-Zielen
+  bleiben ausdruecklich Naeherungsmodelle. Fehlende historische 5m-/4H-
+  Daten, Quotes, Kontext und Fills werden nicht als bestaetigt ausgegeben.
+  Solche Ergebnisse erteilen weder eine Live- noch eine automatische
+  Paper-Freigabe; Kennzahlen und Kosten tragen Modellprovenienz.
+- Vorher-/Nachher-Vergleiche brauchen dieselbe datierte Eingangsstichprobe,
+  explizite Versionen, Markt/Richtung/Horizont/Regime und Kostenannahmen.
+  Fehlende, offene und ungefuellte Verlaeufe sind keine Gewinne oder 0R.
+  Ein Vergleichswerkzeug ersetzt nicht die noch fehlenden Produktionsdaten.
+- BI bleibt unveraendert strikt 17/20. Andere Scanner erhalten nicht blind
+  den Momentum-Vertrag. Die Turtle-Variante wird nicht als identisches
+  historisches Turtle-Ausstiegssystem bezeichnet.

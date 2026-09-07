@@ -516,7 +516,7 @@ def test_frontend_copy_never_turns_backtests_or_paper_execution_into_live_releas
 
     for paper_truth in (
         "Paper Auto-Trader (Elite)",
-        "Backtest Paper-Evidenz",
+        "Historische Modell-Evidenz",
         "Paper-Testkandidat mit Risk-Limit",
         "Backtests & Paper-Healthchecks",
         "Automatisierte Paper-Ausführung",

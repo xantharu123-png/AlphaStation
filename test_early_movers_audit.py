@@ -999,13 +999,15 @@ def test_early_mover_verified_5m_trigger_is_blocked_by_4h_spike_rejection(monkey
     now = int(time.time())
     start = now - 37 * 300
     five_min = [{"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for i in range(35)]
-    five_min.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1400})
+    five_min.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.997, "close": 1.007, "volume": 1400})
     four_hour = [{"open": 0.66, "high": 0.69, "low": 0.64, "close": 0.67, "volume": 1000} for _ in range(40)]
     four_hour.extend([
         {"open": 0.67, "high": 0.78, "low": 0.66, "close": 0.755, "volume": 8000},
         {"open": 0.755, "high": 0.765, "low": 0.725, "close": 0.735, "volume": 5000},
         {"open": 0.735, "high": 0.737, "low": 0.720, "close": 0.721, "volume": 4200},
     ])
+    for index, bar in enumerate(four_hour):
+        bar["timestamp"] = now - (len(four_hour) - index) * 14400
 
     def fake_fetch(symbol, exchange, timeframe="1h", count=50):
         return four_hour if timeframe == "4h" else five_min
@@ -1094,7 +1096,7 @@ def test_early_mover_5m_retest_hold_uses_adaptive_threshold():
     now = int(time.time())
     start = now - 37 * 300
     bars = [{"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000} for i in range(35)]
-    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
+    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.997, "close": 1.007, "volume": 1200})
 
     result = api._score_early_mover_trigger_bars(row, bars, "5m", api._early_mover_trigger_profile(row))
 
@@ -1121,7 +1123,7 @@ def test_early_mover_5m_trigger_ignores_unfinished_live_candle():
         {"timestamp": start + i * 300, "open": 1.002, "high": 1.014, "low": 0.992, "close": 1.001, "volume": 1000}
         for i in range(35)
     ]
-    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.998, "close": 1.007, "volume": 1200})
+    bars.append({"timestamp": start + 35 * 300, "open": 0.997, "high": 1.012, "low": 0.997, "close": 1.007, "volume": 1200})
     bars.append({"timestamp": now - 60, "open": 1.035, "high": 1.04, "low": 0.90, "close": 0.91, "volume": 8000})
 
     result = api._score_early_mover_trigger_bars(row, bars, "5m", api._early_mover_trigger_profile(row))
@@ -1279,6 +1281,9 @@ def _extended_4h_rebound_bars():
         bars.append({"open": open_, "high": high, "low": low, "close": close, "volume": 1300})
         price = close
     bars.append({"open": price, "high": price * 1.003, "low": price * 0.985, "close": price * 0.99, "volume": 1200})
+    now = int(time.time())
+    for index, bar in enumerate(bars):
+        bar["timestamp"] = now - (len(bars) - index) * 14400
     return bars
 
 

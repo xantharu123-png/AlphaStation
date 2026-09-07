@@ -525,3 +525,33 @@ Abnahme, genaue Timeframes und verbleibende Daten-/Kalender-/UX-Grenzen:
 `AUDIT_FIBONACCI_2026-09-07.md`. Eine Verbesserung der neuen Forward-
 Trefferquote ist weiterhin separat nachzuweisen. Fuer neue Serverrevisionen
 immer Git-HEAD, API-Revision, Dienste und Health gesondert kontrollieren.
+
+## 19. Scanner-Vertraege und Backtest-Nachaudit 07.09.2026
+
+Referenz: `AUDIT_SCANNER_CONTRACTS_2026-09-07.md`; Eingabeschema fuer lokale
+Versionsvergleiche: `docs/MOMENTUM_BACKTEST_PARITY.md`. Beauftragt nach dem
+read-only Audit aller Scannerfamilien mit Schwerpunkt Aktien-Breakout.
+
+- Momentum ist jetzt explizit bestaetigter 10D-/20D-Ausbruch, nicht mehr
+  reine Range-Staerke oder Trend-Reclaim. Bestehende 0,1%-Bestaetigung und
+  5m-Abschluss/Frische gelten vor Publikation; eigene Ablehnungsdiagnostik.
+- Alte Strategie-Caches werden durch Version 8 verworfen, neue Momentum-
+  Zeilen tragen Vertrag 1. Leere Listen bis zu einem frischen gueltigen
+  Scan sind moeglich. Kein Aufweichen fuer mehr Ergebnisse; keine Watchlist.
+- Crypto-Kerzenintegritaet, nachtraeglich aufgehobene Scoredeckel und
+  verlorene Breakout-Bestaetigung korrigiert; BI17/20 unveraendert.
+- Momentum-Tagesauswahl nutzt denselben reinen Regelkern. Tages-Exits sind
+  aber ein explizites Naeherungsmodell, kein identischer Live-Replay.
+  Fehlende historische Intraday-/Quote-/Fill-Evidenz bleibt offen.
+- Backtest-API uebergibt richtige Regeldictionaries. Fehlende Eroeffnung,
+  offene Exit-Kerzen und unbekannte Performance werden nicht erfunden.
+  Proxy-Kennzahlen erteilen keine automatische Paper-/Live-Freigabe.
+- Browserhinweise, unbekannte Kennzahlen und Turtle-Variantenbeschreibung
+  korrigiert. Lokale QA ausschliesslich mit synthetischen Antworten;
+  keine echte Mail, Order oder produktive Datenmigration.
+
+Fullsuite-/Hash-/Browser-Abnahme steht im Auditbericht. `output/`, Archive
+und lokale DBs bleiben privat. Letzter Nutzer-Servernachweis `4dc49eb`
+wird nicht durch einen lokalen Test oder GitHub-Push aktualisiert. Vor
+Rollout wie bisher sauberer Checkout, Daten-Backup und anschliessend
+Revision/Bundle/Services/Health getrennt pruefen. Cron unveraendert.

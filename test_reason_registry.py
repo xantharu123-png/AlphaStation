@@ -6,7 +6,8 @@ in _alert_decision_from_reasons als "WATCH" gelabelt statt "NO_TRADE" —
 das Decision-Mapping ist KEINE Suffix-Logik, sondern eine explizite Menge.
 
 Dieser Guard macht die Luecke strukturell unmoeglich:
-  1. Jeder in api.py erzeugte Gate-Grund (reasons.append("...")) muss im
+  1. Jeder in api.py oder dem gemeinsamen Momentum-Vertrag erzeugte Gate-Grund
+     (reasons.append("...")) muss im
      Decision-Mapping zu einer nicht-WATCH-Entscheidung fuehren — oder in
      der unten eingefrorenen WATCH-Whitelist stehen.
   2. Die Whitelist ist bidirektional: verwaiste Eintraege (Grund existiert
@@ -122,7 +123,11 @@ KNOWN_WATCH_REASONS = frozenset({
 
 
 def _collect_reason_literals() -> set:
-    src = (REPO_ROOT / "api.py").read_text(encoding="utf-8")
+    # Extracted shared contract remains part of the inventory; moving code
+    # cannot make existing rejection reasons disappear from this guard.
+    src = "\n".join((REPO_ROOT / path).read_text(encoding="utf-8") for path in (
+        "api.py", "modules/stock_momentum_contract.py",
+    ))
     tree = ast.parse(src)
     literals = set()
     for node in ast.walk(tree):
@@ -152,6 +157,11 @@ def _decisions_for(reason: str) -> set:
 def test_reason_inventory_is_substantial():
     # Sanity: das Inventar darf nicht versehentlich leer laufen (Parser-Bruch).
     assert len(_collect_reason_literals()) >= 100
+
+
+def test_shared_momentum_invalid_data_is_no_trade_not_watch():
+    assert "invalid_momentum_inputs" in _collect_reason_literals()
+    assert _decisions_for("invalid_momentum_inputs") == {"NO_TRADE"}
 
 
 def test_every_reason_is_mapped_or_whitelisted():
