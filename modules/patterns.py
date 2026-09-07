@@ -2176,17 +2176,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
             fib_bars, as_of=cutoff, direction=direction, timeframe="1D",
             timestamp_mode="close",
         )
-        if leg is not None:
-            # A later breach of the leg origin invalidates the projection.
-            # An old upward leg cannot remain bullish through a lower low.
-            tail = fib_bars[leg.end_pivot_index + 1:]
-            origin_breached = (
-                any(bar["low"] < leg.start_price for bar in tail)
-                if direction == "long"
-                else any(bar["high"] > leg.start_price for bar in tail)
-            )
-            if origin_breached:
-                leg = None
+        # The shared core invalidates an origin breach for BI and charts alike.
         if leg is None:
             details.append(" Fib: Kein intakter bestaetigter Swing in Signalrichtung")
         else:

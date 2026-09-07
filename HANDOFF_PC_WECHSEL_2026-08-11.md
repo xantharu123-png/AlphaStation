@@ -506,3 +506,22 @@ Befunde. Finale volle Suite: 3197 PASS, vier Plattform-Skips, null Fehler;
 Code-/Testbytes waehrend des Laufs unveraendert. Details im Audit-Nachtrag.
 SSH wurde erneut mit `publickey,password` abgewiesen; Backup/Deployment und
 Messung der neuen produktiven Laufzeiten sind weiterhin offen.
+
+## 18. Fibonacci-Nachaudit 07.09.2026
+
+Die nachgereichte erfolgreiche Server-Recovery bestaetigte `4dc49eb`,
+API healthy und Bundle `cc0d82106285` (Nutzerausgabe 20:41 UTC). Sie ersetzt
+die aelteren Blockermeldungen oben, beweist aber keinen spaeteren Rollout.
+
+Nach Nutzerauftrag zur Fortsetzung: Fibonacci-Lebenszyklus zentralisiert
+(kein bestehender Swing nach abgeschlossenem Ursprungsbruch), US-Tageszeiten
+von Krypto-/Nicht-US-Chartdaten getrennt und angeforderte Detail-Richtung
+weitergereicht. Der Chart-S/R-Eingangsadapter teilt dieselbe Zeitzuordnung.
+17/20, BI-Fenster 30 Tageskerzen, ATR-Selektion und Provider-Routen bleiben
+unveraendert; keine neue Strategie oder Watchlist. Keine DB-Migration,
+Frontend-Aenderung, Mail, Order, Cron- oder Serveraktion.
+
+Abnahme, genaue Timeframes und verbleibende Daten-/Kalender-/UX-Grenzen:
+`AUDIT_FIBONACCI_2026-09-07.md`. Eine Verbesserung der neuen Forward-
+Trefferquote ist weiterhin separat nachzuweisen. Fuer neue Serverrevisionen
+immer Git-HEAD, API-Revision, Dienste und Health gesondert kontrollieren.

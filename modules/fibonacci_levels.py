@@ -21,6 +21,7 @@ from modules.level_zones import (
     _json_value,
     _normalized_timeframe,
     confirmed_pivot_evidence,
+    normalize_completed_bars,
 )
 
 
@@ -178,11 +179,18 @@ def select_confirmed_swing_leg(
     LONG requires a confirmed swing low before a confirmed swing high. SHORT
     requires a confirmed swing high before a confirmed swing low. Independent
     period extrema in the wrong temporal order are therefore never accepted.
+    After the existing move/ATR eligibility rules select a leg, a strict wick
+    breach of its origin by any completed bar after its end retires that leg.
+    An origin touch is not a breach, and a retired leg cannot be replaced by
+    older anchors merely to recover an available projection.
     """
     side = _normal_direction(direction)
     cutoff = _coerce_datetime(as_of)
+    completed = normalize_completed_bars(
+        bars, timeframe=timeframe, as_of=cutoff, timestamp_mode=timestamp_mode
+    )
     pivots = confirmed_pivot_evidence(
-        bars,
+        completed,
         timeframe=timeframe,
         as_of=cutoff,
         pivot_left=pivot_left,
@@ -222,6 +230,20 @@ def select_confirmed_swing_leg(
             )
             if move <= 0 or move + 1e-12 < minimum_move:
                 continue
+            # Pivot indices refer to the normalized, completed chronology,
+            # not the raw input (which may be unsorted, duplicated or open).
+            # Include right-hand confirmation bars: the origin can already
+            # be broken when the endpoint first becomes a confirmed pivot.
+            tail = completed[end_index + 1:]
+            origin_breached = (
+                any(bar.low < start.midpoint for bar in tail)
+                if side == "LONG"
+                else any(bar.high > start.midpoint for bar in tail)
+            )
+            if origin_breached:
+                # Retire the selected leg, rather than searching older
+                # starts/ends that would conceal the observed origin break.
+                return None
             start_index = int(start.provenance["pivot_index"])
             confirmation = max(start.confirmed_at, end.confirmed_at)
             identity = "|".join((
@@ -256,6 +278,7 @@ def select_confirmed_swing_leg(
                     "atr": atr_value,
                     "start_source": start.source_name,
                     "end_source": end.source_name,
+                    "origin_breach_policy": "strict_completed_bar_wick_after_end",
                 },
             )
     return None

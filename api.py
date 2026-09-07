@@ -115,6 +115,7 @@ from modules.data_fetchers import (
     rate_limited_get,
     redact_sensitive_query_values,
     fetch_ohlcv_for_chart,
+    chart_market_context,
     fetch_grouped_daily,
     fetch_daily_candles_crypto,
     fetch_multi_day_data,
@@ -16724,6 +16725,26 @@ def _fib_lookback_for_timeframe(timeframe: str) -> int:
     return 60
 
 
+def _chart_level_input(bars, ticker: str, timeframe: str):
+    """Preserve provider timestamps; only US equities use US daily sessions.
+
+    Crypto daily bars close one provider day after their open, not at the
+    New York equity close. Other non-US charts conservatively use their
+    provider timestamps plus the requested duration, not an invented US
+    calendar. Explicit completion flags survive either adaptation.
+    """
+    if timeframe != "1D" or not chart_market_context(ticker)["us_equity_session"]:
+        return list(bars)
+    adapted = []
+    for raw in bars:
+        for bar in _daily_level_bars([raw]):
+            for key in ("is_closed", "complete", "completed", "final"):
+                if key in raw:
+                    bar[key] = raw[key]
+            adapted.append(bar)
+    return adapted
+
+
 def _calculate_directional_fib_levels(
     highs: List[float],
     lows: List[float],
@@ -16803,6 +16824,7 @@ def _calculate_directional_fib_levels(
         recent = [
             {
                 "open_time": bar.opened_at,
+                "close_time": bar.closed_at,
                 "open": bar.open,
                 "high": bar.high,
                 "low": bar.low,
@@ -16842,6 +16864,9 @@ def _calculate_directional_fib_levels(
         )
         payload["meta"]["causal_timestamps_available"] = True
         payload["meta"]["structural_barrier"] = False
+        payload["meta"]["direction_source"] = "requested" if _normalize_chart_direction(direction) else "automatic"
+        payload["meta"]["minimum_move_atr"] = 1.0 if atr_value and atr_value > 0 else 0.0
+        payload["meta"]["multi_timeframe_confirmation"] = False
         return payload
 
     clean: List[tuple[float, float, float]] = []
@@ -26712,15 +26737,18 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         fib_levels = {}
         fib_meta = {}
         if len(bars) >= 20:
-            _fib_daily_bars = _daily_level_bars(list(reversed(bars[:60])))
+            _fib_daily_bars = normalize_completed_bars(
+                _chart_level_input(list(reversed(bars)), ticker, "1D"),
+                timeframe="1D", as_of=_detail_cutoff,
+            )
             fib_payload = _calculate_directional_fib_levels(
-                [b["high"] for b in _fib_daily_bars],
-                [b["low"] for b in _fib_daily_bars],
-                [b["close"] for b in _fib_daily_bars],
+                [b.high for b in _fib_daily_bars],
+                [b.low for b in _fib_daily_bars],
+                [b.close for b in _fib_daily_bars],
                 timeframe="1D",
-                direction=None,
-                lookback=min(60, len(_fib_daily_bars)),
-                times=[b.get("close_time") for b in _fib_daily_bars],
+                direction=requested_direction or None,
+                lookback=60,
+                times=[b.closed_at for b in _fib_daily_bars],
                 as_of=_detail_cutoff,
                 timestamp_mode="close",
             )
@@ -27242,10 +27270,8 @@ def get_chart_data(
             try:
                 current_price = closes[-1] if closes else 0
                 if HAS_REAL_SR and len(ohlcv) >= 20:
-                    # Convert to format expected by calculate_sr_from_historical
-                    # It expects: [(date, open, high, low, close, volume), ...]
-                    ohlc_tuples = [(b["time"], b["open"], b["high"], b["low"], b["close"], b.get("volume", 0)) for b in ohlcv]
-                    sr_input = _daily_level_bars(ohlcv) if timeframe == "1D" else ohlc_tuples
+                    # S/R and Fib share the same asset-aware completed-bar input.
+                    sr_input = _chart_level_input(ohlcv, ticker, timeframe)
                     sr_result = calculate_sr_from_historical(
                         sr_input,
                         current_price,
@@ -27419,28 +27445,28 @@ def get_chart_data(
         # Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
-                if timeframe == "1D":
-                    _fib_chart_bars = _daily_level_bars(ohlcv)
-                    _fib_highs = [bar["high"] for bar in _fib_chart_bars]
-                    _fib_lows = [bar["low"] for bar in _fib_chart_bars]
-                    _fib_closes = [bar["close"] for bar in _fib_chart_bars]
-                    _fib_times = [bar.get("close_time") for bar in _fib_chart_bars]
-                    _fib_timestamp_mode = "close"
-                else:
-                    _fib_highs, _fib_lows, _fib_closes = highs, lows, closes
-                    _fib_times = times
-                    _fib_timestamp_mode = "open"
+                _fib_cutoff = datetime.now(timezone.utc)
+                _fib_chart_bars = normalize_completed_bars(
+                    _chart_level_input(ohlcv, ticker, timeframe),
+                    timeframe=timeframe, as_of=_fib_cutoff,
+                )
                 fib_payload = _calculate_directional_fib_levels(
-                    _fib_highs,
-                    _fib_lows,
-                    _fib_closes,
+                    [bar.high for bar in _fib_chart_bars],
+                    [bar.low for bar in _fib_chart_bars],
+                    [bar.close for bar in _fib_chart_bars],
                     timeframe=timeframe,
                     direction=fib_direction,
-                    times=_fib_times,
-                    as_of=datetime.now(timezone.utc),
-                    timestamp_mode=_fib_timestamp_mode,
+                    times=[bar.closed_at for bar in _fib_chart_bars],
+                    as_of=_fib_cutoff,
+                    timestamp_mode="close",
                 )
                 if fib_payload:
+                    context = chart_market_context(ticker)
+                    fib_payload["meta"]["asset_class"] = context["asset_class"]
+                    fib_payload["meta"]["completion_basis"] = (
+                        "us_equity_regular_session" if timeframe == "1D" and context["us_equity_session"]
+                        else "provider_timestamp_and_timeframe_duration"
+                    )
                     result["fib"] = fib_payload["levels"]
                     result["fib_direction"] = fib_payload["meta"]["direction"]
                     result["fib_meta"] = fib_payload["meta"]

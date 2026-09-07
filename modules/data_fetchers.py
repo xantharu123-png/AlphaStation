@@ -1054,6 +1054,43 @@ def fetch_historical_data_stocks(ticker, days, poly_key):
     return None
 
 
+def chart_market_context(ticker):
+    """Describe the existing chart route and its daily-session semantics.
+
+    This is a routing classification, not external instrument validation. Only
+    the plain Polygon equity route uses the US regular-session daily adapter;
+    crypto, international equities, forex and futures retain source timestamps.
+    Preserve the caller's ticker except for the existing crypto alias mapping.
+    """
+    upper_ticker = ticker.upper()
+    intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+    crypto_suffixes = ("-USD", "-EUR", "-GBP")
+    crypto_aliases = ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "MATIC")
+
+    route_ticker = ticker
+    if upper_ticker.endswith(intl_suffixes):
+        provider, asset_class = "yahoo", "equity"
+    elif upper_ticker.endswith("=X"):
+        provider, asset_class = "yahoo", "forex"
+    elif upper_ticker.endswith("=F"):
+        provider, asset_class = "yahoo", "futures"
+    elif upper_ticker.endswith(crypto_suffixes):
+        provider, asset_class = "yahoo", "crypto"
+    elif upper_ticker in crypto_aliases:
+        route_ticker = f"{upper_ticker}-USD"
+        provider, asset_class = "yahoo", "crypto"
+    elif upper_ticker.startswith("X:"):
+        provider, asset_class = "polygon", "crypto"
+    else:
+        provider, asset_class = "polygon", "equity"
+    return {
+        "ticker": route_ticker,
+        "provider": provider,
+        "asset_class": asset_class,
+        "us_equity_session": provider == "polygon" and asset_class == "equity",
+    }
+
+
 # ── fetch_ohlcv_for_chart (originally line 6262) ──
 def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     """
@@ -1070,20 +1107,11 @@ def fetch_ohlcv_for_chart(ticker, poly_key, timeframe="1H", bars=300):
     Returns:
         List of dicts with time, open, high, low, close, volume
     """
-    # Erkennung: Ist das ein internationaler/Yahoo-Ticker?
-    _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
-    _yahoo_patterns = ("=X", "=F", "-USD", "-EUR", "-GBP")
-    _is_yahoo = any(ticker.upper().endswith(s) for s in _intl_suffixes + _yahoo_patterns)
-    
-    # Krypto-Tickers (CoinGecko IDs → Yahoo Format)
-    if not _is_yahoo and ticker.upper() in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "MATIC"):
-        ticker = f"{ticker.upper()}-USD"
-        _is_yahoo = True
-    
-    if _is_yahoo:
-        return _fetch_ohlcv_yahoo(ticker, timeframe)
+    context = chart_market_context(ticker)
+    if context["provider"] == "yahoo":
+        return _fetch_ohlcv_yahoo(context["ticker"], timeframe)
     else:
-        return _fetch_ohlcv_polygon(ticker, poly_key, timeframe)
+        return _fetch_ohlcv_polygon(context["ticker"], poly_key, timeframe)
 
 
 # ── fetch_realtime_price_alpaca (originally line 8045) ──
