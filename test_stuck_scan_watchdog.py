@@ -3,7 +3,8 @@
 
 Teil 1 (api.py): _scan_watchdog_check erkennt Budget-Risse, mailt EINMAL je
 Episode an den Betreiber (persistentes Dedupe) und verlangt am Hartdeckel
-(3x Budget, min. +15 Min) einen kontrollierten Dienst-Neustart. Ein noch
+(BI: fest 135 Min; sonst 3x Budget, min. +15 Min) einen kontrollierten
+Dienst-Neustart. Ein noch
 lebender Worker bleibt registriert und darf niemals parallel ersetzt werden.
 
 Teil 2 (bg_service.py): Herzschlag-Waechter fuer die sequenzielle

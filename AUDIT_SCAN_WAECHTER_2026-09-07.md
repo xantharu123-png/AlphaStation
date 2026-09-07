@@ -112,3 +112,53 @@ Entwarnungen sind wie bisher Prozesszustand; dieser Patch fuehrt keine dauerhaft
 Wiederaufnahme ueber API-Neustarts ein. Echte neue Episoden koennen weiter
 berechtigte Betreiber-Mails erzeugen. Der Patch ist keine Zusage von null Mails
 und kein Nachweis, dass langsame Produktionsscans bereits behoben sind.
+
+## Nachtrag: Kalibrierung nach Serverlogs am 07.09.2026
+
+Der anschliessend vom Nutzer gelieferte Server-HEAD ist weiterhin `47eca9a`.
+Im gezeigten 48-Stunden-Ausschnitt stehen 32 erfolgreiche BI-Abschluesse:
+je 16 LONG/SHORT, Laufzeiten 2377,2 bis 2812,1 Sekunden (39,6-46,9 Minuten).
+Neun Laufzeiten liegen ueber 45 Minuten; acht weiche Warnungen sind im
+Ausschnitt sichtbar. Keine ERROR- oder Hartlimit-Meldung in diesem Auszug.
+Das ist kein Nachweis, dass ausserhalb des Auszugs keine Fehler vorkamen.
+Gleiche Journal-Sekunden fuer Warnung und DONE beweisen wegen moeglicher
+Ausgabepufferung keine bestimmte Reihenfolge im Prozess.
+
+Nach Zustimmung des Nutzers wird ausschliesslich das weiche Warnbudget von
+`bi_long` und `bi_short` auf **60 Minuten** gesetzt. Das ergibt gegenueber
+dem laengsten gezeigten erfolgreichen Lauf rund 13 Minuten Reserve, ist aber
+keine empirische Garantie fuer kuenftige Laufzeiten. Das bestehende harte
+Eskalationslimit bleibt explizit **135 Minuten**; es wird nicht versehentlich
+mit dem bisherigen Faktor drei auf 180 Minuten erhoeht. Andere Scanner,
+Intervalle, BI-17/20-Regel, Dedupe, Worker-Exklusivitaet, Cron und Datenbanken
+werden durch diese Kalibrierung nicht veraendert. Die oeffentliche Runtime-
+Gesundheitsanzeige und Betreiber-Mails verwenden dasselbe 60-Minuten-Budget.
+
+Zehn neue Offline-Gegenproben testen beide BI-Richtungen: gemessene 46m52s,
+59m59s und exakt 60m ohne Warnung/Episode; danach einmalige Warnung; weiterhin
+Hartalarm direkt nach 135m trotz aktiver Sechs-Stunden-Warndrossel und ohne
+parallelen Ersatz-Worker. Zunaechst scheiterten acht Tests am 45-Minuten-Stand.
+Eine isolierte Erhoehung nur des Warnbudgets liess gezielt die zwei Hartlimit-
+Tests scheitern; nach Entkopplung bestanden alle zehn. Die bestehenden
+Lebenszyklus-Tests verwenden nun echte weiche Warnperioden von 65 statt 50
+Minuten, ohne ihre Aussagen zu Zustellfehlern, Dedupe und Rennen abzusenken.
+Gezielte Abnahme: 49 Waechtertests bestanden. Der unabhaengige Reviewer
+fand keine offenen Befunde und fuehrte dieselben 49 Faelle in getrennten
+Testpfaden erneut erfolgreich aus.
+
+Finale volle Testsuite auf unveraenderten Code-/Testbytes: **3197 bestanden,
+vier Plattform-Skips, null Fehler**, 596,76 Sekunden. Die vier Skips betreffen
+Windows-Symlink-Rechte beziehungsweise Linux-O_NOFOLLOW/FIFO/Atomic-Rename-
+Vertraege. JUnit lokal: `tmp/bi_watchdog_release_20260907.xml` (3201 Faelle).
+Alle vier Python-Dateihashes waren vor und nach dem Lauf identisch. Python-
+Compile, Frontend-Verifikation (`cc0d82106285` unveraendert), `git diff --check`
+und Credential-Musterscan im gezielten Aenderungsumfang bestanden. Keine
+produktiven Mails, Marktscans, Orders oder Datenbankzugriffe aus diesen Tests.
+
+Der erneute rein lesende SSH-Versuch mit vorhandenem Schluessel wurde mit
+`Permission denied (publickey,password)` abgewiesen. Daher weiterhin kein
+produktives Backup, Pull, Neustart oder Cron-Eingriff durchgefuehrt. Der Nutzer
+muss sich fuer den Rollout selbst anmelden; vor dem gesamten noch fehlenden
+Auditpaket sind die produktiven Datenbanken zu sichern. Die neuen Laufzeiten
+sind nach diesem Rollout erneut zu messen, da die vorliegenden Messwerte noch
+zur alten Scanner-Version gehoeren. Kein Gewinn- oder Performanceversprechen.

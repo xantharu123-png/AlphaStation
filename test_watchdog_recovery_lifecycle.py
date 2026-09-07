@@ -1,4 +1,7 @@
-"""Real watchdog/worker/dedupe lifecycle; fake clock and SMTP, no market calls."""
+"""Real watchdog/worker/dedupe lifecycle; fake clock and SMTP, no market calls.
+
+Soft-warning episodes run for 65 minutes, beyond the calibrated BI 60m budget.
+"""
 
 import threading
 import time
@@ -62,7 +65,7 @@ def watchdog(monkeypatch, tmp_path):
 
 def test_throttled_warning_cannot_turn_into_recovery_after_six_hours(watchdog):
     api._email_dedupe_mark("stuck_throttle_bi_short")
-    watchdog.run(50, check=True)
+    watchdog.run(65, check=True)
     assert watchdog.sent == []
     watchdog.clock[0] += 7 * 3600
     watchdog.run()
@@ -72,7 +75,7 @@ def test_throttled_warning_cannot_turn_into_recovery_after_six_hours(watchdog):
 
 
 def test_no_orphan_recovery_without_a_delivered_warning(watchdog):
-    watchdog.state["_episode_started_at"] = watchdog.clock[0] - 50 * 60
+    watchdog.state["_episode_started_at"] = watchdog.clock[0] - 65 * 60
     watchdog.run()
     assert watchdog.sent == []
     assert "_episode_started_at" not in watchdog.state
@@ -88,7 +91,7 @@ def test_hard_only_warning_gets_its_recovery_despite_other_episode_throttle(watc
 
 
 def test_already_delivered_recovery_never_rearms_after_dedupe_expiry(watchdog):
-    started = watchdog.clock[0] - 50 * 60
+    started = watchdog.clock[0] - 65 * 60
     watchdog.state["_episode_started_at"] = started
     api._email_dedupe_mark(f"stuck_scan_bi_short_{int(started)}")
     api._email_dedupe_mark(f"stuck_recovery_bi_short_{int(started)}")
@@ -103,35 +106,35 @@ def test_already_delivered_recovery_never_rearms_after_dedupe_expiry(watchdog):
 @pytest.mark.parametrize("retry_hours", [10, 192], ids=["ten-hours", "eight-days"])
 def test_delivery_retry_preserves_actual_recovery_time(watchdog, failure, retry_hours):
     watchdog.results[:] = [True, failure, True]
-    watchdog.run(50, check=True)
+    watchdog.run(65, check=True)
     assert len(watchdog.sent) == 2
-    assert "50 Min" in watchdog.sent[-1]["body"]
+    assert "65 Min" in watchdog.sent[-1]["body"]
     watchdog.clock[0] += retry_hours * 3600
     watchdog.run(1)
     assert len(watchdog.sent) == 3
-    assert "50 Min" in watchdog.sent[-1]["body"]
-    assert "651 Min" not in watchdog.sent[-1]["body"]
+    assert "65 Min" in watchdog.sent[-1]["body"]
+    assert "666 Min" not in watchdog.sent[-1]["body"]
     assert "_episode_started_at" not in watchdog.state
     assert not watchdog.state.get("_pending_stuck_recoveries")
 
 
 def test_delivery_failure_does_not_merge_a_new_timeout_into_recovered_episode(watchdog):
     watchdog.results[:] = [True, False, True, True, True]
-    watchdog.run(50, check=True)
+    watchdog.run(65, check=True)
     watchdog.clock[0] += 7 * 3600
-    watchdog.run(50, check=True)
+    watchdog.run(65, check=True)
     warnings = [mail for mail in watchdog.sent if "haengt" in mail["subject"]]
     recoveries = [mail for mail in watchdog.sent if "laeuft wieder" in mail["subject"]]
     assert len(warnings) == 2
     assert len(recoveries) == 3  # Failed attempt, its retry, then new episode.
-    assert all("50 Min" in mail["body"] for mail in recoveries)
+    assert all("65 Min" in mail["body"] for mail in recoveries)
     assert not watchdog.state.get("_pending_stuck_recoveries")
 
 
 def test_failed_followup_run_keeps_same_incident_warning_identity(watchdog):
-    watchdog.run(50, check=True, fail=True)
+    watchdog.run(65, check=True, fail=True)
     watchdog.clock[0] += 7 * 3600
-    watchdog.run(50, check=True, fail=True)
+    watchdog.run(65, check=True, fail=True)
     assert len(watchdog.sent) == 1
     assert "_episode_started_at" in watchdog.state
     watchdog.run(1)
@@ -158,7 +161,7 @@ def test_completion_while_warning_is_in_flight_waits_for_its_outcome(
     monkeypatch.setattr(api, "_send_email_alert", smtp)
     assert api._run_scan_safe("bi_short", lambda: scan_release.wait(5))
     worker = watchdog.workers[0]
-    watchdog.clock[0] += 50 * 60
+    watchdog.clock[0] += 65 * 60
     watcher = threading.Thread(target=api._scan_watchdog_check, args=("bi_short",))
     watcher.start()
     try:
@@ -176,5 +179,5 @@ def test_completion_while_warning_is_in_flight_waits_for_its_outcome(
     watchdog.run(1)
     assert len(watchdog.sent) == (2 if warning_delivered else 1)
     if warning_delivered:
-        assert "50 Min" in watchdog.sent[-1]["body"]
+        assert "65 Min" in watchdog.sent[-1]["body"]
     assert not watchdog.state.get("_pending_stuck_recoveries")

@@ -492,3 +492,17 @@ zu pruefen. Port 80 lieferte fuer /api/health HTTP 404, SSH-Key wurde abgewiesen
 Kein Rollout durchgefuehrt. Reale lange BI-Laeufe bleiben anhand Journald zu
 klaeren; 599 Minuten in der alten Mail waren nicht zwingend eine Worker-Laufzeit.
 Abnahme und sichere lesende Serverpruefung stehen im neuen Bericht.
+
+### 17.1 Kalibrierung nach den nachgereichten Serverlogs
+
+Der Nutzer bestaetigte anschliessend Server-HEAD `47eca9a` und 32 erfolgreiche
+BI-Laeufe in 39,6-46,9 Minuten; neun davon ueber dem alten Warnbudget. Nach
+Zustimmung: BI LONG/SHORT weiche Warnung erst nach 60 Minuten, harte Eskalation
+weiterhin nach 135 Minuten (explizit von der Warnbudget-Kalibrierung entkoppelt).
+Andere Scannerbudgets, Intervalle und Handelsregeln bleiben unveraendert.
+Die zehn neuen Budget-Gegenproben und alle bisherigen Waechter-/Recovery-Tests
+bestanden gemeinsam (49 Tests), ebenso beim unabhaengigen Reviewer ohne offene
+Befunde. Finale volle Suite: 3197 PASS, vier Plattform-Skips, null Fehler;
+Code-/Testbytes waehrend des Laufs unveraendert. Details im Audit-Nachtrag.
+SSH wurde erneut mit `publickey,password` abgewiesen; Backup/Deployment und
+Messung der neuen produktiven Laufzeiten sind weiterhin offen.

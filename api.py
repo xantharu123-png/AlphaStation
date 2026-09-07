@@ -23352,8 +23352,10 @@ def _init_scan_status_from_cache():
 _init_scan_status_from_cache()
 
 _SCAN_TIMEOUTS = {
-    "bi_long": 45,
-    "bi_short": 45,
+    # 05.-07.09. Serverlogs: 32 erfolgreiche BI-Laeufe in 39,6-46,9 Min.
+    # 45 Min erzeugten Routine-Alarme; 60 Min lassen ~13 Min Puffer.
+    "bi_long": 60,
+    "bi_short": 60,
     "biotech": 45,
     "bear": 20,
     "early_movers": 25,
@@ -23380,6 +23382,9 @@ _STUCK_HARD_CAP_MIN_EXTRA_SEC = 15 * 60
 
 def _stuck_hard_cap_sec(name) -> int:
     """Hartdeckel in Sekunden: ab hier ist ein kontrollierter Neustart noetig."""
+    if name in ("bi_long", "bi_short"):
+        # Nur das Warnbudget wurde kalibriert; das bestehende Hartlimit bleibt.
+        return 135 * 60
     budget_sec = _SCAN_TIMEOUTS.get(name, 10) * 60
     return max(budget_sec * _STUCK_HARD_CAP_MULT, budget_sec + _STUCK_HARD_CAP_MIN_EXTRA_SEC)
 
