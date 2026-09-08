@@ -186,6 +186,11 @@ def test_whole_wrapper_writes_confirmed_contract_before_cache(monkeypatch):
 @pytest.mark.parametrize("bars", [[], [_bar(0, 99.5), _bar(1, 100.3), _bar(2, 99.9)]])
 def test_whole_wrapper_never_caches_missing_or_lost_confirmation(monkeypatch, bars):
     written = _wrapper_fixture(monkeypatch, bars=bars)
+    if not bars:
+        with pytest.raises(api.ScannerDataError, match="scan_data_unavailable"):
+            api._strategy_scan_wrapper(NAME, send_email=False)
+        assert written == []  # Missing feed does not replace the last final cache.
+        return
     assert api._strategy_scan_wrapper(NAME, send_email=False) == []
     assert written[0][0] == []
     rejects = written[0][1]["metadata"]["diagnostics"]["rejected"]
@@ -204,9 +209,11 @@ def test_whole_wrapper_exposes_scoped_provider_rejection(monkeypatch):
     def unavailable(*a, **kw):
         raise api.req.ConnectionError("fixture provider unavailable")
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", unavailable)
-    assert api._strategy_scan_wrapper(NAME, send_email=False) == []
-    rejects = written[0][1]["metadata"]["diagnostics"]["rejected"]
-    assert rejects["momentum:intraday_data_unavailable"] == 1
+    with pytest.raises(api.ScannerDataError, match="scan_data_unavailable") as caught:
+        api._strategy_scan_wrapper(NAME, send_email=False)
+    assert written == []
+    rejects = caught.value.diagnostics["rejected"]
+    assert rejects["scan_data_unavailable"] == 1
     assert "exception" not in rejects
 
 

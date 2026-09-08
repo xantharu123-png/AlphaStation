@@ -12,6 +12,7 @@ from __future__ import annotations  # Annotations lazy: py3.8-kompatibel
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -87,6 +88,88 @@ def read_snapshot(db_path):
         ).fetchone())
     inventory["missing_report_columns"] = sorted(set(REPORT_COLUMNS) - columns)
     return rows, inventory
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _invalid_json_constant(_value):
+    raise ValueError("Non-finite JSON constant")
+
+
+def read_collected_snapshot(path, now):
+    """Consume a private projected server export, not a mutable historical replay."""
+    path = Path(path)
+    if path.stat().st_size > 200 * 1024 * 1024:
+        raise ValueError("Evidence file too large")
+    payload = json.loads(path.read_text(encoding="utf-8-sig"),
+                         object_pairs_hook=_unique_json_object,
+                         parse_constant=_invalid_json_constant)
+    if (not isinstance(payload, dict) or payload.get("kind") != "private_server_evidence"
+            or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1
+            or payload.get("read_only") is not True):
+        raise ValueError("Not a supported server snapshot")
+    stamp = payload.get("captured_at")
+    if not isinstance(stamp, str) or len(stamp) > 64:
+        raise ValueError("Missing capture time")
+    try:
+        captured = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("Capture time is not ISO formatted") from None
+    if captured.tzinfo is None or captured.utcoffset() is None:
+        raise ValueError("Capture time must include timezone")
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Comparison time must include timezone")
+    captured = captured.astimezone(timezone.utc)
+    if captured > now:
+        raise ValueError("Missing or future capture time")
+    tracker = payload.get("tracker")
+    if not isinstance(tracker, dict):
+        raise ValueError("Missing tracker snapshot")
+    rows, inventory = tracker.get("rows"), tracker.get("inventory")
+    if not isinstance(rows, list) or not isinstance(inventory, dict) or len(rows) > 100000:
+        raise ValueError("Invalid tracker snapshot")
+    count_keys = ("all_rows", "trade_rows", "shadow_rows", "other_rows")
+    if set(inventory) != {*count_keys, "missing_report_columns"}:
+        raise ValueError("Incomplete inventory schema")
+    if any(type(inventory.get(key)) is not int or not 0 <= inventory[key] <= 2**63 - 1 for key in count_keys):
+        raise ValueError("Inventory counts must be nonnegative integers")
+    if inventory["all_rows"] != sum(inventory[key] for key in count_keys[1:]):
+        raise ValueError("Inventory populations do not sum to total")
+    if inventory["trade_rows"] != len(rows):
+        raise ValueError("Incomplete projected trade population")
+    missing = inventory["missing_report_columns"]
+    if (not isinstance(missing, list) or any(not isinstance(key, str) for key in missing)
+            or len(missing) != len(set(missing)) or not set(missing) <= set(REPORT_COLUMNS)
+            or REQUIRED_COLUMNS & set(missing)):
+        raise ValueError("Invalid missing-column inventory")
+    expected_columns = set(REPORT_COLUMNS) - set(missing)
+    seen_ids = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) & set(REPORT_COLUMNS) != expected_columns
+                or row.get("mail_class") != "trade"):
+            raise ValueError("Invalid projected trade row schema")
+        ident = row.get("id")
+        if type(ident) is not int or not 0 < ident <= 2**63 - 1 or ident in seen_ids:
+            raise ValueError("Trade row IDs must be positive and unique")
+        seen_ids.add(ident)
+        for key in expected_columns:
+            value = row[key]
+            if value is not None and type(value) not in (str, int, float):
+                raise ValueError("Projected values must be SQLite scalars")
+            if type(value) is float and not math.isfinite(value):
+                raise ValueError("Projected values must be finite")
+    # Ignore extraneous fields from a supplied file; never export raw rows.
+    selected = [{key: value for key, value in row.items() if key in REPORT_COLUMNS} for row in rows]
+    allowed_inventory = {key: inventory[key] for key in count_keys}
+    allowed_inventory["missing_report_columns"] = sorted(missing)
+    return selected, allowed_inventory, captured
 
 
 def _explicit_dimension(row, key, st):
@@ -210,7 +293,10 @@ def main() -> int:
                         help="Zellen pro Tag statt pro Monat (Regime-Brueche sichtbar machen)")
     parser.add_argument("--include-recent", action="store_true",
                         help="Vorlaeufige Versandkohorte statt vollstaendig beobachteter Kohorte")
-    parser.add_argument("--db", type=Path, help="Expliziter Tracker-Pfad; nur lesend, keine neue DB")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--db", type=Path, help="Expliziter Tracker-Pfad; nur lesend, keine neue DB")
+    source.add_argument("--snapshot-json", type=Path,
+                        help="Privaten Serverexport offline am erfassten Zeitpunkt auswerten")
     parser.add_argument("--format", choices=("text", "json"), default="text",
                         help="JSON: versionsgetrennte aggregierte Evidenz, keine Rohdaten")
     args = parser.parse_args()
@@ -220,12 +306,17 @@ def main() -> int:
     as_of = datetime.now(timezone.utc)
     db_path = args.db or Path(st.SIGNAL_DB_PATH)
     try:
-        rows, inventory = read_snapshot(db_path)
+        if args.snapshot_json:
+            rows, inventory, as_of = read_collected_snapshot(args.snapshot_json, as_of)
+        else:
+            rows, inventory = read_snapshot(db_path)
         if args.format == "json":
             report = build_evidence_report(
                 rows, inventory, days=max(1, args.days), as_of=as_of,
                 mature_only=not args.include_recent, scanner=args.scanner, per_day=args.per_day,
             )
+            report["source_kind"] = "imported_server_snapshot" if args.snapshot_json else "local_sqlite"
+            report["source_authenticity"] = "not_cryptographically_attested"
             print(json.dumps(report, indent=2, ensure_ascii=True, allow_nan=False))
             return 0
     except (OSError, sqlite3.Error, ValueError, OverflowError):
@@ -233,7 +324,7 @@ def main() -> int:
         # Never leak a raw database error/path/row in machine-readable output.
         print("Auswertung nicht verfuegbar: DB/Pfad/Schema/Daten pruefen; nichts migriert.", file=sys.stderr)
         return 2
-    print(f"DB: {db_path}")
+    print(f"Snapshot: {args.snapshot_json}" if args.snapshot_json else f"DB: {db_path}")
     if args.scanner:
         rows = [r for r in rows if str(r.get("scanner") or "") == args.scanner]
     rows, cohort = st.select_performance_cohort(

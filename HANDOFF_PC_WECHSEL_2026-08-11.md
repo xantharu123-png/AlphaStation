@@ -618,3 +618,50 @@ Diagnose-/Vergleichstests bestanden. Unabhaengig 384 Paper-Risikotests bestanden
 Lokaler DB-Hash vor/nach Diagnose identisch; keine Produktionsdaten veraendert.
 Letzter GitHub-Stand vor diesem Schritt war `fa9fba7`; dessen Server-Pull
 wurde als Bash ausgegeben, aber noch nicht vom Nutzer als gesund bestaetigt.
+
+## 22. Scanner-Zuverlaessigkeit und Kapital bestaetigt, 08.09.2026
+
+Fortsetzung nach Account-/Tokenwechsel. Nutzer bestaetigte **5.000 USD**, nicht
+5 Mio. USD. Die offene Kapitalfrage in Abschnitt 21 ist damit erledigt; die
+300-USD-Toleranz autorisiert keine Erhoehung engerer bestehender Risikolimits.
+Weder 150 USD/Tag noch drei Gewinner oder eine exakte Verlustgrenze versprechen.
+
+Referenz: `AUDIT_SCANNER_RELIABILITY_2026-09-08.md` und aktualisiertes
+`docs/PROFITABILITY_PROTOCOL_2026-09-08.md`. Lokaler Ausgangscommit `c8de95c`.
+
+- Generische Aktien-/Momentum- und BI-Datenfehler nicht mehr als erfolgreiche
+  Nulltreffer publizieren; vollstaendiges breites Universum verlangen, letzten
+  guten Cache erhalten. Legitimes Nullergebnis bleibt moeglich. 17/20 unveraendert.
+- API trennt angenommenen Start, bereits laufenden Scan, Fehler und Lauf-ID.
+  UI trennt Laden/fehlend/unvollstaendig/Fehler/final null, aktualisiert BI nach
+  Hintergrundabschluss und laesst gesunde lange BI-Laeufe weiterlaufen.
+  Scopewechsel und veraltete numerische Abschlussmeldungen abgesichert.
+- Reines Offline-Tagesrisikomodell mit Decimal, festen Session-/Kosten-/Slot-
+  Vertraegen; keine Einbindung oder Freigabe in die bestehende Ausfuehrung.
+  Details und Integrationsgrenze in `docs/DAILY_RISK_MODEL.md`.
+- Sicherer privater SSH-Export vorbereitet: lokal
+  `& 'C:\Projekt\TradingBot\scripts\collect_hetzner_evidence.ps1'` ausfuehren.
+  Passwort nur im Nutzerterminal. Kein Pull/Neustart, keine Server-Appimports;
+  DB-Lesen nach dauerhaftem Wechsel zur verifizierten Service-UID/GID.
+  `--snapshot-json` importiert streng validierte Projektion in vorhandene
+  versions-/herkunftsgetrennte Lesediagnose. Datei bleibt unter `output/` privat.
+
+Neu verifizierter oeffentlicher Hetzner-Healthstand am 08.09., 14:16 UTC:
+`fa9fba7fdddc`, Bundle `938257a0d05f`, healthy. Das aktualisiert die aeltere
+Unklarheit in Abschnitt 21, beweist aber nicht das Deployment dieses Pakets.
+SSH ohne Interaktion abgewiesen; kein aktueller privater Produktionsexport
+vorhanden. Die lokale 22-OPEN-DB ist keine aktuelle Performance-Evidenz.
+
+Finale Test-/Bundle-/Hash-Abnahme im neuen Auditbericht nachschlagen; ein wegen
+weiterem Browserbefund gestoppter erster Vollsuite-Lauf zaehlt nicht als Pass.
+Keine Produktionsaktion, Cron-Aktivierung, echte Mail oder Order. Privates
+`output/` und lokale DB/Secrets nicht stagen. Push, Serverupdate und profitable
+Forward-Ergebnisse bleiben getrennte Nachweise.
+
+Finale Abnahme dieses Pakets: Bundle `df791ada6247`; gerenderte Desktop-/Mobil-
+Pruefung und unabhaengiges Review bestanden. Vollsuite: 3905 PASS/vier Skips,
+nur ein veralteter Source-Shape-Test rot; danach ausschliesslich diesen Test
+angepasst und alle 3745 Nicht-Deployment-Tests erneut gruen. Die unveraenderten
+161 Deployment-Tests waren im Vollsuite-Lauf gruen: disjunkt 3906 PASS/vier Skips.
+Keine Produktionsbytes nach dem Vollsuite-Freeze geaendert. Details, Hashes und
+JUnit-Pfade im Audit; fehlenden produktiven Netto-Nachweis nicht ueberspringen.

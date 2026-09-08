@@ -45,6 +45,42 @@ from modules.vrvp_levels import (
 from modules.volume_metrics import historical_volume_baseline
 from modules import paper_autotrader as _paper_autotrader
 
+
+class ScannerDataError(RuntimeError):
+    """Safe operator error; never put provider payloads/URLs in public state."""
+
+    CODES = frozenset({
+        "scan_data_unavailable", "scan_provider_unauthorized",
+        "scan_provider_rate_limited", "scan_data_incomplete", "scan_data_invalid",
+    })
+
+    def __init__(self, code="scan_data_unavailable", diagnostics=None):
+        self.code = code if code in self.CODES else "scan_data_unavailable"
+        self.diagnostics = dict(diagnostics or {})
+        super().__init__(self.code)
+
+
+def _scanner_provider_error(status_code):
+    if status_code in (401, 403):
+        return "scan_provider_unauthorized"
+    if status_code == 429:
+        return "scan_provider_rate_limited"
+    return "scan_data_unavailable"
+
+
+def _scanner_payload_error(payload):
+    """An HTTP-200 provider error body is not a valid market observation."""
+    if not isinstance(payload, dict):
+        return "scan_data_invalid"
+    status = str(payload.get("status") or "").upper()
+    if status in {"", "OK", "DELAYED"}:
+        return None
+    if status in {"NOT_AUTHORIZED", "UNAUTHORIZED", "FORBIDDEN"}:
+        return "scan_provider_unauthorized"
+    if status in {"RATE_LIMITED", "TOO_MANY_REQUESTS"}:
+        return "scan_provider_rate_limited"
+    return "scan_data_invalid"
+
 # SPAC SIC Codes (für Biotech Scanner SPAC-Filter)
 SPAC_SIC_CODES = {"6770", "6726"}
 
@@ -934,7 +970,7 @@ def _bi_cache_load(direction="long"):
         return None, None, None
 
 
-def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total=0, detail=""):
+def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total=0, detail="", diagnostics=None):
     """Speichert atomar; Live-Zwischenstaende ersetzen nie den Final-Cache."""
     tmp_path = None
     try:
@@ -949,6 +985,8 @@ def _bi_cache_save(results, direction="long", *, partial=False, checked=0, total
             "count": len(results),
             "results": results
         }
+        if diagnostics is not None:
+            cache["diagnostics"] = diagnostics
         final_path = _bi_cache_path(direction)
         path = f"{final_path}.partial" if partial else final_path
         tmp_dir = os.path.dirname(path) or "."
@@ -1025,7 +1063,7 @@ def _bi_progress_read(direction="long"):
         return None
 
 
-def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0, top_score=0, avg_score=0, detail=""):
+def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0, top_score=0, avg_score=0, detail="", diagnostics=None):
     """Schreibt Scan-Fortschritt in Datei."""
     try:
         progress = {
@@ -1040,6 +1078,8 @@ def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0,
             "detail": detail,
             "timestamp": time.time()
         }
+        if diagnostics is not None:
+            progress["diagnostics"] = diagnostics
         with open(_bi_progress_path(direction), "w") as f:
             json.dump(progress, f)
     except Exception:
@@ -1115,6 +1155,21 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         direction: "long" oder "short"
         candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
     """
+    funnel = {
+        "scanner": f"bi_{direction}", "coverage": "incomplete",
+        "total": 0, "checked": 0, "history_available": 0,
+        "analyzed": 0, "indicator_passed": 0, "data_failures": 0, "analysis_errors": 0,
+        "rejected": {}, "final_results": None,
+    }
+
+    def _reject(reason):
+        counts = funnel["rejected"]
+        counts[reason] = counts.get(reason, 0) + 1
+
+    def _data_error(code):
+        funnel["data_failures"] += 1
+        raise ScannerDataError(code, funnel)
+
     try:
         # ── Fallback: Full stock universe from Polygon ──
         if not candidates:
@@ -1143,11 +1198,16 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     else:
                         resp = rate_limited_get(url, params=params, timeout=15)
                     if resp.status_code != 200:
-                        print(f"[BI {direction}] Universe page {_page} failed: {resp.status_code}")
-                        break
+                        _data_error(_scanner_provider_error(resp.status_code))
                     data = resp.json()
-                    results = data.get("results", [])
+                    if _scanner_payload_error(data):
+                        _data_error(_scanner_payload_error(data))
+                    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                        _data_error("scan_data_invalid")
+                    results = data["results"]
                     for r in results:
+                        if not isinstance(r, dict) or not isinstance(r.get("ticker"), str):
+                            _data_error("scan_data_invalid")
                         t = r.get("ticker", "")
                         if not t or t in seen:
                             continue
@@ -1169,6 +1229,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         break
                     _bi_progress_write(direction, "scanning",
                                        detail=f"Universe: {len(candidates)} Aktien geladen (Seite {_page+1})...")
+
+                if next_url:
+                    _data_error("scan_data_incomplete")
+                if not candidates:
+                    _data_error("scan_data_unavailable")
 
                 # 2. Gainers/Losers als Bonus (aktuelle Mover)
                 for endpoint in ["gainers", "losers"]:
@@ -1195,6 +1260,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _bi_progress_write(direction, "scanning",
                                    detail=f"{len(candidates)} Kandidaten — starte Analyse")
                 print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
+            except ScannerDataError:
+                raise
             except Exception as e:
                 safe_error = redact_sensitive_query_values(e)
                 _bi_progress_write(
@@ -1202,14 +1269,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     "error",
                     detail=f"Universe-Fehler: {safe_error[:50]}",
                 )
-                raise RuntimeError(f"BI {direction} Universe konnte nicht geladen werden") from e
+                _data_error("scan_data_unavailable")
 
         if not candidates:
             _bi_progress_write(direction, "error", detail="Keine Kandidaten verfügbar")
-            raise RuntimeError(f"BI {direction}: keine Kandidaten verfügbar")
+            _data_error("scan_data_unavailable")
 
         candidates = _bi_interleave_candidates_by_symbol(candidates)
         total = len(candidates)
+        funnel["total"] = total
         _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
         _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
 
@@ -1271,8 +1339,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
                 params = {"adjusted": "true", "sort": "asc", "apiKey": poly_key}
 
-                resp = rate_limited_get(url, params=params, timeout=15)
                 checked += 1
+                funnel["checked"] = checked
+                resp = rate_limited_get(url, params=params, timeout=15)
 
                 if checked % 10 == 0:
                     # V2.2: Alle 10 statt 25 Stocks updaten für Live-Fortschritt
@@ -1284,15 +1353,28 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                            detail=f"{checked}/{total} analysiert")
 
                 if resp.status_code != 200:
-                    no_data_count += 1
-                    if resp.status_code == 429:
-                        time.sleep(5)  # Rate Limit → 5s Pause
-                    continue
+                    _data_error(_scanner_provider_error(resp.status_code))
 
                 api_data = resp.json()
-                raw_bars = api_data.get("results", [])
+                if _scanner_payload_error(api_data):
+                    _data_error(_scanner_payload_error(api_data))
+                if not isinstance(api_data, dict) or not isinstance(api_data.get("results"), list):
+                    _data_error("scan_data_invalid")
+                raw_bars = api_data["results"]
+                last_timestamp = 0
+                for bar in raw_bars:
+                    if not isinstance(bar, dict):
+                        _data_error("scan_data_invalid")
+                    values = [bar.get(key) for key in ("t", "o", "h", "l", "c", "v")]
+                    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
+                        _data_error("scan_data_invalid")
+                    ts, open_, high, low, close, volume = values
+                    if ts <= last_timestamp or min(open_, high, low, close) <= 0 or volume < 0 or high < max(open_, low, close) or low > min(open_, high, close):
+                        _data_error("scan_data_invalid")
+                    last_timestamp = ts
                 if not raw_bars or len(raw_bars) < 10:
                     no_data_count += 1
+                    _reject("insufficient_daily_history")
                     continue
 
                 all_bars = []
@@ -1320,7 +1402,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 # Vertragsindikatoren berechenbar; dann gibt es kein BI-Signal.
                 if len(_session_bars) < 36:
                     no_data_count += 1
+                    _reject("insufficient_completed_history")
                     continue
+                funnel["history_available"] += 1
 
                 # ── Avg-Volume-Check: min $200K Ø Daily Dollar-Volume ──
                 # V2.8: Heutigen partiellen Bar ausschließen für Volume-Berechnung
@@ -1333,6 +1417,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 avg_dollar_vol = avg_vol_10d * all_bars[-1]["close"] if all_bars[-1]["close"] > 0 else 0
                 if avg_dollar_vol < 200_000:
                     no_data_count += 1
+                    _reject("insufficient_dollar_liquidity")
                     continue
 
                 # ── RVOL Anomalie-Filter: >50x = IPO-Tag oder Pump-Scheme ──
@@ -1350,6 +1435,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _scan_rvol = _recent_vol / _prev_vol if _recent_vol and _prev_vol else 0
                 if _scan_rvol > 50:
                     no_data_count += 1
+                    _reject("rvol_anomaly")
                     continue
 
                 # ── SPAC NAV-Detection: Preis $9.50-$10.50 + ATR < 1% = SPAC bei NAV ──
@@ -1358,11 +1444,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _atr_pct = (_spac_atr / _last_price * 100) if _spac_atr > 0 and _last_price > 0 else 0.0
                 if 9.50 <= _last_price <= 10.50 and _atr_pct < 1.0:
                     no_data_count += 1
+                    _reject("spac_nav")
                     continue
 
+            except ScannerDataError:
+                raise
+            except (TypeError, ValueError, KeyError, OverflowError):
+                _data_error("scan_data_invalid")
             except Exception:
-                no_data_count += 1
-                continue
+                _data_error("scan_data_unavailable")
 
             analysis_attempts += 1
             try:
@@ -1375,8 +1465,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if _prev_close > 0:
                     _today_change_pct = ((_last_bar["close"] - _prev_close) / _prev_close) * 100
                     if direction == "long" and _today_change_pct > 15:
+                        _reject("already_broke_out")
                         continue  # Schon explodiert — zu spät für "Imminent"
                     if direction == "short" and _today_change_pct < -15:
+                        _reject("already_broke_out")
                         continue  # Schon gecrasht — zu spät
 
                 # H-2c (BI-Audit 10.06.): KUMULATIVER Pump-Filter (Long).
@@ -1399,6 +1491,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                             _pp_std = (sum((x - _pp_mean) ** 2 for x in _pp_prev) / len(_pp_prev)) ** 0.5
                             if _pp_cum2 > 4 * max(0.1, _pp_std):
                                 cum_pump_fail += 1
+                                _reject("cumulative_pump")
                                 print(f"[BI {direction}] Suppressed {ticker}: cumulative_pump "
                                       f"(+{_pp_cum2:.1f}% in 2 Tagen, {_pp_cum2 / max(0.1, _pp_std):.1f}x StdDev)")
                                 continue
@@ -1413,6 +1506,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 score_sum += bi_score
                 score_count += 1
+                funnel["analyzed"] = score_count
                 if bi_score > top_score:
                     top_score = bi_score
 
@@ -1427,7 +1521,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 contract_payload = _bi_analysis_contract_payload(result)
                 if not is_valid or contract_payload is None:
                     contract_reject_count += 1
+                    _reject("indicator_or_hard_gate_contract")
                     continue
+                funnel["indicator_passed"] += 1
 
                 # V2.7: Short Trend-Info (nur informativ, kein Hard-Reject mehr)
                 # V2.6b Hard-Rejects waren zu aggressiv → haben 80%+ der Kandidaten eliminiert
@@ -1449,6 +1545,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 )
                 if not plan.get("accepted"):
                     reason = plan.get("reason")
+                    _reject("plan:" + str(reason or "invalid"))
                     if reason == "range_too_narrow":
                         range_fail += 1
                     elif reason == "atr_too_small":
@@ -1647,6 +1744,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     print(f"[BI {direction}] Live-Update: {len(_live)} BI-Signale bei {checked}/{total}")
             except Exception as e:
                 analysis_errors += 1
+                funnel["analysis_errors"] = analysis_errors
                 print(
                     f"[BI {direction}] Error analyzing {ticker}: "
                     f"{redact_sensitive_query_values(e)}"
@@ -1654,10 +1752,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
         # Finale Sortierung + Speichern
-        _raise_on_systemic_analysis_failures(
-            f"BI {direction}", analysis_attempts, analysis_errors
-        )
+        if analysis_errors or checked != total:
+            raise ScannerDataError("scan_data_incomplete", funnel)
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+        funnel["coverage"] = "complete"
+        funnel["final_results"] = len(results)
         _bi_cache_save(
             results,
             direction=direction,
@@ -1665,11 +1764,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             checked=checked,
             total=total,
             detail="Finaler BI Scan abgeschlossen",
+            diagnostics=funnel,
         )
 
         avg_sc = round(score_sum / max(1, score_count))
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
-        pipeline = (f"{total} Kandidaten → {no_data_count} kein History → "
+        pipeline = (f"{total} Kandidaten → {no_data_count} History-/Liquiditaetsfilter → "
                     f"{cum_pump_fail} 2d-Pump → "
                     f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "
                     f"{contract_reject_count} unter {BI_STOCK_REQUIRED_GREEN}/{BI_STOCK_INDICATOR_COUNT} "
@@ -1681,8 +1781,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _bi_progress_write(direction, "done", checked=checked, total=total,
                            hits=len(results), no_data=no_data_count,
                            top_score=top_score, avg_score=avg_sc,
-                           detail=pipeline)
+                           detail=pipeline, diagnostics=funnel)
 
+    except ScannerDataError as e:
+        _bi_progress_write(direction, "error", checked=funnel["checked"], total=funnel["total"],
+                           detail=e.code, diagnostics=e.diagnostics)
+        raise
     except Exception as e:
         safe_error = redact_sensitive_query_values(e)
         _bi_progress_write(direction, "error", detail=f"Fehler: {safe_error[:100]}")

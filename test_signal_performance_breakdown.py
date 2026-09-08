@@ -223,3 +223,153 @@ def test_valid_smtp_and_be_evidence_survives_static_column_allowlist(tmp_path):
         assert metrics[key] == before.get(key)
     assert metrics["qualified_origin_rows"] == 1
     assert "fr1_" not in json.dumps(report)
+
+
+def _collected_payload(rows=None):
+    rows = rows if rows is not None else [_row()]
+    projected = [{**{key: row.get(key) for key in script.REPORT_COLUMNS},
+                  **{key: value for key, value in row.items() if key not in script.REPORT_COLUMNS}}
+                 for row in rows]
+    return {"schema_version": 1, "kind": "private_server_evidence", "read_only": True,
+            "captured_at": AS_OF.isoformat(),
+            "tracker": {"rows": projected, "inventory": {
+                "all_rows": len(rows), "trade_rows": len(rows), "shadow_rows": 0,
+                "other_rows": 0, "missing_report_columns": [],
+            }}}
+
+
+def test_collected_snapshot_uses_capture_time_without_reading_local_db(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "export.json"
+    payload = _collected_payload()
+    path.write_text(json.dumps(payload), encoding="utf8")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(script, "read_snapshot", lambda *_: pytest.fail("wrong local DB"))
+    monkeypatch.setattr(sys, "argv", ["report", "--snapshot-json", str(path), "--format", "json"])
+    assert script.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["as_of"] == AS_OF.isoformat()
+    assert result["source_kind"] == "imported_server_snapshot"
+    assert result["historical_replay"] is False
+    assert result["account_pnl_usd"] is None
+    assert result["aggregate_descriptive_only"]["sum_r"] == -1
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+@pytest.mark.parametrize("change", [
+    {"kind": "untrusted_other_format"}, {"schema_version": True},
+    {"captured_at": "2099-01-01T00:00:00Z"},
+    {"tracker": {"rows": [], "inventory": {"trade_rows": 1}}},
+    {"tracker": {"rows": [{}], "inventory": {"trade_rows": 1}}},
+])
+def test_bad_collected_snapshot_is_not_empty_success(tmp_path, change):
+    payload = {**_collected_payload([]), **change}
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+@pytest.mark.parametrize("key", ["all_rows", "trade_rows", "shadow_rows", "other_rows"])
+@pytest.mark.parametrize("bad", [-1, True, 1.0, None, "0", [], {"secret": "PRIVATE_VALUE"}, 2**63])
+def test_import_inventory_counts_are_strict_nonnegative_integers(tmp_path, key, bad):
+    payload = _collected_payload()
+    payload["tracker"]["inventory"][key] = bad
+    path = tmp_path / "bad_count.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+@pytest.mark.parametrize("change", [
+    {"all_rows": 2}, {"shadow_rows": 1}, {"other_rows": 1},
+    {"private_account": "PRIVATE_VALUE"},
+    {"missing_report_columns": ["PRIVATE_VALUE"]},
+    {"missing_report_columns": {"secret": "PRIVATE_VALUE"}},
+    {"missing_report_columns": ["id"]},
+    {"missing_report_columns": ["entry", "entry"]},
+    {"missing_report_columns": ["entry"]},
+    {"missing_report_columns": [None]},
+])
+def test_import_inconsistent_or_private_inventory_is_rejected(tmp_path, change):
+    payload = _collected_payload()
+    payload["tracker"]["inventory"].update(change)
+    path = tmp_path / "bad_inventory.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+@pytest.mark.parametrize("stamp", ["2026-09-08T12:00:00", "2026-09-08", None, 0, {}, "PRIVATE_VALUE"])
+def test_import_requires_explicit_timezone_for_capture_time(tmp_path, stamp):
+    payload = _collected_payload()
+    payload["captured_at"] = stamp
+    path = tmp_path / "bad_time.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+@pytest.mark.parametrize("ident", [0, -1, True, 1.0, "1", None, [], {}, 2**63])
+def test_import_requires_positive_integer_ids(tmp_path, ident):
+    payload = _collected_payload([_row(ident)])
+    path = tmp_path / "bad_id.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+def test_import_rejects_duplicate_ids_even_with_consistent_inventory(tmp_path):
+    path = tmp_path / "duplicates.json"
+    path.write_text(json.dumps(_collected_payload([_row(), _row()])), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+@pytest.mark.parametrize("value", [{"private": "PRIVATE_VALUE"}, ["PRIVATE_VALUE"], True, float("nan"), float("inf"), float("-inf")])
+def test_import_projected_values_must_be_finite_sqlite_scalars(tmp_path, value):
+    payload = _collected_payload([_row(strategy=value)])
+    path = tmp_path / "nonscalar.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+def test_import_extra_private_row_fields_are_never_projected(tmp_path):
+    payload = _collected_payload([_row(private_account={"token": "PRIVATE_VALUE"})])
+    path = tmp_path / "private.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    rows, inventory, _ = script.read_collected_snapshot(path, AS_OF)
+    assert "PRIVATE_VALUE" not in json.dumps({"rows": rows, "inventory": inventory})
+    assert set(rows[0]) == set(script.REPORT_COLUMNS)
+
+
+def test_import_valid_legacy_projection_and_empty_inventory(tmp_path):
+    payload = _collected_payload()
+    del payload["tracker"]["rows"][0]["strategy"]
+    payload["tracker"]["inventory"]["missing_report_columns"] = ["strategy"]
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    rows, inventory, _ = script.read_collected_snapshot(path, AS_OF)
+    assert "strategy" not in rows[0]
+    assert inventory["missing_report_columns"] == ["strategy"]
+    path.write_text(json.dumps(_collected_payload([])), encoding="utf8")
+    rows, inventory, _ = script.read_collected_snapshot(path, AS_OF)
+    assert rows == [] and inventory["all_rows"] == 0
+
+
+def test_import_rejects_duplicate_json_keys_instead_of_silent_overwrite(tmp_path):
+    text = json.dumps(_collected_payload())
+    text = text.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1', 1)
+    path = tmp_path / "duplicate_keys.json"
+    path.write_text(text, encoding="utf8")
+    with pytest.raises(ValueError, match="Duplicate JSON"):
+        script.read_collected_snapshot(path, AS_OF)
+
+
+def test_import_missing_inventory_key_is_not_a_default_zero(tmp_path):
+    payload = _collected_payload()
+    del payload["tracker"]["inventory"]["shadow_rows"]
+    path = tmp_path / "missing_count.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    with pytest.raises(ValueError, match="inventory schema"):
+        script.read_collected_snapshot(path, AS_OF)

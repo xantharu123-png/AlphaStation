@@ -101,6 +101,9 @@ from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, s
 
 # Import scanner modules
 from modules.scanners import (
+    ScannerDataError,
+    _scanner_provider_error,
+    _scanner_payload_error,
     _bi_background_scan,
     _biotech_background_scan,
     _bi_cache_load,
@@ -14524,6 +14527,9 @@ class ScanResultsResponse(BaseModel):
     exclusion_policy: Optional[List[str]] = None
     scan_running: Optional[bool] = None
     scan_error: Optional[str] = None
+    scan_run_id: Optional[str] = None
+    scan_last_attempt_at: Optional[str] = None
+    scan_last_completed_at: Optional[str] = None
     partial: Optional[bool] = None
     checked: Optional[int] = None
     total: Optional[int] = None
@@ -17670,15 +17676,31 @@ def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]
                 cloned["_sources"] = [source]
                 merged[ticker] = cloned
 
+    # A movers-only fallback is not a completed full-universe stock scan.
+    # Fail before publishing anything so the last good final cache survives.
+    feed_diag = {"coverage": "incomplete", "universe_count": 0, "final_results": None}
     try:
         full_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
         full_resp = rate_limited_get(full_url, params={"apiKey": POLYGON_KEY}, timeout=30)
-        if full_resp.status_code == 200:
-            _add_tickers(full_resp.json().get("tickers", []), "full")
-        else:
-            print(f"[Strategy Scan] full snapshot API error: {full_resp.status_code}")
-    except Exception as e:
-        print(f"[Strategy Scan] full snapshot error: {_sanitized_exception_text(e)}")
+        if full_resp.status_code != 200:
+            raise ScannerDataError(_scanner_provider_error(full_resp.status_code), feed_diag)
+        payload = full_resp.json()
+        if _scanner_payload_error(payload):
+            raise ScannerDataError(_scanner_payload_error(payload), feed_diag)
+        if not isinstance(payload, dict) or not isinstance(payload.get("tickers"), list):
+            raise ScannerDataError("scan_data_invalid", feed_diag)
+        tickers = payload["tickers"]
+        if not tickers:
+            raise ScannerDataError("scan_data_unavailable", feed_diag)
+        if any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not item["ticker"].strip() for item in tickers):
+            raise ScannerDataError("scan_data_invalid", feed_diag)
+        _add_tickers(tickers, "full")
+    except ScannerDataError:
+        raise
+    except (TypeError, ValueError):
+        raise ScannerDataError("scan_data_invalid", feed_diag) from None
+    except Exception:
+        raise ScannerDataError("scan_data_unavailable", feed_diag) from None
 
     for endpoint in ("gainers", "losers"):
         try:
@@ -17850,9 +17872,13 @@ def _fetch_strategy_daily_history(
     ticker: str,
     min_days: int,
     history_cache: Dict[str, List[Dict[str, Any]]],
+    strict_data: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Fetch daily bars once per ticker for strategy validation."""
-    cache_key = f"{ticker}:{min_days}"
+    """Fetch daily bars; full stock scans distinguish unavailable provider data.
+
+    The default preserves compatibility for separate optional enrichment paths.
+    """
+    cache_key = f"{ticker}:{min_days}" + (":strict" if strict_data else "")
     if cache_key in history_cache:
         return history_cache[cache_key]
 
@@ -17869,7 +17895,11 @@ def _fetch_strategy_daily_history(
         try:
             ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe="1D", bars=max(min_days + 30, 120))
         except Exception:
+            if strict_data:
+                raise ScannerDataError("scan_data_unavailable") from None
             ohlcv = None
+        if ohlcv is None and strict_data:
+            raise ScannerDataError("scan_data_unavailable")
         if ohlcv:
             daily_bars = []
             for bar in ohlcv:
@@ -17882,8 +17912,9 @@ def _fetch_strategy_daily_history(
                         "close": float(bar.get("close", 0) or 0),
                         "volume": float(bar.get("volume", 0) or 0),
                     })
-                except Exception as item_err:
-                    print(f"[Strategy Scan] history parse skip {ticker}: {item_err}")
+                except Exception:
+                    if strict_data:
+                        raise ScannerDataError("scan_data_invalid") from None
                     continue
 
     history_cache[cache_key] = daily_bars
@@ -20354,7 +20385,7 @@ def _apply_special_strategy_post_filter(
             continue
 
         daily_bars = _stock_completed_pattern_history(
-            _fetch_strategy_daily_history(str(ticker), min_history, history_cache),
+            _fetch_strategy_daily_history(str(ticker), min_history, history_cache, True),
             as_of=datetime.now(timezone.utc),
         )
         if len(daily_bars) < min_history:
@@ -20399,12 +20430,14 @@ def _bi_background_scan_wrapper(direction: str) -> None:
     previous_revision = _scan_cache_revision(cache)
     try:
         print(f"[BI {direction}] Starting scan...")
+        _remove_partial_cache(cache)
         _bi_background_scan(POLYGON_KEY, direction=direction, candidates=None)
         _require_fresh_scan_cache(scan_name, previous_revision)
         print(f"[BI {direction}] Scan completed")
         # Email Alert bei Grade S/A
         _check_and_alert(scan_name, cache)
     except Exception as e:
+        _remove_partial_cache(cache)
         print(f"BI background scan error ({direction}): {e}")
         import traceback
         _print_sanitized_traceback()
@@ -20607,6 +20640,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             "market_type": "stocks",
             "cache_version": STOCK_STRATEGY_CACHE_VERSION,
             "universe_count": len(_all_snapshot_tickers),
+            "coverage": "incomplete",
             "common_stock_source": common_stock_source,
             "common_stock_universe_count": len(common_stock_universe) if common_stock_universe is not None else None,
             "filters": {
@@ -20621,7 +20655,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
             },
             "rejected": {},
             "raw_matches_before_special_filter": 0,
-            "final_results": 0,
+            "final_results": None,
             "stage_counts": {
                 "snapshot_universe": len(_all_snapshot_tickers),
             },
@@ -20634,6 +20668,9 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         def _stage(name: str) -> None:
             stages = scan_diag.setdefault("stage_counts", {})
             stages[name] = int(stages.get(name, 0)) + 1
+
+        if not _all_snapshot_tickers:
+            raise ScannerDataError("scan_data_unavailable", scan_diag)
 
         _remove_partial_cache(_strat_cache)
         _last_partial_publish = 0.0
@@ -20783,7 +20820,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                     else:
                         _stage("dollar_volume_filter")
 
-                    daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache)
+                    daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
                     previous_change = _stock_previous_session_change(daily_bars, as_of=scan_now_utc)
                     if _has_vortag_filter:
                         if previous_change is None or not (vortag_min <= previous_change <= vortag_max):
@@ -20889,6 +20926,8 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                             as_of=scan_now_utc,
                         )
                         _confirmation_status = _momentum_confirmation.get("Breakout_Freshness_Status")
+                        if _confirmation_status == "DATA_UNAVAILABLE":
+                            raise ScannerDataError("scan_data_unavailable", scan_diag)
                         _confirmation_age = _alert_float(_momentum_confirmation.get("Breakout_Confirmation_Age_Seconds"))
                         if _confirmation_status not in {"FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"}:
                             _reject(f"momentum:intraday_{str(_confirmation_status or 'unavailable').lower()}")
@@ -21287,12 +21326,19 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
                         strategy_row["swing_timeframe"] = "daily_swing"
                     results.append(strategy_row)
                     _publish_partial(checked, force=len(results) == 1)
+                except ScannerDataError as data_error:
+                    _reject(data_error.code)
+                    raise ScannerDataError(data_error.code, scan_diag) from None
                 except Exception as item_err:
                     print(f"[Strategy Scan] {strategy_name}: skip {t.get('ticker', '?')} ({item_err})")
                     _reject("exception")
                     continue
 
         # Sortieren nach SCORE absteigend (nicht Change% — Score ist die Gesamtbewertung)
+        if not scan_diag["stage_counts"].get("priced_snapshot"):
+            raise ScannerDataError("scan_data_unavailable", scan_diag)
+        if scan_diag["rejected"].get("exception"):
+            raise ScannerDataError("scan_data_incomplete", scan_diag)
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
@@ -21309,6 +21355,7 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         results = results[:max_results]
         _enrich_stock_business_quality_rows(results)
         scan_diag["final_results"] = len(results)
+        scan_diag["coverage"] = "complete"
         scan_diag.setdefault("stage_counts", {})["raw_matches_before_special_filter"] = scan_diag["raw_matches_before_special_filter"]
         scan_diag.setdefault("stage_counts", {})["final_results"] = scan_diag["final_results"]
         scan_diag["top_rejects"] = sorted(
@@ -23349,6 +23396,8 @@ def _public_scan_error_code(value: Any) -> Optional[str]:
     if not value:
         return None
     text_value = str(value)
+    if text_value in ScannerDataError.CODES:
+        return text_value
     lowered = text_value.lower()
     if "zeitbudget" in lowered or "timeout" in lowered:
         return "scan_timeout"
@@ -23853,15 +23902,18 @@ def _run_scan_safe(name, func, timeout_min=None):
         _scan_status[name]["running"] = True
         _scan_status[name]["_started_at"] = time.time()
         _scan_status[name]["_run_id"] = run_id
+        _scan_status[name]["last_run_id"] = run_id
         _scan_status[name].pop("_timeout_logged", None)
         _scan_status[name].pop("_hard_timeout_logged", None)
         _scan_status[name]["last_attempt_at"] = datetime.now().isoformat()
         _scan_status[name].pop("last_error", None)
+        _scan_status[name].pop("last_attempt_diagnostics", None)
 
     def _worker():
         start_t = time.time()
         succeeded = False
         error_text = None
+        attempt_diagnostics = None
         previous_cache_revision = _scan_cache_revision(SCAN_CACHE_MAP.get(name))
         try:
             func()
@@ -23871,6 +23923,9 @@ def _run_scan_safe(name, func, timeout_min=None):
             print(f"[Scheduler] {name} DONE in {elapsed}s")
         except Exception as e:
             error_text = _sanitized_exception_text(e)
+            if isinstance(e, ScannerDataError):
+                error_text = e.code
+                attempt_diagnostics = e.diagnostics
             elapsed = round(time.time() - start_t, 1)
             print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}")
             _print_sanitized_traceback()
@@ -23911,6 +23966,8 @@ def _run_scan_safe(name, func, timeout_min=None):
                         recoveries = list(state.get("_pending_stuck_recoveries", {}).items())
                     else:
                         state["last_error"] = error_text or "Unbekannter Scan-Fehler"
+                        if attempt_diagnostics is not None:
+                            state["last_attempt_diagnostics"] = attempt_diagnostics
             for episode_key, recovery in recoveries:
                 try:
                     outcome = _send_stuck_recovery_mail(
@@ -26631,6 +26688,8 @@ def get_scan_status():
             )
             scans_copy[name] = {
                 "running": status["running"],
+                "run_id": status.get("last_run_id"),
+                "attempt_diagnostics": status.get("last_attempt_diagnostics"),
                 "last_run": status["last_run"],
                 "last_attempt_at": status.get("last_attempt_at"),
                 "next_run": status["next_run"],
@@ -28398,6 +28457,20 @@ def list_strategies(market_type: str = Query("stocks", description="Market type:
     )
 
 
+def _manual_scan_ack(scan_name: str, accepted: bool, **fields) -> Dict[str, Any]:
+    """A busy worker is not a newly accepted manual scan."""
+    with _scan_lock:
+        state = dict(_scan_status.get(scan_name, {}))
+    return {
+        **fields,
+        "status": "started" if accepted else "already_running",
+        "accepted": bool(accepted),
+        "run_id": state.get("last_run_id"),
+        "last_attempt_at": state.get("last_attempt_at"),
+        "message": fields.get("message") if accepted else "Scan laeuft bereits; kein neuer Lauf gestartet.",
+    }
+
+
 @app.post("/api/scan")
 def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     """
@@ -28425,29 +28498,16 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         if _safe_key not in _scan_status:
             with _scan_lock:
                 _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
-        _run_scan_safe(_safe_key, lambda: _crypto_strategy_scan_wrapper(_strat_name))
-        return {
-            "status": "started",
-            "message": f"Crypto-Strategie-Scan gestartet: {resolved_strategy}",
-            "strategy": resolved_strategy,
-            "requested_strategy": request.strategy,
-            "market_type": request.market_type,
-        }
+        accepted = _run_scan_safe(_safe_key, lambda: _crypto_strategy_scan_wrapper(_strat_name))
+        return _manual_scan_ack(_safe_key, accepted, message=f"Crypto-Strategie-Scan gestartet: {resolved_strategy}",
+                                strategy=resolved_strategy, requested_strategy=request.strategy, market_type=request.market_type)
 
     if "bi_long" in strategy_lower:
-        _run_scan_safe("bi_long", lambda: _bi_background_scan_wrapper("long"))
-        return {
-            "status": "started",
-            "message": "BI Scanner (Long) started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("bi_long", lambda: _bi_background_scan_wrapper("long"))
+        return _manual_scan_ack("bi_long", accepted, message="BI Scanner (Long) started", strategy=resolved_strategy)
     elif "bi_short" in strategy_lower:
-        _run_scan_safe("bi_short", lambda: _bi_background_scan_wrapper("short"))
-        return {
-            "status": "started",
-            "message": "BI Scanner (Short) started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("bi_short", lambda: _bi_background_scan_wrapper("short"))
+        return _manual_scan_ack("bi_short", accepted, message="BI Scanner (Short) started", strategy=resolved_strategy)
     elif "biotech" in strategy_lower:
         _run_scan_safe("biotech", _biotech_scan_wrapper)
         return {
@@ -28532,13 +28592,9 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         if _safe_key not in _scan_status:
             with _scan_lock:
                 _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
-        _run_scan_safe(_safe_key, lambda: _strategy_scan_wrapper(_strat_name))
-        return {
-            "status": "started",
-            "message": f"Strategie-Scan gestartet: {resolved_strategy}",
-            "strategy": resolved_strategy,
-            "requested_strategy": request.strategy,
-        }
+        accepted = _run_scan_safe(_safe_key, lambda: _strategy_scan_wrapper(_strat_name))
+        return _manual_scan_ack(_safe_key, accepted, message=f"Strategie-Scan gestartet: {resolved_strategy}",
+                                strategy=resolved_strategy, requested_strategy=request.strategy)
 
 
 @app.get("/api/scan-results", response_model=ScanResultsResponse)
@@ -28710,6 +28766,9 @@ def get_scan_results(
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
 
     scan_error = _public_scan_error_code(scan_state.get("last_error"))
+    if scan_state.get("last_attempt_diagnostics") is not None:
+        diagnostics = dict(diagnostics or {})
+        diagnostics["attempt_diagnostics"] = scan_state["last_attempt_diagnostics"]
     if scan_error:
         warnings.insert(0, f"Letzter Scan fehlgeschlagen: {scan_error}")
 
@@ -28726,6 +28785,9 @@ def get_scan_results(
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")) if scan_state else None,
         scan_error=scan_error,
+        scan_run_id=scan_state.get("last_run_id"),
+        scan_last_attempt_at=scan_state.get("last_attempt_at"),
+        scan_last_completed_at=scan_state.get("last_run"),
         partial=is_partial,
         checked=cache_meta.get("checked"),
         total=cache_meta.get("total"),
@@ -28743,13 +28805,9 @@ def trigger_bi_scan(request: BIScanRequest):
         raise HTTPException(status_code=400, detail="Direction must be 'long' or 'short'")
 
     # Thread statt BackgroundTasks — überlebt Browser-Reload
-    _run_scan_safe(f"bi_{request.direction}", lambda: _bi_background_scan_wrapper(request.direction))
-
-    return {
-        "status": "started",
-        "message": f"BI scan started ({request.direction})",
-        "direction": request.direction,
-    }
+    accepted = _run_scan_safe(f"bi_{request.direction}", lambda: _bi_background_scan_wrapper(request.direction))
+    return _manual_scan_ack(f"bi_{request.direction}", accepted,
+                            message=f"BI scan started ({request.direction})", direction=request.direction)
 
 
 @app.get("/api/bi-results", response_model=ScanResultsResponse)
@@ -28816,7 +28874,12 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         "progress_detail": cache_meta.get("detail", ""),
         "mail_gate": "strict: S/A/A+, score>=80, RVOL>=0.7, valid levels, trade health, no severe chase/fakeout/liquidity blockers",
         "display_note": "BI tab shows only scanner signals with at least 17 of 20 green technical indicators; mail delivery has separate execution gates.",
+        "funnel": cache_meta.get("diagnostics"),
+        "attempt_diagnostics": scan_state.get("last_attempt_diagnostics"),
     }
+    scan_error = _public_scan_error_code(scan_state.get("last_error"))
+    if scan_error:
+        quality["warnings"] = [f"Letzter Scan fehlgeschlagen: {scan_error}", *quality["warnings"]]
     return ScanResultsResponse(
         status="success",
         count=len(results),
@@ -28829,7 +28892,10 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")),
-        scan_error=_public_scan_error_code(scan_state.get("last_error")),
+        scan_error=scan_error,
+        scan_run_id=scan_state.get("last_run_id"),
+        scan_last_attempt_at=scan_state.get("last_attempt_at"),
+        scan_last_completed_at=scan_state.get("last_run"),
         partial=is_partial,
         checked=cache_meta.get("checked"),
         total=cache_meta.get("total"),

@@ -10,10 +10,42 @@ from urllib.parse import parse_qs, urlparse
 import json
 import mimetypes
 import time
+import argparse
+import threading
 
 FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 STAMP = datetime.now(timezone.utc).isoformat()
 ERRORS = []
+SCANNER_QA = {"bi": "normal", "momentum": "normal", "stamp": STAMP}
+SCANNER_QA_LOCK = threading.Lock()
+
+
+def qa_scanner_payload(kind, direction="LONG"):
+    with SCANNER_QA_LOCK:
+        state = dict(SCANNER_QA)
+    mode, stamp = state[kind], state["stamp"]
+    row = bi_row(direction)
+    if kind == "momentum":
+        row.update({"strategy": "Momentum Breakout Long", "scanner": "stock_strategy"})
+    rows = [row] if mode in {"normal", "background_done", "failed_with_cache"} else []
+    running = mode == "background_running"
+    missing = mode in {"missing", "idle_empty"}
+    return {
+        "status": "success", "data": rows, "count": len(rows),
+        "cached_at": None if missing else (STAMP if running else stamp),
+        "scan_running": running, "partial": False,
+        "scan_error": "scan_data_unavailable" if mode in {"failed", "failed_with_cache"} else None,
+        "warnings": [], "checked": 20 if running else 100, "total": 100,
+        "diagnostics": {"universe_count": 100, "raw_cache_rows": len(rows),
+                        "validated_scanner_signals": len(rows), "visible_scanner_signals": len(rows),
+                        "final_results": len(rows), "checked": 100, "total": 100,
+                        "funnel": {"coverage": "incomplete" if mode in {"failed", "failed_with_cache"} else "complete",
+                                   "checked": 100, "total": 100, "analysis_attempts": 100,
+                                   "data_failures": {}, "legitimate_filters": {"below_17": 100-len(rows)}},
+                        "stage_counts": {"priced_snapshot": 100, "momentum_breakout_gate": len(rows)},
+                        "rejected": {"momentum_breakout_gate": 100-len(rows)},
+                        "indicator_gate": {"minimum_green": 17, "total_indicators": 20}},
+    }
 
 
 def bi_row(direction="LONG"):
@@ -51,6 +83,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path == "/__qa/scanners":
+            request = json.loads(body or b"{}")
+            allowed = {"normal", "idle_empty", "background_running", "background_done", "empty",
+                       "failed", "failed_with_cache", "cooldown", "busy", "missing", "fetch_error"}
+            with SCANNER_QA_LOCK:
+                for kind in ("bi", "momentum"):
+                    if request.get(kind) in allowed:
+                        SCANNER_QA[kind] = request[kind]
+                SCANNER_QA["stamp"] = datetime.now(timezone.utc).isoformat()
+            return self.send_json({"ok": True, "synthetic_only": True})
+        if self.path in {"/api/bi-scan", "/api/scan"}:
+            kind = "bi" if self.path == "/api/bi-scan" else "momentum"
+            with SCANNER_QA_LOCK:
+                mode = SCANNER_QA[kind]
+                if mode == "cooldown":
+                    return self.send_json({"detail": "Scan cooldown active", "retry_after_seconds": 60}, 429)
+                if mode == "busy":
+                    return self.send_json({"status": "already_running", "accepted": False})
+                SCANNER_QA["stamp"] = datetime.now(timezone.utc).isoformat()
+            return self.send_json({"status": "started", "accepted": True, "synthetic_only": True})
         if self.path == "/api/run-backtest":
             # Return a fixture, never run any strategy or touch a database.
             payload = {
@@ -93,7 +145,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             return self.send_json({"status": "healthy", "revision": "LOCAL-QA-NOT-PRODUCTION"})
         if path == "/api/strategies":
-            return self.send_json({"strategies": [], "categories": {}})
+            return self.send_json({"strategies": {"Momentum Breakout Long": {"display_group": "Momentum"}}, "categories": {}})
+        if path == "/api/scan-results":
+            with SCANNER_QA_LOCK:
+                mode = SCANNER_QA["momentum"]
+            if mode == "fetch_error":
+                return self.send_json({"detail": "QA unavailable"}, 503)
+            return self.send_json(qa_scanner_payload("momentum"))
         if path == "/api/backtest-strategies":
             return self.send_json({"strategies": [
                 {"id": "sma_crossover", "name": "QA – fehlende R / partielle Daten", "requires_ticker": False, "category": "QA", "direction": "long"},
@@ -103,6 +161,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"running": False, "scans": {}})
         if path == "/api/scan-status":
             return self.send_json({"scheduler_running": True, "scans": {
+                **{f"bi_{direction}": {
+                    "running": SCANNER_QA["bi"] == "background_running",
+                    "last_run": SCANNER_QA["stamp"] if SCANNER_QA["bi"] in {"background_done", "empty"} else STAMP,
+                    "next_run": None, "interval_min": 180, "cache_health": "ok",
+                } for direction in ("long", "short")},
                 "crypto_explosion": {"running": True, "last_run": STAMP, "next_run": None,
                     "interval_min": 15, "cache_health": "stuck", "running_since_sec": 2102,
                     "timeout_minutes": 35, "progress": {"running": True, "checked": 430,
@@ -114,7 +177,11 @@ class Handler(BaseHTTPRequestHandler):
             }})
         if path == "/api/bi-results":
             direction = query.get("direction", ["long"])[0].upper()
-            return self.send_json({"status": "success", "data": [bi_row(direction)], "count": 1, "cached_at": STAMP, "scan_running": False, "partial": False, "diagnostics": {}})
+            with SCANNER_QA_LOCK:
+                mode = SCANNER_QA["bi"]
+            if mode == "fetch_error":
+                return self.send_json({"detail": "QA unavailable"}, 503)
+            return self.send_json(qa_scanner_payload("bi", direction))
         if path == "/api/ticker-detail":
             # Deliberately contradictory live enrichment: selected SHORT must
             # retain its original snapshot, not this generic LONG setup.
@@ -142,5 +209,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("Synthetic audit UI only: http://127.0.0.1:8765", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    print(f"Synthetic audit UI only: http://127.0.0.1:{args.port}", flush=True)
+    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()

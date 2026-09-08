@@ -1,17 +1,16 @@
 # Profitabilitaets-Pruefprotokoll – 08.09.2026
 
-Status: Schritt 1 lokal umgesetzt und geprueft; kein Profitabilitaetsnachweis, keine Handelsfreigabe.
+Status: Schritt 1 umgesetzt; Scanner-Zuverlaessigkeit, sicherer Serverexport und Offline-Risikomodell lokal erweitert. Aktuelle Server-Ergebniskohorte und Netto-Profitabilitaetsnachweis fehlen weiterhin. Keine Handelsfreigabe.
 
-## Auftrag und offene Entscheidung
+## Auftrag und bestaetigte Kapitalvorgabe
 
 Gewuenscht sind bis zu drei Trades und 150 USD Nettogewinn pro Tag. Drei Trades sind eine Obergrenze, keine Pflicht und keine Zahl garantierter Gewinner. Die genannte Tagesverlusttoleranz von 300 USD ist weder ein freigegebenes Risikobudget noch eine garantierte Verlustgrenze.
 
-**Kapitalangabe `5000k`: UNGEKLAERT.** Vor Positionsgroessen, Risikoparametern oder einer gespeicherten Konfiguration sind Betrag und Kontowaehrung ausdruecklich zu bestaetigen.
+**Kapital bestaetigt am 08.09.2026: 5.000 USD.** Dies ist eine Nutzervorgabe, kein live verifizierter Broker-Kontostand. Es aktiviert keine Ausfuehrung und hebt engere bestehende Risikolimits nicht an.
 
-| Rein hypothetisches Kapital | 150 USD relativ zum Kapital | 300 USD relativ zum Kapital |
+| Bestaetigte Kapitalvorgabe | 150 USD relativ zum Kapital | 300 USD relativ zum Kapital |
 | --- | ---: | ---: |
 | 5.000 USD | 3 % pro Tag | 6 % |
-| 5.000.000 USD, woertliche Lesart von `5000k` | 0,003 % pro Tag | 0,006 % |
 
 Diese Divisionen sind keine Renditeprognose. Ein Tagesziel darf weder mehr Trades erzwingen noch Hebel, Positionsgroesse oder Stop-Naehe rechtfertigen. Stop-Orders garantieren keinen Ausfuehrungspreis; Stop-Limit-Orders koennen unausgefuehrt bleiben. Deshalb kann auch ein korrektes Risikogate einen Verlust von mehr als 300 USD nicht ausschliessen. [SEC/Investor.gov: Stop-, Stop-Limit- und Trailing-Stop-Orders](https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins-15)
 
@@ -39,6 +38,16 @@ Der vorhandene Vergleich [scanner_cohort_comparison.py](C:/Projekt/TradingBot/mo
 
 ### 2. Aktuellen Produktionsbestand sichern – offen
 
+Vorbereitet ist jetzt `scripts/collect_hetzner_evidence.ps1`: Es uebertraegt den lokal geprueften Standalone-Collector ueber SSH-stdin, ohne Serverdatei, Pull, Neustart oder Import von Server-Appcode. Der Collector prueft die aktiven API-/BG-Writer und Datenpfade, wechselt dauerhaft zur verifizierten nichtprivilegierten Service-Identitaet und liest den Tracker in einer SQLite-Transaktion einschliesslich WAL. Health und Cache-Zaehler sind separate Beobachtungen, keine atomare Gesamtsicherung. Die private Projektion enthaelt benoetigte Trade-Evidenz, aber keine Mailtexte, Empfaenger oder API-Schluessel; sie bleibt uncommittet unter `output/profitability/`.
+
+Ausfuehrung in der eigenen Windows-PowerShell (SSH-Passwort nur dort eingeben):
+
+```powershell
+& 'C:\Projekt\TradingBot\scripts\collect_hetzner_evidence.ps1'
+```
+
+Danach die erzeugte Datei lokal mit `scripts/signal_performance_breakdown.py --snapshot-json <Datei> --days 30 --format json` auswerten. Der Import validiert die Projektion; er ist kein kryptographischer Echtheitsnachweis und keine vollstaendige App-/Broker-Population. Ein solcher aktueller Serverexport liegt fuer diesen Arbeitsschritt noch nicht vor.
+
 Zuerst einen konsistenten, lesbaren Hetzner-Snapshot mit Erstellungszeit, Revisionen, Modellversionen und benoetigten Tracker-/Zustellmetadaten beschaffen. Konsistenz eines SQLite-Snapshots einschliesslich laufender WAL-Schreibvorgaenge muss nachgewiesen sein; keine unkoordinierte Kopie nur der Hauptdatei.
 
 Kosten-, Fill- und Kursdaten muessen dieselben Gelegenheiten und Zeitraeume betreffen. Geheimnisse, Mailinhalte und personenbezogene Daten sind fuer eine aggregierte Messung nicht pauschal erforderlich. Fehlende Provenienz bleibt unbekannt. Kein bisheriger lokaler Test ersetzt diesen Produktionsnachweis.
@@ -51,9 +60,13 @@ Baseline und **eine** konkret definierte Exit-Alternative verwenden dieselben zu
 
 Keine Stops passend zu 50 USD Gewinn enger setzen; keine Fibonacci-Anker, Levels oder Schwellen nach dem besten historischen Ergebnis auswaehlen. Der BI-Vertrag bleibt mindestens 17/20 bestaetigte Faktoren plus harte Blocker; darunter keine Signalausgabe, Watchlist, Mail oder Signaltracking.
 
-### 4. Netto-Ledger und prospektives Tagesbudget – offen
+### 4. Netto-Ledger und prospektives Tagesbudget – Offline-Modell umgesetzt, Integration offen
 
-Zuerst offline modellieren, erst nach Kapitalbestaetigung und gesonderter Pruefung eine persistierte Ausfuehrungskonfiguration erwaegen. Benoetigt werden:
+Das reine [Offline-Modell](C:/Projekt/TradingBot/docs/DAILY_RISK_MODEL.md) prueft jetzt feste Sessionbasis, vollstaendige Kosten, offene/reservierte Stoprisiken plus Gap-Stress und maximal drei Entry-Slots. Es nutzt exakte Dezimalarithmetik und den engsten bestehenden Cap. Es ist **nicht** in den persistenten Risiko-Store oder eine Ausfuehrung eingebunden und kann keine tatsaechliche Tagesverlustgrenze erzwingen. Broker-/Paper-Freigabe und atomare Reservierung bleiben immer falsch.
+
+Rechenbeispiel mit unveraenderten Quellcode-Prozentdefaults: 5.000 USD ergeben 12,50 USD Einzelrisiko, 37,50 USD aggregiertes Risiko und 50 USD Tagescap. Die Toleranz von 300 USD hebt diese engeren Grenzen nicht an. Schon 50 USD Bruttogewinn entsprechen bei 12,50 USD Preisrisiko 4R; mit Kosten wird der benoetigte Nettogewinn nicht leichter erreichbar. Dies ist keine Empfehlung zur Positionsgroesse und keine Aussage zur produktiven Kontokonfiguration.
+
+Zuerst offline modellieren; die Kapitalvorgabe ist jetzt bestaetigt. Eine persistierte Ausfuehrungskonfiguration benoetigt weiterhin eine gesonderte Pruefung von Brokerdaten, Session und Kosten. Benoetigt werden:
 
 - Tatsachengetreue Entry-/Exit-Fills, Teilfuellungen, Gebuehren, Spread/Slippage ohne Doppelabzug, Finanzierung/Funding und gegebenenfalls Leihkosten. Modellkosten und Brokerkosten explizit unterscheiden; fehlende Kosten nicht als null behandeln.
 - Fester Sessionbeginn, Kontowaehrung und Startkapitalbasis; Regeln fuer Mitternacht, Sommerzeit, offene Altpositionen, Gewinne und Neustarts.
@@ -113,7 +126,7 @@ Die R-Arithmetik wird aus dem bestehenden Tracker wiederverwendet, einschliessli
 
 Aktueller lokaler 30-Tage-Snapshot: 22 historische Trade-Zeilen, null neu angelegte Signale im Fenster, fuenf Plaene mit im Fenster abgelaufener Beobachtungsfrist; alle fuenf noch OPEN. Null entschiedene Ergebnisse und null qualifizierte Ursprungsnachweise. Nettoperformance und Dollar-PnL bleiben unbekannt. Das ist ein Befund ueber die lokale Datei, nicht ueber Hetzner.
 
-## Abnahme und reproduzierbare Evidenz
+## Historische Abnahme von Schritt 1 (vor den Scanner-/Offline-Erweiterungen)
 
 - Finale gezielte Tests der Diagnose und des vorhandenen Vergleichs: **54 bestanden** in 1,63 s.
 - Vollstaendige Testsuite auf den finalen Skript-/Testbytes: **3561 bestanden, 4 uebersprungen** in 634,79 s. Isolierte temporaere Daten-, Laufzeit- und Dedupe-Pfade; JUnit lokal unter `tmp/profit_evidence_full_20260908.xml`.
@@ -125,3 +138,5 @@ Aktueller lokaler 30-Tage-Snapshot: 22 historische Trade-Zeilen, null neu angele
 - Gepruefte Skriptbytes: SHA256 `c5acb23fcdc3a9ecfe37019f7875a8c46c8b2e9d0bd2b2662c415048b0548020`; Testdatei: `2db912ecfebd685b804555a5cd28935de1e5c6ef44c5ed4889ca62f34f2a1d02`.
 
 Diese Abnahme betrifft die Lesediagnose und das Pruefprotokoll, nicht einen profitablen Scanner, ein ausgefuehrtes Deployment oder die Umsetzung der offenen Schritte 2 bis 5.
+
+Die anschliessende Abnahme der Scanner-/UI-Korrekturen, des privaten Serverexports und des Offline-Risikomodells wird gesondert in `AUDIT_SCANNER_RELIABILITY_2026-09-08.md` dokumentiert. Die obigen alten Bundle-/Dateihashes sind keine Abnahme spaeter geaenderter Dateien.

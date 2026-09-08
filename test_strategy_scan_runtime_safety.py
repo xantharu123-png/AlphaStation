@@ -313,12 +313,15 @@ def test_scheduled_scan_with_fresh_readable_cache_succeeds(tmp_path, monkeypatch
             api._scan_status.pop(scan_key, None)
 
 
-def test_frontend_hides_technical_diagnostics_and_surfaces_scan_failures():
+def test_frontend_shows_safe_aggregate_evidence_and_surfaces_scan_failures():
     frontend = (Path(__file__).parent / "frontend" / "index.html").read_text(encoding="utf-8")
 
     assert "<b>Diagnose:</b>" not in frontend
     assert "Datenstand:" in frontend
-    assert "data.scan_error && !data.scan_running" in frontend
+    assert "if (data?.scan_error) return 'error'" in frontend
+    assert "scannerPublicFailure(200, data)" in frontend
+    assert "function ScannerEvidence(" in frontend
+    assert "Scanner-Daten konnten nicht geladen werden" in frontend
 
 
 def test_orb_sort_preserves_zero_r_distance(monkeypatch):
