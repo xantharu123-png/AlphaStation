@@ -13,6 +13,7 @@ import re
 import time
 import threading
 import tempfile
+import uuid
 import datetime as dt
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -30,6 +31,7 @@ from modules.helpers import is_spac
 from modules.patterns import (
     BI_STOCK_CONTRACT_VERSION,
     BI_STOCK_INDICATOR_COUNT,
+    BI_STOCK_INDICATORS,
     BI_STOCK_REQUIRED_GREEN,
     analyze_breakout_imminent,
     analyze_candles,
@@ -37,6 +39,14 @@ from modules.patterns import (
 from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signals
 from modules.trade_levels import trade_geometry
 from modules.bi_trade_plan import build_bi_trade_plan
+from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
+try:
+    from modules.signal_tracker import _detect_code_revision
+except Exception:
+    # Tracking is optional for API startup. Missing provenance stays unknown;
+    # observation must not turn it into a mandatory scanner dependency.
+    def _detect_code_revision():
+        return "unknown"
 from modules.vrvp_levels import (
     apply_vrvp_to_trade_setup,
     build_vrvp_structure,
@@ -1064,7 +1074,8 @@ def _bi_progress_read(direction="long"):
 
 
 def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0, top_score=0, avg_score=0, detail="", diagnostics=None):
-    """Schreibt Scan-Fortschritt in Datei."""
+    """Atomically publish progress; a failed write keeps the previous snapshot."""
+    tmp_path = None
     try:
         progress = {
             "status": status,  # "running", "done", "error"
@@ -1080,10 +1091,20 @@ def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0,
         }
         if diagnostics is not None:
             progress["diagnostics"] = diagnostics
-        with open(_bi_progress_path(direction), "w") as f:
+        path = _bi_progress_path(direction)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(path),
+                                         prefix=".bi-progress-", suffix=".tmp", delete=False) as f:
+            tmp_path = f.name
             json.dump(progress, f)
+        os.replace(tmp_path, path)
     except Exception:
         pass
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _bi_cache_age_str(age_min):
@@ -1161,6 +1182,30 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         "analyzed": 0, "indicator_passed": 0, "data_failures": 0, "analysis_errors": 0,
         "rejected": {}, "final_results": None,
     }
+    # Independent observation ID, not the API scheduler's run ID. Revision is
+    # the existing immutable process stamp, never a per-ticker Git lookup.
+    try:
+        funnel["confluence"] = create_bi_diagnostics(
+            direction=direction, indicator_specs=BI_STOCK_INDICATORS,
+            required_green=BI_STOCK_REQUIRED_GREEN,
+            contract_version=BI_STOCK_CONTRACT_VERSION,
+            run_id=uuid.uuid4().hex, code_revision=_detect_code_revision(),
+            started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        )
+    except Exception:
+        funnel["confluence"] = {
+            "available": False, "reason": "initialization_failed", "initialization_errors": 1,
+        }
+
+    def _observe(result, bar_count, payload_accepted):
+        # Diagnostics never grant or revoke a signal, even if observation fails.
+        if funnel["confluence"].get("available") is False:
+            return
+        try:
+            observe_bi_analysis(funnel["confluence"], result, bar_count=bar_count,
+                                payload_accepted=payload_accepted)
+        except Exception:
+            funnel["confluence"]["observation_errors"] += 1
 
     def _reject(reason):
         counts = funnel["rejected"]
@@ -1173,7 +1218,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
     try:
         # ── Fallback: Full stock universe from Polygon ──
         if not candidates:
-            _bi_progress_write(direction, "scanning", detail="Lade volles Aktien-Universe...")
+            _bi_progress_write(direction, "scanning", detail="Lade volles Aktien-Universe...", diagnostics=funnel)
             try:
                 candidates = []
                 seen = set()
@@ -1228,7 +1273,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     if not next_url:
                         break
                     _bi_progress_write(direction, "scanning",
-                                       detail=f"Universe: {len(candidates)} Aktien geladen (Seite {_page+1})...")
+                                       detail=f"Universe: {len(candidates)} Aktien geladen (Seite {_page+1})...", diagnostics=funnel)
 
                 if next_url:
                     _data_error("scan_data_incomplete")
@@ -1258,7 +1303,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         pass
 
                 _bi_progress_write(direction, "scanning",
-                                   detail=f"{len(candidates)} Kandidaten — starte Analyse")
+                                   detail=f"{len(candidates)} Kandidaten — starte Analyse", diagnostics=funnel)
                 print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
             except ScannerDataError:
                 raise
@@ -1268,18 +1313,19 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     direction,
                     "error",
                     detail=f"Universe-Fehler: {safe_error[:50]}",
+                    diagnostics=funnel,
                 )
                 _data_error("scan_data_unavailable")
 
         if not candidates:
-            _bi_progress_write(direction, "error", detail="Keine Kandidaten verfügbar")
+            _bi_progress_write(direction, "error", detail="Keine Kandidaten verfügbar", diagnostics=funnel)
             _data_error("scan_data_unavailable")
 
         candidates = _bi_interleave_candidates_by_symbol(candidates)
         total = len(candidates)
         funnel["total"] = total
         _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
-        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...")
+        _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...", diagnostics=funnel)
 
         # ── Analyse ──
         results = []
@@ -1308,7 +1354,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _bi_progress_write(direction, "stopped", checked=checked, total=total,
                                    hits=len(results), no_data=no_data_count,
                                    top_score=top_score, avg_score=avg_sc,
-                                   detail=f" Manuell gestoppt bei {checked}/{total}")
+                                   detail=f" Manuell gestoppt bei {checked}/{total}", diagnostics=funnel)
                 if results:
                     results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)
                     _bi_cache_save(
@@ -1318,6 +1364,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         checked=checked,
                         total=total,
                         detail=f"Manuell gestoppt bei {checked}/{total}",
+                        diagnostics=funnel,
                     )
                 _bi_clear_stop(direction)
                 return
@@ -1348,6 +1395,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     if not _bi_should_stop(direction):
                         avg_sc = round(score_sum / max(1, score_count))
                         _bi_progress_write(direction, "running", checked=checked, total=total,
+                                           diagnostics=funnel,
                                            hits=len(results), no_data=no_data_count,
                                            top_score=top_score, avg_score=avg_sc,
                                            detail=f"{checked}/{total} analysiert")
@@ -1455,6 +1503,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _data_error("scan_data_unavailable")
 
             analysis_attempts += 1
+            analysis_result_returned = False
+            analysis_observed = False
             try:
                 # ── Already-Broke-Out Filter: Aktie hat heute schon >15% gemacht → kein "Imminent" mehr ──
                 # Breakout IMMINENT = BEVOR der Breakout passiert, nicht NACHDEM er schon +30% gemacht hat
@@ -1498,6 +1548,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # Analyse
                 result = analyze_breakout_imminent(bars, direction=direction)
+                analysis_result_returned = True
                 if len(result) == 8:
                     is_valid, bi_score, max_score, details, confidence, grade, sm_fires, sm_hits = result
                 else:
@@ -1519,6 +1570,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 else: _score_buckets["0-19"] += 1
 
                 contract_payload = _bi_analysis_contract_payload(result)
+                analysis_observed = True
+                _observe(result, len(bars), contract_payload is not None)
                 if not is_valid or contract_payload is None:
                     contract_reject_count += 1
                     _reject("indicator_or_hard_gate_contract")
@@ -1740,9 +1793,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         checked=checked,
                         total=total,
                         detail=f"Zwischenstand: {checked}/{total} analysiert",
+                        diagnostics=funnel,
                     )
                     print(f"[BI {direction}] Live-Update: {len(_live)} BI-Signale bei {checked}/{total}")
             except Exception as e:
+                if analysis_result_returned and not analysis_observed:
+                    # Malformed analyzer returns still count as observations;
+                    # exceptions before a return remain analysis_errors only.
+                    _observe(result, len(bars), False)
                 analysis_errors += 1
                 funnel["analysis_errors"] = analysis_errors
                 print(
@@ -1773,7 +1831,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     f"{cum_pump_fail} 2d-Pump → "
                     f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "
                     f"{contract_reject_count} unter {BI_STOCK_REQUIRED_GREEN}/{BI_STOCK_INDICATOR_COUNT} "
-                    f"oder Vertragsfehler → {range_fail} Range → "
+                    f"oder harte Sperre/Vertragsfehler → {range_fail} Range → "
                     f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} BI-Signale"
                     f" [Scores: {_buckets_str}]")
         print(f"[BI {direction}] Pipeline: {pipeline}")
@@ -1789,7 +1847,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         raise
     except Exception as e:
         safe_error = redact_sensitive_query_values(e)
-        _bi_progress_write(direction, "error", detail=f"Fehler: {safe_error[:100]}")
+        funnel["coverage"] = "incomplete"
+        funnel["final_results"] = None
+        _bi_progress_write(direction, "error", checked=funnel["checked"], total=funnel["total"],
+                           detail=f"Fehler: {safe_error[:100]}", diagnostics=funnel)
         raise RuntimeError(safe_error) from None
 
 

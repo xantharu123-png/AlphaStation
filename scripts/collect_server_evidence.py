@@ -11,9 +11,11 @@ from datetime import datetime, timezone
 import json
 import http.client
 import math
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 
@@ -72,6 +74,30 @@ momentum:intraday_stale_extension momentum:intraday_data_unavailable
 momentum:intraday_confirmation_stale momentum:confirmation_expired_before_publication
 reversal_ad:ad_confirms_selloff_falling_knife
 """.split())
+CACHE_MAX_BYTES = 8 * 1024 * 1024
+# Mirrored protocol keys only. The root-invoked collector never imports app code.
+CONFLUENCE_COUNTS = frozenset("""
+evaluated schema_invalid below_required incomplete pre_hard_gate_qualified
+core_valid_count payload_accepted_count observation_errors
+""".split())
+CONFLUENCE_FACTORS = frozenset("""
+atr_squeeze volume_dry_up obv_flow close_position range_duration boundary_tests
+adx_turning institutional_flow rsi_drift range_structure directional_persistence
+range_compression macd_histogram stochastic_momentum order_block_confluence
+fvg_proximity liquidity_pool_proximity fibonacci_confluence volume_void
+candle_body_compression
+""".split())
+CONFLUENCE_FACTOR_COUNTS = frozenset({"evaluated", "green", "red", "unavailable"})
+CONFLUENCE_HARD_GATES = frozenset({
+    "last_bar_pump", "range_breakdown", "recent_bearish_pressure",
+    "recent_bullish_pressure", "unknown",
+})
+CONFLUENCE_CONTRACT = "stock-bi-20-v2"
+BI_CACHE_SCANNERS = {
+    "bi_cache_long.json": "bi_long", "bi_cache_long.json.partial": "bi_long",
+    "bi_cache_short.json": "bi_short", "bi_cache_short.json.partial": "bi_short",
+    "bi_scan_progress_long.json": "bi_long", "bi_scan_progress_short.json": "bi_short",
+}
 
 
 def _iso_timestamp(value):
@@ -98,6 +124,79 @@ def _count_projection(value, allowed):
     if omitted:
         # Keep evidence of unsupported schema without leaking free-form keys.
         result["_omitted_categories"] = omitted
+    return result
+
+
+def _confluence_identity(value, expected_scanner):
+    """Strict identifiers from the scanner call, not arbitrary source strings."""
+    scanner = value.get("scanner")
+    if (type(scanner) is not str or scanner not in ("bi_long", "bi_short")
+            or (expected_scanner is not None and scanner != expected_scanner)
+            or value.get("direction") != scanner.removeprefix("bi_")):
+        return None
+    run_id, revision = value.get("run_id"), value.get("code_revision")
+    if type(run_id) is not str or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+        return None
+    if (type(revision) is not str
+            or re.fullmatch(r"(?:[0-9a-f]{12}(?:-dirty|-tree-unknown)?|unknown)", revision) is None
+            or value.get("contract_version") != CONFLUENCE_CONTRACT):
+        return None
+    try:
+        started = datetime.fromisoformat(_iso_timestamp(value.get("started_at")))
+        if started.tzinfo is None or started.utcoffset() is None:
+            return None
+        started_at = started.astimezone(timezone.utc).isoformat()
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return {"scanner": scanner, "direction": scanner.removeprefix("bi_"),
+            "run_id": run_id, "code_revision": revision,
+            "contract_version": CONFLUENCE_CONTRACT, "started_at": started_at}
+
+
+def _confluence_projection(value, expected_scanner=None):
+    """Schema-1 numeric protocol only; absent/unknown fields never become zero."""
+    if not isinstance(value, dict):
+        return {"available": False, "schema_status": "invalid"}
+    if (value.get("available") is False and value.get("reason") == "initialization_failed"
+            and type(value.get("initialization_errors")) is int
+            and value["initialization_errors"] == 1):
+        return {"available": False, "reason": "initialization_failed", "initialization_errors": 1}
+    if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        return {"available": False, "schema_status": "unknown"}
+    if (type(value.get("required_green")) is not int or value["required_green"] != 17
+            or any(not _nonnegative_count(value.get(key)) for key in CONFLUENCE_COUNTS)):
+        return {"available": False, "schema_status": "invalid"}
+    identity = _confluence_identity(value, expected_scanner)
+    if identity is None:
+        return {"available": False, "schema_status": "invalid_identity"}
+    containers = {
+        "green_count_histogram": frozenset(str(n) for n in range(21)),
+        "available_count_histogram": frozenset(str(n) for n in range(21)),
+        "bar_count_histogram": frozenset(str(n) for n in range(36, 51)) | {"other"},
+        "first_hard_gate_counts": CONFLUENCE_HARD_GATES,
+    }
+    for key, allowed in containers.items():
+        counts = value.get(key)
+        if not isinstance(counts, dict) or any(not _nonnegative_count(counts.get(k)) for k in allowed):
+            return {"available": False, "schema_status": "invalid"}
+    factors = value.get("factor_counts")
+    if not isinstance(factors, dict):
+        return {"available": False, "schema_status": "invalid"}
+    for key in CONFLUENCE_FACTORS:
+        counts = factors.get(key)
+        if (not isinstance(counts, dict)
+                or any(not _nonnegative_count(counts.get(k)) for k in CONFLUENCE_FACTOR_COUNTS)):
+            return {"available": False, "schema_status": "invalid"}
+    result = {"available": True, "schema_version": 1, "required_green": 17}
+    result.update(identity)
+    result.update({key: value[key] for key in sorted(CONFLUENCE_COUNTS)})
+    result.update({key: _count_projection(value[key], allowed) for key, allowed in containers.items()})
+    result["factor_counts"] = {
+        key: _count_projection(factors[key], CONFLUENCE_FACTOR_COUNTS)
+        for key in sorted(CONFLUENCE_FACTORS)
+    }
+    if len(factors) > len(CONFLUENCE_FACTORS):
+        result["omitted_factor_categories"] = len(factors) - len(CONFLUENCE_FACTORS)
     return result
 
 
@@ -142,9 +241,21 @@ def service_pid(unit):
     return pid
 
 
+def _proc_directory(pid):
+    return Path("/proc") / str(pid)
+
+
+def _namespace_path(runtime, service_path):
+    """Keep /proc/PID/root intact: resolve() would escape a PrivateTmp view."""
+    target = PurePosixPath(str(service_path))
+    if not target.is_absolute() or ".." in target.parts:
+        raise ValueError("Expected an absolute service path without parent traversal")
+    return Path(runtime["process_root"]).joinpath(*target.parts[1:])
+
+
 def runtime_identity(unit, app):
     pid = service_pid(unit)
-    proc = Path("/proc") / str(pid)
+    proc = _proc_directory(pid)
     cwd = (proc / "cwd").resolve(strict=True)
     if cwd != app:
         raise ValueError("Unexpected service working directory")
@@ -171,12 +282,18 @@ def runtime_identity(unit, app):
     tracker = Path(environment.get("SIGNAL_TRACKER_DB_PATH", str(data / "signal_tracker.sqlite")))
     if not tracker.is_absolute():
         tracker = cwd / tracker
-    temp = Path(environment.get("ALPHA_RUNTIME_TMP_DIR", "/tmp"))
+    temp = PurePosixPath(environment.get("ALPHA_RUNTIME_TMP_DIR") or "/tmp")
     if not temp.is_absolute():
-        temp = cwd / temp
-    return {"pid": pid, "uid": ownership["Uid"], "gid": ownership["Gid"],
+        temp = PurePosixPath(cwd.as_posix()) / temp
+    # This intentional kernel-provided symlink is retained, not resolved to the
+    # host root. Cache paths below it use the verified service's mount namespace.
+    process_root = proc / "root"
+    identity = {"pid": pid, "uid": ownership["Uid"], "gid": ownership["Gid"],
             "cwd": str(cwd), "tracker": str(tracker.resolve(strict=True)),
-            "progress_dir": str(temp.resolve(strict=True))}
+            "process_root": str(process_root), "progress_dir": str(temp)}
+    if not _namespace_path(identity, temp).is_dir():
+        raise ValueError("Service progress directory is unavailable")
+    return identity
 
 
 def drop_reader_privileges(uid, gid, os_api=None):
@@ -220,13 +337,34 @@ def local_health():
         connection.close()
 
 
+def _read_cache_payload(path):
+    """Bounded, read-only regular-file read; never wait on an exchanged FIFO."""
+    path = Path(path)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size > CACHE_MAX_BYTES:
+        raise ValueError("Cache is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_size > CACHE_MAX_BYTES
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise ValueError("Cache file changed during open")
+        raw = stream.read(CACHE_MAX_BYTES + 1)
+        after = os.fstat(stream.fileno())
+        if ((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError("Cache file changed during read")
+    if len(raw) > CACHE_MAX_BYTES:
+        raise ValueError("Cache exceeds bounded size")
+    return json.loads(raw.decode("utf-8"))
+
+
 def safe_cache_summary(path):
     """Counts/numeric funnel only, not cached tickers or free-form messages."""
     try:
-        path = Path(path)
-        if path.is_symlink() or not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
-            return {"available": False}
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = _read_cache_payload(path)
         if not isinstance(payload, dict):
             return {"available": False}
         result = {"available": True}
@@ -266,6 +404,9 @@ def safe_cache_summary(path):
                 counts = _count_projection(diagnostics.get(key), allowed)
                 if counts is not None:
                     result[key] = counts
+            if "confluence" in diagnostics:
+                result["confluence"] = _confluence_projection(
+                    diagnostics["confluence"], BI_CACHE_SCANNERS.get(Path(path).name))
         return result
     except (OSError, ValueError, TypeError):
         return {"available": False}
@@ -287,11 +428,12 @@ def collect(app):
     drop_reader_privileges(service_account.pw_uid, service_account.pw_gid)
     health = local_health()
     tracker = tracker_snapshot(runtimes[units[0]]["tracker"])
-    caches = {name: safe_cache_summary(path) for name, path in {
+    api_runtime = runtimes[units[0]]
+    caches = {name: safe_cache_summary(_namespace_path(api_runtime, path)) for name, path in {
         "bi_long": "/tmp/bi_cache_long.json", "bi_short": "/tmp/bi_cache_short.json",
         "momentum": "/tmp/strategy_momentum_breakout_long_cache.json",
-        "bi_long_progress": Path(runtimes[units[0]]["progress_dir"]) / "bi_scan_progress_long.json",
-        "bi_short_progress": Path(runtimes[units[0]]["progress_dir"]) / "bi_scan_progress_short.json",
+        "bi_long_progress": PurePosixPath(api_runtime["progress_dir"]) / "bi_scan_progress_long.json",
+        "bi_short_progress": PurePosixPath(api_runtime["progress_dir"]) / "bi_scan_progress_short.json",
     }.items()}
     if any(runtime_identity(unit, app) != runtimes[unit] for unit in units):
         raise ValueError("Writer restarted or paths changed during collection")
@@ -301,6 +443,7 @@ def collect(app):
             "tracker": tracker, "scanner_caches": caches,
             "notes": ["Tracker rows are one SQLite read transaction including WAL.",
                       "SQLite/cache reading runs as verified non-root tradingbot UID/GID.",
+                      "Cache/progress paths use the verified API process mount namespace.",
                       "Normal SQLite WAL/SHM coordination is possible; no root-owned sidecars.",
                       "Cache/health files are separately observed, not an atomic cross-file snapshot.",
                       "No recipients, account blobs, mail bodies or API keys selected.",

@@ -2,8 +2,10 @@ from contextlib import closing
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -224,3 +226,343 @@ def test_health_no_redirect_non200_oversized_or_nonobject_response(monkeypatch, 
     with pytest.raises(ValueError):
         collector.local_health()
     assert state["closed"]
+
+
+def _confluence_payload():
+    # Synthetic protocol example, never market evidence or scanner output.
+    result = {"schema_version": 1, "required_green": 17, "scanner": "bi_long", "direction": "long",
+              "run_id": "0123456789abcdef" * 2, "code_revision": "012345abcdef-dirty",
+              "contract_version": "stock-bi-20-v2", "started_at": "2026-09-08T12:00:00+02:00"}
+    result.update({key: 0 for key in collector.CONFLUENCE_COUNTS})
+    result["green_count_histogram"] = {str(n): 0 for n in range(21)}
+    result["available_count_histogram"] = {str(n): 0 for n in range(21)}
+    result["bar_count_histogram"] = {str(n): 0 for n in range(36, 51)} | {"other": 0}
+    result["factor_counts"] = {
+        key: {name: 0 for name in collector.CONFLUENCE_FACTOR_COUNTS}
+        for key in collector.CONFLUENCE_FACTORS
+    }
+    result["first_hard_gate_counts"] = {key: 0 for key in collector.CONFLUENCE_HARD_GATES}
+    return result
+
+
+def test_collector_factor_allowlist_matches_registry_without_runtime_app_import():
+    import ast
+    source = (Path(__file__).parent / "modules" / "patterns.py").read_text(encoding="utf8")
+    tree = ast.parse(source)
+    registry = next(ast.literal_eval(node.value) for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "BI_STOCK_INDICATORS"
+                            for target in node.targets))
+    assert collector.CONFLUENCE_FACTORS == {row[1] for row in registry}
+    collector_tree = ast.parse(Path(collector.__file__).read_text(encoding="utf8"))
+    imports = [node for node in ast.walk(collector_tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
+    assert not any(isinstance(node, ast.ImportFrom) and (node.module or "").startswith("modules")
+                   or isinstance(node, ast.Import) and any(alias.name.startswith("modules") for alias in node.names)
+                   for node in imports)
+
+
+def test_confluence_summary_exports_fixed_counts_but_no_metadata_or_dynamic_private_keys(tmp_path):
+    confluence = _confluence_payload()
+    confluence.update(evaluated=12, below_required=10, pre_hard_gate_qualified=2,
+                     detail="PRIVATE_TEXT", token="PRIVATE_TOKEN")
+    confluence["green_count_histogram"]["17"] = 2
+    confluence["green_count_histogram"]["PRIVATE_BIN"] = 10
+    confluence["factor_counts"]["atr_squeeze"]["green"] = 7
+    confluence["factor_counts"]["atr_squeeze"]["PRIVATE_NESTED"] = 9
+    confluence["factor_counts"]["PRIVATE_FACTOR"] = {"green": 200}
+    confluence["first_hard_gate_counts"]["PRIVATE_HARD_GATE"] = 2
+    path = tmp_path / "confluence.json"
+    path.write_text(json.dumps({"results": [{"ticker": "PRIVATE_ROW"}],
+                               "diagnostics": {"confluence": confluence}}), encoding="utf8")
+    summary = collector.safe_cache_summary(path)
+    result = summary["confluence"]
+    assert result["available"] is True
+    assert result["evaluated"] == 12 and result["green_count_histogram"]["17"] == 2
+    assert result["factor_counts"]["atr_squeeze"]["green"] == 7
+    assert result["green_count_histogram"]["_omitted_categories"] == 1
+    assert result["omitted_factor_categories"] == 1
+    assert "PRIVATE" not in json.dumps(summary)
+    assert result["run_id"] == confluence["run_id"]
+    assert result["code_revision"] == confluence["code_revision"]
+    assert result["started_at"] == "2026-09-08T10:00:00+00:00"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_id", "PRIVATE_RUN"), ("run_id", "a" * 31), ("run_id", None),
+    ("code_revision", "abc1234"), ("code_revision", "a" * 40),
+    ("code_revision", "012345abcdef-PRIVATE_SUFFIX"), ("code_revision", ["PRIVATE_VALUE"]),
+    ("contract_version", "PRIVATE_CONTRACT"), ("scanner", "PRIVATE_SCANNER"),
+    ("scanner", {}), ("direction", "short"), ("direction", ["long"]),
+    ("started_at", "2026-09-08T12:00:00"), ("started_at", "PRIVATE_TIME"),
+])
+def test_confluence_untrusted_or_missing_identity_is_not_exported(key, value):
+    payload = _confluence_payload()
+    payload[key] = value
+    assert collector._confluence_projection(payload) == {"available": False, "schema_status": "invalid_identity"}
+
+
+@pytest.mark.parametrize("revision", ["012345abcdef", "012345abcdef-dirty", "012345abcdef-tree-unknown", "unknown"])
+def test_confluence_revision_identity_retains_dirty_and_uncertain_suffixes(revision):
+    payload = _confluence_payload()
+    payload["code_revision"] = revision
+    result = collector._confluence_projection(payload)
+    assert result["available"] is True and result["code_revision"] == revision
+
+
+@pytest.mark.parametrize("name,scanner", [("bi_cache_short.json", "bi_short"),
+                                          ("bi_scan_progress_short.json", "bi_short"),
+                                          ("bi_cache_long.json", "bi_long"),
+                                          ("bi_scan_progress_long.json", "bi_long")])
+def test_confluence_identity_must_match_known_cache_or_progress_direction(tmp_path, name, scanner):
+    path = tmp_path / name
+    payload = _confluence_payload()
+    payload.update(scanner=scanner, direction=scanner.removeprefix("bi_"))
+    path.write_text(json.dumps({"diagnostics": {"confluence": payload}}), encoding="utf8")
+    assert collector.safe_cache_summary(path)["confluence"]["available"] is True
+    opposite = "bi_short" if scanner == "bi_long" else "bi_long"
+    payload.update(scanner=opposite, direction=opposite.removeprefix("bi_"))
+    path.write_text(json.dumps({"diagnostics": {"confluence": payload}}), encoding="utf8")
+    assert collector.safe_cache_summary(path)["confluence"] == {"available": False, "schema_status": "invalid_identity"}
+
+
+@pytest.mark.parametrize("version", [None, 0, 2, True, "1", "PRIVATE_VERSION"])
+def test_confluence_unknown_schema_is_not_reported_as_zero(version):
+    payload = _confluence_payload()
+    payload["schema_version"] = version
+    assert collector._confluence_projection(payload) == {"available": False, "schema_status": "unknown"}
+
+
+@pytest.mark.parametrize("location,value", [
+    ("evaluated", -1), ("evaluated", True), ("evaluated", "4"),
+    ("evaluated", 2**63), ("required_green", 16), ("required_green", True),
+    ("green_count_histogram", {}), ("factor_counts", {}),
+    ("first_hard_gate_counts", None),
+])
+def test_confluence_incomplete_or_invalid_protocol_is_not_fabricated(location, value):
+    payload = _confluence_payload()
+    payload[location] = value
+    assert collector._confluence_projection(payload) == {"available": False, "schema_status": "invalid"}
+
+
+def test_missing_confluence_is_omitted_and_true_observed_zero_is_retained(tmp_path):
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({"diagnostics": {}}), encoding="utf8")
+    assert "confluence" not in collector.safe_cache_summary(path)
+    path.write_text(json.dumps({"diagnostics": {"confluence": _confluence_payload()}}), encoding="utf8")
+    result = collector.safe_cache_summary(path)["confluence"]
+    assert result["available"] is True and result["evaluated"] == 0
+    assert result["green_count_histogram"]["17"] == 0
+
+
+def test_confluence_initialization_failure_exports_only_fixed_unavailable_error_block(tmp_path):
+    path = tmp_path / "bi_cache_long.json"
+    failure = {"available": False, "reason": "initialization_failed", "initialization_errors": 1}
+    path.write_text(json.dumps({"diagnostics": {"confluence": {
+        **failure, "exception": "PRIVATE_EXCEPTION", "token": "PRIVATE_KEY",
+    }}}), encoding="utf8")
+    result = collector.safe_cache_summary(path)["confluence"]
+    assert result == failure
+    assert "evaluated" not in result and "green_count_histogram" not in result
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("change", [
+    {"available": 0}, {"available": True}, {"reason": "PRIVATE_REASON"},
+    {"initialization_errors": True}, {"initialization_errors": 0},
+    {"initialization_errors": 2}, {"initialization_errors": "1"},
+])
+def test_confluence_initialization_failure_requires_exact_allowlisted_types_and_values(change):
+    payload = {"available": False, "reason": "initialization_failed", "initialization_errors": 1, **change}
+    assert collector._confluence_projection(payload) == {"available": False, "schema_status": "unknown"}
+
+
+def test_cache_read_uses_readonly_flags_and_preserves_same_file_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    path.write_text('{"checked":7,"results":[]}', encoding="utf8")
+    before = path.stat()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    real_open = collector.os.open
+    calls = []
+    def read_open(target, flags):
+        calls.append(flags)
+        return real_open(target, flags)
+    monkeypatch.setattr(collector.os, "open", read_open)
+    assert collector.safe_cache_summary(path)["checked"] == 7
+    assert calls and all((flags & (os.O_WRONLY | os.O_RDWR)) == 0 for flags in calls)
+    assert not any(flags & (os.O_CREAT | os.O_TRUNC | os.O_APPEND) for flags in calls)
+    assert path.stat().st_ino == before.st_ino
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory", "oversized"])
+def test_cache_unsafe_type_or_oversized_file_never_opens(tmp_path, monkeypatch, kind):
+    path = tmp_path / "cache.json"
+    path.write_text("{}", encoding="utf8")
+    mode = {"symlink": stat.S_IFLNK, "fifo": stat.S_IFIFO,
+            "directory": stat.S_IFDIR, "oversized": stat.S_IFREG}[kind]
+    real_lstat = Path.lstat
+    monkeypatch.setattr(Path, "lstat", lambda self: SimpleNamespace(
+        st_mode=mode, st_size=collector.CACHE_MAX_BYTES + 1 if kind == "oversized" else 2
+    ) if self == path else real_lstat(self))
+    def forbidden_open(*args):
+        raise AssertionError("An unsafe path must not be opened")
+    monkeypatch.setattr(collector.os, "open", forbidden_open)
+    assert collector.safe_cache_summary(path) == {"available": False}
+
+
+def test_cache_exchange_to_other_inode_or_fifo_is_rejected_after_nonblocking_open(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    path.write_text('{"checked":99}', encoding="utf8")
+    real_fstat = collector.os.fstat
+    for changed_mode in (stat.S_IFREG, stat.S_IFIFO):
+        def changed_file(fd):
+            original = real_fstat(fd)
+            return SimpleNamespace(st_mode=changed_mode, st_size=original.st_size,
+                                   st_dev=original.st_dev, st_ino=original.st_ino + 1)
+        monkeypatch.setattr(collector.os, "fstat", changed_file)
+        assert collector.safe_cache_summary(path) == {"available": False}
+
+
+def test_cache_growth_during_read_still_has_hard_byte_bound(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    path.write_text('{"checked":99}', encoding="utf8")
+    monkeypatch.setattr(collector, "CACHE_MAX_BYTES", 8)
+    original = path.stat()
+    fake_stat = SimpleNamespace(st_mode=stat.S_IFREG, st_size=2,
+                                st_dev=original.st_dev, st_ino=original.st_ino,
+                                st_mtime_ns=original.st_mtime_ns)
+    real_lstat = Path.lstat
+    monkeypatch.setattr(Path, "lstat", lambda self: fake_stat if self == path else real_lstat(self))
+    monkeypatch.setattr(collector.os, "fstat", lambda fd: fake_stat)
+    assert collector.safe_cache_summary(path) == {"available": False}
+
+
+def test_cache_in_place_write_during_read_is_unavailable_even_when_size_is_unchanged(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    path.write_bytes(b'{"checked":11}')
+    original = path.stat()
+    real_fdopen = collector.os.fdopen
+    class MutatingReader:
+        def __init__(self, descriptor, mode):
+            self.stream = real_fdopen(descriptor, mode)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def fileno(self):
+            return self.stream.fileno()
+        def read(self, limit):
+            raw = self.stream.read(limit)
+            path.write_bytes(b'{"checked":22}')
+            os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1000000000))
+            return raw
+    monkeypatch.setattr(collector.os, "fdopen", MutatingReader)
+    assert collector.safe_cache_summary(path) == {"available": False}
+    assert path.stat().st_ino == original.st_ino and path.stat().st_size == original.st_size
+
+
+def _mock_runtime_process(tmp_path, monkeypatch, progress_dir="/tmp"):
+    proc = tmp_path / "proc" / "321"
+    app = proc / "cwd"
+    app.mkdir(parents=True)
+    tracker = app / "signal_tracker.sqlite"
+    tracker.write_bytes(b"identity-check-only")
+    process_root = proc / "root"
+    process_root.joinpath(*collector.PurePosixPath(progress_dir).parts[1:]).mkdir(parents=True)
+    (proc / "status").write_text("Name:\tpython\nUid:\t1001\t1001\t1001\t1001\nGid:\t1002\t1002\t1002\t1002\n", encoding="ascii")
+    environment = [f"SIGNAL_TRACKER_DB_PATH={tracker}", "PRIVATE_KEY=DO_NOT_EXPORT"]
+    if progress_dir != "/tmp":
+        environment.append("ALPHA_RUNTIME_TMP_DIR=" + progress_dir)
+    (proc / "environ").write_bytes("\0".join(environment).encode())
+    monkeypatch.setattr(collector, "service_pid", lambda unit: 321)
+    monkeypatch.setattr(collector, "_proc_directory", lambda pid: proc)
+    return proc, app, tracker
+
+
+@pytest.mark.parametrize("progress_dir", ["/tmp", "/run/alpha-private"])
+def test_runtime_identity_keeps_verified_process_root_and_service_progress_path(tmp_path, monkeypatch, progress_dir):
+    proc, app, tracker = _mock_runtime_process(tmp_path, monkeypatch, progress_dir)
+    real_resolve = Path.resolve
+    def no_namespace_resolve(self, *args, **kwargs):
+        assert proc / "root" not in (self, *self.parents), "Do not resolve paths out of the service namespace"
+        return real_resolve(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", no_namespace_resolve)
+    result = collector.runtime_identity("tradingbot-api.service", app.resolve())
+    assert result["pid"] == 321 and (result["uid"], result["gid"]) == (1001, 1002)
+    assert result["process_root"] == str(proc / "root")
+    assert result["progress_dir"] == progress_dir
+    assert result["tracker"] == str(tracker.resolve())
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_runtime_identity_still_rejects_wrong_cwd_or_mixed_process_privileges(tmp_path, monkeypatch):
+    proc, app, _ = _mock_runtime_process(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="working directory"):
+        collector.runtime_identity("tradingbot-api.service", tmp_path)
+    (proc / "status").write_text("Uid:\t0\t1001\t0\t1001\nGid:\t1002\t1002\t1002\t1002\n", encoding="ascii")
+    with pytest.raises(ValueError, match="Mixed process"):
+        collector.runtime_identity("tradingbot-api.service", app.resolve())
+
+
+@pytest.mark.parametrize("target", ["relative/cache.json", "/tmp/../secret", "C:\\tmp\\cache.json"])
+def test_namespace_cache_targets_must_be_absolute_service_paths_without_traversal(target):
+    with pytest.raises(ValueError):
+        collector._namespace_path({"process_root": "/proc/321/root"}, target)
+
+
+def _mock_collection(tmp_path, monkeypatch):
+    app = tmp_path / "app"
+    app.mkdir()
+    runtimes = {}
+    for pid, unit in ((321, "tradingbot-api.service"), (654, "tradingbot-bg.service")):
+        runtimes[unit] = {"pid": pid, "uid": 1001, "gid": 1002, "cwd": str(app),
+                          "tracker": str(app / "tracker.sqlite"),
+                          "process_root": str(tmp_path / "proc" / str(pid) / "root"),
+                          "progress_dir": "/run/alpha-progress"}
+    monkeypatch.setattr(collector, "runtime_identity", lambda unit, app: dict(runtimes[unit]))
+    monkeypatch.setitem(collector.sys.modules, "pwd", SimpleNamespace(
+        getpwnam=lambda name: SimpleNamespace(pw_uid=1001, pw_gid=1002)))
+    state = {"dropped": False, "paths": []}
+    monkeypatch.setattr(collector, "drop_reader_privileges", lambda uid, gid: state.update(dropped=True))
+    monkeypatch.setattr(collector, "local_health", lambda: _health_payload())
+    def snapshot(path):
+        assert state["dropped"]
+        return {"inventory": {}, "rows": []}
+    monkeypatch.setattr(collector, "tracker_snapshot", snapshot)
+    return app, runtimes, state
+
+
+def test_collection_reads_api_namespace_caches_and_override_progress_after_privilege_drop(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    def summary(path):
+        assert state["dropped"]
+        state["paths"].append(Path(path))
+        return {"available": False}
+    monkeypatch.setattr(collector, "safe_cache_summary", summary)
+    result = collector.collect(app)
+    namespace = Path(runtimes["tradingbot-api.service"]["process_root"])
+    assert state["paths"] == [
+        namespace / "tmp" / "bi_cache_long.json",
+        namespace / "tmp" / "bi_cache_short.json",
+        namespace / "tmp" / "strategy_momentum_breakout_long_cache.json",
+        namespace / "run" / "alpha-progress" / "bi_scan_progress_long.json",
+        namespace / "run" / "alpha-progress" / "bi_scan_progress_short.json",
+    ]
+    assert result["read_only"] is True
+
+
+def test_collection_never_falls_back_to_host_cache_when_private_tmp_is_missing(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    result = collector.collect(app)
+    assert all(value == {"available": False} for value in result["scanner_caches"].values())
+
+
+def test_collection_rejects_process_restart_during_namespace_read(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    def summary(path):
+        runtimes["tradingbot-api.service"]["pid"] = 322
+        runtimes["tradingbot-api.service"]["process_root"] = str(tmp_path / "proc" / "322" / "root")
+        return {"available": False}
+    monkeypatch.setattr(collector, "safe_cache_summary", summary)
+    with pytest.raises(ValueError, match="restarted or paths changed"):
+        collector.collect(app)
