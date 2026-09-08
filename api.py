@@ -41,6 +41,7 @@ from typing import Optional, Dict, List, Any, Tuple, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import make_msgid
@@ -96,6 +97,7 @@ except ImportError as _auth_err:
     HAS_AUTH = False
     print(f"[Warning] Auth module not loaded: {_auth_err}")
 import requests as req
+from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 
 # Import scanner modules
 from modules.scanners import (
@@ -23532,7 +23534,9 @@ _SCAN_TIMEOUTS = {
     "bear": 20,
     "early_movers": 25,
     "crypto_trade_signals": 30,
-    "crypto_explosion": 25,
+    # 08.09. Serverlogs: 28 completed runs, median 23m55s, max 29m22s.
+    # Warning headroom only; keep the independent 75-minute hard limit.
+    "crypto_explosion": 35,
     "penny_stocks": 45,
     "penny_positions": 5,
     # Zweitkalibrierung 31.07. (Live-Messung 30./31.07.): US-Session-Laufzeiten
@@ -23557,6 +23561,8 @@ def _stuck_hard_cap_sec(name) -> int:
     if name in ("bi_long", "bi_short"):
         # Nur das Warnbudget wurde kalibriert; das bestehende Hartlimit bleibt.
         return 135 * 60
+    if name == "crypto_explosion":
+        return 75 * 60
     budget_sec = _SCAN_TIMEOUTS.get(name, 10) * 60
     return max(budget_sec * _STUCK_HARD_CAP_MULT, budget_sec + _STUCK_HARD_CAP_MIN_EXTRA_SEC)
 
@@ -23593,16 +23599,26 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=
             "kontrolliert neu starten: <code>systemctl restart tradingbot-api</code>."
         )
     else:
-        subject = f"Scan-Waechter: {name} haengt"
+        subject = f"Scan-Waechter: {name} dauert laenger als vorgesehen"
         headline = f"{name} laeuft seit {minutes} Min (Budget {timeout_min} Min)"
         detail = (
-            "Der Scan hat sein Zeitbudget gerissen und haengt wahrscheinlich in "
-            "einem Netz-Aufruf. Es wird kein paralleler Ersatzlauf gestartet. "
+            "Der Scan hat sein Warnbudget ueberschritten. Die Laufzeit allein "
+            "belegt keinen Haenger oder blockierten Netz-Aufruf. "
+            "Es wird kein paralleler Ersatzlauf gestartet. "
             "Endet der Worker nicht selbst, meldet der Waechter am Hartlimit, dass "
-            "ein kontrollierter Dienst-Neustart erforderlich ist. Der sichere "
-            "Serverbefehl dafuer lautet: "
+            "ein kontrollierter Dienst-Neustart erforderlich ist. "
+            "Wegen dieser Warnung allein ist noch kein Neustart noetig. "
+            "Der Serverbefehl fuer den spaeteren Hartlimit-Fall lautet: "
             "<code>systemctl restart tradingbot-api</code>."
         )
+    if name == "crypto_explosion":
+        progress = _ce_progress_snapshot()
+        if progress.get("running"):
+            detail += (
+                f" Fortschritt: {int(progress.get('checked', 0))}/"
+                f"{int(progress.get('total', 0))} Handelspaare geprueft; "
+                f"letzter Fortschritt vor {progress['seconds_since_progress']} Sekunden."
+            )
     rendered_at = datetime.now(timezone.utc)
     body_html = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
@@ -23814,6 +23830,10 @@ def _run_scan_safe(name, func, timeout_min=None):
     run_id = uuid.uuid4().hex
     with _scan_lock:
         active_thread = _scan_threads.get(name)
+        sibling = {"crypto_explosion": "crypto_trade_signals", "crypto_trade_signals": "crypto_explosion"}.get(name)
+        if sibling and _scan_status.get(sibling, {}).get("running"):
+            print(f"[Scheduler] {name} skip: shared crypto engine owned by {sibling}")
+            return False
         if (active_thread is not None and active_thread.is_alive()) or _scan_status[name].get("running"):
             runtime = _scan_runtime_state(name, _scan_status[name], timeout_minutes=timeout_min)
             if runtime["timeout_exceeded"]:
@@ -26622,6 +26642,9 @@ def get_scan_status():
                 scans_copy[name]["running_since_sec"] = int(time.time() - status["_started_at"])
 
     # Progress-Daten aus /tmp/ Files anhängen (BI + Biotech)
+    crypto_progress = _ce_progress_snapshot()
+    if crypto_progress and "crypto_explosion" in scans_copy:
+        scans_copy["crypto_explosion"]["progress"] = crypto_progress
     for scan_key, reader in [("bi_long", lambda: _bi_progress_read("long")),
                               ("bi_short", lambda: _bi_progress_read("short")),
                               ("biotech", _biotech_progress_read)]:
@@ -27908,7 +27931,7 @@ def _fetch_bybit_candles(symbol: str, timeframe: str = "5m", count: int = 120) -
     if not contract:
         return []
     try:
-        response = req.get(
+        response = scan_http_get(req.get,
             "https://api.bybit.com/v5/market/kline",
             params={"category": "linear", "symbol": contract, "interval": interval, "limit": min(max(int(count or 120), 2), 1000)},
             timeout=12,
@@ -27943,6 +27966,8 @@ def _fetch_bybit_candles(symbol: str, timeframe: str = "5m", count: int = 120) -
             except Exception:
                 continue
         return bars
+    except ScanRequestError:
+        raise
     except Exception as exc:
         print(f"[Bybit candles] {contract} {timeframe}: {_sanitized_exception_text(exc)}")
         return []
@@ -31006,6 +31031,22 @@ def get_early_movers():
 # Note: _crash_monitor_wrapper is defined later with fear score functionality
 CRYPTO_EXPLOSION_MAX_CHART_CHECKS = int(os.environ.get("CRYPTO_EXPLOSION_MAX_CHART_CHECKS", "1000") or "1000")
 CRYPTO_EXPLOSION_MIN_TURNOVER_USD = float(os.environ.get("CRYPTO_EXPLOSION_MIN_TURNOVER_USD", "1500000") or "1500000")
+_CE_RUN_LOCK = threading.Lock()
+_CE_PROGRESS = {}
+
+
+def _ce_progress_snapshot() -> Dict[str, Any]:
+    with _scan_lock:
+        result = deepcopy(_CE_PROGRESS)
+    if result:
+        result["seconds_since_progress"] = max(0, int(time.time() - result["updated_at"]))
+    return result
+
+
+def _ce_progress_update(**values) -> None:
+    with _scan_lock:
+        _CE_PROGRESS.update(values)
+        _CE_PROGRESS["updated_at"] = time.time()
 
 
 def _ce_float(value: Any, default: float = 0.0) -> float:
@@ -31045,10 +31086,12 @@ def _ce_base_from_contract(contract: str) -> str:
 
 def _ce_http_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12) -> Any:
     try:
-        response = req.get(url, params=params, timeout=timeout)
+        response = scan_http_get(req.get, url, params=params, timeout=timeout)
         if response.status_code != 200:
             return None
         return response.json()
+    except ScanRequestError:
+        raise
     except Exception as exc:
         print(f"[Crypto Explosion] HTTP error: {_sanitized_exception_text(exc)}")
         return None
@@ -31281,9 +31324,13 @@ def _fetch_crypto_explosion_universe() -> Tuple[List[Dict[str, Any]], Dict[str, 
     ]
     rows: List[Dict[str, Any]] = []
     by_exchange: Dict[str, int] = {}
+    request_failures = {}
     for exchange, func in sources:
         try:
             got = func()
+        except ScanRequestError as exc:
+            request_failures[exchange] = exc.reason
+            got = []
         except Exception as exc:
             print(
                 f"[Crypto Explosion] {exchange} universe failed: "
@@ -31301,7 +31348,7 @@ def _fetch_crypto_explosion_universe() -> Tuple[List[Dict[str, Any]], Dict[str, 
             continue
         seen.add(key)
         unique.append(row)
-    return unique, {"by_exchange": by_exchange, "universe_count": len(unique)}
+    return unique, {"by_exchange": by_exchange, "universe_count": len(unique), "request_failures": request_failures}
 
 
 def _ce_completed_bars(
@@ -31345,9 +31392,16 @@ def _ce_green_streak(bars: List[Dict[str, Any]]) -> Tuple[int, float]:
 
 
 _CE_BTC_CONTEXT_CACHE = {"ts": 0.0, "btc_24h": None, "known": False, "data_status": "missing"}
+_CE_BTC_CONTEXT_LOCK = threading.Lock()
 
 
 def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[str, Any]:
+    # Single-flight refresh: parallel venue workers must not stampede CoinGecko.
+    with _CE_BTC_CONTEXT_LOCK:
+        return _get_crypto_btc_context_locked(symbol, coin_change_24h)
+
+
+def _get_crypto_btc_context_locked(symbol: str, coin_change_24h: float) -> Dict[str, Any]:
     known = False
     status = "error"
     error = None
@@ -31356,6 +31410,10 @@ def _get_crypto_btc_context(symbol: str, coin_change_24h: float = 0.0) -> Dict[s
             btc_change = _ce_float(_CE_BTC_CONTEXT_CACHE.get("btc_24h"))
             known = True
             status = "ok"
+        elif (0 <= time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 30
+              and _CE_BTC_CONTEXT_CACHE.get("data_status") == "error"):
+            btc_change = 0.0
+            error = "BTC market context temporarily unavailable"
         else:
             markets = _fetch_coingecko_markets(pages=1)
             btc = next((c for c in markets if c.get("id") == "bitcoin"), None)
@@ -31716,35 +31774,89 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
 
 
 def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    universe, stats = _fetch_crypto_explosion_universe()
+    _ce_progress_update(running=True, status="universe", checked=0, total=0,
+                        hits=0, errors=0, by_exchange={}, started_at=time.time(),
+                        detail="Crypto Long Engine: Handelsplaetze werden abgefragt",
+                        hits_label="Setups vor Endpruefung")
+    with paced_scan_requests():
+        universe, stats = _fetch_crypto_explosion_universe()
     max_checks = max(50, min(CRYPTO_EXPLOSION_MAX_CHART_CHECKS, 1600))
-    results: List[Dict[str, Any]] = []
-    reason_counts: Dict[str, int] = {}
-    checked = 0
-    for row in universe[:max_checks]:
-        checked += 1
-        contract = row.get("contract")
-        exchange = row.get("exchange")
-        try:
-            bars5 = _fetch_exchange_candles_any(contract, exchange, timeframe="5m", count=140)
-            bars15 = _fetch_exchange_candles_any(contract, exchange, timeframe="15m", count=96)
-            bars4h = _fetch_exchange_candles_any(contract, exchange, timeframe="4h", count=72)
-            row = _refresh_crypto_funding(row)
-            if len(_ce_completed_bars(bars5, "5m")) >= 50 and len(_ce_completed_bars(bars15, "15m")) >= 24:
-                row = _refresh_crypto_explosion_spread(row)
-            scored = _score_crypto_explosion_candidate(row, bars5, bars15, bars4h)
-            if scored:
-                results.append(scored)
-        except Exception as exc:
-            key = f"{exchange}_chart_error"
-            reason_counts[key] = reason_counts.get(key, 0) + 1
-            print(
-                f"[Crypto Explosion] {exchange}:{contract} error: "
-                f"{_sanitized_exception_text(exc)}"
-            )
+    groups = {}
+    for index, row in enumerate(universe[:max_checks]):
+        exchange = str(row.get("exchange") or "").lower()
+        if exchange not in {"bybit", "binance", "mexc", "bitget"}:
+            raise ValueError("Crypto Explosion: unsupported universe venue")
+        groups.setdefault(exchange, []).append((index, dict(row)))
+    total = sum(map(len, groups.values()))
+    _ce_progress_update(status="scanning", total=total, by_exchange={
+        venue: {"checked": 0, "total": len(batch)} for venue, batch in groups.items()
+    }, source_failures=dict(stats.get("request_failures") or {}))
 
+    def scan_venue(exchange, batch):
+        found, reasons, aborted = [], {}, False
+        # Exactly one worker per venue; <=4 workers/futures, no 1000-item queue.
+        with paced_scan_requests():
+            for index, row in batch:
+                scored = None
+                error = False
+                try:
+                    contract = row.get("contract")
+                    bars5 = _fetch_exchange_candles_any(contract, exchange, timeframe="5m", count=140)
+                    bars15 = _fetch_exchange_candles_any(contract, exchange, timeframe="15m", count=96)
+                    bars4h = _fetch_exchange_candles_any(contract, exchange, timeframe="4h", count=72)
+                    row = _refresh_crypto_funding(row)
+                    if len(_ce_completed_bars(bars5, "5m")) >= 50 and len(_ce_completed_bars(bars15, "15m")) >= 24:
+                        row = _refresh_crypto_explosion_spread(row)
+                    scored = _score_crypto_explosion_candidate(row, bars5, bars15, bars4h)
+                    if scored:
+                        found.append((index, scored))
+                except Exception as exc:
+                    error = True
+                    reason = exc.reason if isinstance(exc, ScanRequestError) else "chart_error"
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                    aborted = reason == "rate_limit"
+                    print(f"[Crypto Explosion] {exchange}:{row.get('contract')} error: {_sanitized_exception_text(exc)}", flush=True)
+                with _scan_lock:
+                    _CE_PROGRESS["checked"] += 1
+                    _CE_PROGRESS["hits"] += bool(scored)
+                    _CE_PROGRESS["errors"] += error
+                    _CE_PROGRESS["by_exchange"][exchange]["checked"] += 1
+                    _CE_PROGRESS["updated_at"] = time.time()
+                    _CE_PROGRESS["detail"] = "Crypto Long Engine: " + " | ".join(
+                        f"{venue} {p['checked']}/{p['total']}" for venue, p in _CE_PROGRESS["by_exchange"].items()
+                    ) + f"; {_CE_PROGRESS['errors']} Prueffehler"
+                    checked = _CE_PROGRESS["checked"]
+                if checked % 50 == 0 or checked == total:
+                    print(f"[Crypto Explosion] Progress: {checked}/{total} chart checks", flush=True)
+                if aborted:
+                    break  # Do not hammer a rate-limited venue with the remaining symbols.
+        return found, reasons, aborted
+
+    indexed, reason_counts, aborted_venues = [], {}, []
+    if groups:
+        # Waiting for ALL workers is intentional: timeouts never orphan a worker
+        # or release ownership while it can still write to this run's state.
+        with ThreadPoolExecutor(max_workers=len(groups), thread_name_prefix="crypto-venue") as executor:
+            futures = {executor.submit(scan_venue, venue, batch): venue for venue, batch in groups.items()}
+            for future in as_completed(futures):
+                venue = futures[future]
+                found, reasons, aborted = future.result()
+                indexed.extend(found)
+                reason_counts.update({f"{venue}_{key}": value for key, value in reasons.items()})
+                if aborted:
+                    aborted_venues.append(venue)
+    # Completion order must never become a hidden ranking/tie-break criterion.
+    results = [row for _, row in sorted(indexed, key=lambda item: item[0])]
+    fresh_results = []
+    for row in results:
+        freshness = _crypto_candle_freshness([{"timestamp": row.get("execution_candle_timestamp")}], "5m")
+        if not freshness["fresh"]:
+            reason_counts["expired_before_publish"] = reason_counts.get("expired_before_publish", 0) + 1
+            continue
+        row["execution_data_age_seconds"] = freshness["age_seconds"]
+        fresh_results.append(row)
     results = sorted(
-        results,
+        fresh_results,
         key=lambda r: (
             0 if r.get("trade_signal") == "JETZT_TRADEN" else 1,
             -int(r.get("entry_score") or 0),
@@ -31752,9 +31864,14 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             -float(r.get("turnover_24h_usd") or 0),
         ),
     )[:80]
+    progress = _ce_progress_snapshot()
     stats.update({
-        "chart_checked": checked,
+        "chart_checked": progress.get("checked", 0),
         "max_chart_checks": max_checks,
+        "venue_workers": len(groups),
+        "aborted_venues": sorted(aborted_venues),
+        "source_degraded": bool(stats.get("request_failures") or any(key != "expired_before_publish" for key in reason_counts)),
+        "incomplete": bool(aborted_venues or not total or progress.get("errors", 0) == total),
         "result_count": len(results),
         "trade_now_count": sum(1 for r in results if r.get("trade_signal") == "JETZT_TRADEN"),
         "armed_count": sum(1 for r in results if r.get("trade_signal") == "EXPLOSION_ARMED"),
@@ -31765,15 +31882,24 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
 
 def _crypto_explosion_wrapper() -> None:
+    # Also cover the manual combined-scan path, which calls this wrapper directly.
+    if not _CE_RUN_LOCK.acquire(blocking=False):
+        raise RuntimeError("Crypto Explosion already running; kein Parallelstart")
     try:
-        print("[Crypto Explosion] Starting exchange-native scan...")
+        print("[Crypto Explosion] Starting exchange-native scan (max 4 venue workers)...", flush=True)
         rows, stats = _run_crypto_explosion_scan()
-        save_cache_file(CRYPTO_EXPLOSION_CACHE, rows)
-        print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks")
+        if stats.get("incomplete"):
+            raise RuntimeError("Crypto Explosion partial cache prevented: venue unavailable/rate-limited; previous cache retained")
+        save_cache_file(CRYPTO_EXPLOSION_CACHE, rows, metadata={"scan_stats": stats})
+        _ce_progress_update(running=False, status="done")
+        print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks", flush=True)
     except Exception as exc:
+        _ce_progress_update(running=False, status="error")
         print(f"[Crypto Explosion] Error: {_sanitized_exception_text(exc)}")
         _print_sanitized_traceback()
         raise
+    finally:
+        _CE_RUN_LOCK.release()
 
 
 def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Optional[int]) -> List[Dict[str, Any]]:
@@ -31824,8 +31950,8 @@ def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Op
 
 @app.post("/api/crypto-explosion-scan")
 def trigger_crypto_explosion_scan():
-    _run_scan_safe("crypto_explosion", _crypto_explosion_wrapper)
-    return {"status": "started", "message": "Crypto Explosion scan started"}
+    started = _run_scan_safe("crypto_explosion", _crypto_explosion_wrapper)
+    return {"status": "started" if started else "already_running", "message": "Crypto Explosion scan started" if started else "Crypto engine already running"}
 
 
 @app.get("/api/crypto-explosion-results")
@@ -31843,7 +31969,11 @@ def get_crypto_explosion_results():
     # downgraden, damit trade_now_count die Wahrheit zeigt.
     decorated = _downgrade_expired_crypto_triggers(decorated, cache_age)
     quality = _scan_quality_payload("crypto_explosion", cache_age, decorated)
+    runtime_stats = (_scan_cache_payload(CRYPTO_EXPLOSION_CACHE) or {}).get("scan_stats") or {}
+    if runtime_stats.get("source_degraded"):
+        quality["warnings"] = list(dict.fromkeys([*quality["warnings"], "Eingeschraenkte Boersen-/Datenabdeckung; siehe Scannerstatus"]))
     stats = {
+        "runtime": runtime_stats,
         "result_count": len(decorated),
         "trade_now_count": sum(1 for r in decorated if r.get("trade_signal") == "JETZT_TRADEN"),
         "armed_count": sum(1 for r in decorated if r.get("trade_signal") == "EXPLOSION_ARMED"),
@@ -33641,6 +33771,9 @@ def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dic
     warnings = []
     if not long_cached_at:
         warnings.append("Long-Engine Cache fehlt")
+    long_scan_stats = ((_scan_cache_payload(CRYPTO_EXPLOSION_CACHE) or {}).get("scan_stats") or {})
+    if long_scan_stats.get("source_degraded"):
+        warnings.append("Long-Engine: eingeschraenkte Boersen-/Datenabdeckung; siehe Scannerstatus")
     if not short_cached_at:
         warnings.append("Short-Engine Cache fehlt")
     stats = {
@@ -33678,8 +33811,8 @@ def _crypto_trade_signals_wrapper(refresh_sources: bool = True) -> None:
 
 @app.post("/api/crypto-trade-signals-scan")
 def trigger_crypto_trade_signals_scan():
-    _run_scan_safe("crypto_trade_signals", _crypto_trade_signals_wrapper)
-    return {"status": "started", "message": "Crypto Trade Signals scan started"}
+    started = _run_scan_safe("crypto_trade_signals", _crypto_trade_signals_wrapper)
+    return {"status": "started" if started else "already_running", "message": "Crypto Trade Signals scan started" if started else "Crypto engine already running"}
 
 
 @app.get("/api/crypto-trade-signals-results")

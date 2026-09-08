@@ -63,7 +63,7 @@ def test_api_stuck_scan_sends_one_warning_mail(monkeypatch, tmp_path):
     mail = sent[0]
     assert mail["mail_class"] == "info"
     assert "crypto_explosion" in mail["subject"]
-    assert "haengt" in mail["subject"]
+    assert "dauert laenger als vorgesehen" in mail["subject"]
     assert "Budget 25 Min" in mail["body"]
     assert "systemctl restart tradingbot-api" in mail["body"]
     state = api._scan_status["crypto_explosion"]
@@ -310,7 +310,7 @@ def test_warn_throttle_rearms_after_6h(monkeypatch, tmp_path):
     )
     assert api._scan_watchdog_check("crypto_explosion") == "stuck"
     assert len(sent) == 1
-    assert "haengt" in sent[0]["subject"]
+    assert "dauert laenger als vorgesehen" in sent[0]["subject"]
 
 
 def test_hard_timeout_mail_bypasses_soft_warning_throttle(monkeypatch, tmp_path):

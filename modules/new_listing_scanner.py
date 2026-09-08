@@ -42,6 +42,7 @@ from modules.vrvp_levels import (
 )
 from modules.trade_levels import trade_geometry
 from modules.volume_metrics import historical_volume_baseline
+from modules.crypto_scan_runtime import ScanRequestError, scan_http_get
 
 try:
     import requests as req
@@ -129,7 +130,7 @@ def _api_get(url, params=None, timeout=15):
     """Robuster API-Call mit Fehlerbehandlung."""
     try:
         if req:
-            resp = req.get(url, params=params, timeout=timeout)
+            resp = scan_http_get(req.get, url, params=params, timeout=timeout)
             if resp.status_code == 200:
                 return resp.json()
             log.warning(f"API {resp.status_code}: {url}")
@@ -141,6 +142,8 @@ def _api_get(url, params=None, timeout=15):
                 url += "?" + urllib.parse.urlencode(params)
             with urllib.request.urlopen(url, timeout=timeout) as r:
                 return json.loads(r.read())
+    except ScanRequestError:
+        raise
     except Exception as e:
         log.warning(f"API Error {url}: {e}")
         return None

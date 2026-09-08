@@ -101,6 +101,17 @@ class Handler(BaseHTTPRequestHandler):
             ]})
         if path == "/api/scheduler-status":
             return self.send_json({"running": False, "scans": {}})
+        if path == "/api/scan-status":
+            return self.send_json({"scheduler_running": True, "scans": {
+                "crypto_explosion": {"running": True, "last_run": STAMP, "next_run": None,
+                    "interval_min": 15, "cache_health": "stuck", "running_since_sec": 2102,
+                    "timeout_minutes": 35, "progress": {"running": True, "checked": 430,
+                        "total": 1000, "hits": 12, "hits_label": "Setups vor Endpruefung",
+                        "seconds_since_progress": 2, "status": "scanning",
+                        "detail": "Crypto Long Engine: bybit 130/300 | binance 120/300 | mexc 100/250 | bitget 80/150; 0 Prueffehler"}},
+                "crypto_trade_signals": {"running": False, "last_run": STAMP, "next_run": None,
+                    "interval_min": 15, "cache_health": "ok"},
+            }})
         if path == "/api/bi-results":
             direction = query.get("direction", ["long"])[0].upper()
             return self.send_json({"status": "success", "data": [bi_row(direction)], "count": 1, "cached_at": STAMP, "scan_running": False, "partial": False, "diagnostics": {}})

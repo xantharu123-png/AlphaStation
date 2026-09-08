@@ -123,7 +123,7 @@ def test_delivery_failure_does_not_merge_a_new_timeout_into_recovered_episode(wa
     watchdog.run(65, check=True)
     watchdog.clock[0] += 7 * 3600
     watchdog.run(65, check=True)
-    warnings = [mail for mail in watchdog.sent if "haengt" in mail["subject"]]
+    warnings = [mail for mail in watchdog.sent if "dauert laenger als vorgesehen" in mail["subject"]]
     recoveries = [mail for mail in watchdog.sent if "laeuft wieder" in mail["subject"]]
     assert len(warnings) == 2
     assert len(recoveries) == 3  # Failed attempt, its retry, then new episode.
@@ -152,7 +152,7 @@ def test_completion_while_warning_is_in_flight_waits_for_its_outcome(
 
     def smtp(subject, body_html, **kwargs):
         watchdog.sent.append({"subject": subject, "body": body_html})
-        if "haengt" in subject:
+        if "dauert laenger als vorgesehen" in subject:
             warning_entered.set()
             assert warning_release.wait(5)
             return warning_delivered

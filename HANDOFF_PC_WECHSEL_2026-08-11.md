@@ -555,3 +555,30 @@ und lokale DBs bleiben privat. Letzter Nutzer-Servernachweis `4dc49eb`
 wird nicht durch einen lokalen Test oder GitHub-Push aktualisiert. Vor
 Rollout wie bisher sauberer Checkout, Daten-Backup und anschliessend
 Revision/Bundle/Services/Health getrennt pruefen. Cron unveraendert.
+
+## 20. Crypto-Explosion-Laufzeit und Warnmeldungen, 08.09.2026
+
+Der Nutzer bestaetigte inzwischen `882d9e6`, API healthy, Bundle
+`3738379e722f` und drei aktive Dienste (08.09.2026, 09:32 UTC).
+Das ersetzt die aelteren Server-Momentaufnahmen, nicht den Rollout des
+folgenden Pakets. Referenz: `AUDIT_CRYPTO_RUNTIME_2026-09-08.md`.
+
+- 28 erfolgreiche alte Crypto-Explosion-Laeufe: Median 23m55s, Maximum
+  29m22s. Wiederholte 25-Minuten-Warnungen beweisen keinen Netz-Haenger.
+- Nutzerfreigabe: weich 35 Minuten, hart weiterhin 75; BI bleibt 60/135.
+  Sachlicher Warntext, Fortschritt in Mail und bestehender Krypto-Anzeige.
+- Maximal vier Venue-Worker mit jeweils seriellen, getakteten Requests;
+  Cooldown/Abbruch bei Rate-Limits, keine sofortigen Retry-Schleifen.
+  Single-Flight-BTC-Kontext und gegenseitige Engine-Startsperre.
+- Handelsregeln, BI17/20 und 5m/15m/4h-Eingaben unveraendert. Echte
+  Kerzenfrische nochmals vor Publikation, keine verjuengten Alttreffer.
+  Unvollstaendiger Rate-Limit-Lauf oder kompletter Abrufausfall ersetzt
+  den vorherigen Cache nicht. Fortschritt ist keine partielle Signalliste.
+- Finale 3368 nicht-deploy Tests bestanden; unveraenderte Deployment-
+  Checks zuvor 161 bestanden/vier Skips. Build `938257a0d05f`, Compile,
+  Syntax und synthetische Chromium-Pruefung Desktop/Mobil bestanden.
+  Ausfuehrliche Evidenz und Hashes im Audit. `output/` bleibt lokal.
+
+Keine Serveraktion, Migration, Mail, Order oder Cron-Aktivierung. Push,
+Deployment und produktive Beschleunigung sind weiterhin getrennte Nachweise;
+API-/BG-Neustart und Versions-/Health-Pruefung erst beim Server-Pull.

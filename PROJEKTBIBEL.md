@@ -773,3 +773,25 @@ Referenz: `AUDIT_SCANNER_CONTRACTS_2026-09-07.md`.
 - BI bleibt unveraendert strikt 17/20. Andere Scanner erhalten nicht blind
   den Momentum-Vertrag. Die Turtle-Variante wird nicht als identisches
   historisches Turtle-Ausstiegssystem bezeichnet.
+
+## 18. Crypto-Laufzeit und betriebliche Wahrheit, 08.09.2026
+
+Referenz: `AUDIT_CRYPTO_RUNTIME_2026-09-08.md`.
+
+- Crypto Explosion hat 35 Minuten Warnbudget und unabhaengig davon
+  75 Minuten Hartlimit. Eine Warnbudget-Ueberschreitung allein beweist
+  keinen Haenger. BI-Budgets 60/135 und Handelsregeln bleiben unveraendert.
+- Maximal vier parallel arbeitende Venues, je Host seriell und getaktet.
+  Rate-Limit-Abbruch/Cooldown statt Retry-Sturm; kein Ersatzworker neben
+  einem lebenden Lauf. Der manuelle kombinierte Scanner teilt die Sperre.
+- Ein unvollstaendiger Rate-Limit-Lauf, leeres Universum oder kompletter
+  Abrufausfall ist kein frisches leeres Ergebnis. Fehlende Quellen werden
+  kenntlich gemacht. Der Schutz gilt pro API-Prozess, nicht global fuer
+  alle Dienste einer IP-Adresse.
+- Zwischenfortschritt besteht aus Zaehlern und Zeitangaben, nicht aus
+  vorlaeufigen Trades. Ergebnisfrische richtet sich nach echten Kerzen,
+  niemals allein nach dem Zeitpunkt des Cache-Schreibens.
+- Weniger Warnungen oder parallele Offline-Tests beweisen weder eine
+  bestimmte produktive Beschleunigung noch einen besseren Trading-Edge.
+  Produktive Laufzeit, Datenabdeckung und Forward-Erwartungswert brauchen
+  jeweils eigene Nachweise. Keine Cron-/Live-Trading-Aktivierung.
