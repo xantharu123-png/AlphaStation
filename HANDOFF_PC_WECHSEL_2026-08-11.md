@@ -582,3 +582,39 @@ folgenden Pakets. Referenz: `AUDIT_CRYPTO_RUNTIME_2026-09-08.md`.
 Keine Serveraktion, Migration, Mail, Order oder Cron-Aktivierung. Push,
 Deployment und produktive Beschleunigung sind weiterhin getrennte Nachweise;
 API-/BG-Neustart und Versions-/Health-Pruefung erst beim Server-Pull.
+
+## 21. Profitabilitaet Schritt 1: Evidenz statt Dollar-Versprechen, 08.09.2026
+
+Nutzer wuenscht bis zu drei Trades/Tag und 150 USD Gewinn bei genannter
+Tagesverlusttoleranz 300 USD. `5000k` als Kontogroesse ist noch ungeklaert:
+5.000 oder 5.000.000 USD? Keine Positionsgroesse, Risikokonfiguration,
+Broker-Paper-Aktivierung oder Live-Freigabe aus dieser Angabe ableiten.
+
+Referenz und offener Arbeitsplan: `docs/PROFITABILITY_PROTOCOL_2026-09-08.md`.
+Die erste lokale Diagnose erweitert die vorhandene rein lesende
+`scripts/signal_performance_breakdown.py` um expliziten DB-Pfad und
+aggregiertes versions-/herkunftsgetrenntes JSON. Kein neuer Tracker,
+keine DB-Migration und keine Aenderung der Scanner-, Mail- oder Handelsregeln.
+Der vorhandene gepaarte Exportvergleich wird fuer spaetere Studien genutzt;
+es wurde noch keine neue Exitregel ausgewaehlt oder abgenommen.
+
+Lokale DB am 08.09.: 22 alte OPEN-Zeilen, juengster Start 05.08., alle ohne
+Code-/Evaluationsversion. Kein aktueller produktiver Nettoperformancenachweis.
+Die Exportdatei liegt privat unter `output/profitability/`; nicht mitpushen.
+Neue JSON-Diagnose behauptet weder komplette App-Population noch Broker-
+Netto-PnL. Trade-/Shadow-Herkunft, offene und ungefuellte Faelle bleiben getrennt.
+
+Bestandsaudit bestaetigt: drei gleichzeitige Paperpositionen sind kein
+Drei-Trades-Tageslimit; gegenwaertiges DailyPnL-Gate reserviert nicht das
+verbleibende Tagesbudget. Broker-Fill-Ergebnisarithmetik ist vor allgemeinen
+Kommissionen/Kosten. Bestehende strengere Risikogates nicht auf die genannte
+Toleranz anheben. Erst Kapital klaeren, aktuellen lesenden Produktionsreport
+beschaffen, vorab definierte kostenbewusste Vergleichsstudie und gesonderte
+Risikopruefung; keine garantierte 300-USD-Grenze oder 150 USD pro Tag.
+
+Abnahme der Diagnose und genaue verbleibende Schritte stehen im Protokoll.
+Finale Gesamtpruefung: 3561 bestanden/vier Skips in 634,79 s; 54 gezielte
+Diagnose-/Vergleichstests bestanden. Unabhaengig 384 Paper-Risikotests bestanden.
+Lokaler DB-Hash vor/nach Diagnose identisch; keine Produktionsdaten veraendert.
+Letzter GitHub-Stand vor diesem Schritt war `fa9fba7`; dessen Server-Pull
+wurde als Bash ausgegeben, aber noch nicht vom Nutzer als gesund bestaetigt.
