@@ -52,6 +52,16 @@ DATA_FAILURE_CODES = frozenset("""
 scan_data_unavailable scan_provider_unauthorized scan_provider_rate_limited
 scan_provider_error scan_data_invalid scan_data_incomplete scan_analysis_failed exception
 """.split())
+PUBLIC_SCAN_ERROR_CODES = frozenset("""
+scan_data_unavailable scan_provider_unauthorized scan_provider_rate_limited
+scan_data_incomplete scan_data_invalid
+""".split())
+DATA_ERROR_REASONS = frozenset("""
+invalid_payload provider_status invalid_json missing_results invalid_results_type
+invalid_result_count invalid_query_count result_count_mismatch contradictory_empty_response
+unexpected_pagination invalid_bar_type invalid_bar_value invalid_bar_geometry
+invalid_bar_timestamp invalid_data_conversion
+""".split())
 REJECTION_CODES = DATA_FAILURE_CODES | frozenset("""
 insufficient_daily_history insufficient_completed_history insufficient_dollar_liquidity
 rvol_anomaly spac_nav already_broke_out cumulative_pump indicator_or_hard_gate_contract
@@ -387,6 +397,9 @@ def safe_cache_summary(path):
             result["status"] = status
         elif "status" in payload:
             result["status"] = "unknown"
+        detail = payload.get("detail")
+        if status == "error" and type(detail) is str and detail in PUBLIC_SCAN_ERROR_CODES:
+            result["error_code"] = detail
         rows = payload.get("results")
         result["raw_rows"] = len(rows) if isinstance(rows, list) else None
         diagnostics = payload.get("diagnostics") or {}
@@ -399,6 +412,9 @@ def safe_cache_summary(path):
                 result["coverage"] = diagnostics["coverage"]
             if type(diagnostics.get("scan_in_progress")) is bool:
                 result["scan_in_progress"] = diagnostics["scan_in_progress"]
+            reason = diagnostics.get("data_error_reason")
+            if type(reason) is str and reason in DATA_ERROR_REASONS:
+                result["data_error_reason"] = reason
             for key, allowed in (("rejected", REJECTION_CODES), ("stage_counts", STAGE_COUNTS),
                                  ("data_failures", DATA_FAILURE_CODES), ("legitimate_filters", REJECTION_CODES)):
                 counts = _count_projection(diagnostics.get(key), allowed)

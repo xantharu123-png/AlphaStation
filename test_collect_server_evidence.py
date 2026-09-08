@@ -179,6 +179,69 @@ def test_cache_counts_are_nonnegative_integer_fields_only(tmp_path, value):
     json.dumps(result, allow_nan=False)
 
 
+@pytest.mark.parametrize("reason", [
+    "invalid_payload", "provider_status", "invalid_json", "missing_results", "invalid_results_type",
+    "invalid_result_count", "invalid_query_count", "result_count_mismatch", "contradictory_empty_response",
+    "unexpected_pagination", "invalid_bar_type", "invalid_bar_value", "invalid_bar_geometry",
+    "invalid_bar_timestamp", "invalid_data_conversion",
+])
+def test_daily_data_error_reason_exports_only_known_funnel_code(tmp_path, reason):
+    path = tmp_path / "bi_scan_progress_long.json"
+    path.write_text(json.dumps({"status": "error", "diagnostics": {
+        "data_error_reason": reason, "provider_response": "PRIVATE_PROVIDER_RESPONSE",
+    }}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["available"] is True and result["data_error_reason"] == reason
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("reason", [
+    None, True, 1, 1.5, [], {}, {"reason": "missing_results", "key": "PRIVATE_KEY"},
+    "PRIVATE_REASON", "missing_results PRIVATE_TOKEN", "Missing_Results", " missing_results",
+])
+def test_daily_data_error_reason_never_copies_unknown_or_nonstring_values(tmp_path, reason):
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({"diagnostics": {"data_error_reason": reason}}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["available"] is True and "data_error_reason" not in result
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("code", [
+    "scan_data_unavailable", "scan_provider_unauthorized", "scan_provider_rate_limited",
+    "scan_data_incomplete", "scan_data_invalid",
+])
+def test_progress_error_status_exports_exact_public_error_code(tmp_path, code):
+    path = tmp_path / "bi_scan_progress_short.json"
+    path.write_text(json.dumps({"status": "error", "detail": code, "error": "PRIVATE_STACK"}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["status"] == "error" and result["error_code"] == code
+    assert "detail" not in result and "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status", [None, True, 1, [], {}, "running", "done", "Error", "PRIVATE_STATUS"])
+def test_progress_detail_is_not_error_code_without_exact_error_status(tmp_path, status):
+    path = tmp_path / "progress.json"
+    path.write_text(json.dumps({"status": status, "detail": "scan_data_invalid"}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["available"] is True and "error_code" not in result
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("detail", [
+    None, True, 1, [], {}, {"code": "scan_data_invalid", "token": "PRIVATE_TOKEN"},
+    "PRIVATE_DETAIL", "scan_data_invalid PRIVATE_RESPONSE", " scan_data_invalid",
+    "scan_provider_error", "scan_analysis_failed", "exception",
+])
+def test_progress_error_detail_rejects_free_text_nonstring_and_nonpublic_codes(tmp_path, detail):
+    path = tmp_path / "progress.json"
+    path.write_text(json.dumps({"status": "error", "detail": detail}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["available"] is True and result["status"] == "error"
+    assert "error_code" not in result and "detail" not in result
+    assert "PRIVATE" not in json.dumps(result)
+
+
 def _mock_health(monkeypatch, payload, status=200):
     state = {"closed": False, "requests": []}
     raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf8")

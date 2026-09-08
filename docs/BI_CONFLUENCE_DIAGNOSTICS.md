@@ -118,3 +118,41 @@ anschließenden regulären neuen Scan und dessen konsistente Diagnose. Unit- und
 Integrationstests belegen nur die geprüften lokalen Verträge; synthetische
 17/20-Beispiele zeigen Erreichbarkeit, keine reale Trefferquote. Die Diagnose
 lockert keine Schwelle und belegt weder Profitabilität noch Broker-Ausführungen.
+
+## Leere Historien und genaue Datenfehler (09.09.2026)
+
+Die reine Prüfung in `modules/bi_market_data.py` behandelt das optionale
+`results`-Feld entsprechend dem [Providervertrag für Tagesaggregate](https://massive.com/docs/rest/stocks/aggregates/custom-bars).
+Fehlt es, sind ein expliziter Erfolgsstatus `OK`/`DELAYED` und ein ganzzahliges
+`resultsCount: 0` erforderlich. Ein vorhandenes `queryCount` muss dann ebenfalls
+ganzzahlig null sein; ein Hinweis auf weitere Seiten darf nicht vorliegen.
+Das ist keine pauschale Umwandlung fehlender oder fehlerhafter Antworten in `[]`.
+
+Eine bestätigte Leerhistorie wird als `insufficient_daily_history` gezählt und
+der Scanner fährt mit der nächsten Aktie fort, sowohl Long als auch Short.
+Es entstehen keine Indikatorbeobachtung, kein Signal, kein Tracking und keine
+Mail für diese Aktie. Die bestehende 17/20-Regel bleibt unverändert.
+
+Explizite Ergebnislisten bleiben auch ohne Zählermetadaten kompatibel. Sind
+Zähler vorhanden, werden Typ, Nichtnegativität und Konsistenz geprüft.
+`results: null`, widersprüchliche Nullantworten, falsche Ergebnistypen sowie
+ungültige OHLCV-Werte bleiben Fehler. Die Seitengrenze und `queryCount`-Prüfung
+gelten nur für den BI-Abruf von 1-Tages-Kerzen über höchstens 320 Tage, nicht
+pauschal für andere Aggregationszeiträume. Eine unvollständige Antwort darf
+keinen scheinbar vollständigen Scan erzeugen.
+
+Bei einem Datenvalidierungsfehler steht zusätzlich ein fester, datensparsamer
+Code in `diagnostics.data_error_reason` und im Serverlog. Beispiele:
+`missing_results`, `invalid_json`, `invalid_bar_geometry`,
+`invalid_bar_timestamp`, `result_count_mismatch`. Der öffentliche Fehlercode
+bleibt beispielsweise `scan_data_invalid`; bestehende API-/UI-Verträge ändern
+sich nicht. Der genaue Grund ist Diagnoseinformation, keine neue Signalregel.
+Bereits gezählte Historien-/Liquiditätsfilter bleiben auch im Fehlerfortschritt
+erhalten. Ein fehlerhafter Lauf ersetzt weiterhin nicht den letzten Final-Cache.
+
+Der Standalone-Collector übernimmt `data_error_reason` nur aus seiner festen
+Allowlist. `error_code` wird nur aus einer Progress-Meldung mit `status: error`
+und exakt einem der fünf öffentlichen Scannerfehler übernommen. Freitext,
+Ticker, Kursantworten, URLs und Zugangsdaten sind für beide Felder ausgeschlossen.
+Damit ist für neue Läufe ein weiterer Journal-Auszug meist nicht mehr nötig;
+ein alter Export enthält dadurch nicht nachträglich den früheren Fehlergrund.

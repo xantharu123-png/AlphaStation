@@ -40,6 +40,9 @@ from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signa
 from modules.trade_levels import trade_geometry
 from modules.bi_trade_plan import build_bi_trade_plan
 from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
+from modules.bi_market_data import (
+    BI_DATA_ERROR_REASONS, BIAggregateDataError, parse_bi_daily_aggregates,
+)
 try:
     from modules.signal_tracker import _detect_code_revision
 except Exception:
@@ -1176,6 +1179,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         direction: "long" oder "short"
         candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
     """
+    no_data_count = 0
     funnel = {
         "scanner": f"bi_{direction}", "coverage": "incomplete",
         "total": 0, "checked": 0, "history_available": 0,
@@ -1211,9 +1215,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         counts = funnel["rejected"]
         counts[reason] = counts.get(reason, 0) + 1
 
-    def _data_error(code):
+    def _data_error(code, reason=None):
         funnel["data_failures"] += 1
-        raise ScannerDataError(code, funnel)
+        if isinstance(reason, str) and reason in BI_DATA_ERROR_REASONS:
+            funnel["data_error_reason"] = reason
+            print(f"[BI {direction}] Data validation failed: {reason}")
+        raise ScannerDataError(code, funnel) from None
 
     try:
         # ── Fallback: Full stock universe from Polygon ──
@@ -1330,7 +1337,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         # ── Analyse ──
         results = []
         checked = 0
-        no_data_count = 0
         contract_reject_count = 0
         range_fail = 0
         atr_fail = 0
@@ -1403,23 +1409,17 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if resp.status_code != 200:
                     _data_error(_scanner_provider_error(resp.status_code))
 
-                api_data = resp.json()
-                if _scanner_payload_error(api_data):
-                    _data_error(_scanner_payload_error(api_data))
-                if not isinstance(api_data, dict) or not isinstance(api_data.get("results"), list):
-                    _data_error("scan_data_invalid")
-                raw_bars = api_data["results"]
-                last_timestamp = 0
-                for bar in raw_bars:
-                    if not isinstance(bar, dict):
-                        _data_error("scan_data_invalid")
-                    values = [bar.get(key) for key in ("t", "o", "h", "l", "c", "v")]
-                    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
-                        _data_error("scan_data_invalid")
-                    ts, open_, high, low, close, volume = values
-                    if ts <= last_timestamp or min(open_, high, low, close) <= 0 or volume < 0 or high < max(open_, low, close) or low > min(open_, high, close):
-                        _data_error("scan_data_invalid")
-                    last_timestamp = ts
+                try:
+                    api_data = resp.json()
+                except ValueError:
+                    _data_error("scan_data_invalid", "invalid_json")
+                provider_error = _scanner_payload_error(api_data)
+                if provider_error:
+                    _data_error(provider_error, "provider_status" if isinstance(api_data, dict) else "invalid_payload")
+                try:
+                    raw_bars = parse_bi_daily_aggregates(api_data)
+                except BIAggregateDataError as e:
+                    _data_error("scan_data_invalid", e.reason)
                 if not raw_bars or len(raw_bars) < 10:
                     no_data_count += 1
                     _reject("insufficient_daily_history")
@@ -1498,7 +1498,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             except ScannerDataError:
                 raise
             except (TypeError, ValueError, KeyError, OverflowError):
-                _data_error("scan_data_invalid")
+                _data_error("scan_data_invalid", "invalid_data_conversion")
             except Exception:
                 _data_error("scan_data_unavailable")
 
@@ -1843,14 +1843,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
     except ScannerDataError as e:
         _bi_progress_write(direction, "error", checked=funnel["checked"], total=funnel["total"],
-                           detail=e.code, diagnostics=e.diagnostics)
+                           no_data=no_data_count, detail=e.code, diagnostics=e.diagnostics)
         raise
     except Exception as e:
         safe_error = redact_sensitive_query_values(e)
         funnel["coverage"] = "incomplete"
         funnel["final_results"] = None
         _bi_progress_write(direction, "error", checked=funnel["checked"], total=funnel["total"],
-                           detail=f"Fehler: {safe_error[:100]}", diagnostics=funnel)
+                           no_data=no_data_count, detail=f"Fehler: {safe_error[:100]}", diagnostics=funnel)
         raise RuntimeError(safe_error) from None
 
 
