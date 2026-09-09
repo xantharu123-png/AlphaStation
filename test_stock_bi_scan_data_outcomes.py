@@ -138,11 +138,14 @@ def test_bi_history_provider_failure_preserves_final(monkeypatch, tmp_path, stat
     assert "SECRET" not in json.dumps(progress)
 
 
-@pytest.mark.parametrize("payload", [None, {}, {"results": "bad"}, {"results": [None]},
-                                      {"results": [{"t": 1, "o": 2, "h": 1, "l": 1, "c": 2, "v": 1}]}])
-def test_bi_invalid_feed_not_technical_rejection(monkeypatch, tmp_path, payload):
+@pytest.mark.parametrize("payload,code", [
+    (None, "scan_data_invalid"), ({}, "scan_data_invalid"), ({"results": "bad"}, "scan_data_invalid"),
+    ({"results": [None]}, "scan_data_incomplete"),
+    ({"results": [{"t": 1, "o": 2, "h": 1, "l": 1, "c": 2, "v": 1}]}, "scan_data_incomplete"),
+])
+def test_bi_invalid_feed_not_technical_rejection(monkeypatch, tmp_path, payload, code):
     final, before = bi_io(monkeypatch, tmp_path, Reply(payload=payload))
-    with pytest.raises(scanners.ScannerDataError, match="scan_data_invalid"):
+    with pytest.raises(scanners.ScannerDataError, match=code):
         scanners._bi_background_scan("fake", candidates=["TEST"])
     assert final.read_bytes() == before
 

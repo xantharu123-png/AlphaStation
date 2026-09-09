@@ -20594,14 +20594,187 @@ def _biotech_scan_wrapper() -> None:
         raise
 
 
-def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[Dict[str, Any]]:
+_STOCK_ATTEMPT_STRATEGIES = {
+    "Momentum Breakout Long": "momentum_breakout_long",
+    "Gap Momentum Long": "gap_momentum_long",
+    "Gap Momentum Short": "gap_momentum_short",
+    "Turtle Breakout": "turtle_breakout", "Bull Flag": "bull_flag", "Bear Flag": "bear_flag",
+    "Compression Breakout": "compression_breakout",
+    "Cup and Handle Breakout": "cup_and_handle_breakout", "Trend Reversal": "trend_reversal",
+    "MA Bounce Long": "ma_bounce_long", "MA Bounce Short": "ma_bounce_short",
+    "Wyckoff Accumulation": "wyckoff_accumulation", "Wyckoff Distribution": "wyckoff_distribution",
+}
+_STOCK_ATTEMPT_ERRORS = frozenset(ScannerDataError.CODES) | frozenset({
+    "scan_failed", "scan_timeout", "scan_already_running", "scan_cache_publish_failed", "scan_partial_cache",
+})
+_STOCK_ATTEMPT_COUNTS = frozenset({
+    "checked", "total", "universe_count", "common_stock_universe_count",
+    "raw_matches_before_special_filter", "final_results", "max_results",
+})
+_STOCK_ATTEMPT_STAGES = frozenset("""
+snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
+change_filter price_filter close_position_filter gap_filter dollar_volume_filter
+vortag_filter rvol_filter momentum_breakout_gate momentum_completed_5m_confirmation
+reversal_ad_gate raw_matches_before_special_filter final_results
+""".split())
+_STOCK_ATTEMPT_REJECTIONS = _STOCK_ATTEMPT_STAGES | frozenset(ScannerDataError.CODES) | frozenset("""
+invalid_symbol_or_missing_prev_close missing_price_or_prev_close exception
+premarket_dollar_volume_filter premarket_missing_quote premarket_spread_guard premarket_extension_guard
+momentum:not_enough_daily_history momentum:invalid_momentum_inputs momentum:daily_momentum_too_small
+momentum:rvol_below_breakout_threshold momentum:daily_close_not_near_high
+momentum:no_momentum_breakout_structure momentum:price_below_ema20 momentum:no_ema20_50_trend_reclaim
+momentum:rsi_too_weak_for_momentum momentum:rsi_overheated momentum:bounce_after_recent_selloff
+momentum:incoherent_signal_direction momentum:intraday_unavailable momentum:intraday_stale
+momentum:intraday_not_confirmed momentum:intraday_failed_breakout momentum:intraday_stale_breakout
+momentum:intraday_stale_extension momentum:intraday_data_unavailable momentum:intraday_confirmation_stale
+momentum:confirmation_expired_before_publication reversal_ad_gate reversal_ad:ad_confirms_selloff_falling_knife
+""".split())
+_STOCK_ATTEMPT_SWEEP_COUNTS = frozenset({
+    "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed",
+    "current_result_count", "final_results",
+})
+_stock_attempt_lock = threading.Lock()
+_stock_attempt_run_ids: Dict[str, str] = {}
+
+
+def _new_stock_strategy_attempt(strategy_name: str = "", *, sweep: bool = False) -> Dict[str, Any]:
+    """Create fixed diagnostic identity; never let telemetry alter a scan."""
+    try:
+        slug = "stock_strategy_sweep" if sweep else _STOCK_ATTEMPT_STRATEGIES.get(strategy_name)
+        if not slug:
+            return {}
+        try:
+            from modules.signal_tracker import _detect_code_revision
+            revision = _detect_code_revision()
+        except Exception:
+            revision = "unknown"
+        if not isinstance(revision, str) or not re.fullmatch(r"(?:[0-9a-f]{12}(?:-dirty|-tree-unknown)?|unknown)", revision):
+            revision = "unknown"
+        attempt = {
+            "schema_version": 1, "attempt_kind": "stock_strategy_sweep" if sweep else "stock_strategy",
+            "strategy_slug": slug, "run_id": uuid.uuid4().hex, "code_revision": revision,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with _stock_attempt_lock:
+            _stock_attempt_run_ids[slug] = attempt["run_id"]
+        return attempt
+    except Exception:
+        return {}
+
+
+def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str, Any]:
+    """Strict bounded projection: no rows, provider bodies or dynamic reasons."""
+    source = value if isinstance(value, dict) else {}
+    def counts(raw, allowed):
+        raw = raw if isinstance(raw, dict) else {}
+        return {key: raw[key] for key in sorted(allowed)
+                if type(raw.get(key)) is int and 0 <= raw[key] <= 10**9}
+    result = counts(source, _STOCK_ATTEMPT_SWEEP_COUNTS if sweep else _STOCK_ATTEMPT_COUNTS)
+    if source.get("final_results") is None:
+        result["final_results"] = None
+    if source.get("coverage") in ("complete", "incomplete"):
+        result["coverage"] = source["coverage"]
+    if not sweep:
+        result["stage_counts"] = counts(source.get("stage_counts"), _STOCK_ATTEMPT_STAGES)
+        result["rejected"] = counts(source.get("rejected"), _STOCK_ATTEMPT_REJECTIONS)
+        return result
+    if source.get("mail_status") in ("not_attempted", "guarded", "no_results", "error"):
+        result["mail_status"] = source["mail_status"]
+    if isinstance(source.get("mail_error_code"), str) and source["mail_error_code"] in _STOCK_ATTEMPT_ERRORS:
+        result["mail_error_code"] = source["mail_error_code"]
+    result["strategy_results"] = {}
+    outcomes = source.get("strategy_results")
+    for name in ("Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout"):
+        slug = _STOCK_ATTEMPT_STRATEGIES[name]
+        item = outcomes.get(slug) if isinstance(outcomes, dict) else None
+        if not isinstance(item, dict) or item.get("status") not in ("complete", "error"):
+            continue
+        projected = {"status": item["status"], "result_count": None}
+        if item["status"] == "complete":
+            projected.update(counts(item, {"result_count", "aggregate_candidate_count"}))
+        elif isinstance(item.get("error_code"), str) and item["error_code"] in _STOCK_ATTEMPT_ERRORS:
+            projected["error_code"] = item["error_code"]
+        result["strategy_results"][slug] = projected
+    return result
+
+
+def _publish_stock_strategy_attempt(
+    attempt: Dict[str, Any], status: str, *, diagnostics: Any = None,
+    result_count: Optional[int] = None, error: Any = None,
+) -> bool:
+    """Best-effort atomic diagnostic write, separate from every result cache.
+
+    `guarded` records only a mail-guard call, never SMTP acceptance. The lock
+    prevents an older overlapping worker's finish from replacing a newer start.
+    """
+    try:
+        if not attempt:
+            return False
+        slug = attempt.get("strategy_slug")
+        valid_slugs = set(_STOCK_ATTEMPT_STRATEGIES.values()) | {"stock_strategy_sweep"}
+        if slug not in valid_slugs or status not in ("running", "complete", "error"):
+            raise ValueError("invalid_attempt")
+        kind = "stock_strategy_sweep" if slug == "stock_strategy_sweep" else "stock_strategy"
+        if (type(attempt.get("schema_version")) is not int or attempt["schema_version"] != 1
+                or attempt.get("attempt_kind") != kind
+                or not isinstance(attempt.get("run_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", attempt["run_id"])
+                or not isinstance(attempt.get("code_revision"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{12}(?:-dirty|-tree-unknown)?|unknown)", attempt["code_revision"])
+                or not isinstance(attempt.get("started_at"), str)):
+            raise ValueError("invalid_attempt")
+        started = datetime.fromisoformat(attempt["started_at"])
+        if started.tzinfo is None or started.utcoffset() is None:
+            raise ValueError("invalid_attempt")
+        if status == "complete" and (type(result_count) is not int or not 0 <= result_count <= 10**9):
+            raise ValueError("invalid_attempt")
+        payload = {key: attempt[key] for key in (
+            "schema_version", "attempt_kind", "strategy_slug", "run_id", "code_revision",
+        )}
+        payload.update(started_at=started.isoformat(), status=status, updated_at=datetime.now(timezone.utc).isoformat(),
+                       result_count=result_count if status == "complete" else None)
+        payload["diagnostics"] = _stock_strategy_attempt_diagnostics(
+            diagnostics, sweep=slug == "stock_strategy_sweep",
+        )
+        if status == "error":
+            raw_error = error.code if isinstance(error, ScannerDataError) else error
+            safe_error = raw_error if isinstance(raw_error, str) and raw_error in _STOCK_ATTEMPT_ERRORS else _public_scan_error_code(raw_error)
+            payload["error_code"] = safe_error if safe_error in _STOCK_ATTEMPT_ERRORS else "scan_failed"
+            payload["diagnostics"]["coverage"] = "incomplete"
+            payload["diagnostics"]["final_results"] = None
+        root_dir = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or ("/tmp" if os.name == "posix" else tempfile.gettempdir())
+        filename = "stock_strategy_sweep_attempt.json" if slug == "stock_strategy_sweep" else f"stock_strategy_{slug}_attempt.json"
+        with _stock_attempt_lock:
+            if _stock_attempt_run_ids.get(slug) != attempt["run_id"]:
+                return False
+            try:
+                written = save_cache_file(os.path.join(root_dir, filename), [], metadata=payload)
+                if written is False:
+                    print("[Strategy Attempt] write_failed")
+                    return False
+            except Exception:
+                print("[Strategy Attempt] write_failed")
+                return False
+        return True
+    except Exception:
+        print("[Strategy Attempt] validation_failed")
+        return False
+
+
+def _strategy_scan_wrapper(
+    strategy_name: str, send_email: bool = True, *, publish_generic_cache: bool = True,
+) -> List[Dict[str, Any]]:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
     _strat_cache = _strategy_cache_path(strategy_name)
+    _attempt = _new_stock_strategy_attempt(strategy_name)
+    scan_diag: Dict[str, Any] = {}
+    _publish_stock_strategy_attempt(_attempt, "running")
     try:
         strat = STRATEGIES.get(strategy_name)
         if not strat:
             print(f"[Strategy Scan] Strategie '{strategy_name}' nicht gefunden")
+            _publish_stock_strategy_attempt(_attempt, "error", error="scan_data_invalid")
             return []
 
         filters = strat.get("filters", {})
@@ -21367,13 +21540,18 @@ def _strategy_scan_wrapper(strategy_name: str, send_email: bool = True) -> List[
         # V2.2: Separate Cache-Datei pro Strategie + Fallback auf generischen Cache
         _metadata = {"cache_version": STOCK_STRATEGY_CACHE_VERSION, "diagnostics": scan_diag}
         finalize_cache_file(_strat_cache, results, metadata=_metadata)
-        save_cache_file(STRATEGY_SCAN_CACHE, results, metadata=_metadata)  # Fallback für alte Clients
+        if publish_generic_cache:
+            save_cache_file(STRATEGY_SCAN_CACHE, results, metadata=_metadata)  # Fallback für alte Clients
         print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         if send_email:
             _send_strategy_scan_alerts(strategy_name, results, "stocks")
+        _publish_stock_strategy_attempt(_attempt, "complete", diagnostics=scan_diag, result_count=len(results))
         return results
 
     except Exception as e:
+        _publish_stock_strategy_attempt(
+            _attempt, "error", diagnostics=e.diagnostics if isinstance(e, ScannerDataError) else scan_diag, error=e,
+        )
         _remove_partial_cache(_strat_cache)
         print(f"[Strategy Scan] Fehler: {e}")
         import traceback
@@ -21386,37 +21564,108 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
 
     BI/Bear/Biotech/ORB already run on their own schedules. This sweep covers
     the generic stock-strategy mails that otherwise only happen after a manual
-    strategy scan.
+    strategy scan. Each strategy may fail independently; only current successful
+    rows enter the unchanged combined mail guard. An incomplete sweep must not
+    replace the previous complete aggregate cache.
     """
-    try:
-        all_rows: List[Dict[str, Any]] = []
-        summary = []
-        for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
-            rows = _strategy_scan_wrapper(strategy_name, send_email=False) or []
-            summary.append({"strategy": strategy_name, "rows": len(rows)})
+    strategy_codes = {name: _STOCK_ATTEMPT_STRATEGIES[name] for name in (
+        "Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout",
+    )}
+    attempt = _new_stock_strategy_attempt(sweep=True)
+    diagnostics: Dict[str, Any] = {
+        "coverage": "incomplete",
+        "strategies_total": len(_AUTO_STOCK_ALERT_STRATEGIES),
+        "strategies_attempted": 0,
+        "strategies_completed": 0,
+        "strategies_failed": 0,
+        "current_result_count": 0,
+        "final_results": None,
+        "strategy_results": {},
+        "mail_status": "not_attempted",
+    }
+    _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
+    all_rows: List[Dict[str, Any]] = []
+    for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
+        strategy_code = strategy_codes.get(strategy_name, "unknown_strategy")
+        diagnostics["strategies_attempted"] += 1
+        outcome: Dict[str, Any] = {"status": "error", "result_count": None}
+        try:
+            if strategy_name not in strategy_codes or not STRATEGIES.get(strategy_name):
+                raise ScannerDataError("scan_data_invalid")
+            # The leaf still publishes its own complete cache. It must not
+            # overwrite the sweep aggregate before the other strategies finish.
+            rows = _strategy_scan_wrapper(
+                strategy_name, send_email=False, publish_generic_cache=False,
+            )
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ScannerDataError("scan_data_invalid")
+            current_rows = []
             for row in rows[:25]:
-                if not isinstance(row, dict):
-                    continue
                 enriched = dict(row)
                 enriched.setdefault("Strategy", strategy_name)
                 enriched.setdefault("strategy", strategy_name)
-                all_rows.append(enriched)
+                try:
+                    score = float(enriched.get("score", enriched.get("Score", 0)) or 0)
+                    change = float(enriched.get("Change_Pct", enriched.get("change_pct", 0)) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    raise ScannerDataError("scan_data_invalid") from None
+                if not math.isfinite(score) or not math.isfinite(change):
+                    raise ScannerDataError("scan_data_invalid")
+                current_rows.append(enriched)
+            # Commit this strategy's rows only after validating the entire
+            # bounded contribution, never after a partial per-row failure.
+            all_rows.extend(current_rows)
+            outcome = {"status": "complete", "result_count": len(rows),
+                       "aggregate_candidate_count": len(current_rows)}
+            diagnostics["strategies_completed"] += 1
+        except Exception as exc:
+            error_code = _public_scan_error_code(
+                exc.code if isinstance(exc, ScannerDataError) else exc,
+            ) or "scan_failed"
+            outcome["error_code"] = error_code
+            diagnostics["strategies_failed"] += 1
+            # No provider messages, ticker rows or stale cache contents enter
+            # either the public attempt diagnostics or this operator log.
+            print(f"[Strategy Sweep] {strategy_code}: {error_code}")
+        finally:
+            diagnostics["strategy_results"][strategy_code] = outcome
+            _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
             time.sleep(1)
 
-        all_rows.sort(
-            key=lambda x: (
-                -float(x.get("score", x.get("Score", 0)) or 0),
-                -abs(float(x.get("Change_Pct", x.get("change_pct", 0)) or 0)),
-            )
+    all_rows.sort(
+        key=lambda x: (
+            -float(x.get("score", x.get("Score", 0)) or 0),
+            -abs(float(x.get("Change_Pct", x.get("change_pct", 0)) or 0)),
         )
-        save_cache_file(STRATEGY_SCAN_CACHE, all_rows[:100])
-        print(f"[Strategy Sweep] {len(all_rows)} Kandidaten aus {len(summary)} Strategien: {summary}")
-        _send_strategy_scan_alerts("Aktien Auto-Sweep", all_rows[:75], "stocks")
-    except Exception as e:
-        print(f"[Strategy Sweep] Fehler: {e}")
-        import traceback
-        _print_sanitized_traceback()
+    )
+    diagnostics["current_result_count"] = len(all_rows)
+    # Keep the existing global ranking, 25-per-strategy contribution, combined
+    # cluster context and mail helper's 50-row inspection budget. Never send a
+    # second per-strategy batch or interpret a guarded call as SMTP acceptance.
+    if all_rows:
+        try:
+            _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows[:75]), "stocks")
+            diagnostics["mail_status"] = "guarded"
+        except Exception as exc:
+            diagnostics["mail_status"] = "error"
+            diagnostics["mail_error_code"] = _public_scan_error_code(exc) or "scan_failed"
+    else:
+        diagnostics["mail_status"] = "no_results"
+    if diagnostics["strategies_failed"] or diagnostics["mail_status"] == "error":
+        _publish_stock_strategy_attempt(attempt, "error", diagnostics=diagnostics, error="scan_data_incomplete")
+        raise ScannerDataError("scan_data_incomplete", diagnostics)
+    diagnostics["coverage"] = "complete"
+    diagnostics["final_results"] = len(all_rows[:100])
+    try:
+        save_cache_file(STRATEGY_SCAN_CACHE, all_rows[:100], metadata={"diagnostics": diagnostics})
+    except Exception:
+        _publish_stock_strategy_attempt(attempt, "error", diagnostics=diagnostics, error="scan_cache_publish_failed")
         raise
+    _publish_stock_strategy_attempt(attempt, "complete", diagnostics=diagnostics, result_count=len(all_rows[:100]))
+    print(
+        f"[Strategy Sweep] {len(all_rows)} Kandidaten aus "
+        f"{diagnostics['strategies_completed']} erfolgreichen Strategien"
+    )
 
 
 def _crypto_prior_six_day_average(change_7d, change_24h):

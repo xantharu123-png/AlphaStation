@@ -20,6 +20,7 @@ alpha-time-*/
 # Private local mail exports used for audits; never publish them with source.
 Mailarchiv/
 output/playwright/
+output/profitability/
 .playwright-cli/
 tmp/
 tmp_mail_*.json

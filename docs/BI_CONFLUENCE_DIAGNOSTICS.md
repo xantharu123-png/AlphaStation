@@ -17,7 +17,7 @@ Der Scanner speichert das Objekt unter `diagnostics.confluence`.
 
 | Feld | Bedeutung |
 | --- | --- |
-| `schema_version`, `contract_version`, `required_green` | Formatversion `1`, aktuell `stock-bi-20-v2` und `17`. Formatversion ist keine Code-Revision. |
+| `schema_version`, `contract_version`, `required_green` | Formatversion `1`, aktuell `stock-bi-20-v3` und `17`. Der Collector kann historische v2-Läufe getrennt lesen. Formatversion ist keine Code-Revision. |
 | `scanner`, `direction` | `bi_long`/`long` oder `bi_short`/`short`. |
 | `run_id`, `started_at`, `code_revision` | Eigene UUID je Diagnose-Lauf, explizit zeitzonenbezogener Startzeitpunkt und unveränderlicher Revisionsstempel des Prozesses. |
 | `evaluated`, `schema_invalid` | Beobachtete Analyse-Rückgaben und davon formal inkonsistente Ergebnisse, beispielsweise falsche IDs, Typen, Versionen oder Zählersummen. |
@@ -29,6 +29,8 @@ Der Scanner speichert das Objekt unter `diagnostics.confluence`.
 | `first_hard_gate_counts` | Erster gemeldeter harter Blockierungsgrund, ausschließlich nach Konfluenzqualifikation. |
 | `core_valid_count`, `payload_accepted_count` | Gültiges Rohanalyse-Ergebnis beziehungsweise nichtleeres Ergebnis des Konfluenz-Payloadhelpers; ausdrücklich getrennt. |
 | `observation_errors` | Fehler der Diagnosebeobachtung; dürfen die bestehende Signalentscheidung nicht beeinflussen. |
+| `failed_pair_counts` | 190 feste Faktorpaare `01:02` bis `19:20`: beide Faktoren bekannt und rot. Unbekannt zählt nicht rot. Keine unabhängigen Wahrscheinlichkeiten und keine Einzelticker. |
+| `consolidation_days_histogram` | Analysemetadatum `consolidation_days`, Klassen 0 bis 50 und `other`. Kein zusätzliches Signal-Gate. |
 
 `unavailable` bedeutet **nicht auswertbar**, nicht rot. Bei fehlerfreier
 Diagnosebeobachtung (`observation_errors = 0`) gilt pro Faktor:
@@ -142,7 +144,7 @@ pauschal für andere Aggregationszeiträume. Eine unvollständige Antwort darf
 keinen scheinbar vollständigen Scan erzeugen.
 
 Bei einem Datenvalidierungsfehler steht zusätzlich ein fester, datensparsamer
-Code in `diagnostics.data_error_reason` und im Serverlog. Beispiele:
+Code in `diagnostics.data_error_reason`. Beispiele:
 `missing_results`, `invalid_json`, `invalid_bar_geometry`,
 `invalid_bar_timestamp`, `result_count_mismatch`. Der öffentliche Fehlercode
 bleibt beispielsweise `scan_data_invalid`; bestehende API-/UI-Verträge ändern
@@ -156,3 +158,37 @@ und exakt einem der fünf öffentlichen Scannerfehler übernommen. Freitext,
 Ticker, Kursantworten, URLs und Zugangsdaten sind für beide Felder ausgeschlossen.
 Damit ist für neue Läufe ein weiterer Journal-Auszug meist nicht mehr nötig;
 ein alter Export enthält dadurch nicht nachträglich den früheren Fehlergrund.
+
+## Isolierte Datenfehler und ein fester Analysezeitpunkt (09.09.2026)
+
+Eine defekte einzelne Kursserie (`invalid_bar_*` oder `invalid_data_conversion`)
+wird vollständig ausgeschlossen. Die verbleibenden Aktien werden weiter geprüft,
+damit ein Fehler nicht sämtliche nachfolgenden Analysen verdeckt. Die ursprüngliche
+Serie wird weder geglättet noch durch Entfernen einzelner Kerzen repariert.
+`quarantined_symbols`, `data_error_counts` und `data_error_fields` zählen nur
+feste Fehlercodes und Feldnamen, nie Ticker, Rohwerte oder Providertexte.
+
+Auch nach Prüfung aller Aktien bleibt ein solcher Lauf **unvollständig**:
+`coverage: incomplete`, `final_results: null`, `scan_data_incomplete`.
+Kein neuer Final-Cache und keine automatische BI-Mail aus diesem Lauf.
+Der API-Wrapper entfernt seine Zwischenstände im Fehlerpfad. `checked == total`
+beweist nur, dass alle Abrufe versucht wurden, nicht gültige Datenabdeckung.
+Provider-, Berechtigungs-, Rate-Limit-, JSON-/Antwortformat- und Netzwerkfehler
+brechen weiterhin sofort ab; sie sind keine isolierten Kurskerzenfehler.
+
+`run_as_of` wird vor dem Universumsabruf einmal UTC-bezogen festgehalten und ist
+identisch mit `confluence.started_at`. Abgeschlossene Tageskerzen, Analysedatum
+und Planstruktur verwenden diesen Stichtag. Tagesdaten werden nach New York
+datiert, unabhängig von der Serverzeitzone. Ohne speziellen Frühschlusskalender
+wird eine Sitzung konservativ erst um 16:00 New Yorker Zeit zugelassen; spätere
+Sitzungen bleiben ausgeschlossen. `analysis_session_dates` zählt die tatsächlich
+übergebenen letzten Sitzungstage (höchstens vier konkrete Tage plus `other`).
+Dies synchronisiert die abgeschlossenen Analysekerzen, **nicht** die während des
+Laufs einzeln aktualisierten Preise. Eine ausführbare Quote bleibt separat zu prüfen.
+
+Version `stock-bi-20-v3` bezeichnet die gemeinsame Range-Grenze für Plan und
+Fibonacci-Faktor S18. Unverändert: maximal 50 abgeschlossene Analyse-Tageskerzen,
+30 Kerzen für die bestätigte Fibonacci-Swing-Suche, 2/2-Pivots, Mindest-Swing und
+Nähetoleranz sowie die 6%-Konsolidierungsdefinition. Der adaptive Range-Ausschnitt
+und sein bestehender 15-Kerzen-Fallback werden nicht länger mit einer separaten
+starren 15-Kerzen-Grenze in S18 vermischt. Das ist kein neuer Profitabilitätsnachweis.

@@ -248,7 +248,7 @@ def test_h2_short_extension_reject_and_control(monkeypatch, capsys):
         return _attach_ts(bars)
 
     # Partial-Bar deterministisch abschneiden (Session-Erkennung separat getestet)
-    monkeypatch.setattr(scanners, "_bi_strip_partial_bar", lambda b: b[:-1])
+    monkeypatch.setattr(scanners, "_bi_strip_partial_bar", lambda b, **kw: b[:-1])
 
     saved = _patch_scan_io(
         monkeypatch, {"TEST": mk(92.0)},
@@ -421,12 +421,13 @@ def test_h2_cumulative_pump_filter(monkeypatch):
 # ────────────────────────── M-1: Partial-Bar ──────────────────────────
 
 class _FakeDatetime(_real_datetime):
-    """Kontrollierte Uhr: now() liefert den gesetzten Zeitpunkt (tz-ignorant)."""
+    """Kontrollierte Uhr: gesetzte naive Fixturezeit ist US/Eastern."""
     _now = None
 
     @classmethod
     def now(cls, tz=None):
-        return cls._now
+        from zoneinfo import ZoneInfo
+        return cls._now if tz is None else cls._now.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(tz)
 
 
 def test_m1_helper_session_logic(monkeypatch):

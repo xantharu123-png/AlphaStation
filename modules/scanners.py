@@ -16,7 +16,9 @@ import tempfile
 import uuid
 import datetime as dt
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from collections import defaultdict
+from requests.exceptions import RequestException
 from modules.data_fetchers import (
     rate_limited_get, fetch_grouped_daily, get_ticker_details,
     _get_bpiq_catalysts, _calculate_biotech_catalyst_score,
@@ -41,7 +43,8 @@ from modules.trade_levels import trade_geometry
 from modules.bi_trade_plan import build_bi_trade_plan
 from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
 from modules.bi_market_data import (
-    BI_DATA_ERROR_REASONS, BIAggregateDataError, parse_bi_daily_aggregates,
+    BI_DATA_ERROR_REASONS, BI_DATA_ERROR_FIELDS, BI_ISOLATABLE_BAR_ERRORS,
+    BIAggregateDataError, parse_bi_daily_aggregates,
 )
 try:
     from modules.signal_tracker import _detect_code_revision
@@ -1141,7 +1144,7 @@ def _bi_scan_is_running(direction="long"):
     return True
 
 
-def _bi_strip_partial_bar(all_bars):
+def _bi_strip_partial_bar(all_bars, *, as_of=None):
     """
     M-1 (BI-Audit 10.06.): Liefert die Bars OHNE den heutigen, noch LAUFENDEN
     Handelstag. Der Partial-Bar floss bisher als vollwertige Kerze in die
@@ -1152,6 +1155,18 @@ def _bi_strip_partial_bar(all_bars):
     """
     if not all_bars:
         return all_bars
+    if as_of is not None:
+        # One immutable analysis clock per BI run. A scan crossing 16:00 ET
+        # must not use yesterday for early symbols and today for late ones.
+        # Without an early-close calendar, 16:00 ET is conservative (same as
+        # stock_bars.completed_polygon_bars); never admit a future session.
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("BI analysis clock must be timezone-aware")
+        eastern = ZoneInfo("America/New_York")
+        cutoff = as_of.astimezone(eastern)
+        return [bar for bar in all_bars if dt.datetime.combine(
+            dt.date.fromisoformat(bar["date"]), dt.time(16), eastern
+        ) <= cutoff]
     try:
         import pytz
         _et = pytz.timezone("US/Eastern")
@@ -1180,11 +1195,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         candidates: Vorgeladene Kandidaten-Liste (aus fetch_stock_data im Hauptthread)
     """
     no_data_count = 0
+    run_as_of = datetime.now(dt.timezone.utc)
     funnel = {
         "scanner": f"bi_{direction}", "coverage": "incomplete",
         "total": 0, "checked": 0, "history_available": 0,
         "analyzed": 0, "indicator_passed": 0, "data_failures": 0, "analysis_errors": 0,
         "rejected": {}, "final_results": None,
+        "run_as_of": run_as_of.isoformat(), "quarantined_symbols": 0,
+        "data_error_counts": {}, "data_error_fields": {}, "analysis_session_dates": {},
     }
     # Independent observation ID, not the API scheduler's run ID. Revision is
     # the existing immutable process stamp, never a per-ticker Git lookup.
@@ -1194,7 +1212,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             required_green=BI_STOCK_REQUIRED_GREEN,
             contract_version=BI_STOCK_CONTRACT_VERSION,
             run_id=uuid.uuid4().hex, code_revision=_detect_code_revision(),
-            started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            started_at=run_as_of.isoformat(),
         )
     except Exception:
         funnel["confluence"] = {
@@ -1215,12 +1233,26 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         counts = funnel["rejected"]
         counts[reason] = counts.get(reason, 0) + 1
 
-    def _data_error(code, reason=None):
+    def _record_data_error(reason=None, field="unknown"):
         funnel["data_failures"] += 1
         if isinstance(reason, str) and reason in BI_DATA_ERROR_REASONS:
             funnel["data_error_reason"] = reason
-            print(f"[BI {direction}] Data validation failed: {reason}")
+            counts = funnel["data_error_counts"]
+            counts[reason] = counts.get(reason, 0) + 1
+        field = field if isinstance(field, str) and field in BI_DATA_ERROR_FIELDS else "unknown"
+        fields = funnel["data_error_fields"]
+        fields[field] = fields.get(field, 0) + 1
+
+    def _data_error(code, reason=None):
+        _record_data_error(reason)
         raise ScannerDataError(code, funnel) from None
+
+    def _quarantine(reason, field="unknown"):
+        # Discard the entire affected series, never patch prices or skip bars
+        # inside it. Other symbols can still be diagnosed. Any such gap keeps
+        # this run incomplete: no new final cache or automatic BI mail.
+        _record_data_error(reason, field)
+        funnel["quarantined_symbols"] += 1
 
     try:
         # ── Fallback: Full stock universe from Polygon ──
@@ -1386,7 +1418,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
             # OHLCV laden — Short braucht 300 Tage für SMA200 Bonus-Signale
             try:
-                end_date = datetime.now()
+                end_date = run_as_of.astimezone(ZoneInfo("America/New_York"))
                 fetch_days = 320 if direction == "short" else 130
                 start_date = end_date - timedelta(days=fetch_days)
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
@@ -1419,27 +1451,44 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 try:
                     raw_bars = parse_bi_daily_aggregates(api_data)
                 except BIAggregateDataError as e:
+                    if e.reason in BI_ISOLATABLE_BAR_ERRORS:
+                        _quarantine(e.reason, e.field)
+                        continue
                     _data_error("scan_data_invalid", e.reason)
-                if not raw_bars or len(raw_bars) < 10:
+                if not raw_bars:
                     no_data_count += 1
                     _reject("insufficient_daily_history")
                     continue
 
                 all_bars = []
                 for bar in raw_bars:
+                    try:
+                        bar_time = datetime.fromtimestamp(bar["t"] / 1000, tz=dt.timezone.utc)
+                    except OSError:
+                        # Windows can report an out-of-range epoch as OSError.
+                        # Catch it only here: network errors also inherit it.
+                        raise ValueError("invalid_daily_timestamp") from None
+                    if bar_time > run_as_of:
+                        # A future aggregate opening cannot supply even the
+                        # separate latest-price/extension checks of this run.
+                        raise BIAggregateDataError("invalid_bar_timestamp", field="t")
                     all_bars.append({
-                        "date": datetime.fromtimestamp(bar["t"] / 1000).strftime("%Y-%m-%d"),
+                        "date": bar_time.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d"),
                         "open": bar["o"],
                         "high": bar["h"],
                         "low": bar["l"],
                         "close": bar["c"],
                         "volume": bar["v"]
                     })
+                if len(all_bars) < 10:
+                    no_data_count += 1
+                    _reject("insufficient_daily_history")
+                    continue
                 # M-1 (BI-Audit 10.06.): Die an analyze_breakout_imminent uebergebenen
                 # Bars enden mit dem letzten KOMPLETTEN Handelstag — der laufende
                 # Partial-Bar verfaelschte die Kontraktions-Signale. Live-Preis-Checks
                 # (Already-Broke-Out, Extension-Gates, Preis-Feld) nutzen weiter all_bars.
-                _session_bars = _bi_strip_partial_bar(all_bars)
+                _session_bars = _bi_strip_partial_bar(all_bars, as_of=run_as_of)
                 # 50 abgeschlossene Tageskerzen halten die 20 BI-Indikatoren auf
                 # demselben Datenfenster wie AutoTrader/Backtest. Insbesondere
                 # benoetigt der MACD drei Histogrammwerte (mindestens 36 Bars),
@@ -1497,8 +1546,14 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
             except ScannerDataError:
                 raise
+            except BIAggregateDataError as e:
+                _quarantine(e.reason, e.field)
+                continue
+            except RequestException:
+                _data_error("scan_data_unavailable")
             except (TypeError, ValueError, KeyError, OverflowError):
-                _data_error("scan_data_invalid", "invalid_data_conversion")
+                _quarantine("invalid_data_conversion")
+                continue
             except Exception:
                 _data_error("scan_data_unavailable")
 
@@ -1547,6 +1602,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                 continue
 
                 # Analyse
+                session_date = bars[-1]["date"]
+                session_counts = funnel["analysis_session_dates"]
+                if session_date not in session_counts and len(set(session_counts) - {"other"}) >= 4:
+                    session_date = "other"
+                session_counts[session_date] = session_counts.get(session_date, 0) + 1
                 result = analyze_breakout_imminent(bars, direction=direction)
                 analysis_result_returned = True
                 if len(result) == 8:
@@ -1594,7 +1654,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _session_bars, direction=direction,
                     range_days=getattr(result, "consolidation_days", None),
                     live_price=all_bars[-1]["close"],
-                    as_of=dt.datetime.now(dt.timezone.utc),
+                    as_of=run_as_of,
                 )
                 if not plan.get("accepted"):
                     reason = plan.get("reason")
@@ -1810,7 +1870,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
         # Finale Sortierung + Speichern
-        if analysis_errors or checked != total:
+        if analysis_errors or funnel["data_failures"] or checked != total:
             raise ScannerDataError("scan_data_incomplete", funnel)
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
         funnel["coverage"] = "complete"

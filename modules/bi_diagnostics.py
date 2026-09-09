@@ -88,6 +88,10 @@ def create_bi_diagnostics(*, direction, indicator_specs, required_green,
             for key in keys
         },
         "first_hard_gate_counts": {key: 0 for key in _HARD_GATES},
+        # Pairwise co-failures, not independent probabilities and not rows.
+        # Only known red factors count; unavailable is never silently red.
+        "failed_pair_counts": {f"{a:02}:{b:02}": 0 for a in range(1, 20) for b in range(a + 1, 21)},
+        "consolidation_days_histogram": {**{str(i): 0 for i in range(51)}, "other": 0},
     }
 
 
@@ -184,4 +188,11 @@ def observe_bi_analysis(diagnostics, result, *, bar_count, payload_accepted):
         counts["green"] += int(passed)
         counts["red"] += int(known and not passed)
         counts["unavailable"] += int(not known)
+    red_ids = [i for i, (known, passed) in enumerate(flags, 1) if known and not passed]
+    for offset, a in enumerate(red_ids):
+        for b in red_ids[offset + 1:]:
+            diagnostics["failed_pair_counts"][f"{a:02}:{b:02}"] += 1
+    days = getattr(result, "consolidation_days", None)
+    day_bucket = str(days) if type(days) is int and 0 <= days <= 50 else "other"
+    diagnostics["consolidation_days_histogram"][day_bucket] += 1
     return None

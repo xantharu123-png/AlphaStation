@@ -259,7 +259,7 @@ def test_empty_then_analyzed_finishes_with_unchanged_strict_contract(
         row = cache["results"][0]
         assert row["BI_IndicatorsGreen"] == row["BI_IndicatorsRequired"] == 17
         assert row["BI_IndicatorsAvailable"] == row["BI_IndicatorsTotal"] == 20
-        assert row["BI_IndicatorContractVersion"] == "stock-bi-20-v2"
+        assert row["BI_IndicatorContractVersion"] == scanners.BI_STOCK_CONTRACT_VERSION
 
 
 @pytest.mark.parametrize("direction", ["long", "short"])
@@ -281,7 +281,9 @@ def test_empty_then_invalid_preserves_final_and_does_not_claim_zero_success(
     scanners, tickers, final, before, calls, analyses, _ = _lifecycle(
         monkeypatch, tmp_path, _result(17), direction, [empty, invalid]
     )
-    with pytest.raises(scanners.ScannerDataError, match="scan_data_invalid") as caught:
+    isolated = reason in {"invalid_bar_type", "invalid_data_conversion"}
+    code = "scan_data_incomplete" if isolated else "scan_data_invalid"
+    with pytest.raises(scanners.ScannerDataError, match=code) as caught:
         scanners._bi_background_scan("fixture", direction, tickers)
     assert final.read_bytes() == before
     assert calls == [1, 1] and analyses == []

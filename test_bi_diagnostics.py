@@ -73,6 +73,7 @@ def test_initial_schema_has_only_complete_fixed_keys_and_zero_counters():
         "payload_accepted_count", "observation_errors", "green_count_histogram",
         "available_count_histogram", "bar_count_histogram", "factor_counts",
         "first_hard_gate_counts",
+        "failed_pair_counts", "consolidation_days_histogram",
     }
     assert d["schema_version"] == 1
     assert d["scanner"] == "bi_long"

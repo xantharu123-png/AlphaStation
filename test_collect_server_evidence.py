@@ -604,14 +604,18 @@ def test_collection_reads_api_namespace_caches_and_override_progress_after_privi
     monkeypatch.setattr(collector, "safe_cache_summary", summary)
     result = collector.collect(app)
     namespace = Path(runtimes["tradingbot-api.service"]["process_root"])
-    assert state["paths"] == [
+    assert state["paths"][:5] == [
         namespace / "tmp" / "bi_cache_long.json",
         namespace / "tmp" / "bi_cache_short.json",
         namespace / "tmp" / "strategy_momentum_breakout_long_cache.json",
         namespace / "run" / "alpha-progress" / "bi_scan_progress_long.json",
         namespace / "run" / "alpha-progress" / "bi_scan_progress_short.json",
     ]
+    assert namespace / "tmp" / "crypto_explosion_cache.json" in state["paths"]
+    assert namespace / "tmp" / "strategy_gap_momentum_long_cache.json" in state["paths"]
+    assert len(state["paths"]) == 5 + len(collector.FIXED_SCANNER_CACHES) + len(collector.STOCK_STRATEGY_CACHE_NAMES) - 1
     assert result["read_only"] is True
+    assert result["mail_evidence"]["outbox"] == {"available": False, "reason": "unverified_runtime_path"}
 
 
 def test_collection_never_falls_back_to_host_cache_when_private_tmp_is_missing(tmp_path, monkeypatch):
@@ -629,3 +633,379 @@ def test_collection_rejects_process_restart_during_namespace_read(tmp_path, monk
     monkeypatch.setattr(collector, "safe_cache_summary", summary)
     with pytest.raises(ValueError, match="restarted or paths changed"):
         collector.collect(app)
+
+
+def _outbox_db(path, rows=()):
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE mail_outbox(status,mail_class,attempts,created_at,next_attempt_at,expires_at,sent_at,subject,body_html,recipients_json,last_error)")
+        connection.executemany("INSERT INTO mail_outbox VALUES(?,?,?,?,?,?,?,'PRIVATE_SUBJECT','PRIVATE_BODY','PRIVATE_EMAIL','PRIVATE_ERROR')", rows)
+        connection.commit()
+
+
+def _suppression_db(path, rows=()):
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE suppression_buckets(bucket_start,scanner,reason,first_seen_at,last_seen_at,event_count,code_revision)")
+        connection.executemany("INSERT INTO suppression_buckets VALUES(?,?,?,?,?,?,'PRIVATE_REVISION')", rows)
+        connection.commit()
+
+
+@pytest.mark.parametrize("snapshot,create", [(collector.outbox_snapshot, _outbox_db),
+                                             (collector.suppression_snapshot, _suppression_db)])
+def test_mail_missing_unknown_schema_and_real_zero_are_distinct_and_never_create_db(tmp_path, snapshot, create):
+    path = tmp_path / "mail.sqlite"
+    assert snapshot(path, 200000) == {"available": False, "reason": "missing"}
+    assert not path.exists()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE unrelated(id)")
+    assert snapshot(path, 200000) == {"available": False, "reason": "unknown_schema"}
+    create(path)
+    result = snapshot(path, 200000)
+    assert result["available"] is True
+    assert result.get("rows", result.get("reason_occurrences")) == 0
+
+
+def test_outbox_metadata_only_counts_pending_expired_sent_unknown_and_failed_attempt_counter(tmp_path):
+    path = tmp_path / "mail.sqlite"
+    now = 200000
+    _outbox_db(path, [
+        ("pending", "trade", 2, now - 100, now - 10, now + 100, None),
+        ("pending", "info", 3, now - 200, now - 10, now - 1, None),
+        ("sent", "swing_trade", 0, now - 300, now - 10, now + 100, now - 20),
+        ("PRIVATE_STATUS", "PRIVATE_CLASS", 0, now - 90000, now - 10, now + 100, None),
+    ])
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = collector.outbox_snapshot(path, now)
+    assert result["available"] is True and result["rows"] == 4
+    assert result["by_status"]["pending"] == 2 and result["by_status"]["sent"] == 1
+    assert result["due_pending"] == result["pending_past_expiry"] == 1
+    assert result["created_last_24h"] == 3 and result["sent_last_24h"] == 1
+    assert result["stored_attempt_counter_sum"] == 5 and result["max_stored_attempt_counter"] == 3
+    assert result["unknown_status_rows"] == result["unknown_mail_class_rows"] == 1
+    assert result["oldest_open_created_at"] == now - 200
+    assert "PRIVATE" not in json.dumps(result)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_suppression_window_counts_occurrences_not_unique_signals_and_suppresses_unknown_keys(tmp_path):
+    path = tmp_path / "suppression.sqlite"
+    now = 200100
+    start = int((now - 86400) // 3600) * 3600
+    _suppression_db(path, [
+        (start, "bi_long", "smtp_delivery_failed", start + 1, start + 2, 3),
+        (start + 3600, "bi_long", "smtp_delivery_failed", start + 3601, start + 3602, 4),
+        (start + 3600, "bi_short", "cooldown_active", start + 3601, start + 3602, 5),
+        (start + 3600, "PRIVATE_SCANNER", "PRIVATE_REASON", start + 3601, start + 3602, 6),
+        (start - 3600, "bi_long", "smtp_delivery_failed", start - 3500, start - 3400, 100),
+    ])
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = collector.suppression_snapshot(path, now)
+    assert result["available"] is True and result["reason_occurrences"] == 18
+    assert result["unknown_dimension_occurrences"] == 6
+    assert result["by_scanner_reason"] == [
+        {"scanner": "bi_long", "reason": "smtp_delivery_failed", "reason_occurrences": 7},
+        {"scanner": "bi_short", "reason": "cooldown_active", "reason_occurrences": 5},
+    ]
+    assert "up_to_1h" in result["window_semantics"]
+    assert "not_unique" in result["count_unit"] and "PRIVATE" not in json.dumps(result)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_mail_queries_are_ro_queryonly_one_transaction_and_select_no_content(tmp_path, monkeypatch):
+    path = tmp_path / "outbox.sqlite"
+    _outbox_db(path)
+    original = collector.sqlite3.connect
+    calls, statements = [], []
+    def connect(database, **kwargs):
+        calls.append((database, kwargs))
+        connection = original(database, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+    monkeypatch.setattr(collector.sqlite3, "connect", connect)
+    assert collector.outbox_snapshot(path, 200000)["available"] is True
+    assert calls[0][0].endswith("?mode=ro") and calls[0][1]["uri"] is True
+    assert statements.count("BEGIN") == 1 and "PRAGMA query_only=ON" in statements
+    projected = next(text for text in statements if 'FROM "mail_outbox"' in text)
+    assert all(name not in projected for name in ("subject", "body_html", "recipients_json", "last_error"))
+    assert not any(text.startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER")) for text in statements)
+
+
+def test_mail_wal_snapshot_reads_latest_commit_without_consuming_queue(tmp_path):
+    path = tmp_path / "outbox.sqlite"
+    _outbox_db(path)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("INSERT INTO mail_outbox(status,mail_class,attempts,created_at,next_attempt_at,expires_at) VALUES('pending','trade',0,1,1,300000)")
+        writer.commit()
+        result = collector.outbox_snapshot(path, 200000)
+        assert result["rows"] == result["due_pending"] == 1
+        assert writer.execute("SELECT status FROM mail_outbox").fetchone()[0] == "pending"
+
+
+def test_mail_query_row_limit_is_unknown_not_truncated_success(tmp_path, monkeypatch):
+    path = tmp_path / "outbox.sqlite"
+    _outbox_db(path, [("pending", "trade", 0, 1, 1, 300000, None)] * 2)
+    monkeypatch.setattr(collector, "EVIDENCE_MAX_ROWS", 1)
+    assert collector.outbox_snapshot(path, 200000) == {"available": False, "reason": "row_limit_exceeded"}
+
+
+@pytest.mark.parametrize("invalid", [None, -1, "PRIVATE_ATTEMPT", 1.5])
+def test_mail_invalid_attempt_metadata_is_not_zero_or_exposed(tmp_path, invalid):
+    path = tmp_path / "outbox.sqlite"
+    _outbox_db(path, [("pending", "trade", invalid, 1, 1, 300000, None)])
+    assert collector.outbox_snapshot(path, 200000) == {"available": False, "reason": "invalid_data"}
+
+
+def test_mail_unsafe_type_does_not_open_sqlite(tmp_path, monkeypatch):
+    path = tmp_path / "directory.sqlite"
+    path.mkdir()
+    monkeypatch.setattr(collector.sqlite3, "connect", lambda *a, **kw: pytest.fail("unsafe type must not open"))
+    assert collector.outbox_snapshot(path, 200000) == {"available": False, "reason": "unsafe_file_type"}
+
+
+def test_mail_writer_routes_and_mount_namespace_inode_must_agree(tmp_path, monkeypatch):
+    one, two = tmp_path / "one.sqlite", tmp_path / "two.sqlite"
+    _outbox_db(one)
+    _outbox_db(two)
+    runtimes = {"api": {"_mail_paths": {"outbox": "/same.sqlite"}, "pid": 1},
+                "bg": {"_mail_paths": {"outbox": "/same.sqlite"}, "pid": 2}}
+    monkeypatch.setattr(collector, "_namespace_path", lambda runtime, path: one if runtime["pid"] == 1 else two)
+    assert collector.mail_store_evidence(runtimes, 200000)["outbox"] == {
+        "available": False, "reason": "writer_file_mismatch"}
+    runtimes["bg"]["_mail_paths"]["outbox"] = "/different.sqlite"
+    assert collector.mail_store_evidence(runtimes, 200000)["outbox"] == {
+        "available": False, "reason": "writer_path_mismatch"}
+    runtimes["bg"]["_mail_paths"]["outbox"] = "/same.sqlite"
+    monkeypatch.setattr(collector, "_namespace_path", lambda runtime, path: one)
+    result = collector.mail_store_evidence(runtimes, 200000)
+    assert result["outbox"]["available"] is True and result["outbox"]["rows"] == 0
+    assert result["delivery_journal"] == {"available": False, "reason": "not_collected"}
+
+
+def test_mail_paths_respect_runtime_data_and_individual_overrides_without_exporting_environment(tmp_path, monkeypatch):
+    proc, app, _ = _mock_runtime_process(tmp_path, monkeypatch)
+    with (proc / "environ").open("ab") as stream:
+        stream.write(b"\0ALPHA_DATA_DIR=state\0MAIL_OUTBOX_DB_PATH=mail-custom.sqlite\0SUPPRESSION_TELEMETRY_DB_PATH=other/suppress.sqlite\0")
+    result = collector.runtime_identity("tradingbot-api.service", app.resolve())
+    assert result["_mail_paths"] == {
+        "outbox": str(app / "mail-custom.sqlite"), "suppression": str(app / "other" / "suppress.sqlite")}
+    assert "PRIVATE_KEY" not in json.dumps(result)
+
+
+def test_mail_code_allowlists_match_reviewed_registry_without_app_import():
+    import ast
+    tree = ast.parse((Path(__file__).parent / "modules" / "suppression_telemetry.py").read_text(encoding="utf8"))
+    for suffix in ("SCANNERS", "REASONS"):
+        source = next(ast.literal_eval(node.value.args[0]) for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "ALLOWED_SUPPRESSION_" + suffix
+                              for target in node.targets))
+        assert getattr(collector, "SUPPRESSION_" + suffix) == source
+
+
+@pytest.mark.parametrize("version", ["stock-bi-20-v2", "stock-bi-20-v3"])
+def test_confluence_preserves_exact_historical_or_current_contract_version(version):
+    payload = _confluence_payload()
+    payload["contract_version"] = version
+    result = collector._confluence_projection(payload)
+    assert result["available"] is True and result["contract_version"] == version
+
+
+def test_new_optional_bi_diagnostics_strict_projection_and_missing_stays_missing(tmp_path):
+    path = tmp_path / "bi_scan_progress_long.json"
+    confluence = _confluence_payload()
+    confluence["failed_pair_counts"] = {f"{left:02}:{right:02}": 0 for left in range(1, 21) for right in range(left + 1, 21)}
+    confluence["failed_pair_counts"]["01:20"] = 12
+    confluence["failed_pair_counts"]["PRIVATE_PAIR"] = 99
+    confluence["consolidation_days_histogram"] = {str(n): 0 for n in range(51)} | {"other": 0}
+    path.write_text(json.dumps({"diagnostics": {
+        "confluence": confluence, "run_as_of": "2026-09-09T12:00:00+02:00", "quarantined_symbols": 2,
+        "data_error_counts": {"invalid_bar_geometry": 2, "PRIVATE_REASON": 3},
+        "data_error_fields": {"v": 2, "PRIVATE_FIELD": 3},
+        "analysis_session_dates": {"2026-09-08": 125, "other": 1, "PRIVATE_DATE": 8},
+    }}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["numeric_diagnostics"]["quarantined_symbols"] == 2
+    assert result["run_as_of"] == "2026-09-09T10:00:00+00:00"
+    assert result["confluence"]["failed_pair_counts"]["01:20"] == 12
+    assert result["analysis_session_dates"]["2026-09-08"] == 125
+    assert "PRIVATE" not in json.dumps(result)
+    path.write_text('{"diagnostics":{}}', encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert all(key not in result for key in ("run_as_of", "data_error_counts", "data_error_fields", "analysis_session_dates"))
+
+
+def test_collection_strips_internal_mail_paths_and_reads_after_privilege_drop(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    for runtime in runtimes.values():
+        runtime["_mail_paths"] = {"outbox": "/PRIVATE_PATH.sqlite"}
+    def snapshot(values, now):
+        assert state["dropped"] is True and values == runtimes
+        return {"outbox": {"available": False, "reason": "missing"}}
+    monkeypatch.setattr(collector, "mail_store_evidence", snapshot)
+    result = collector.collect(app)
+    assert "PRIVATE_PATH" not in json.dumps(result)
+    assert "not_collected" in result["scanner_attempt_coverage"]["other_scanners"]
+
+
+def test_fixed_scanner_cache_names_and_stock_strategy_names_match_api_source_without_import():
+    import ast
+    import re
+    tree = ast.parse((Path(__file__).parent / "api.py").read_text(encoding="utf8"))
+    source_strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                      and type(node.value) is str}
+    assert set(collector.FIXED_SCANNER_CACHES.values()) <= source_strings
+    order = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "STOCK_STRATEGY_ORDER"
+                         for target in node.targets))
+    slugs = {re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]+", "_", name.lower().replace(" ", "_").replace("/", "_"))).strip("_")
+             for name in order}
+    assert set(collector.STOCK_STRATEGY_CACHE_NAMES) == slugs
+
+
+def test_mail_oversized_or_binary_dimensions_never_leave_sqlite(tmp_path):
+    path = tmp_path / "mail.sqlite"
+    _outbox_db(path, [("PRIVATE" * 10000, sqlite3.Binary(b"PRIVATE_BLOB"), 0, 1, 1, 300000, None)])
+    with collector._evidence_rows(path, "mail_outbox", ("status", "mail_class", "attempts")) as rows:
+        assert rows == [{"status": None, "mail_class": None, "attempts": 0}]
+    result = collector.outbox_snapshot(path, 200000)
+    assert result["available"] is True and result["unknown_status_rows"] == 1
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_suppression_only_reads_overlapping_window_before_applying_row_bound(tmp_path, monkeypatch):
+    path = tmp_path / "suppression.sqlite"
+    now = 200100
+    start = int((now - 86400) // 3600) * 3600
+    _suppression_db(path, [(start - 3600, "bi_long", "cooldown_active", start - 3500, start - 3400, 1)] * 5
+                    + [(start, "bi_long", "cooldown_active", start + 1, start + 2, 7)])
+    monkeypatch.setattr(collector, "EVIDENCE_MAX_ROWS", 1)
+    result = collector.suppression_snapshot(path, now)
+    assert result["available"] is True and result["reason_occurrences"] == 7
+
+
+def _attempt_payload(slug="momentum_breakout_long", status="error"):
+    sweep = slug == "stock_strategy_sweep"
+    result = {"schema_version": 1, "attempt_kind": "stock_strategy_sweep" if sweep else "stock_strategy",
+              "strategy_slug": slug, "run_id": "ab" * 16, "code_revision": "012345abcdef-dirty",
+              "started_at": "2026-09-09T12:00:00+02:00", "updated_at": "2026-09-09T12:01:00+02:00",
+              "results": [], "status": status, "result_count": 0 if status == "complete" else None,
+              "error_code": "scan_data_invalid" if status == "error" else None,
+              "diagnostics": {"coverage": "incomplete" if status != "complete" else "complete",
+                              "final_results": 0 if status == "complete" else None}}
+    if sweep:
+        result["diagnostics"].update(strategy_results={}, mail_status="not_attempted", mail_error_code=None,
+                                     strategies_total=4, strategies_attempted=0, strategies_completed=0, strategies_failed=0)
+    return result
+
+
+@pytest.mark.parametrize("status", ["running", "complete", "error"])
+@pytest.mark.parametrize("slug", sorted(collector.STOCK_ATTEMPT_SLUGS | {"stock_strategy_sweep"}))
+def test_strategy_attempt_preserves_zero_vs_failure_and_fixed_identity(tmp_path, slug, status):
+    path = tmp_path / "attempt.json"
+    payload = _attempt_payload(slug, status)
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, slug)
+    assert result["available"] is True and result["strategy_slug"] == slug
+    assert result["status"] == status and result["result_count"] == (0 if status == "complete" else None)
+    assert result["started_at"] == "2026-09-09T10:00:00+00:00"
+    assert result["error_code"] == ("scan_data_invalid" if status == "error" else None)
+    if slug == "stock_strategy_sweep":
+        assert result["mail_status_semantics"] == "guard_execution_not_delivery_evidence"
+
+
+def test_sweep_attempt_separates_failed_leaf_from_completed_sibling_and_mail_guard(tmp_path):
+    path = tmp_path / "sweep.json"
+    payload = _attempt_payload("stock_strategy_sweep")
+    payload["diagnostics"].update(
+        strategies_attempted=4, strategies_completed=3, strategies_failed=1, current_result_count=2,
+        strategy_results={
+            "momentum_breakout_long": {"status": "error", "result_count": None,
+                                       "error_code": "scan_data_unavailable"},
+            "gap_momentum_long": {"status": "complete", "result_count": 2, "aggregate_candidate_count": 2},
+            "PRIVATE_SLUG": {"PRIVATE_SECRET": "PRIVATE_BODY"},
+        }, mail_status="guarded", mail_error_code=None,
+    )
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, "stock_strategy_sweep")
+    assert result["available"] is True and result["result_count"] is None
+    assert result["numeric_diagnostics"]["current_result_count"] == 2
+    assert result["strategy_results"]["momentum_breakout_long"]["result_count"] is None
+    assert "aggregate_candidate_count" not in result["strategy_results"]["momentum_breakout_long"]
+    assert result["strategy_results"]["gap_momentum_long"]["result_count"] == 2
+    assert result["mail_status"] == "guarded" and "PRIVATE" not in json.dumps(result)
+    assert result["omitted_strategy_categories"] == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"strategy_slug": "PRIVATE_SLUG"}, {"attempt_kind": "PRIVATE_KIND"},
+    {"run_id": "PRIVATE_RUN"}, {"code_revision": "PRIVATE_REVISION"},
+    {"started_at": "2026-09-09T12:00:00"}, {"updated_at": "2026-01-01T00:00:00+00:00"},
+    {"status": "PRIVATE_STATUS"}, {"status": "error", "result_count": 0},
+    {"status": "complete", "result_count": None}, {"error_code": "PRIVATE_ERROR"},
+    {"error_code": {}}, {"results": [{"ticker": "PRIVATE_TICKER"}]}, {"diagnostics": None},
+])
+def test_strategy_attempt_rejects_incoherent_or_untrusted_schema_without_leak(tmp_path, change):
+    path = tmp_path / "attempt.json"
+    path.write_text(json.dumps({**_attempt_payload(), **change}), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, "momentum_breakout_long")
+    assert result == {"available": False, "reason": "invalid_or_unreadable"}
+
+
+@pytest.mark.parametrize("version", [True, 0, 2, "1", None])
+def test_strategy_attempt_unknown_schema_is_not_zero(tmp_path, version):
+    path = tmp_path / "attempt.json"
+    path.write_text(json.dumps({**_attempt_payload(), "schema_version": version}), encoding="utf8")
+    assert collector.safe_strategy_attempt_summary(path, "momentum_breakout_long") == {
+        "available": False, "reason": "unknown_schema"}
+
+
+def test_strategy_attempt_projection_omits_raw_diagnostic_and_unknown_keys(tmp_path):
+    path = tmp_path / "attempt.json"
+    payload = _attempt_payload()
+    payload.update(error="PRIVATE_STACK", exception="PRIVATE_EXCEPTION", ticker="PRIVATE_TICKER")
+    payload["diagnostics"].update(error="PRIVATE_MESSAGE", universe_count=4,
+        data_failures={"scan_data_invalid": 1, "PRIVATE_REASON": 2},
+        rejected={"missing_price_or_prev_close": 4, "PRIVATE_REJECTION": 2},
+        stage_counts={"priced_snapshot": 0, "PRIVATE_STAGE": 3})
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, "momentum_breakout_long")
+    assert result["available"] is True and result["numeric_diagnostics"]["universe_count"] == 4
+    assert result["rejected"]["missing_price_or_prev_close"] == 4
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_attempt_time_comparison_uses_instants_with_variable_fractional_precision(tmp_path):
+    path = tmp_path / "attempt.json"
+    payload = _attempt_payload()
+    payload.update(started_at="2026-09-09T12:00:00.000000+02:00", updated_at="2026-09-09T10:00:00Z")
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, "momentum_breakout_long")
+    assert result["available"] is True and result["started_at"] == result["updated_at"]
+
+
+def test_failed_sweep_child_nullable_aggregate_is_unknown_not_zero(tmp_path):
+    path = tmp_path / "sweep.json"
+    payload = _attempt_payload("stock_strategy_sweep")
+    payload["diagnostics"]["strategy_results"] = {
+        "momentum_breakout_long": {"status": "error", "result_count": None,
+                                  "error_code": "scan_data_invalid", "aggregate_candidate_count": None}}
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, "stock_strategy_sweep")
+    assert result["available"] is True
+    assert result["strategy_results"]["momentum_breakout_long"]["aggregate_candidate_count"] is None
+
+
+def test_collection_attempt_files_use_api_namespace_and_runtime_override_after_drop(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    calls = []
+    def summary(path, slug):
+        assert state["dropped"]
+        calls.append((path, slug))
+        return {"available": False, "reason": "missing"}
+    monkeypatch.setattr(collector, "safe_strategy_attempt_summary", summary)
+    result = collector.collect(app)
+    namespace = Path(runtimes["tradingbot-api.service"]["process_root"])
+    assert len(calls) == 5
+    assert (namespace / "run" / "alpha-progress" / "stock_strategy_momentum_breakout_long_attempt.json",
+            "momentum_breakout_long") in calls
+    assert (namespace / "run" / "alpha-progress" / "stock_strategy_sweep_attempt.json", "stock_strategy_sweep") in calls
+    assert result["stock_strategy_attempts"]["momentum_breakout_long"] == {"available": False, "reason": "missing"}

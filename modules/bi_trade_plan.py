@@ -30,6 +30,29 @@ def bi_consolidation_days(bars):
     return days
 
 
+def bi_range_context(completed_bars, *, range_days=None):
+    """One BI range from at most 50 chronological, completed daily bars.
+
+    Keep the existing strict <6% consolidation definition and the existing
+    15-bar plan fallback when fewer than five consolidation bars exist. The
+    caller owns the completed-bar cutoff; this pure helper never reads time or
+    a live quote. Empty history has unknown prices, never manufactured zeros.
+    """
+    analysis_bars = list(completed_bars or ())[-50:]
+    if range_days is not None and (
+        type(range_days) is not int or not 0 <= range_days <= len(analysis_bars)
+    ):
+        raise ValueError("invalid BI range_days")
+    days = bi_consolidation_days(analysis_bars) if range_days is None else range_days
+    window = analysis_bars[-days:] if days >= 5 else analysis_bars[-15:]
+    return {
+        "range_days": days,
+        "effective_days": len(window),
+        "range_high": max(bar["high"] for bar in window) if window else None,
+        "range_low": min(bar["low"] for bar in window) if window else None,
+    }
+
+
 def build_bi_trade_plan(completed_bars, *, direction, range_days=None, live_price=None,
                         as_of=None, apply_structure=True):
     """Return accepted/reason, canonical prices and explicit entry semantics.
@@ -58,10 +81,13 @@ its next-bar fill approximation instead of inventing an at-signal fill.
         return {**rejected, "reason": "invalid_ohlc"}
 
     analysis_bars = bars[-50:]
-    days = bi_consolidation_days(analysis_bars) if range_days is None else int(range_days)
-    range_bars = bars[-days:] if days >= 5 else bars[-15:]
-    high = max(b["high"] for b in range_bars)
-    low = min(b["low"] for b in range_bars)
+    try:
+        range_context = bi_range_context(analysis_bars, range_days=range_days)
+    except (ValueError, TypeError):
+        return {**rejected, "reason": "invalid_range_context"}
+    days = range_context["range_days"]
+    high = range_context["range_high"]
+    low = range_context["range_low"]
     size = high - low
     if size / low * 100 < 1.0:
         return {**rejected, "reason": "range_too_narrow"}

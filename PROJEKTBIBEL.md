@@ -715,7 +715,7 @@ Neueste bounded Audit-/Abnahmereferenz: `AUDIT_REMEDIATION_2026-09-04.md`.
 Historische Testzahlen, Bundle-Hashes und Serverstaende oben beschreiben nur
 ihren jeweiligen damaligen Stand. Die aktuellen fachlichen Invarianten sind:
 
-- BI `stock-bi-20-v2`: mindestens 17 von 20 bestaetigt, alle 20 auswertbar,
+- BI `stock-bi-20-v3`: mindestens 17 von 20 bestaetigt, alle 20 auswertbar,
   harte Gegenindikationen blockieren unabhaengig vom gewichteten Score.
   Keine unter-17-Kandidatenliste, kein unter-17-Tracking oder Mailversand.
 - Physische Support-/Resistance-Grenzen duerfen nicht durch die aktuelle
@@ -741,6 +741,13 @@ ihren jeweiligen damaligen Stand. Die aktuellen fachlichen Invarianten sind:
 
 Dieses Paket aktiviert weder Live-Trading noch den frueheren Root-Cron.
 Deployment und echte neue Forward-Ergebnisse bleiben separate Nachweise.
+
+Ergaenzung vom 09.09.2026: v3 gleicht die Fibonacci-Rangegrenze an die bereits
+verwendete adaptive Plan-Range an; keine Schwelle wird gelockert. BI-Laeufe
+verwenden einen festen Stichtag fuer abgeschlossene Analysekerzen. Defekte
+Einzelserien werden isoliert, verhindern aber weiterhin einen vollstaendigen
+Final-Cache und automatische BI-Mails dieses Laufs. Siehe
+`docs/SCANNER_RELIABILITY_REPAIR_2026-09-09.md`.
 
 ## 17. Bestaetigter Momentum-Breakout und Modellgrenzen, 07.09.2026
 

@@ -25,7 +25,7 @@ from modules.data_fetchers import rate_limited_get
 from modules.trade_levels import trade_geometry
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline
-from modules.bi_trade_plan import bi_consolidation_days
+from modules.bi_trade_plan import bi_consolidation_days, bi_range_context
 from modules.fibonacci_levels import select_confirmed_swing_leg, project_fibonacci
 from modules.stock_bars import completed_polygon_bars
 
@@ -860,7 +860,7 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 # payload contract; append a new version instead of silently renaming them.
 BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v2"
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v3"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
@@ -1371,7 +1371,10 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # Zaehle aufeinanderfolgende Tage in enger Range (vom Ende rueckwaerts)
     # Der aktuelle Bar ist bereits in max/min enthalten und muss deshalb als
     # erster Range-Tag zaehlen. Der alte Startwert 0 war um einen Tag zu klein.
-    range_days = bi_consolidation_days(bars)
+    # The shared plan contract is stock-BI only. Keep the separate legacy
+    # crypto library mode's input horizon and boundary semantics unchanged.
+    range_context = None if crypto_mode else bi_range_context(bars)
+    range_days = bi_consolidation_days(bars) if crypto_mode else range_context["range_days"]
 
     if not is_penny_illiquid:
         if range_days >= 15:
@@ -2187,7 +2190,13 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
                 if float(item.provenance["ratio"]) in (0.236, 0.382, 0.5)
                 and abs(current_price - item.midpoint) < tolerance
             ]
-            boundary = max(highs[-15:]) if direction == "long" else min(lows[-15:])
+            # Match the actual BI plan boundary, including its unchanged
+            # 15-bar fallback. A separate fixed window could confirm a level
+            # that the selected adaptive-range plan does not use at all.
+            if crypto_mode:
+                boundary = max(highs[-15:]) if direction == "long" else min(lows[-15:])
+            else:
+                boundary = range_context["range_high" if direction == "long" else "range_low"]
             boundary_near = [item for item in levels if abs(boundary - item.midpoint) < tolerance]
             if near or boundary_near:
                 s18_passed = True

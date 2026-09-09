@@ -56,7 +56,7 @@ def bi_row(direction="LONG"):
         "bi_grade": "A", "bi_score": 88, "rvol": 2.1, "rsi": 56, "volume": 1500000,
         "change_pct": -2 if short else 2, "bi_indicators_green": 17,
         "bi_indicators_required": 17, "bi_indicators_total": 20,
-        "bi_indicators_available": 20, "bi_indicator_contract_version": "stock-bi-20-v2",
+        "bi_indicators_available": 20, "bi_indicator_contract_version": "stock-bi-20-v3",
         "bi_indicator_checks": [{"id": i, "name": f"QA-Faktor {i}", "available": True, "passed": i <= 17, "reason": "Synthetischer Test"} for i in range(1, 21)],
         "trade_action": "WAIT_FOR_TRIGGER", "data_as_of": STAMP,
         "trade_setup": {

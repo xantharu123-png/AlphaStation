@@ -1,6 +1,6 @@
 # Profitabilitaets-Pruefprotokoll – 08.09.2026
 
-Status: Schritt 1 umgesetzt; Scanner-Zuverlaessigkeit, sicherer Serverexport und Offline-Risikomodell lokal erweitert. Aktuelle Server-Ergebniskohorte und Netto-Profitabilitaetsnachweis fehlen weiterhin. Keine Handelsfreigabe.
+Statusfortschreibung 09.09.2026: Serverexport liegt vor und wurde auditiert. Scanner-Zuverlaessigkeit und Diagnose werden gemaess `SCANNER_RELIABILITY_REPAIR_2026-09-09.md` repariert. Eine neue belastbare Ergebniskohorte und der Netto-Profitabilitaetsnachweis fehlen weiterhin. Keine Handelsfreigabe.
 
 ## Auftrag und bestaetigte Kapitalvorgabe
 
@@ -36,17 +36,17 @@ Die bestehende Risiko-, Tracker- und Vergleichsinfrastruktur wurde gelesen; die 
 
 Der vorhandene Vergleich [scanner_cohort_comparison.py](C:/Projekt/TradingBot/modules/scanner_cohort_comparison.py:104) wird wiederverwendet: gleiche gehashte Inputs, explizite Kosten, getrennte fehlende/ungefuellte/ungeklaerte Ergebnisse, gepaarte Netto-R-Differenz. Kein zweiter Vergleichsmotor und keine nachtraegliche Auswahl der drei besten Tagestrades.
 
-### 2. Aktuellen Produktionsbestand sichern – offen
+### 2. Aktuellen Produktionsbestand lesen – Export vorhanden, neue Ergebniskohorte offen
 
 Vorbereitet ist jetzt `scripts/collect_hetzner_evidence.ps1`: Es uebertraegt den lokal geprueften Standalone-Collector ueber SSH-stdin, ohne Serverdatei, Pull, Neustart oder Import von Server-Appcode. Der Collector prueft die aktiven API-/BG-Writer und Datenpfade, wechselt dauerhaft zur verifizierten nichtprivilegierten Service-Identitaet und liest den Tracker in einer SQLite-Transaktion einschliesslich WAL. Health und Cache-Zaehler sind separate Beobachtungen, keine atomare Gesamtsicherung. Die private Projektion enthaelt benoetigte Trade-Evidenz, aber keine Mailtexte, Empfaenger oder API-Schluessel; sie bleibt uncommittet unter `output/profitability/`.
 
 Ausfuehrung in der eigenen Windows-PowerShell (SSH-Passwort nur dort eingeben):
 
 ```powershell
-& 'C:\Projekt\TradingBot\scripts\collect_hetzner_evidence.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Projekt\TradingBot\scripts\collect_hetzner_evidence.ps1"
 ```
 
-Danach die erzeugte Datei lokal mit `scripts/signal_performance_breakdown.py --snapshot-json <Datei> --days 30 --format json` auswerten. Der Import validiert die Projektion; er ist kein kryptographischer Echtheitsnachweis und keine vollstaendige App-/Broker-Population. Ein solcher aktueller Serverexport liegt fuer diesen Arbeitsschritt noch nicht vor.
+Danach die erzeugte Datei lokal mit `scripts/signal_performance_breakdown.py --snapshot-json <Datei> --days 30 --format json` auswerten. Der Import validiert die Projektion; er ist kein kryptographischer Echtheitsnachweis und keine vollstaendige App-/Broker-Population. Der private Export vom 09.09.2026, 20:28 UTC, zeigt Revision `93df14b1903a`, einen vollstaendigen BI-Long-Lauf ohne 17/20-Treffer und einen abgebrochenen BI-Short-Lauf. Die 474 historischen Trackerzeilen liefern keine neue Ergebniskohorte dieser Reparatur. Technischer Befund und offene Nachweise stehen in `SCANNER_RELIABILITY_REPAIR_2026-09-09.md`.
 
 Zuerst einen konsistenten, lesbaren Hetzner-Snapshot mit Erstellungszeit, Revisionen, Modellversionen und benoetigten Tracker-/Zustellmetadaten beschaffen. Konsistenz eines SQLite-Snapshots einschliesslich laufender WAL-Schreibvorgaenge muss nachgewiesen sein; keine unkoordinierte Kopie nur der Hauptdatei.
 

@@ -16,13 +16,19 @@ BI_DATA_ERROR_REASONS = frozenset({
     "invalid_bar_type", "invalid_bar_value", "invalid_bar_geometry",
     "invalid_bar_timestamp", "invalid_data_conversion",
 })
+BI_ISOLATABLE_BAR_ERRORS = frozenset({
+    "invalid_bar_type", "invalid_bar_value", "invalid_bar_geometry",
+    "invalid_bar_timestamp", "invalid_data_conversion",
+})
+BI_DATA_ERROR_FIELDS = frozenset({"t", "o", "h", "l", "c", "v", "bar", "unknown"})
 
 
 class BIAggregateDataError(ValueError):
     """Fixed diagnostic code only: never retain provider payloads or URLs."""
 
-    def __init__(self, reason):
+    def __init__(self, reason, *, field="unknown"):
         self.reason = reason if isinstance(reason, str) and reason in BI_DATA_ERROR_REASONS else "invalid_payload"
+        self.field = field if isinstance(field, str) and field in BI_DATA_ERROR_FIELDS else "unknown"
         super().__init__(self.reason)
 
 
@@ -67,21 +73,23 @@ list needs positive evidence of success and zero results, not a blanket default.
     last_timestamp = 0
     for bar in bars:
         if not isinstance(bar, dict):
-            raise BIAggregateDataError("invalid_bar_type")
+            raise BIAggregateDataError("invalid_bar_type", field="bar")
         values = [bar.get(key) for key in ("t", "o", "h", "l", "c", "v")]
-        try:
-            valid = all(not isinstance(value, bool) and isinstance(value, (int, float))
-                        and math.isfinite(value) for value in values)
-        except OverflowError:
-            valid = False
-        if not valid:
-            raise BIAggregateDataError("invalid_bar_value")
+        for key, value in zip(("t", "o", "h", "l", "c", "v"), values):
+            try:
+                valid = (not isinstance(value, bool) and isinstance(value, (int, float))
+                         and math.isfinite(value))
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise BIAggregateDataError("invalid_bar_value", field=key)
         timestamp, open_, high, low, close, volume = values
         if timestamp <= last_timestamp:
-            raise BIAggregateDataError("invalid_bar_timestamp")
-        if min(open_, high, low, close) <= 0 or volume < 0:
-            raise BIAggregateDataError("invalid_bar_value")
+            raise BIAggregateDataError("invalid_bar_timestamp", field="t")
+        for key, value in zip(("o", "h", "l", "c", "v"), values[1:]):
+            if value < 0 or (key != "v" and value == 0):
+                raise BIAggregateDataError("invalid_bar_value", field=key)
         if high < max(open_, low, close) or low > min(open_, high, close):
-            raise BIAggregateDataError("invalid_bar_geometry")
+            raise BIAggregateDataError("invalid_bar_geometry", field="bar")
         last_timestamp = timestamp
     return bars
