@@ -41,6 +41,7 @@ DIAGNOSTIC_COUNTS = frozenset("""
 total checked history_available analyzed indicator_passed data_failures
 analysis_errors final_results universe_count common_stock_universe_count
 raw_matches_before_special_filter max_results quarantined_symbols
+transport_requests transport_retries transport_recovered_incidents transport_retry_budget_exhausted
 """.split())
 STAGE_COUNTS = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -62,6 +63,11 @@ invalid_payload provider_status invalid_json missing_results invalid_results_typ
 invalid_result_count invalid_query_count result_count_mismatch contradictory_empty_response
 unexpected_pagination invalid_bar_type invalid_bar_value invalid_bar_geometry
 invalid_bar_timestamp invalid_data_conversion
+""".split())
+TRANSPORT_ERROR_REASONS = frozenset("""
+timeout connection_failure tls_failure http_unauthorized http_rate_limited
+http_request_timeout http_server_error http_client_error http_unexpected_status
+malformed_json unexpected_failure
 """.split())
 REJECTION_CODES = DATA_FAILURE_CODES | frozenset("""
 insufficient_daily_history insufficient_completed_history insufficient_dollar_liquidity
@@ -1046,7 +1052,11 @@ def safe_cache_summary(path):
             reason = diagnostics.get("data_error_reason")
             if type(reason) is str and reason in DATA_ERROR_REASONS:
                 result["data_error_reason"] = reason
+            transport_reason = diagnostics.get("transport_error_reason")
+            if type(transport_reason) is str and transport_reason in TRANSPORT_ERROR_REASONS:
+                result["transport_error_reason"] = transport_reason
             for name, allowed in (("data_error_counts", DATA_ERROR_REASONS),
+                                  ("transport_error_counts", TRANSPORT_ERROR_REASONS),
                                   ("data_error_fields", frozenset({"t", "o", "h", "l", "c", "v", "bar", "unknown"}))):
                 counts = _count_projection(diagnostics.get(name), allowed)
                 if counts is not None:

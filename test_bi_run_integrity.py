@@ -94,10 +94,11 @@ def test_network_failure_is_not_a_quarantined_bar(monkeypatch, tmp_path, kind):
         raise getattr(requests.exceptions, kind)("PRIVATE_TOKEN")
 
     monkeypatch.setattr(scanners, "rate_limited_get", broken)
+    monkeypatch.setattr(scanners.time, "sleep", lambda seconds: None)
     with pytest.raises(scanners.ScannerDataError, match="scan_data_unavailable") as caught:
         scanners._bi_background_scan("fixture", "long", tickers)
     assert caught.value.diagnostics["quarantined_symbols"] == 0
-    assert len(calls) == 1 and not analyses
+    assert len(calls) == (3 if kind in {"Timeout", "ConnectionError"} else 1) and not analyses
     assert final.read_bytes() == before
     assert "PRIVATE" not in json.dumps(caught.value.diagnostics)
 

@@ -195,6 +195,41 @@ def test_daily_data_error_reason_exports_only_known_funnel_code(tmp_path, reason
     assert "PRIVATE" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("reason", ["timeout", "connection_failure", "tls_failure", "http_unauthorized",
+    "http_rate_limited", "http_request_timeout", "http_server_error", "http_client_error",
+    "http_unexpected_status", "malformed_json", "unexpected_failure"])
+def test_transport_diagnostics_allowlisted_and_old_payload_compatible(tmp_path, reason):
+    path = tmp_path / "bi_scan_progress_long.json"
+    path.write_text(json.dumps({"diagnostics": {
+        "transport_error_reason": reason, "transport_error_counts": {reason: 2, "PRIVATE_URL": 4},
+        "transport_requests": 3, "transport_retries": 2, "transport_recovered_incidents": 1,
+        "transport_retry_budget_exhausted": 0, "transport_raw_error": "PRIVATE_KEY",
+    }}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert result["transport_error_reason"] == reason
+    assert result["transport_error_counts"] == {reason: 2, "_omitted_categories": 1}
+    assert result["numeric_diagnostics"] == {"transport_requests": 3, "transport_retries": 2,
+        "transport_recovered_incidents": 1, "transport_retry_budget_exhausted": 0}
+    assert "PRIVATE" not in json.dumps(result)
+    path.write_text('{"diagnostics":{}}', encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert "transport_error_reason" not in result and "transport_error_counts" not in result
+    assert result["numeric_diagnostics"] == {}
+
+
+@pytest.mark.parametrize("unsafe", ["PRIVATE", [], {}, True, -1, 1.5, None])
+def test_transport_projection_discards_invalid_values(tmp_path, unsafe):
+    path = tmp_path / "bi_scan_progress_long.json"
+    path.write_text(json.dumps({"diagnostics": {
+        "transport_error_reason": unsafe, "transport_retries": unsafe,
+        "transport_error_counts": {"timeout": unsafe},
+    }}), encoding="utf8")
+    result = collector.safe_cache_summary(path)
+    assert "transport_error_reason" not in result
+    assert "transport_retries" not in result["numeric_diagnostics"]
+    assert result["transport_error_counts"] == {"_omitted_categories": 1}
+
+
 @pytest.mark.parametrize("reason", [
     None, True, 1, 1.5, [], {}, {"reason": "missing_results", "key": "PRIVATE_KEY"},
     "PRIVATE_REASON", "missing_results PRIVATE_TOKEN", "Missing_Results", " missing_results",

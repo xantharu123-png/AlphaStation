@@ -42,6 +42,7 @@ from modules.analysis import _detect_chart_patterns, calculate_short_bonus_signa
 from modules.trade_levels import trade_geometry
 from modules.bi_trade_plan import build_bi_trade_plan
 from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
+from modules.bi_transport import BITransport, BITransportError, BITransportStopped
 from modules.bi_market_data import (
     BI_DATA_ERROR_REASONS, BI_DATA_ERROR_FIELDS, BI_ISOLATABLE_BAR_ERRORS,
     BIAggregateDataError, parse_bi_daily_aggregates,
@@ -1254,8 +1255,19 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         _record_data_error(reason, field)
         funnel["quarantined_symbols"] += 1
 
+    transport = BITransport(rate_limited_get, lambda: _bi_should_stop(direction), time.sleep, funnel)
+
+    def _required_json(url, params):
+        try:
+            return transport.json(url, params=params, timeout=15)
+        except BITransportError as error:
+            _data_error(error.code, "invalid_json" if error.reason == "malformed_json" else None)
+
     try:
         # ── Fallback: Full stock universe from Polygon ──
+        # Reset only the prior run's stop flag, before any network work. Never
+        # erase a fresh stop requested while the universe is being fetched.
+        _bi_clear_stop(direction)
         if not candidates:
             _bi_progress_write(direction, "scanning", detail="Lade volles Aktien-Universe...", diagnostics=funnel)
             try:
@@ -1276,14 +1288,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     if next_url:
                         # Never embed credentials in pagination URLs: request
                         # exceptions and traces routinely render the URL.
-                        resp = rate_limited_get(
-                            next_url, params={"apiKey": poly_key}, timeout=15
-                        )
+                        data = _required_json(next_url, {"apiKey": poly_key})
                     else:
-                        resp = rate_limited_get(url, params=params, timeout=15)
-                    if resp.status_code != 200:
-                        _data_error(_scanner_provider_error(resp.status_code))
-                    data = resp.json()
+                        data = _required_json(url, params)
                     if _scanner_payload_error(data):
                         _data_error(_scanner_payload_error(data))
                     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
@@ -1321,6 +1328,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # 2. Gainers/Losers als Bonus (aktuelle Mover)
                 for endpoint in ["gainers", "losers"]:
+                    if _bi_should_stop(direction):
+                        raise BITransportStopped()
                     try:
                         gurl = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
                         resp = rate_limited_get(gurl, params={"apiKey": poly_key}, timeout=15)
@@ -1344,7 +1353,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 _bi_progress_write(direction, "scanning",
                                    detail=f"{len(candidates)} Kandidaten — starte Analyse", diagnostics=funnel)
                 print(f"[BI {direction}] Universe loaded: {len(candidates)} stocks")
-            except ScannerDataError:
+            except (ScannerDataError, BITransportStopped):
                 raise
             except Exception as e:
                 safe_error = redact_sensitive_query_values(e)
@@ -1363,7 +1372,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         candidates = _bi_interleave_candidates_by_symbol(candidates)
         total = len(candidates)
         funnel["total"] = total
-        _bi_clear_stop(direction)  # Altes Stop-Signal aufräumen
         _bi_progress_write(direction, "running", total=total, detail=f"{total} Kandidaten — Starte Analyse...", diagnostics=funnel)
 
         # ── Analyse ──
@@ -1426,7 +1434,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 checked += 1
                 funnel["checked"] = checked
-                resp = rate_limited_get(url, params=params, timeout=15)
+                api_data = _required_json(url, params)
 
                 if checked % 10 == 0:
                     # V2.2: Alle 10 statt 25 Stocks updaten für Live-Fortschritt
@@ -1438,13 +1446,6 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                            top_score=top_score, avg_score=avg_sc,
                                            detail=f"{checked}/{total} analysiert")
 
-                if resp.status_code != 200:
-                    _data_error(_scanner_provider_error(resp.status_code))
-
-                try:
-                    api_data = resp.json()
-                except ValueError:
-                    _data_error("scan_data_invalid", "invalid_json")
                 provider_error = _scanner_payload_error(api_data)
                 if provider_error:
                     _data_error(provider_error, "provider_status" if isinstance(api_data, dict) else "invalid_payload")
@@ -1544,7 +1545,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _reject("spac_nav")
                     continue
 
-            except ScannerDataError:
+            except (ScannerDataError, BITransportStopped):
                 raise
             except BIAggregateDataError as e:
                 _quarantine(e.reason, e.field)
@@ -1870,6 +1871,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
         # Finale Sortierung + Speichern
+        if _bi_should_stop(direction):
+            raise BITransportStopped()
         if analysis_errors or funnel["data_failures"] or checked != total:
             raise ScannerDataError("scan_data_incomplete", funnel)
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
@@ -1901,6 +1904,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                            top_score=top_score, avg_score=avg_sc,
                            detail=pipeline, diagnostics=funnel)
 
+    except BITransportStopped:
+        _bi_progress_write(direction, "stopped", checked=funnel["checked"], total=funnel["total"],
+                           no_data=no_data_count, detail="Manuell gestoppt", diagnostics=funnel)
+        _bi_clear_stop(direction)
+        return
     except ScannerDataError as e:
         _bi_progress_write(direction, "error", checked=funnel["checked"], total=funnel["total"],
                            no_data=no_data_count, detail=e.code, diagnostics=e.diagnostics)
