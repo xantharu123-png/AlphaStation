@@ -105,3 +105,11 @@ Unabhängige Aufgaben- und Gesamtprüfung der Quelländerungen ohne Befund
 abgeschlossen; Veröffentlichung und Produktionsabnahme bleiben getrennte Schritte.
 Noch keine Serveränderung, kein neuer vollständiger
 Live-Scan und keine neue SMTP-Annahme durch diese Reparatur nachgewiesen.
+
+Nach der Fast-forward-Integration in `main` (`2f757e6`) wurde die jetzt vollständige
+Suite einschließlich der Providerdiagnose gemeinsam erneut ausgeführt:
+**4.649 bestanden, 4 übersprungen**, 298,94 Sekunden. Keine weiteren
+Quellcodeänderungen nach diesem Lauf. Der öffentliche Health-Abruf um 10:05 UTC
+meldete noch `b2f69eb5d39a`; geschützte Scannerstatusdaten erfordern eine Anmeldung.
+Das ist keine Produktionsabnahme der Reparatur. Die lesende Providerdiagnose
+wartet weiterhin auf die SSH-Anmeldung des Benutzers.

@@ -21,6 +21,8 @@
 - Task 4: source regression 4,595 passed / 4 skipped; 54 new probe tests passed
   separately. Whole-source review clean. Publication and live operational
   acceptance are separate; this is not an all-scanners-working claim.
+- Final integrated rerun on `main` at `2f757e6`: **4,649 passed / 4 skipped**,
+  298.94 seconds, including the new probe tests. No source edits afterwards.
 
 The checklists below describe the acceptance contract; local completion does
 not mark unobserved production steps complete.
