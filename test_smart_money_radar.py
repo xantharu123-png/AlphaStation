@@ -575,6 +575,13 @@ def test_detect_clusters_below_threshold_empty():
 
 
 def test_fetch_insider_clusters_building_then_cluster(monkeypatch, tmp_path):
+    # Keep the historical fixtures inside the unchanged 45-day retention window.
+    fixed_now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz is not None else fixed_now.replace(tzinfo=None)
+    monkeypatch.setattr(smr, "datetime", FrozenDateTime)
     path = str(tmp_path / "insider_hist.json")
     monkeypatch.setattr(smr, "_fetch_latest_form4_trades",
                         lambda: ([_ins_trade("AAA", "X", "buy", "2026-07-30")], 1, 0))
@@ -586,7 +593,7 @@ def test_fetch_insider_clusters_building_then_cluster(monkeypatch, tmp_path):
     assert json.loads(open(path, encoding="utf-8").read())["trades"]
 
     # Vorbefuellter Verlauf mit echtem Cluster + EDGAR down -> Verlauf allein reicht
-    cluster_date = datetime.now(timezone.utc).date().isoformat()
+    cluster_date = fixed_now.date().isoformat()
     trades = {
         f"k{i}": _ins_trade("AAA", f"I{i}", "buy", cluster_date, link=f"L{i}")
         for i in range(3)
