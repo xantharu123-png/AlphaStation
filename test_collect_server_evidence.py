@@ -1,4 +1,5 @@
 from contextlib import closing
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -813,7 +814,7 @@ def test_mail_writer_routes_and_mount_namespace_inode_must_agree(tmp_path, monke
     monkeypatch.setattr(collector, "_namespace_path", lambda runtime, path: one)
     result = collector.mail_store_evidence(runtimes, 200000)
     assert result["outbox"]["available"] is True and result["outbox"]["rows"] == 0
-    assert result["delivery_journal"] == {"available": False, "reason": "not_collected"}
+    assert result["delivery_journal"] == {"available": False, "reason": "unverified_runtime_path"}
 
 
 def test_mail_paths_respect_runtime_data_and_individual_overrides_without_exporting_environment(tmp_path, monkeypatch):
@@ -822,7 +823,8 @@ def test_mail_paths_respect_runtime_data_and_individual_overrides_without_export
         stream.write(b"\0ALPHA_DATA_DIR=state\0MAIL_OUTBOX_DB_PATH=mail-custom.sqlite\0SUPPRESSION_TELEMETRY_DB_PATH=other/suppress.sqlite\0")
     result = collector.runtime_identity("tradingbot-api.service", app.resolve())
     assert result["_mail_paths"] == {
-        "outbox": str(app / "mail-custom.sqlite"), "suppression": str(app / "other" / "suppress.sqlite")}
+        "outbox": str(app / "mail-custom.sqlite"), "suppression": str(app / "other" / "suppress.sqlite"),
+        "delivery_journal": str(app / "signal_tracker_delivery_acceptance.sqlite")}
     assert "PRIVATE_KEY" not in json.dumps(result)
 
 
@@ -1044,3 +1046,298 @@ def test_collection_attempt_files_use_api_namespace_and_runtime_override_after_d
             "momentum_breakout_long") in calls
     assert (namespace / "run" / "alpha-progress" / "stock_strategy_sweep_attempt.json", "stock_strategy_sweep") in calls
     assert result["stock_strategy_attempts"]["momentum_breakout_long"] == {"available": False, "reason": "missing"}
+
+
+def _delivery_journal_db(path, rows=()):
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE delivery_acceptance_journal(intent_key TEXT PRIMARY KEY,accepted_at,"
+                           "recipient_keys_json,journaled_at,state,reconciled_at,retry_count,reconcile_error)")
+        connection.executemany("INSERT INTO delivery_acceptance_journal VALUES(?,?,'PRIVATE_RECIPIENT_KEYS',"
+                               "'PRIVATE_JOURNALED_AT',?,'PRIVATE_RECONCILED_AT',?,'PRIVATE_ERROR')", rows)
+        connection.commit()
+
+
+def _delivery_iso(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def test_delivery_journal_missing_unknown_schema_and_zero_are_distinct_without_creation(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "missing"}
+    assert not path.exists()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE unrelated(id)")
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "unknown_schema"}
+    _delivery_journal_db(path)
+    result = collector.delivery_journal_snapshot(path, 200000)
+    assert result["available"] is True and result["rows"] == 0
+    assert result["by_state"] == {"PENDING": 0, "RECONCILED": 0}
+    assert result["oldest_pending_accepted_at"] is result["latest_accepted_at"] is None
+
+
+def test_delivery_journal_counts_first_acceptance_metadata_not_messages_or_inbox_receipts(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    now = 200000
+    _delivery_journal_db(path, [
+        ("PRIVATE_INTENT_1", _delivery_iso(now - 86401), "PENDING", 3),
+        ("PRIVATE_INTENT_2", _delivery_iso(now - 86400), "PENDING", 2),
+        ("PRIVATE_INTENT_3", _delivery_iso(now), "RECONCILED", 4),
+        ("PRIVATE_INTENT_4", _delivery_iso(now + 1), "RECONCILED", 0),
+        ("PRIVATE_INTENT_5", _delivery_iso(now - 20), "PRIVATE_STATE", 1),
+    ])
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = collector.delivery_journal_snapshot(path, now)
+    assert result["available"] is True and result["rows"] == 5
+    assert result["by_state"] == {"PENDING": 2, "RECONCILED": 2}
+    assert result["unknown_state_rows"] == result["future_accepted_rows"] == 1
+    assert result["first_accepted_last_24h"] == 3
+    assert result["oldest_pending_accepted_at"] == now - 86401
+    assert result["latest_accepted_at"] == now
+    assert result["stored_reconciliation_retry_count_sum"] == 10
+    assert result["max_stored_reconciliation_retry_count"] == 4
+    assert result["count_unit"] == "intent_rows_not_messages_recipients_or_smtp_attempts"
+    assert result["coverage"] == "independent_acceptance_journal_metadata_only"
+    assert result["delivery_semantics"] == "smtp_acceptance_metadata_not_inbox_receipt"
+    assert result["recipient_cohort_validation"] == "not_collected"
+    assert result["window_semantics"] == "earliest_recorded_acceptance_per_intent_in_inclusive_24h_window"
+    assert "PRIVATE" not in json.dumps(result)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_delivery_journal_old_replayed_intent_and_retained_reconciled_time_are_not_new_acceptances(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    now = 200000
+    _delivery_journal_db(path, [("PRIVATE_INTENT", _delivery_iso(now - 86401), "PENDING", 5)])
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE delivery_acceptance_journal SET journaled_at=?,reconciled_at=?",
+                           (_delivery_iso(now - 10), _delivery_iso(now - 20)))
+        connection.commit()
+    result = collector.delivery_journal_snapshot(path, now)
+    assert result["available"] is True and result["first_accepted_last_24h"] == 0
+    assert result["by_state"] == {"PENDING": 1, "RECONCILED": 0}
+
+
+def test_delivery_journal_timezone_offsets_count_as_instants(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    now = datetime(2026, 9, 14, 10, tzinfo=timezone.utc).timestamp()
+    _delivery_journal_db(path, [("PRIVATE_INTENT", "2026-09-14T12:00:00+02:00", "PENDING", 0)])
+    result = collector.delivery_journal_snapshot(path, now)
+    assert result["first_accepted_last_24h"] == 1
+    assert result["latest_accepted_at"] == result["oldest_pending_accepted_at"] == now
+
+
+@pytest.mark.parametrize("invalid", [None, "PRIVATE_TIMESTAMP", "2026-09-14", "2026-09-14T10:00:00",
+                                     "PRIVATE" * 1000, sqlite3.Binary(b"PRIVATE_TIME"), 200000,
+                                     "0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59-23:59",
+                                     "1969-12-31T23:59:59+00:00"],
+                         ids=["null", "invalid", "date_only", "naive", "oversized", "blob", "numeric",
+                              "utc_underflow", "utc_overflow", "negative_epoch"])
+def test_delivery_journal_invalid_acceptance_time_is_unknown_not_zero_or_exposed(tmp_path, invalid):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [("PRIVATE_INTENT", invalid, "PENDING", 0)])
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "invalid_data"}
+
+
+@pytest.mark.parametrize("invalid", [None, -1, "PRIVATE_COUNTER", 1.5, sqlite3.Binary(b"PRIVATE_COUNTER")])
+def test_delivery_journal_invalid_retry_counter_is_unknown_not_zero_or_exposed(tmp_path, invalid):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [("PRIVATE_INTENT", _delivery_iso(1), "PENDING", invalid)])
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "invalid_data"}
+
+
+@pytest.mark.parametrize("unknown", [None, "PRIVATE_STATE", "PRIVATE" * 1000, sqlite3.Binary(b"PRIVATE_STATE")],
+                         ids=["null", "unknown", "oversized", "blob"])
+def test_delivery_journal_unknown_state_has_no_raw_dimension_output(tmp_path, unknown):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [("PRIVATE_INTENT", _delivery_iso(1), unknown, 0)])
+    result = collector.delivery_journal_snapshot(path, 200000)
+    assert result["available"] is True and result["unknown_state_rows"] == 1
+    assert result["by_state"] == {"PENDING": 0, "RECONCILED": 0}
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_delivery_journal_query_is_bounded_read_only_metadata_only(tmp_path, monkeypatch):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [("PRIVATE_INTENT", _delivery_iso(1), "PENDING", 0)])
+    original = collector.sqlite3.connect
+    calls, statements = [], []
+    def connect(database, **kwargs):
+        calls.append((database, kwargs))
+        connection = original(database, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+    monkeypatch.setattr(collector.sqlite3, "connect", connect)
+    assert collector.delivery_journal_snapshot(path, 200000)["available"] is True
+    assert calls[0][0].endswith("?mode=ro") and calls[0][1]["uri"] is True
+    assert statements.count("BEGIN") == 1 and "PRAGMA query_only=ON" in statements
+    assert "PRAGMA trusted_schema=OFF" in statements
+    projected = next(statement for statement in statements if 'FROM "delivery_acceptance_journal"' in statement)
+    assert all(name not in projected for name in ("intent_key", "recipient_keys_json", "reconcile_error",
+                                                "journaled_at", "reconciled_at"))
+    assert "length(\"accepted_at\")<=64" in projected and "LIMIT 100001" in projected
+    assert not any(statement.startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER")) for statement in statements)
+
+
+def test_delivery_journal_wal_latest_commit_visible_without_reconciliation(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("INSERT INTO delivery_acceptance_journal(intent_key,accepted_at,state,retry_count) "
+                       "VALUES('PRIVATE_INTENT',?,'PENDING',7)", (_delivery_iso(1),))
+        writer.commit()
+        result = collector.delivery_journal_snapshot(path, 200000)
+        assert result["rows"] == result["by_state"]["PENDING"] == 1
+        assert writer.execute("SELECT state,retry_count FROM delivery_acceptance_journal").fetchone() == ("PENDING", 7)
+
+
+def test_delivery_journal_row_limit_is_unknown_not_truncated_success(tmp_path, monkeypatch):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [(str(i), _delivery_iso(1), "PENDING", 0) for i in range(2)])
+    monkeypatch.setattr(collector, "EVIDENCE_MAX_ROWS", 1)
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "row_limit_exceeded"}
+
+
+def test_delivery_journal_unsafe_file_type_is_not_opened(tmp_path, monkeypatch):
+    path = tmp_path / "journal.sqlite"
+    path.mkdir()
+    monkeypatch.setattr(collector.sqlite3, "connect", lambda *a, **kw: pytest.fail("unsafe file must not open"))
+    assert collector.delivery_journal_snapshot(path, 200000) == {"available": False, "reason": "unsafe_file_type"}
+
+
+def test_delivery_journal_writer_paths_and_namespace_inodes_must_match(tmp_path, monkeypatch):
+    one, two = tmp_path / "one.sqlite", tmp_path / "two.sqlite"
+    _delivery_journal_db(one)
+    _delivery_journal_db(two)
+    runtimes = {"api": {"_mail_paths": {"delivery_journal": "/same.sqlite"}, "pid": 1},
+                "bg": {"_mail_paths": {"delivery_journal": "/same.sqlite"}, "pid": 2}}
+    monkeypatch.setattr(collector, "_namespace_path", lambda runtime, path: one if runtime["pid"] == 1 else two)
+    assert collector.mail_store_evidence(runtimes, 200000)["delivery_journal"] == {
+        "available": False, "reason": "writer_file_mismatch"}
+    runtimes["bg"]["_mail_paths"]["delivery_journal"] = "/different.sqlite"
+    assert collector.mail_store_evidence(runtimes, 200000)["delivery_journal"] == {
+        "available": False, "reason": "writer_path_mismatch"}
+    runtimes["bg"]["_mail_paths"]["delivery_journal"] = "/same.sqlite"
+    monkeypatch.setattr(collector, "_namespace_path", lambda runtime, path: one)
+    assert collector.mail_store_evidence(runtimes, 200000)["delivery_journal"]["rows"] == 0
+
+
+@pytest.mark.parametrize("tracker_name,journal_override,expected", [
+    ("signal_tracker.sqlite", None, "signal_tracker_delivery_acceptance.sqlite"),
+    ("custom", "   ", "custom_delivery_acceptance.sqlite"),
+    ("custom.sqlite3", "", "custom_delivery_acceptance.sqlite3"),
+    ("custom.sqlite", "  private/journal.sqlite  ", "private/journal.sqlite"),
+])
+def test_delivery_journal_path_matches_trimmed_override_or_raw_tracker_sibling(tmp_path, monkeypatch,
+                                                                            tracker_name, journal_override, expected):
+    proc, app, tracker = _mock_runtime_process(tmp_path, monkeypatch)
+    (app / tracker_name).touch()
+    environment = f"SIGNAL_TRACKER_DB_PATH={tracker_name}\0PRIVATE_KEY=DO_NOT_EXPORT"
+    if journal_override is not None:
+        environment += "\0SIGNAL_DELIVERY_JOURNAL_DB_PATH=" + journal_override
+    (proc / "environ").write_bytes(environment.encode())
+    real_resolve = Path.resolve
+    def tracker_host_resolution(self, *args, **kwargs):
+        if self == app / tracker_name:
+            return app / "different_host_path.sqlite"
+        return real_resolve(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", tracker_host_resolution)
+    result = collector.runtime_identity("tradingbot-api.service", app.resolve())
+    assert result["tracker"] == str(app / "different_host_path.sqlite")
+    assert result["_mail_paths"]["delivery_journal"] == str(app / expected)
+    assert "PRIVATE_KEY" not in json.dumps(result)
+
+
+def test_delivery_journal_path_defaults_with_data_dir_and_keeps_absolute_override(tmp_path, monkeypatch):
+    proc, app, _ = _mock_runtime_process(tmp_path, monkeypatch)
+    data = app / "state"
+    data.mkdir()
+    (data / "signal_tracker.sqlite").touch()
+    (proc / "environ").write_bytes(b"ALPHA_DATA_DIR=state")
+    assert collector.runtime_identity("tradingbot-api.service", app.resolve())["_mail_paths"]["delivery_journal"] == str(
+        data / "signal_tracker_delivery_acceptance.sqlite")
+    override = tmp_path / "external" / "journal.sqlite"
+    (proc / "environ").write_bytes(f"ALPHA_DATA_DIR=state\0SIGNAL_DELIVERY_JOURNAL_DB_PATH={override}".encode())
+    assert collector.runtime_identity("tradingbot-api.service", app.resolve())["_mail_paths"]["delivery_journal"] == str(override)
+
+
+def test_delivery_journal_future_pending_metadata_has_no_past_acceptance_timestamps(tmp_path):
+    path = tmp_path / "journal.sqlite"
+    _delivery_journal_db(path, [("PRIVATE_INTENT", _delivery_iso(200001), "PENDING", 0)])
+    result = collector.delivery_journal_snapshot(path, 200000)
+    assert result["available"] is True and result["by_state"]["PENDING"] == 1
+    assert result["future_accepted_rows"] == 1 and result["first_accepted_last_24h"] == 0
+    assert result["latest_accepted_at"] is result["oldest_pending_accepted_at"] is None
+
+
+def test_collection_reads_real_journal_in_api_namespace_after_drop_and_hides_internal_route(tmp_path, monkeypatch):
+    app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
+    journal = tmp_path / "journal.sqlite"
+    _delivery_journal_db(journal, [("PRIVATE_INTENT", _delivery_iso(1), "PENDING", 3)])
+    route = "/PRIVATE_JOURNAL_ROUTE.sqlite"
+    for runtime in runtimes.values():
+        runtime["_mail_paths"] = {"delivery_journal": route}
+        namespace = Path(runtime["process_root"])
+        namespace.mkdir(parents=True)
+        (namespace / route.lstrip("/")).hardlink_to(journal)
+    original = collector.delivery_journal_snapshot
+    calls = []
+    def snapshot(path, now):
+        assert state["dropped"] is True
+        calls.append(path)
+        return original(path, now)
+    monkeypatch.setattr(collector, "delivery_journal_snapshot", snapshot)
+    result = collector.collect(app)
+    assert calls == [Path(runtimes["tradingbot-api.service"]["process_root"]) / route.lstrip("/")]
+    evidence = result["mail_evidence"]["delivery_journal"]
+    assert evidence["available"] is True and evidence["by_state"]["PENDING"] == 1
+    assert evidence["stored_reconciliation_retry_count_sum"] == 3
+    assert "PRIVATE" not in json.dumps(result) and "_mail_paths" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("store,overrides", [
+    ("delivery_journal", {"SIGNAL_DELIVERY_JOURNAL_DB_PATH": "linked_dir/../journal.sqlite"}),
+    ("outbox", {"MAIL_OUTBOX_DB_PATH": "linked_dir/../mail.sqlite"}),
+    ("suppression", {"SUPPRESSION_TELEMETRY_DB_PATH": "linked_dir/../suppress.sqlite"}),
+    ("delivery_journal", {"SIGNAL_TRACKER_DB_PATH": "linked_dir/../tracker.sqlite"}),
+    ("delivery_journal", {"ALPHA_DATA_DIR": "linked_dir/../state"}),
+    ("outbox", {"ALPHA_DATA_DIR": "linked_dir/../state"}),
+    ("suppression", {"ALPHA_DATA_DIR": "linked_dir/../state"}),
+], ids=["journal_override", "outbox_override", "suppression_override", "tracker_derived_journal",
+        "data_derived_journal", "data_derived_outbox", "data_derived_suppression"])
+def test_parent_traversal_mail_routes_are_unverified_without_reading_lexical_alternate(tmp_path, monkeypatch,
+                                                                                    store, overrides):
+    proc, app, tracker = _mock_runtime_process(tmp_path, monkeypatch)
+    environment = {} if "ALPHA_DATA_DIR" in overrides else {"SIGNAL_TRACKER_DB_PATH": str(tracker)}
+    environment.update(overrides)
+    configured_tracker = Path(environment.get("SIGNAL_TRACKER_DB_PATH", str(
+        app / environment.get("ALPHA_DATA_DIR", "data_cache") / "signal_tracker.sqlite")))
+    if not configured_tracker.is_absolute():
+        configured_tracker = app / configured_tracker
+    real_resolve = Path.resolve
+    def model_symlink_tracker_resolution(self, *args, **kwargs):
+        # Model a valid application target after POSIX symlink/.. traversal,
+        # without requiring Windows symlink-creation privileges in this test.
+        if self == configured_tracker and ".." in self.parts:
+            return real_resolve(tracker, strict=True)
+        return real_resolve(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", model_symlink_tracker_resolution)
+    (proc / "environ").write_bytes("\0".join(f"{key}={value}" for key, value in environment.items()).encode())
+    runtime = collector.runtime_identity("tradingbot-api.service", app.resolve())
+    alternate = tmp_path / "lexical_alternate.sqlite"
+    alternate.write_bytes(b"The lexically normalized path must not be opened")
+    namespace_calls, snapshot_calls = [], []
+    def namespace(_runtime, path):
+        namespace_calls.append(path)
+        return alternate
+    def forbidden_snapshot(path, now):
+        snapshot_calls.append(path)
+        return {"available": True, "rows": 99}
+    monkeypatch.setattr(collector, "_namespace_path", namespace)
+    for name in ("outbox_snapshot", "suppression_snapshot", "delivery_journal_snapshot"):
+        monkeypatch.setattr(collector, name, forbidden_snapshot)
+    reader_runtime = {"_mail_paths": {store: runtime["_mail_paths"][store]}}
+    result = collector.mail_store_evidence({"api": reader_runtime, "bg": reader_runtime}, 200000)
+    assert result[store] == {"available": False, "reason": "unverified_runtime_path"}
+    assert runtime["_mail_paths"][store] is None
+    assert namespace_calls == snapshot_calls == []

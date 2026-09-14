@@ -34,7 +34,7 @@ be_exit_at be_exit_fill_price be_exit_evidence_mode be_exit_tp1_order
 stop_gap_slippage_r
 """.split()
 PATH_ENV = {"ALPHA_DATA_DIR", "SIGNAL_TRACKER_DB_PATH", "ALPHA_RUNTIME_TMP_DIR",
-            "MAIL_OUTBOX_DB_PATH", "SUPPRESSION_TELEMETRY_DB_PATH"}
+            "MAIL_OUTBOX_DB_PATH", "SUPPRESSION_TELEMETRY_DB_PATH", "SIGNAL_DELIVERY_JOURNAL_DB_PATH"}
 REQUIRED_COLUMNS = {"id", "created_at", "scanner", "mail_class", "status"}
 CACHE_STATUSES = frozenset({"scanning", "running", "done", "error", "stopped", "idle", "pending"})
 DIAGNOSTIC_COUNTS = frozenset("""
@@ -499,6 +499,7 @@ weak_closed_bar_location
 """.split())
 MAIL_STATUSES = frozenset({"pending", "sending", "delivering", "uncertain", "sent", "expired", "dead"})
 MAIL_CLASSES = frozenset({"trade", "swing_trade", "signal_update", "watch", "info"})
+DELIVERY_JOURNAL_STATES = frozenset({"PENDING", "RECONCILED"})
 MAIL_DB_SPECS = {
     "outbox": ("MAIL_OUTBOX_DB_PATH", "mail_outbox.sqlite"),
     "suppression": ("SUPPRESSION_TELEMETRY_DB_PATH", "suppression_telemetry.sqlite"),
@@ -703,7 +704,7 @@ def _epoch(value):
 
 
 @contextmanager
-def _evidence_rows(path, table, columns, where="", parameters=()):
+def _evidence_rows(path, table, columns, where="", parameters=(), *, text_limits=None):
     """One bounded, query-only transaction. No create/schema/migration helpers."""
     path = Path(path)
     before = path.lstat()
@@ -724,13 +725,19 @@ def _evidence_rows(path, table, columns, where="", parameters=()):
             raise EvidenceUnavailable("unknown_schema")
         # Even malformed metadata cannot pull arbitrarily large text/BLOBs into
         # the collector. Numeric schema violations become unavailable, not 0.
-        text_columns = {"status", "mail_class", "scanner", "reason"}
+        text_columns = {name: 100 for name in ("status", "mail_class", "scanner", "reason")}
+        # Opt-in text fields preserve existing numeric projections (including
+        # epoch columns). Limits and names come only from the collector code.
+        for name, limit in (text_limits or {}).items():
+            if name not in columns or type(limit) is not int or not 1 <= limit <= 100:
+                raise EvidenceUnavailable("invalid_projection")
+            text_columns[name] = limit
         selections = []
         for name in columns:
             quoted = '"' + name + '"'
             if name in text_columns:
                 selections.append("CASE WHEN typeof(" + quoted + ")='text' AND length(" + quoted
-                                  + ")<=100 THEN " + quoted + " ELSE NULL END")
+                                  + ")<=" + str(text_columns[name]) + " THEN " + quoted + " ELSE NULL END")
             else:
                 selections.append("CASE WHEN typeof(" + quoted + ") IN ('integer','real') THEN "
                                   + quoted + " ELSE NULL END")
@@ -850,10 +857,69 @@ def suppression_snapshot(path, now):
         return _unavailable_mail_error(error)
 
 
+def delivery_journal_snapshot(path, now):
+    """Acceptance metadata per intent, not recipient validity or inbox receipt.
+
+    Replays merge recipient cohorts and preserve the earliest accepted_at.
+    PENDING is recorded reconciliation backlog, not failed SMTP; RECONCILED is
+    a prior activation marker, not current tracker state. Retries are recorded
+    reconciliation failures, not SMTP attempts. No private key/error is read.
+    """
+    try:
+        now = _epoch(now)
+        result = {"available": True, "rows": 0,
+                  "by_state": {state: 0 for state in sorted(DELIVERY_JOURNAL_STATES)},
+                  "unknown_state_rows": 0, "first_accepted_last_24h": 0,
+                  "future_accepted_rows": 0, "oldest_pending_accepted_at": None,
+                  "latest_accepted_at": None, "stored_reconciliation_retry_count_sum": 0,
+                  "max_stored_reconciliation_retry_count": 0,
+                  "coverage": "independent_acceptance_journal_metadata_only",
+                  "count_unit": "intent_rows_not_messages_recipients_or_smtp_attempts",
+                  "window_semantics": "earliest_recorded_acceptance_per_intent_in_inclusive_24h_window",
+                  "timestamp_semantics": "utc_epoch_seconds_not_after_collection_time",
+                  "delivery_semantics": "smtp_acceptance_metadata_not_inbox_receipt",
+                  "recipient_cohort_validation": "not_collected"}
+        with _evidence_rows(path, "delivery_acceptance_journal", ("state", "accepted_at", "retry_count"),
+                            text_limits={"state": 100, "accepted_at": 64}) as rows:
+            for row in rows:
+                try:
+                    accepted = datetime.fromisoformat(_iso_timestamp(row["accepted_at"]))
+                    if accepted.tzinfo is None or accepted.utcoffset() is None:
+                        raise ValueError("Acceptance time must include timezone")
+                    accepted = _epoch(accepted.astimezone(timezone.utc).timestamp())
+                except (ValueError, TypeError, OverflowError):
+                    raise EvidenceUnavailable("invalid_data") from None
+                retries = row["retry_count"]
+                if not _nonnegative_count(retries):
+                    raise EvidenceUnavailable("invalid_data")
+                result["rows"] += 1
+                state = row["state"]
+                if type(state) is str and state in DELIVERY_JOURNAL_STATES:
+                    result["by_state"][state] += 1
+                else:
+                    result["unknown_state_rows"] += 1
+                result["stored_reconciliation_retry_count_sum"] += retries
+                result["max_stored_reconciliation_retry_count"] = max(
+                    result["max_stored_reconciliation_retry_count"], retries)
+                if accepted > now:
+                    result["future_accepted_rows"] += 1
+                    continue
+                result["first_accepted_last_24h"] += int(now - 86400 <= accepted)
+                latest = result["latest_accepted_at"]
+                result["latest_accepted_at"] = accepted if latest is None else max(latest, accepted)
+                if state == "PENDING":
+                    oldest = result["oldest_pending_accepted_at"]
+                    result["oldest_pending_accepted_at"] = accepted if oldest is None else min(oldest, accepted)
+        return result
+    except (OSError, ValueError, TypeError, sqlite3.Error) as error:
+        return _unavailable_mail_error(error)
+
+
 def mail_store_evidence(runtimes, now):
     """Require matching writer routes AND inodes, including PrivateTmp mounts."""
     result = {}
-    for store, snapshot in (("outbox", outbox_snapshot), ("suppression", suppression_snapshot)):
+    for store, snapshot in (("outbox", outbox_snapshot), ("suppression", suppression_snapshot),
+                            ("delivery_journal", delivery_journal_snapshot)):
         try:
             paths = [runtime.get("_mail_paths", {}).get(store) for runtime in runtimes.values()]
             if any(path is None for path in paths):
@@ -875,7 +941,6 @@ def mail_store_evidence(runtimes, now):
                 raise EvidenceUnavailable("file_replaced")
         except (OSError, ValueError, TypeError) as error:
             result[store] = _unavailable_mail_error(error)
-    result["delivery_journal"] = {"available": False, "reason": "not_collected"}
     return result
 
 
@@ -925,9 +990,19 @@ def runtime_identity(unit, app):
         path = Path(environment.get(override, str(data / filename)))
         if not path.is_absolute():
             path = cwd / path
-        # Normalize relative application configuration, but do not resolve it
-        # out of the verified process mount namespace or require a DB to exist.
-        mail_paths[name] = os.path.abspath(str(path))
+        # Parent traversal after a symlink is not equivalent to lexical
+        # normalization. Do not read a plausible but different host/namespace
+        # file; leave such routes explicitly unverified without resolving.
+        mail_paths[name] = None if ".." in path.parts else os.path.abspath(str(path))
+    # Match _delivery_journal_path without importing application code. Derive
+    # from the configured tracker route before host resolution: a symlink or
+    # PrivateTmp route can have a different sibling than the resolved target.
+    journal_override = environment.get("SIGNAL_DELIVERY_JOURNAL_DB_PATH", "").strip()
+    journal = Path(journal_override) if journal_override else tracker.with_name(
+        tracker.stem + "_delivery_acceptance" + (tracker.suffix or ".sqlite"))
+    if not journal.is_absolute():
+        journal = cwd / journal
+    mail_paths["delivery_journal"] = None if ".." in journal.parts else os.path.abspath(str(journal))
     temp = PurePosixPath(environment.get("ALPHA_RUNTIME_TMP_DIR") or "/tmp")
     if not temp.is_absolute():
         temp = PurePosixPath(cwd.as_posix()) / temp
@@ -1249,10 +1324,13 @@ def collect(app):
                       "Cache/progress paths use the verified API process mount namespace.",
                       "Normal SQLite WAL/SHM coordination is possible; no root-owned sidecars.",
                       "Cache/health files are separately observed, not an atomic cross-file snapshot.",
-                      "Outbox and suppression are separate query-only SQLite transactions; missing is not zero.",
+                      "Outbox, suppression and delivery journal are separate query-only SQLite transactions; missing is not zero.",
                       "Suppression counts overlap and are not unique signals/mails; dropped-write journals are not read.",
                       "Outbox is a retry/uncertainty queue, not all mail sends; sent is not inbox receipt.",
-                      "Outbox fallback uncertainty registry and delivery journal are not read.",
+                      "Delivery journal counts are intent metadata, not recipient-cohort validation or inbox receipt.",
+                      "Journal acceptance windows use earliest acceptance per intent, not mail sends during the window.",
+                      "Journal PENDING and retry counters concern tracker reconciliation, not SMTP failures or attempts.",
+                      "Outbox fallback uncertainty and fallback tracker-acceptance registries are not read.",
                       "Attempt files are best effort: unavailable is unknown; guarded mail status is not delivery proof.",
                       "No recipients, account blobs, mail bodies or API keys selected.",
                       "No broker fills/cost ledger; price-path results are not net account PnL.",
