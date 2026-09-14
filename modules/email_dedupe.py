@@ -19,19 +19,13 @@ def _timestamp(now: Optional[float]) -> float:
     return time.time() if now is None else float(now)
 
 
-def _ensure_lock_byte(lock_file) -> None:
-    lock_file.seek(0, os.SEEK_END)
-    if lock_file.tell() == 0:
-        lock_file.write(b"0")
-        lock_file.flush()
-    lock_file.seek(0)
-
-
 def _acquire_file_lock(lock_file) -> None:
     if os.name == "nt":
         import msvcrt
 
-        _ensure_lock_byte(lock_file)
+        # Windows byte-range locks may extend beyond EOF. An initialization
+        # write before locking races with another process owning byte zero.
+        lock_file.seek(0)
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
         return
 

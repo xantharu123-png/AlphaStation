@@ -1,6 +1,13 @@
+import io
 import multiprocessing
 from pathlib import Path
+import sys
 import threading
+from types import SimpleNamespace
+
+import pytest
+
+import modules.email_dedupe as dedupe_store
 
 from modules.email_dedupe import (
     email_delivery_claim,
@@ -15,6 +22,46 @@ from modules.email_dedupe import (
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("initial_bytes", [b"", b"0"], ids=["empty_eof", "existing_byte"])
+def test_windows_lock_acquisition_never_writes_before_lock(monkeypatch, initial_bytes):
+    events = []
+    state = {"locked": False}
+
+    class LockFile(io.BytesIO):
+        def fileno(self):
+            return 42
+
+        def write(self, data):
+            events.append("write")
+            return super().write(data)
+
+        def flush(self):
+            events.append("flush")
+            # Deterministic model of another process locking byte zero after
+            # an empty-size check, before an initializer flushes its byte.
+            if not state["locked"]:
+                raise PermissionError("initialization raced with another byte-range owner")
+            return super().flush()
+
+    lock_file = LockFile(initial_bytes)
+    lock_file.seek(0, io.SEEK_END)  # a+b starts at EOF, including existing files.
+
+    def locking(fd, mode, count):
+        assert fd == 42 and lock_file.tell() == 0 and count == 1
+        events.append(mode)
+        state["locked"] = mode == "acquire"
+
+    monkeypatch.setattr(dedupe_store, "os", SimpleNamespace(name="nt", SEEK_END=io.SEEK_END))
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(
+        LK_LOCK="acquire", LK_UNLCK="release", locking=locking))
+    dedupe_store._acquire_file_lock(lock_file)
+    assert state["locked"] is True
+    dedupe_store._release_file_lock(lock_file)
+    assert state["locked"] is False
+    assert events == ["acquire", "release"]
+    assert lock_file.getvalue() == initial_bytes
 
 
 def _claim_worker(path, start_event, result_queue):
