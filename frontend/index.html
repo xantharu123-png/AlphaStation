@@ -5780,7 +5780,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         };
     }, [scopeKey, resultsUrl]);
 
-    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null]);
+    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null, schedulerState?.last_attempt_at || null, schedulerState?.run_id || null]);
     useEffect(() => {
         const previous = schedulerSeenRef.current;
         schedulerSeenRef.current = schedulerRevision;
@@ -5852,13 +5852,22 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     };
     const stratLower = String(strategy || '').toLowerCase();
     const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
+    const manualKey = isBI ? (stratLower.includes('short') ? 'bi_short' : 'bi_long')
+        : `${marketType === 'crypto' ? 'crypto_strat' : 'strat'}_${stratLower.replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'strategy'}`;
+    const autoStrategies = ['Momentum Breakout Long', 'Gap Momentum Long', 'Gap Momentum Short', 'Cup and Handle Breakout'];
+    const scanKeys = marketType === 'stocks' && autoStrategies.includes(strategy) ? [manualKey, 'strategy_scan'] : [manualKey];
+    const scannerKey = scanKeys.find(key => schedulerStatus?.scans?.[key]?.running) || scanKeys.reduce((latest, key) => {
+        const stamp = state => scannerTimestamp(state?.last_attempt_at || state?.last_run) ?? -Infinity;
+        return stamp(schedulerStatus?.scans?.[key]) > stamp(schedulerStatus?.scans?.[latest]) ? key : latest;
+    }, scanKeys[0]);
+    const schedulerState = schedulerStatus?.scans?.[scannerKey] || null;
     const resultsUrl = !strategy ? null : isBI
         ? `${API}/api/scan-results?direction=${stratLower.includes('short') ? 'short' : 'long'}`
         : `${API}/api/scan-results?strategy=${encodeURIComponent(strategy)}&market_type=${encodeURIComponent(marketType)}`;
     const feed = useScannerFeed({
         scopeKey: `${marketType}:${strategy}`, resultsUrl,
         startUrl: `${API}/api/scan`, startBody: { strategy, market_type: marketType },
-        cachePrefix: 'scanner', scanCache, updateScanCache,
+        cachePrefix: 'scanner', scanCache, updateScanCache, schedulerState,
     });
     const { results, isScanning, info: scanInfo } = feed;
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
@@ -5923,10 +5932,10 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey} />
 
             <LiveScanStatus
-                active={isScanning || scanInfo?.scan_running}
+                active={isScanning || scanInfo?.scan_running || !!schedulerState?.running}
                 partial={scanInfo?.partial}
                 checked={scanInfo?.checked}
                 total={scanInfo?.total}
@@ -5935,13 +5944,13 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 itemLabel="Treffer"
             />
 
-            <ScannerEvidence feed={feed} kind="strategy" />
+            <ScannerEvidence feed={feed} kind="strategy" running={!!schedulerState?.running} />
 
             <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
                 <div className="md:hidden">
                     {sorted.length === 0 ? (
                         <div className="text-sm text-gray-500 text-center py-6">
-                            {scannerEvidenceState({ info: scanInfo, loading: feed.loading, running: isScanning, error: feed.error, hasLoaded: feed.hasLoaded, count: 0 }).text}
+                            {scannerEvidenceState({ info: scanInfo, loading: feed.loading, running: isScanning || !!schedulerState?.running, error: feed.error, hasLoaded: feed.hasLoaded, count: 0 }).text}
                         </div>
                     ) : (
                         sorted.map((item, idx) => (
@@ -6022,7 +6031,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         {sorted.length === 0 && (
                             <tr>
                                 <td colSpan="8" className="py-8 text-center text-gray-500">
-                                    {scannerEvidenceState({ info: scanInfo, loading: feed.loading, running: isScanning, error: feed.error, hasLoaded: feed.hasLoaded, count: 0 }).text}
+                                    {scannerEvidenceState({ info: scanInfo, loading: feed.loading, running: isScanning || !!schedulerState?.running, error: feed.error, hasLoaded: feed.hasLoaded, count: 0 }).text}
                                 </td>
                             </tr>
                         )}

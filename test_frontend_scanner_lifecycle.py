@@ -388,3 +388,47 @@ def test_both_tabs_use_shared_lifecycle_and_bi_refresh_is_direction_scoped():
     assert "<ScannerEvidence feed={feed}" in scanner and "<ScannerEvidence feed={feed}" in bi
     assert "scannerEvidenceState({" in scanner and "scannerEvidenceState({" in bi
     assert "Keine Stock-BI-Signale mit mindestens 17 von 20" not in bi
+
+
+def test_stock_tab_binds_leaf_and_auto_scheduler_state_to_feed_and_controls():
+    scanner = SOURCE[SOURCE.index("function ScannerTab("):SOURCE.index("function BIScannerTab(")]
+    assert "schedulerState," in scanner
+    assert "scanKey={scannerKey}" in scanner
+    assert "'strategy_scan'" in scanner and "last_attempt_at" in scanner
+    assert scanner.count("running: isScanning || !!schedulerState?.running") == 2
+
+
+@pytest.mark.parametrize("strategy", ["Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout"])
+def test_stock_tab_scheduler_selection_preserves_manual_ownership_and_market_scope(strategy):
+    scanner = SOURCE[SOURCE.index("function ScannerTab("):SOURCE.index("function BIScannerTab(")]
+    selection = scanner[scanner.index("    const stratLower"):scanner.index("    const resultsUrl")]
+    node_run(PURE + "\nconst assert=require('node:assert/strict');\n"
+             + "function select(strategy,marketType,schedulerStatus) {\n" + selection
+             + "\nreturn {scannerKey,schedulerState};}\n"
+             + "const strategy=" + json.dumps(strategy) + ";\n" + """
+      const manual='strat_'+strategy.toLowerCase().replace(/ /g,'_');
+      const scans={strategy_scan:{running:false,last_attempt_at:'2026-09-14T12:00:00Z'}};
+      assert.equal(select(strategy,'stocks',{scans}).scannerKey,'strategy_scan');
+      scans[manual]={running:true,last_attempt_at:'2026-09-14T11:00:00Z'};
+      scans.strategy_scan.running=true;
+      assert.equal(select(strategy,'stocks',{scans}).scannerKey,manual);
+      scans[manual]={running:false,last_attempt_at:'2026-09-14T13:00:00Z'};
+      scans.strategy_scan.running=false;
+      assert.equal(select(strategy,'stocks',{scans}).scannerKey,manual);
+      assert.equal(select(strategy,'crypto',{scans}).scannerKey,'crypto_'+manual);
+      const older={strategy_scan:{last_run:'2026-09-14T12:00:00Z'}};
+      assert.equal(select(strategy,'stocks',{scans:older}).scannerKey,'strategy_scan');
+    """)
+
+
+def test_repeated_auto_failure_between_status_polls_refreshes_error_not_zero_success():
+    lifecycle("""
+      const failed=payload(t1,null,{scan_error:'scan_data_unavailable',diagnostics:{attempt_diagnostics:{coverage:'incomplete',final_results:null}}});
+      queue.push({body:failed}); render(options({scopeKey:'stocks:Momentum Breakout Long',schedulerState:{running:false,last_run:t1,last_attempt_at:t1,run_id:'auto-1',scan_error:'scan_data_incomplete'}})); await settle();
+      queue.push({body:failed});
+      render({...opts,schedulerState:{...opts.schedulerState,last_attempt_at:t2,run_id:'auto-2'}}); await settle();
+      assert.equal(requests.length,2); assert.equal(toasts.length,0);
+      assert.match(feed.error,/kein Scan mit null Signalen/);
+      const evidence=scannerEvidenceState({info:feed.info,loading:feed.loading,running:feed.isScanning,error:feed.error,hasLoaded:feed.hasLoaded,count:0});
+      assert.equal(evidence.tone,'error');
+    """)

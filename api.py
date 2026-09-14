@@ -17667,7 +17667,11 @@ def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]
                 continue
             existing = merged.get(ticker)
             if existing:
-                existing.update(item)
+                # The full snapshot is loaded first and remains one coherent
+                # market observation. Movers supplement the universe, not its
+                # trade/quote/day fields: merging could erase valid data or
+                # combine prices and timestamps from different observations.
+                # For mover-only symbols the first snapshot has precedence too.
                 sources = set(existing.get("_sources", []))
                 sources.add(source)
                 existing["_sources"] = sorted(sources)
@@ -20759,6 +20763,132 @@ def _publish_stock_strategy_attempt(
     except Exception:
         print("[Strategy Attempt] validation_failed")
         return False
+
+
+_STOCK_ATTEMPT_READ_STRATEGIES = frozenset({
+    "Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout",
+})
+_STOCK_ATTEMPT_READ_MAX_BYTES = 128 * 1024
+
+
+def _stock_attempt_datetime(value: Any, *, server_time: bool = False) -> Optional[datetime]:
+    """UTC instant; legacy cache/RAM timestamps use the writer's local timezone."""
+    try:
+        if not isinstance(value, str) or not value or len(value) > 64:
+            return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None and not server_time:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
+    """Bounded read-only diagnostic projection, never a live-worker assertion."""
+    if strategy_name not in _STOCK_ATTEMPT_READ_STRATEGIES:
+        return {"available": False, "reason": "not_supported"}
+    import stat
+    slug = _STOCK_ATTEMPT_STRATEGIES[strategy_name]
+    root = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or ("/tmp" if os.name == "posix" else tempfile.gettempdir())
+    path = Path(root) / f"stock_strategy_{slug}_attempt.json"
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _STOCK_ATTEMPT_READ_MAX_BYTES:
+            raise ValueError("invalid_attempt_file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_size > _STOCK_ATTEMPT_READ_MAX_BYTES
+                    or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise ValueError("invalid_attempt_file")
+            raw = stream.read(_STOCK_ATTEMPT_READ_MAX_BYTES + 1)
+            after = os.fstat(stream.fileno())
+        current = path.lstat()
+        if (len(raw) > _STOCK_ATTEMPT_READ_MAX_BYTES
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
+            raise ValueError("changed_attempt_file")
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate_key")
+                result[key] = value
+            return result
+        def invalid_constant(_value):
+            raise ValueError("invalid_constant")
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        if (not isinstance(payload, dict) or type(payload.get("schema_version")) is not int
+                or payload["schema_version"] != 1 or payload.get("attempt_kind") != "stock_strategy"
+                or payload.get("strategy_slug") != slug or payload.get("results") != []
+                or not isinstance(payload.get("run_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", payload["run_id"])
+                or not isinstance(payload.get("code_revision"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{12}(?:-dirty|-tree-unknown)?|unknown)", payload["code_revision"])):
+            raise ValueError("invalid_attempt_identity")
+        started = _stock_attempt_datetime(payload.get("started_at"))
+        updated = _stock_attempt_datetime(payload.get("updated_at"))
+        if started is None or updated is None or not started <= updated <= datetime.now(timezone.utc):
+            raise ValueError("invalid_attempt_time")
+        status, count, error = payload.get("status"), payload.get("result_count"), payload.get("error_code")
+        diagnostics = payload.get("diagnostics")
+        if status not in ("running", "complete", "error") or not isinstance(diagnostics, dict):
+            raise ValueError("invalid_attempt_status")
+        if status == "complete":
+            if (type(count) is not int or not 0 <= count <= 10**9 or error not in (None, "")
+                    or diagnostics.get("coverage") != "complete"
+                    or type(diagnostics.get("final_results")) is not int or diagnostics["final_results"] != count):
+                raise ValueError("invalid_attempt_completion")
+        elif count is not None or (status == "error" and (not isinstance(error, str) or error not in _STOCK_ATTEMPT_ERRORS)):
+            raise ValueError("invalid_attempt_error")
+        elif status == "running" and error not in (None, ""):
+            raise ValueError("invalid_attempt_running")
+        projected = _stock_strategy_attempt_diagnostics(diagnostics, sweep=False)
+        if status != "complete":
+            projected.update(coverage="incomplete", final_results=None)
+        return {"available": True, "status": status, "strategy_slug": slug,
+                "attempt_run_id": payload["run_id"], "code_revision": payload["code_revision"],
+                "started_at": started.isoformat(), "updated_at": updated.isoformat(),
+                "result_count": count, "error_code": error if status == "error" else None,
+                "status_scope": "persisted_attempt_not_live_worker", "diagnostics": projected}
+    except FileNotFoundError:
+        return {"available": False, "reason": "missing"}
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        return {"available": False, "reason": "invalid"}
+
+
+def _stock_strategy_result_attempt(strategy_name: str, scan_state: Dict[str, Any], cached_at: Any,
+                                   *, cache_complete: bool) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Overlay newer diagnostic evidence without changing scheduler ownership."""
+    state = dict(scan_state)
+    attempt = _read_stock_strategy_attempt(strategy_name)
+    public = {key: value for key, value in attempt.items() if key != "diagnostics"}
+    cache_time = _stock_attempt_datetime(cached_at, server_time=True)
+    cache_complete = bool(cache_complete and cache_time is not None and cache_time <= datetime.now(timezone.utc))
+    manual_time = _stock_attempt_datetime(state.get("last_attempt_at"), server_time=True)
+    # A running manual acknowledgement remains authoritative, even while an
+    # earlier automatic attempt file is visible. Never swap its scheduler UUID.
+    if state.get("running"):
+        return state, public
+    # RAM records a manual start, not its failure time. A later cache alone
+    # cannot prove that an overlapping manual failure has recovered.
+    if not attempt.get("available"):
+        return state, public
+    started = _stock_attempt_datetime(attempt["started_at"])
+    updated = _stock_attempt_datetime(attempt["updated_at"])
+    if ((manual_time is not None and started < manual_time)
+            or (cache_complete and cache_time > updated)):
+        return state, public
+    if attempt["status"] in ("error", "running"):
+        state["last_attempt_at"] = attempt["started_at"]
+        state["last_attempt_diagnostics"] = attempt["diagnostics"]
+        if attempt["status"] == "error":
+            state["last_error"] = attempt["error_code"]
+    # A persisted complete/running record alone never advances last_run,
+    # publishes a final result, or proves a worker is currently alive.
+    return state, public
 
 
 def _strategy_scan_wrapper(
@@ -28869,6 +28999,7 @@ def get_scan_results(
     cache_file = None
     normalize_map = None
     resolved_strategy = None
+    strategy_scoped_cache = False
 
     if strategy:
         resolved_strategy = resolve_strategy_name(strategy, market_type)
@@ -28906,6 +29037,7 @@ def get_scan_results(
             _strat_cache = _strategy_cache_path(resolved_strategy, market_type)
             if os.path.exists(_strat_cache) or os.path.exists(_partial_cache_path(_strat_cache)):
                 cache_file = _strat_cache
+                strategy_scoped_cache = True
             elif market_type != "stocks":
                 cache_file = _strat_cache
             else:
@@ -28971,6 +29103,21 @@ def get_scan_results(
         running=bool(scan_state.get("running")),
     )
     diagnostics = cache_meta.get("diagnostics") if isinstance(cache_meta.get("diagnostics"), dict) else None
+    attempt_status_scoped = bool(market_type == "stocks" and scanner_name == "strategy_scan"
+                                and resolved_strategy in _STOCK_ATTEMPT_READ_STRATEGIES)
+    cache_identity_unverified = False
+    if attempt_status_scoped:
+        identities = [value for value in (cache_meta.get("strategy"), (diagnostics or {}).get("strategy"))
+                      if value is not None]
+        identity_consistent = all(value == resolved_strategy for value in identities)
+        strategy_scoped_cache = identity_consistent and (strategy_scoped_cache or bool(identities))
+        if not strategy_scoped_cache:
+            # The legacy shared fallback may belong to a different strategy.
+            # Neither its rows nor its timestamp are this strategy's evidence.
+            results, cached_at, is_partial = [], None, False
+            diagnostics = {"coverage": "unknown", "final_results": None,
+                           "warning": "strategy_cache_identity_unverified"}
+            cache_identity_unverified = True
     if normalize_map:
         results = _normalize_keys(results, normalize_map)
     results = _filter_bi_signal_rows(scanner_name, results)
@@ -29013,7 +29160,17 @@ def get_scan_results(
     warnings = list(quality["warnings"])
     if stale_strategy_cache:
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
+    if cache_identity_unverified:
+        warnings.insert(0, "Kein eindeutig strategiezugeordneter Ergebnisstand vorhanden")
 
+    if attempt_status_scoped:
+        scan_state, latest_attempt = _stock_strategy_result_attempt(
+            resolved_strategy, scan_state, cached_at,
+            cache_complete=strategy_scoped_cache and not is_partial and not stale_strategy_cache
+            and (diagnostics or {}).get("coverage") == "complete",
+        )
+        diagnostics = dict(diagnostics or {})
+        diagnostics["latest_attempt"] = latest_attempt
     scan_error = _public_scan_error_code(scan_state.get("last_error"))
     if scan_state.get("last_attempt_diagnostics") is not None:
         diagnostics = dict(diagnostics or {})

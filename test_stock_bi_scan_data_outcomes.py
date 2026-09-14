@@ -1,4 +1,5 @@
 """Transport failure is not a zero-hit scan. All I/O is isolated or mocked."""
+from copy import deepcopy
 import json
 import threading
 
@@ -69,6 +70,68 @@ def test_full_snapshot_success_keeps_broad_universe(monkeypatch):
     rows = api._fetch_strategy_snapshot_universe("Momentum Breakout Long")
     assert [row["ticker"] for row in rows] == ["TEST"]
     assert "full" in rows[0]["_sources"]
+
+
+def _snapshot_feed(monkeypatch, full, gainers=(), losers=()):
+    feeds = {"tickers": full, "gainers": gainers, "losers": losers}
+    calls = []
+    def fetch(url, **kwargs):
+        endpoint = url.rsplit("/", 1)[-1]
+        assert endpoint in feeds, "unexpected provider endpoint"
+        calls.append(endpoint)
+        return Reply(payload={"status": "OK", "tickers": deepcopy(list(feeds[endpoint]))})
+    monkeypatch.setattr(api, "rate_limited_get", fetch)
+    return calls
+
+
+@pytest.mark.parametrize("supplement_trade", [{}, None, {"p": 0}])
+def test_sparse_movers_never_erase_full_snapshot_trade(monkeypatch, supplement_trade):
+    full = snapshot()
+    full["lastTrade"]["t"] = 200
+    before = deepcopy(full)
+    calls = _snapshot_feed(monkeypatch, [full], [{"ticker": "TEST", "lastTrade": supplement_trade}])
+    rows = api._fetch_strategy_snapshot_universe("Momentum Breakout Long")
+    assert rows == [{**before, "_sources": ["full", "gainers"]}]
+    assert full == before
+    assert calls == ["tickers", "gainers", "losers"]
+
+
+def test_conflicting_movers_never_mix_full_snapshot_market_objects(monkeypatch):
+    full = {**snapshot(), "lastTrade": {"p": 10.1, "t": 200},
+            "lastQuote": {"p": 10.09, "P": 10.11, "t": 201}, "updated": 202}
+    conflicting = {"ticker": "TEST", "lastTrade": {"p": 9, "t": 100},
+                   "lastQuote": {"p": 8.9, "P": 9.1, "t": 101},
+                   "day": {"c": 9, "v": 1}, "prevDay": {"c": 8}, "updated": 102,
+                   "supplement_only": "not_part_of_full_snapshot"}
+    _snapshot_feed(monkeypatch, [full], [conflicting], [{"ticker": "TEST", "day": {"c": 12}, "updated": 300}])
+    rows = api._fetch_strategy_snapshot_universe("Momentum Breakout Long")
+    assert rows == [{**full, "_sources": ["full", "gainers", "losers"]}]
+
+
+def test_movers_add_new_tickers_and_keep_first_snapshot_atomic(monkeypatch):
+    full = snapshot()
+    gainer = {**snapshot(12), "ticker": "NEW_GAINER", "updated": 200}
+    loser = {**snapshot(8), "ticker": "NEW_LOSER", "updated": 201}
+    repeated = {"ticker": "NEW_GAINER", "lastTrade": None, "updated": 300}
+    _snapshot_feed(monkeypatch, [full], [gainer], [loser, repeated])
+    rows = api._fetch_strategy_snapshot_universe("Momentum Breakout Long")
+    assert rows == [{**full, "_sources": ["full"]},
+                    {**gainer, "_sources": ["gainers", "losers"]},
+                    {**loser, "_sources": ["losers"]}]
+
+
+def test_unpriced_full_snapshot_cannot_borrow_movers_trade(monkeypatch, tmp_path):
+    full = snapshot()
+    del full["lastTrade"]
+    _snapshot_feed(monkeypatch, [full], [{"ticker": "TEST", "lastTrade": {"p": 10.1, "t": 200}}])
+    rows = api._fetch_strategy_snapshot_universe("Momentum Breakout Long")
+    final, generic, before = stock_io(monkeypatch, tmp_path, rows)
+    with pytest.raises(scanners.ScannerDataError, match="scan_data_unavailable"):
+        api._strategy_scan_wrapper("Momentum Breakout Long", send_email=False)
+    assert rows == [{**full, "_sources": ["full", "gainers"]}]
+    assert final.read_bytes() == before
+    assert not generic.exists()
+    assert not final.with_suffix(".json.partial").exists()
 
 
 @pytest.mark.parametrize("provider_status,code", [("NOT_AUTHORIZED", "scan_provider_unauthorized"),
