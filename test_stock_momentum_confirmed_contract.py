@@ -180,7 +180,7 @@ def test_whole_wrapper_writes_confirmed_contract_before_cache(monkeypatch):
     assert rows[0]["Breakout_Freshness_Status"] == "FRESH_CROSS"
     assert api._stock_momentum_row_contract_valid(rows[0], as_of=NOW)
     assert written[0][0] == rows
-    assert written[0][1]["metadata"]["cache_version"] == 8
+    assert written[0][1]["metadata"]["cache_version"] == api.STOCK_STRATEGY_CACHE_VERSION
 
 
 @pytest.mark.parametrize("bars", [[], [_bar(0, 99.5), _bar(1, 100.3), _bar(2, 99.9)]])

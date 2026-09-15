@@ -2,6 +2,12 @@
 
 ## Market observations stay atomic
 
+From 15 September 2026 this section describes the explicit `realtime` mode.
+The default stock swing mode is separately versioned and labelled; see
+[Starter swing contract](STARTER_SWING_CONTRACT.md). It uses completed daily
+plans and a delayed-minute pre-mail check, never silently substitutes a daily
+close for a live trade. ORB/Penny intraday and BI 17/20 remain separate.
+
 The full-market snapshot is the first authoritative observation for a symbol.
 Gainer/loser responses can add symbols and source labels, but must not overwrite
 or splice its trade, quote, daily bar, previous close or timestamps. The first

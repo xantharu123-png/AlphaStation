@@ -10,6 +10,12 @@ import modules.scanners as scanners
 from test_bi_deep_fixes_scan import _flat_bars, _to_polygon, _contract_result
 
 
+@pytest.fixture(autouse=True)
+def legacy_snapshot_contract(monkeypatch):
+    # This suite tests atomic lastTrade/snapshot semantics, not daily plans.
+    monkeypatch.setenv("STOCK_SWING_DATA_MODE", "realtime")
+
+
 class Reply:
     def __init__(self, status=200, payload=None):
         self.status_code = status

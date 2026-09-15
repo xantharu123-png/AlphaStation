@@ -120,6 +120,9 @@ def _spike_then_flat(n_spike=5, n_flat=10, spike_high=107.0, price=100.0, vol=25
 
 def _patch_scan_io(monkeypatch, bars_by_ticker, analyze_result=None, analyze_log=None):
     """Faked HTTP/Cache/Progress; optional analyze_breakout_imminent-Stub."""
+    # These legacy fixtures include weekend bars and live extension checks.
+    # The dated Starter contract has separate real-session integration tests.
+    monkeypatch.setenv("STOCK_SWING_DATA_MODE", "realtime")
     saved = {}
 
     def fake_get(url, params=None, timeout=15):

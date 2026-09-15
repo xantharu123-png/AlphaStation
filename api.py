@@ -145,6 +145,7 @@ from modules.stock_execution import (
     stock_swing_4h_execution_state,
     stock_swing_4h_short_execution_state,
 )
+from modules import stock_swing_contract as stock_swing
 from modules.stock_momentum_contract import (
     CONFIRMATION_BUFFER as _MOMENTUM_CONFIRMATION_BUFFER,
     MOMENTUM_CONTRACT_VERSION,
@@ -808,7 +809,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 8
+STOCK_STRATEGY_CACHE_VERSION = 9
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -3989,6 +3990,7 @@ def _format_alert_timing_label(value: Any, market_type: str = "stocks") -> str:
     raw = str(value or "").strip()
     key = raw.upper()
     labels = {
+        "SWING_PLAN": "Swing-Plan; Einstieg noch offen",
         "SWING_SETUP": "Swing-Setup aktiv",
         "TRADEABLE": "Tradeable",
         "JETZT_TRADEN": "Jetzt handelbar",
@@ -6501,6 +6503,11 @@ def _stock_breakout_freshness_state(
 ) -> Dict[str, Any]:
     """Classify whether a stock breakout is fresh, held, retested, or stale."""
     enriched = dict(row)
+    if stock_swing.is_swing(enriched):
+        # A daily swing confirmation does not age into a five-minute signal.
+        if not stock_swing.validate(enriched, as_of):
+            enriched["Breakout_Freshness_Status"] = "DATA_UNAVAILABLE"
+        return enriched
     enriched["Breakout_Freshness_Checked"] = True
     ticker = _extract_alert_ticker(enriched)
     breakout_level = _alert_float(_alert_get_any(
@@ -9156,6 +9163,10 @@ def _enrich_stock_alert_5m_state(scanner_name: str, row: Dict[str, Any], strateg
 
     enriched = dict(row)
     if scanner_name in _STOCK_SWING_ALERT_SCANNERS and _scanner_uses_swing_horizon(scanner_name):
+        if stock_swing.is_swing(enriched):
+            # The published daily plan retains its causal analysis cutoff.
+            # Do not silently replace it with newer 4H/live execution evidence.
+            return enriched
         enriched.setdefault("entry_quality", "SWING_SETUP")
         enriched.setdefault("swing_timeframe", "daily_swing")
         score = _alert_float(_extract_alert_score(enriched), 0) or 0
@@ -10161,7 +10172,12 @@ def _safe_format_telegram_rows(rows) -> str:
     if not format_alert_rows_for_telegram or not rows:
         return ""
     try:
-        return str(format_alert_rows_for_telegram(rows) or "")
+        text = str(format_alert_rows_for_telegram(rows) or "")
+        references = [str(r.get("scan_price_observed_at") or "unbekannt") for r in rows if stock_swing.is_swing(r)]
+        if references:
+            text += "\nSwing-Plan (1D, Starter): Referenzschluss " + ", ".join(sorted(set(references)))
+            text += ". Kein Livekurs und keine ausgefuehrte Order. Aktuellen Einstieg pruefen."
+        return text
     except Exception as exc:
         print(f"[Alert] Telegram-Formatter Fehler (ignoriert): {exc}")
         return ""
@@ -11111,6 +11127,8 @@ def _check_and_alert(scanner_name, cache_file):
             return
         if scanner_name in _STOCK_ALERT_SCANNERS:
             allowed, _reason = _stock_trade_email_allowed(scanner_name)
+            if scanner_name in _STOCK_SWING_ALERT_SCANNERS and all(stock_swing.validate(r) for r in results):
+                allowed = True  # A dated plan, not an after-hours market entry.
             if not allowed:
                 candidate_count = sum(
                     1 for row in results if isinstance(row, dict)
@@ -11240,8 +11258,9 @@ def _check_and_alert(scanner_name, cache_file):
                     deferred_count += 1
                     _email_dedupe_release(alert["cooldown_key"], claimed_at=now)
                     continue
-                anchored = _conservative_regular_session_anchor(
-                    dict(alert.get("source_row") or {}), now_ts=time.time()
+                source_row = dict(alert.get("source_row") or {})
+                anchored = source_row if stock_swing.is_swing(source_row) else _conservative_regular_session_anchor(
+                    source_row, now_ts=time.time()
                 )
                 validation = _revalidate_stock_strategy_mail_candidate(
                     anchored,
@@ -11298,7 +11317,7 @@ def _check_and_alert(scanner_name, cache_file):
             )
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{emoji} {a["grade"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["score"]}</td>'
-            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}</td>'
+            rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(a["price"])}{_stock_swing_notice_html(a.get("source_row") or {})}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["rvol"]}x</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a["trade_plan_html"]}</td>'
             rows += f'<td style="padding:8px;border-bottom:1px solid #eee">{a.get("entry_quality", "")}</td></tr>'
@@ -12251,6 +12270,82 @@ def _fetch_stock_revalidation_snapshot(
     }, http_status=200)
 
 
+def _stock_swing_notice_html(row):
+    if not stock_swing.is_swing(row):
+        return ""
+    observed = html.escape(str(row.get("scan_price_observed_at") or "unbekannt"))
+    checked = html.escape(str(row.get("price_observed_at") or observed))
+    return (f'<p style="color:#92400e;font-size:12px">Swing-Plan | 1D | Starter (15 Min verzoegert). '
+            f'Referenz: abgeschlossener Tag, Stand {observed}. Kein Live-Bid/Ask, '
+            f'keine Einstiegsausfuehrung. Letzter beobachteter Kurs: {checked}. '
+            'Die letzten 15 Minuten sind nicht beobachtet. Aktuellen Kurs und Order vor Einstieg pruefen.</p>')
+
+
+def _stock_swing_delayed_observation(row, levels, as_of):
+    reference = datetime.fromisoformat(row["scan_price_observed_at"].replace("Z", "+00:00"))
+    available = stock_swing.delayed_market_watermark(as_of)
+    if available == reference:
+        return {"price": row["swing_reference_close"], "observed_at": reference.isoformat()}
+    ticker = _extract_alert_ticker(row)
+    start = int(reference.timestamp()*1000)
+    end = int(available.timestamp()*1000)-1
+    response = rate_limited_get(
+        f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{start}/{end}",
+        params={"apiKey": POLYGON_KEY, "adjusted": "true", "sort": "asc", "limit": 50000}, timeout=20,
+    )
+    if response.status_code != 200:
+        raise ValueError(_scanner_provider_error(response.status_code))
+    price = stock_swing.validate_minute_path(
+        response.json(), reference_at=reference, available_at=available,
+        stop=levels["stop"], tp1=levels["tp1"], direction=levels["direction"],
+    )
+    return {"price": price, "observed_at": available.isoformat()}
+
+
+def _revalidate_stock_swing_plan(row, *, now_ts, scanner_name):
+    as_of = datetime.fromtimestamp(now_ts, timezone.utc)
+    if scanner_name not in _STOCK_SWING_ALERT_SCANNERS or not _scanner_uses_swing_horizon(scanner_name):
+        return {"ok": False, "reason": "swing_mode_not_allowed_for_scanner"}
+    if not stock_swing.validate(row, as_of):
+        return {"ok": False, "reason": "swing_daily_reference_invalid_or_stale"}
+    if scanner_name in _BI_SIGNAL_SCANNERS and not _filter_bi_signal_rows(scanner_name, [row]):
+        return {"ok": False, "reason": "bi_indicator_contract_not_met"}
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid") or levels.get("estimated") or not _alert_trade_plan_ok(row):
+        return {"ok": False, "reason": "swing_trade_plan_invalid"}
+    price = _alert_float(_extract_alert_price(row))
+    reference = stock_swing.number(row.get("swing_reference_close"))
+    if price is None or reference is None or not math.isclose(price, reference, abs_tol=0.0051):
+        return {"ok": False, "reason": "swing_reference_price_mismatch"}
+    direction = str(levels.get("direction") or "").upper()
+    if (direction == "LONG" and not levels["stop"] < price < levels["tp1"]) or (
+        direction == "SHORT" and not levels["tp1"] < price < levels["stop"]
+    ):
+        return {"ok": False, "reason": "swing_reference_outside_plan"}
+    candidate = dict(row)
+    candidate.update(stock_swing.metadata(row["swing_analysis_session"], reference))
+    try:
+        observed = _stock_swing_delayed_observation(row, levels, as_of)
+    except (ValueError, TypeError, req.RequestException, OverflowError):
+        return {"ok": False, "reason": "swing_delayed_price_or_path_unconfirmed"}
+    current = _alert_float(observed.get("price"))
+    geometry = trade_geometry(current, levels["stop"], levels["tp1"], levels["tp2"], direction)
+    if not geometry.get("valid") or _alert_trade_plan_quality(geometry).get("issues"):
+        return {"ok": False, "reason": "swing_delayed_rr_insufficient"}
+    fill_quality = validate_fill_quality(scanner_name, levels["entry"], current,
+                                        levels["stop"], levels["tp1"], levels["tp2"], direction)
+    if not fill_quality.get("valid"):
+        return {"ok": False, "reason": "swing_delayed_entry_too_extended"}
+    candidate.update({"price": current, "Preis": current, "current_price": current,
+                      "price_observed_at": observed["observed_at"],
+                      "price_source": "polygon_delayed_swing_close", "price_mode": "swing_delayed_close",
+                      "swing_unobserved_seconds": stock_swing.DELAY_SECONDS})
+    candidate["swing_plan_validated_at"] = as_of.isoformat()
+    # Keep the planned entry. A prior daily close can never prove an immediate
+    # recipient fill; tracker activation is still tied to SMTP acceptance.
+    return {"ok": True, "candidate": candidate}
+
+
 def _revalidate_stock_strategy_mail_candidate(
     row: Dict[str, Any],
     *,
@@ -12266,6 +12361,10 @@ def _revalidate_stock_strategy_mail_candidate(
     recipient-executable fill.  The tracker waits for a complete post-alert
     interval before establishing the entry.
     """
+    if stock_swing.is_swing(row):
+        return _revalidate_stock_swing_plan(
+            row, now_ts=float(now_ts if now_ts is not None else time.time()), scanner_name=scanner_name,
+        )
     item = dict(row or {})
     for key in (
         "fill_evidence_verified",
@@ -12963,6 +13062,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
     daily_close_confirmed_mode = False
+    starter_swing_mode = market_type == "stocks" and all(stock_swing.validate(row) for row in results)
+    if starter_swing_mode:
+        daily_close_confirmed_mode = True
     # AUDIT 2026-07-29 (Punkt C / RITM+NVST): Pre-Market-Radar-Modus — eigene
     # Fruehwarn-Mail im PM-Fenster, bewusst einfachere Gates (siehe
     # _classify_premarket_candidate), eigener Kanal + Cooldown-Namespace.
@@ -12976,7 +13078,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         except TypeError:
             # Some unit tests monkeypatch the helper as a no-arg lambda.
             market_status = _stock_trade_email_status()
-        if not market_status.get("allowed"):
+        if not market_status.get("allowed") and not starter_swing_mode:
             candidate_count = sum(
                 1 for row in results[:50] if isinstance(row, dict)
             )
@@ -13722,7 +13824,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             <tr style="background:#f5f5f5"><th>Ticker / Unternehmen</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Preis</th><th>Change</th><th>RVOL</th><th>Entry / Stop / TP</th><th>Timing</th></tr>
             {row_html}</table>
             <p style="color:#999;font-size:12px;margin-top:20px">Intraday-Trigger sind optional und gehoeren in den separaten Intraday-Modus, nicht in diese Swing-Mail.</p>
-            <p style="color:#999;font-size:12px;margin-top:20px">Finaler ausfuehrbarer Bid/Ask und Marktpfad wurden unmittelbar vor diesem Einzelversand erneut validiert.</p>
+            {_stock_swing_notice_html(src) if stock_swing.is_swing(src) else '<p style="color:#999;font-size:12px;margin-top:20px">Finaler ausfuehrbarer Bid/Ask und Marktpfad wurden unmittelbar vor diesem Einzelversand erneut validiert.</p>'}
             </body></html>'''
             signal_row = dict(
                 src,
@@ -15962,6 +16064,23 @@ def _stock_momentum_row_contract_valid(row: Dict[str, Any], *, as_of: Optional[d
     canonical = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(strategy), strategy)
     if canonical != "Momentum Breakout Long":
         return True
+    if stock_swing.is_swing(row):
+        level = _alert_float(row.get("Breakout_Level"))
+        close = _alert_float(row.get("Breakout_Confirmation_Close"))
+        price = _alert_float(_extract_alert_price(row))
+        return bool(
+            stock_swing.validate(row, as_of or datetime.now(timezone.utc))
+            and row.get("Momentum_Contract_Version") == MOMENTUM_CONTRACT_VERSION
+            and row.get("Momentum_Execution_Confirmed") is False
+            and row.get("Momentum_Breakout_Type") in MOMENTUM_BREAKOUT_TYPES
+            and str(_infer_alert_direction(row)).upper() == "LONG"
+            and row.get("Breakout_Confirmation_Timeframe") == "1D"
+            and row.get("Breakout_Freshness_Status") == "DAILY_CONFIRMED"
+            and row.get("Breakout_Confirmation_Closed_At") == row.get("scan_price_observed_at")
+            and all(v is not None and math.isfinite(v) and v > 0 for v in (level, close, price))
+            and min(price, close) >= level * (1 + _MOMENTUM_CONFIRMATION_BUFFER)
+            and math.isclose(close, row["swing_reference_close"], abs_tol=0.000001)
+        )
     if (
         type(row.get("Momentum_Contract_Version")) is not int
         or row.get("Momentum_Contract_Version") != MOMENTUM_CONTRACT_VERSION
@@ -17658,6 +17777,28 @@ def _snapshot_atr_pct(day: Dict[str, Any], prev: Dict[str, Any], price: float) -
 
 def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]]:
     """Fetch a broad stock universe, with top movers only as a supplement."""
+    if stock_swing.enabled():
+        # Completed daily evidence, never a day close labelled as a live trade.
+        sessions = stock_swing.completed_sessions()
+        feeds = []
+        diag = {"coverage": "incomplete", "final_results": None,
+                "data_mode": stock_swing.MODE, "analysis_session": sessions[0]}
+        for session in sessions:
+            try:
+                response = rate_limited_get(
+                    f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{session}",
+                    params={"apiKey": POLYGON_KEY, "adjusted": "true", "include_otc": "false"}, timeout=30,
+                )
+                if response.status_code != 200:
+                    raise ScannerDataError(_scanner_provider_error(response.status_code), diag)
+                feeds.append(stock_swing.parse_grouped(response.json(), session))
+            except ScannerDataError:
+                raise
+            except (ValueError, TypeError):
+                raise ScannerDataError("scan_data_invalid", diag) from None
+            except Exception:
+                raise ScannerDataError("scan_data_unavailable", diag) from None
+        return stock_swing.universe(feeds[0], feeds[1], sessions[0])
     merged: Dict[str, Dict[str, Any]] = {}
 
     def _add_tickers(tickers: List[Dict[str, Any]], source: str) -> None:
@@ -17996,6 +18137,9 @@ def _daily_level_bars(
                     open_time = None
         if open_time is None:
             continue
+        exchange_close = stock_swing.session_close(session_date.isoformat())
+        if exchange_close is not None:
+            close_time = exchange_close.astimezone(timezone.utc)
         adapted.append({
             "open_time": open_time,
             "close_time": close_time,
@@ -19990,7 +20134,7 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
 
     enriched = dict(candidate)
     ticker = _extract_alert_ticker(enriched)
-    if ticker and (enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None):
+    if not stock_swing.is_swing(candidate) and ticker and (enriched.get("latest_bar_change_pct") is None or enriched.get("latest_bar_close_pos") is None):
         enriched.update(_fetch_long_latest_intraday_state(ticker))
 
     trade_setup = {
@@ -20047,6 +20191,16 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "last_daily_bar_date": confirmation_bar_date,
         "data_gaps": bool(setup.get("data_gaps")),  # AUDIT N-4 (Anzeige-Info)
     })
+    if stock_swing.is_swing(candidate):
+        # The measured cup breakout is confirmed by the completed 1D candle;
+        # do not demand a realtime next-session 5m cross for a swing plan.
+        enriched.update(stock_swing.metadata(candidate["swing_analysis_session"], price))
+        enriched.update({"long_entry_quality": "SWING_PLAN", "entry_status": "SWING_PLAN",
+                         "trade_action": "LONG_TRIGGER", "daily_close_confirmed": True,
+                         "daily_close_confirmation_date": confirmation_bar_date,
+                         "scanner_note": "Swing-Plan: abgeschlossener 1D-Cup-Breakout; keine Live-Ausfuehrung."})
+        enriched["trade_setup"] = dict(trade_setup, trade_action="LONG_TRIGGER", entry_status="SWING_PLAN")
+        return enriched
     long_reasons = _long_entry_rule_reasons(enriched)
     if long_reasons:
         return None
@@ -20390,7 +20544,8 @@ def _apply_special_strategy_post_filter(
 
         daily_bars = _stock_completed_pattern_history(
             _fetch_strategy_daily_history(str(ticker), min_history, history_cache, True),
-            as_of=datetime.now(timezone.utc),
+            as_of=(stock_swing.session_close(candidate["swing_analysis_session"])
+                   if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
         )
         if len(daily_bars) < min_history:
             continue
@@ -20936,13 +21091,27 @@ def _strategy_scan_wrapper(
         # absolute PM-Liquiditaet + Spread-Guard + ATR-Extensions-Decke.
         premarket_mode = session_name == "Pre-Market"
         scan_now_utc = datetime.now(timezone.utc)
+        swing_daily_mode = bool(_all_snapshot_tickers) and all(
+            stock_swing.validate(item, scan_now_utc) for item in _all_snapshot_tickers
+        )
+        analysis_as_of = (
+            stock_swing.session_close(_all_snapshot_tickers[0]["swing_analysis_session"])
+            if swing_daily_mode else scan_now_utc
+        )
+        if swing_daily_mode:
+            premarket_mode = False
+            _use_extended_prices = False
         session_volume_fraction = _us_equity_expected_volume_fraction(scan_now_utc)
+        if swing_daily_mode:
+            session_volume_fraction = 1.0
         history_cache: Dict[str, List[Dict[str, Any]]] = {}
         scan_diag: Dict[str, Any] = {
             "strategy": strategy_name,
             "market_type": "stocks",
             "cache_version": STOCK_STRATEGY_CACHE_VERSION,
             "universe_count": len(_all_snapshot_tickers),
+            "data_mode": stock_swing.MODE if swing_daily_mode else "live_snapshot",
+            "analysis_as_of": analysis_as_of.isoformat(),
             "coverage": "incomplete",
             "common_stock_source": common_stock_source,
             "common_stock_universe_count": len(common_stock_universe) if common_stock_universe is not None else None,
@@ -21042,6 +21211,9 @@ def _strategy_scan_wrapper(
                     # market object. Never timestamp a day.c aggregate with a
                     # newer lastTrade.t value.
                     regular_price = last_price
+                    if swing_daily_mode:
+                        regular_price = day_close
+                        _snapshot_observed_ts = analysis_as_of.timestamp()
                     use_ext_price = _use_extended_prices and last_price > 0 and day_close > 0
 
                     if use_ext_price:
@@ -21124,7 +21296,10 @@ def _strategy_scan_wrapper(
                         _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
-                    previous_change = _stock_previous_session_change(daily_bars, as_of=scan_now_utc)
+                    if swing_daily_mode:
+                        daily_bars = [bar for bar in daily_bars if
+                                      _daily_bar_date_str(bar) <= t["swing_analysis_session"]]
+                    previous_change = _stock_previous_session_change(daily_bars, as_of=analysis_as_of)
                     if _has_vortag_filter:
                         if previous_change is None or not (vortag_min <= previous_change <= vortag_max):
                             _reject("vortag_filter")
@@ -21139,7 +21314,7 @@ def _strategy_scan_wrapper(
                         day_high=day_high,
                         day_low=day_low,
                         day_volume=volume,
-                        now_utc=scan_now_utc,
+                        now_utc=analysis_as_of,
                         symbol=ticker,
                         direction=_history_direction,
                         spread=(ask - bid) if ask > bid > 0 else None,
@@ -21223,22 +21398,32 @@ def _strategy_scan_wrapper(
                         )
                         # Intraday proof belongs to the scanner contract, before
                         # publication, not only to the independent mail pipeline.
-                        _momentum_confirmation = _stock_breakout_freshness_state(
-                            {"ticker": ticker, "direction": "LONG",
-                             "Breakout_Level": _momentum_selection["breakout_level"]},
-                            as_of=scan_now_utc,
-                        )
+                        if swing_daily_mode:
+                            _momentum_confirmation = {
+                                "Breakout_Level": _momentum_selection["breakout_level"],
+                                "Breakout_Confirmation_Timeframe": "1D",
+                                "Breakout_Confirmation_Close": price,
+                                "Breakout_Confirmation_Closed_At": t["scan_price_observed_at"],
+                                "Breakout_Freshness_Status": "DAILY_CONFIRMED",
+                                "Breakout_Freshness_Checked": True,
+                            }
+                        else:
+                            _momentum_confirmation = _stock_breakout_freshness_state(
+                                {"ticker": ticker, "direction": "LONG",
+                                 "Breakout_Level": _momentum_selection["breakout_level"]},
+                                as_of=scan_now_utc,
+                            )
                         _confirmation_status = _momentum_confirmation.get("Breakout_Freshness_Status")
                         if _confirmation_status == "DATA_UNAVAILABLE":
                             raise ScannerDataError("scan_data_unavailable", scan_diag)
                         _confirmation_age = _alert_float(_momentum_confirmation.get("Breakout_Confirmation_Age_Seconds"))
-                        if _confirmation_status not in {"FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"}:
+                        if not swing_daily_mode and _confirmation_status not in {"FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"}:
                             _reject(f"momentum:intraday_{str(_confirmation_status or 'unavailable').lower()}")
                             continue
-                        if _confirmation_age is None or _confirmation_age > _MAIL_TRIGGER_MAX_AGE_SEC:
+                        if not swing_daily_mode and (_confirmation_age is None or _confirmation_age > _MAIL_TRIGGER_MAX_AGE_SEC):
                             _reject("momentum:intraday_confirmation_stale")
                             continue
-                        _stage("momentum_completed_5m_confirmation")
+                        _stage("momentum_completed_daily_confirmation" if swing_daily_mode else "momentum_completed_5m_confirmation")
                     _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
                     _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
                     _range_pos = _alert_float(history_metrics.get("range_pos"))
@@ -21507,8 +21692,10 @@ def _strategy_scan_wrapper(
                     if _is_momentum_contract:
                         strategy_row.update(_momentum_confirmation)
                         strategy_row["Momentum_Contract_Version"] = MOMENTUM_CONTRACT_VERSION
-                        strategy_row["Momentum_Execution_Confirmed"] = True
-                        strategy_row["Momentum_Analysis_As_Of"] = scan_now_utc.isoformat().replace("+00:00", "Z")
+                        strategy_row["Momentum_Execution_Confirmed"] = not swing_daily_mode
+                        strategy_row["Momentum_Analysis_As_Of"] = analysis_as_of.isoformat().replace("+00:00", "Z")
+                    if swing_daily_mode:
+                        strategy_row.update(stock_swing.metadata(t["swing_analysis_session"], price))
                     _ad_ok, _ad_block_reasons, _ad_info = _stock_reversal_ad_gate(
                         strategy_name,
                         daily_bars,
@@ -21536,7 +21723,7 @@ def _strategy_scan_wrapper(
                             current_price=price,
                             direction=_setup_direction,
                             atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                            as_of=scan_now_utc,
+                            as_of=analysis_as_of,
                             four_hour_bars=_level_4h_bars,
                             spread=(ask - bid) if ask > bid > 0 else None,
                         )
@@ -21572,7 +21759,7 @@ def _strategy_scan_wrapper(
                             require_causal_structure=True,
                         )
                         if _trade_setup:
-                            _vrvp_as_of = scan_now_utc
+                            _vrvp_as_of = analysis_as_of
                             _vrvp = build_vrvp_structure(
                                 daily_bars,
                                 price,
@@ -21625,8 +21812,8 @@ def _strategy_scan_wrapper(
                                 "VRVP_Timeframe": _trade_setup.get("vrvp_timeframe"),
                             })
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
-                        strategy_row["entry_quality"] = "SWING_SETUP"
-                        strategy_row["swing_timeframe"] = "daily_swing"
+                        strategy_row["entry_quality"] = "SWING_PLAN" if swing_daily_mode else "SWING_SETUP"
+                        strategy_row["swing_timeframe"] = "1D" if swing_daily_mode else "daily_swing"
                     results.append(strategy_row)
                     _publish_partial(checked, force=len(results) == 1)
                 except ScannerDataError as data_error:

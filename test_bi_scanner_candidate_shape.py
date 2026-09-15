@@ -48,6 +48,7 @@ def _bars(days=40):
 
 
 def test_bi_short_accepts_string_candidates_before_enrichment(monkeypatch):
+    monkeypatch.setenv("STOCK_SWING_DATA_MODE", "realtime")
     saved = {}
 
     class Response:

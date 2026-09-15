@@ -231,8 +231,13 @@ def test_api_no_recovery_mail_without_episode(monkeypatch, tmp_path):
     sent, _ = _setup_api(monkeypatch, tmp_path, started_ago_sec=0, running=False)
     api._scan_threads.pop("crypto_explosion", None)
     monkeypatch.setattr(api, "_require_fresh_scan_cache", lambda *a, **k: None)
-    api._run_scan_safe("crypto_explosion", lambda: None)
+    # A no-op worker can finish and deregister before the test reads it.
+    # Synchronize inspection instead of relying on thread scheduling luck.
+    from threading import Event
+    release_worker = Event()
+    api._run_scan_safe("crypto_explosion", lambda: release_worker.wait(timeout=5))
     t = api._scan_threads.get("crypto_explosion")
+    release_worker.set()
     assert t is not None
     t.join(timeout=5)
     assert sent == []

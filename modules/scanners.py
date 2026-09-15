@@ -15,6 +15,7 @@ import threading
 import tempfile
 import uuid
 import datetime as dt
+from modules import stock_swing_contract as stock_swing
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -1490,6 +1491,12 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 # Partial-Bar verfaelschte die Kontraktions-Signale. Live-Preis-Checks
                 # (Already-Broke-Out, Extension-Gates, Preis-Feld) nutzen weiter all_bars.
                 _session_bars = _bi_strip_partial_bar(all_bars, as_of=run_as_of)
+                if stock_swing.enabled():
+                    # Starter observations require close + provider delay.
+                    latest_session = stock_swing.completed_sessions(run_as_of, 1)[0]
+                    _session_bars = [b for b in all_bars if b["date"] <= latest_session
+                                     and stock_swing.session_close(b["date"]) is not None]
+                    all_bars = _session_bars
                 # 50 abgeschlossene Tageskerzen halten die 20 BI-Indikatoren auf
                 # demselben Datenfenster wie AutoTrader/Backtest. Insbesondere
                 # benoetigt der MACD drei Histogrammwerte (mindestens 36 Bars),
@@ -1705,6 +1712,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0
                 candidate["RVOL_Basis"] = "completed_signal_vs_prior_20_sessions"
                 candidate["signal_bar_date"] = _session_bars[-1].get("date")
+                if stock_swing.enabled():
+                    candidate.update(stock_swing.metadata(_session_bars[-1]["date"], _session_bars[-1]["close"]))
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0
 

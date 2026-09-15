@@ -2658,6 +2658,14 @@ function stockCompanyName(row = {}, fallbackName = '') {
     return clean && clean.toUpperCase() !== ticker.toUpperCase() ? clean : '';
 }
 
+function SwingPlanNotice({ row = {} }) {
+    if (row.stock_swing_mode !== 'completed_daily_swing' || row.stock_swing_contract_version !== 1) return null;
+    return <div className="text-xs text-amber-800 mt-1 whitespace-normal" data-testid="swing-plan-notice">
+        Swing-Plan · 1D · Starter (15 Min verzögert)<br/>
+        Referenzschluss: {row.swing_analysis_session || 'unbekannt'} · kein Livekurs, kein ausgeführter Einstieg.
+    </div>;
+}
+
 function StockIdentity({ row = {}, ticker = '', fallbackName = '', compact = false }) {
     const symbol = String(ticker || row?.ticker || row?.Ticker || '').trim();
     const companyName = stockCompanyName({...row, ticker: symbol}, fallbackName);
@@ -2672,6 +2680,7 @@ function StockIdentity({ row = {}, ticker = '', fallbackName = '', compact = fal
                     {companyName}
                 </div>
             )}
+            <SwingPlanNotice row={row} />
         </div>
     );
 }
@@ -5807,6 +5816,10 @@ function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
     const tone = ['error', 'warning', 'stale', 'missing'].includes(state.tone) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700';
     return <div className={`rounded-lg border p-3 text-sm ${tone}`} role="status" aria-live="polite">
         <div>{state.text}</div>
+        {diag.data_mode === 'completed_daily_swing' && <div className="mt-1 text-xs">
+            Swing-Modus: abgeschlossene Tageskerzen. Analysestand {diag.analysis_as_of || 'unbekannt'}.
+            Kein Echtzeitkurs und keine garantierte Einstiegsausführung.
+        </div>}
         {feed.info?.cached_at && <div className="mt-1 text-xs">Angezeigter Ergebnisstand: {getRelativeTime(feed.info.cached_at)} · {String(feed.info.cached_at).replace('T', ' ')} (Serverzeit)</div>}
         {feed.notice && !feed.error && !['warning', 'stale', 'missing', 'error'].includes(state.tone) && <div className="mt-1 text-xs">{feed.notice}</div>}
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">{counts.filter(([, value]) => typeof value === 'number' && Number.isFinite(value)).map(([label, value]) => <span key={label}>{label}: {value}</span>)}</div>
@@ -6142,7 +6155,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             const isWait = action.includes('WAIT') || action.includes('WARTEN') || isRetest || isTrigger;
                             const isNoTrade = action.includes('NO_TRADE') || action.includes('NICHT_TRADEN') || action.includes('BLOCKED');
                             const actionCls = isNow ? 'bg-green-100 text-green-800' : isNoTrade ? 'bg-red-100 text-red-800' : isWait ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700';
-                            const actionLabel = isNow
+                            const actionLabel = item.stock_swing_mode === 'completed_daily_swing' && !isNoTrade
+                                ? 'SWING-PLAN · ENTRY OFFEN' : isNow
                                 ? 'JETZT HANDELN'
                                 : isNoTrade
                                     ? 'NICHT HANDELN'
