@@ -94,7 +94,8 @@ def test_premarket_scan_gate_reason():
 
 # ── B3: dynamischer Scan-Takt ──────────────────────────────────
 
-def test_effective_scan_interval_opening_window():
+def test_effective_scan_interval_opening_window(monkeypatch):
+    monkeypatch.setenv("STOCK_SWING_DATA_MODE", "realtime")
     assert api._scan_status["strategy_scan"]["interval_min"] == 60
     assert api._effective_scan_interval_min("strategy_scan", _et(MONDAY, 10, 0)) == 10.0
     assert api._effective_scan_interval_min("strategy_scan", _et(MONDAY, 12, 0)) == 60.0

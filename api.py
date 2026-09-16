@@ -98,6 +98,7 @@ except ImportError as _auth_err:
     print(f"[Warning] Auth module not loaded: {_auth_err}")
 import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
+from modules import stock_scan_runtime
 
 # Import scanner modules
 from modules.scanners import (
@@ -2252,7 +2253,7 @@ def _effective_scan_interval_min(scan_name: str, now_utc: Optional[datetime] = N
         base = 0.0
     if base <= 0:
         base = 1.0
-    if scan_name == "strategy_scan" and _opening_window_active(now_utc):
+    if scan_name == "strategy_scan" and not stock_swing.enabled() and _opening_window_active(now_utc):
         return min(base, _STRATEGY_SCAN_OPENING_INTERVAL_MIN)
     return base
 
@@ -17777,9 +17778,14 @@ def _snapshot_atr_pct(day: Dict[str, Any], prev: Dict[str, Any], price: float) -
 
 def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]]:
     """Fetch a broad stock universe, with top movers only as a supplement."""
+    stock_scan_runtime.checkpoint("universe")
     if stock_swing.enabled():
         # Completed daily evidence, never a day close labelled as a live trade.
         sessions = stock_swing.completed_sessions()
+        cache_key = ("daily_universe", tuple(sessions))
+        cached = stock_scan_runtime.cache_get(cache_key)
+        if cached is not None:
+            return cached
         feeds = []
         diag = {"coverage": "incomplete", "final_results": None,
                 "data_mode": stock_swing.MODE, "analysis_session": sessions[0]}
@@ -17792,13 +17798,18 @@ def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]
                 if response.status_code != 200:
                     raise ScannerDataError(_scanner_provider_error(response.status_code), diag)
                 feeds.append(stock_swing.parse_grouped(response.json(), session))
+            except stock_scan_runtime.ScanWorkTimeout:
+                raise
             except ScannerDataError:
                 raise
             except (ValueError, TypeError):
                 raise ScannerDataError("scan_data_invalid", diag) from None
             except Exception:
                 raise ScannerDataError("scan_data_unavailable", diag) from None
-        return stock_swing.universe(feeds[0], feeds[1], sessions[0])
+        stock_scan_runtime.checkpoint()
+        universe = stock_swing.universe(feeds[0], feeds[1], sessions[0])
+        stock_scan_runtime.cache_put(cache_key, universe)
+        return universe
     merged: Dict[str, Dict[str, Any]] = {}
 
     def _add_tickers(tickers: List[Dict[str, Any]], source: str) -> None:
@@ -18023,6 +18034,14 @@ def _fetch_strategy_daily_history(
 
     The default preserves compatibility for separate optional enrichment paths.
     """
+    stock_scan_runtime.checkpoint("history")
+    runtime = stock_scan_runtime.current()
+    session = runtime.get("analysis_session") if runtime else None
+    shared_key = ("daily_history", ticker, bool(strict_data), session)
+    if session:
+        cached = stock_scan_runtime.cache_get(shared_key)
+        if cached is not None and (len(cached["bars"]) >= min_days or cached["requested"] >= min_days):
+            return cached["bars"]
     cache_key = f"{ticker}:{min_days}" + (":strict" if strict_data else "")
     if cache_key in history_cache:
         return history_cache[cache_key]
@@ -18034,12 +18053,15 @@ def _fetch_strategy_daily_history(
         try:
             daily_bars = fetch_multi_day_data(ticker, POLYGON_KEY, days=max(min_days + 8, min_days))
         except Exception:
+            stock_scan_runtime.checkpoint()
             daily_bars = []
 
     if not daily_bars or len(daily_bars) < min_days:
         try:
             ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe="1D", bars=max(min_days + 30, 120))
+            stock_scan_runtime.checkpoint()
         except Exception:
+            stock_scan_runtime.checkpoint()
             if strict_data:
                 raise ScannerDataError("scan_data_unavailable") from None
             ohlcv = None
@@ -18062,7 +18084,11 @@ def _fetch_strategy_daily_history(
                         raise ScannerDataError("scan_data_invalid") from None
                     continue
 
-    history_cache[cache_key] = daily_bars
+    stock_scan_runtime.checkpoint()
+    if session:
+        stock_scan_runtime.cache_put(shared_key, {"bars": daily_bars, "requested": min_days})
+    else:
+        history_cache[cache_key] = daily_bars
     return daily_bars
 
 
@@ -20537,7 +20563,9 @@ def _apply_special_strategy_post_filter(
         min_history = max(min_history, _get_max_ma_period(strat) + 12)
 
     filtered: List[Dict[str, Any]] = []
-    for candidate in candidates[:candidate_limit]:
+    for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
+        stock_scan_runtime.checkpoint("special_filter", checked=candidate_index,
+                                      total=min(len(candidates), candidate_limit))
         ticker = candidate.get("ticker") or candidate.get("Ticker")
         if not ticker:
             continue
@@ -20769,6 +20797,7 @@ _STOCK_ATTEMPT_ERRORS = frozenset(ScannerDataError.CODES) | frozenset({
 _STOCK_ATTEMPT_COUNTS = frozenset({
     "checked", "total", "universe_count", "common_stock_universe_count",
     "raw_matches_before_special_filter", "final_results", "max_results",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
 })
 _STOCK_ATTEMPT_STAGES = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -20791,6 +20820,7 @@ momentum:confirmation_expired_before_publication reversal_ad_gate reversal_ad:ad
 _STOCK_ATTEMPT_SWEEP_COUNTS = frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed",
     "current_result_count", "final_results",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
 })
 _stock_attempt_lock = threading.Lock()
 _stock_attempt_run_ids: Dict[str, str] = {}
@@ -20829,6 +20859,8 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
         return {key: raw[key] for key in sorted(allowed)
                 if type(raw.get(key)) is int and 0 <= raw[key] <= 10**9}
     result = counts(source, _STOCK_ATTEMPT_SWEEP_COUNTS if sweep else _STOCK_ATTEMPT_COUNTS)
+    if isinstance(source.get("runtime_phase"), str) and source["runtime_phase"] in stock_scan_runtime.PHASES:
+        result["runtime_phase"] = source["runtime_phase"]
     if source.get("final_results") is None:
         result["final_results"] = None
     if source.get("coverage") in ("complete", "incomplete"):
@@ -20892,8 +20924,10 @@ def _publish_stock_strategy_attempt(
         )}
         payload.update(started_at=started.isoformat(), status=status, updated_at=datetime.now(timezone.utc).isoformat(),
                        result_count=result_count if status == "complete" else None)
+        runtime_diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+        runtime_diagnostics.update(stock_scan_runtime.diagnostics())
         payload["diagnostics"] = _stock_strategy_attempt_diagnostics(
-            diagnostics, sweep=slug == "stock_strategy_sweep",
+            runtime_diagnostics, sweep=slug == "stock_strategy_sweep",
         )
         if status == "error":
             raw_error = error.code if isinstance(error, ScannerDataError) else error
@@ -21046,6 +21080,7 @@ def _stock_strategy_result_attempt(strategy_name: str, scan_state: Dict[str, Any
     return state, public
 
 
+@stock_scan_runtime.bounded_leaf
 def _strategy_scan_wrapper(
     strategy_name: str, send_email: bool = True, *, publish_generic_cache: bool = True,
 ) -> List[Dict[str, Any]]:
@@ -21056,6 +21091,7 @@ def _strategy_scan_wrapper(
     scan_diag: Dict[str, Any] = {}
     _publish_stock_strategy_attempt(_attempt, "running")
     try:
+        stock_scan_runtime.checkpoint("universe")
         strat = STRATEGIES.get(strategy_name)
         if not strat:
             print(f"[Strategy Scan] Strategie '{strategy_name}' nicht gefunden")
@@ -21101,6 +21137,7 @@ def _strategy_scan_wrapper(
         if swing_daily_mode:
             premarket_mode = False
             _use_extended_prices = False
+            stock_scan_runtime.current()["analysis_session"] = _all_snapshot_tickers[0]["swing_analysis_session"]
         session_volume_fraction = _us_equity_expected_volume_fraction(scan_now_utc)
         if swing_daily_mode:
             session_volume_fraction = 1.0
@@ -21146,10 +21183,16 @@ def _strategy_scan_wrapper(
 
         _remove_partial_cache(_strat_cache)
         _last_partial_publish = 0.0
+        _last_attempt_publish = 0.0
 
         def _publish_partial(checked: int, force: bool = False) -> None:
-            nonlocal _last_partial_publish
+            nonlocal _last_partial_publish, _last_attempt_publish
+            stock_scan_runtime.checkpoint("analyzing", checked=checked, total=len(_all_snapshot_tickers))
+            scan_diag["checked"] = checked
             now = time.monotonic()
+            if force or now - _last_attempt_publish >= 30:
+                _publish_stock_strategy_attempt(_attempt, "running", diagnostics=scan_diag)
+                _last_attempt_publish = now
             if not force and now - _last_partial_publish < 1.5:
                 return
             preview = sorted(
@@ -21296,6 +21339,7 @@ def _strategy_scan_wrapper(
                         _stage("dollar_volume_filter")
 
                     daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
+                    stock_scan_runtime.checkpoint("analyzing")
                     if swing_daily_mode:
                         daily_bars = [bar for bar in daily_bars if
                                       _daily_bar_date_str(bar) <= t["swing_analysis_session"]]
@@ -21816,6 +21860,8 @@ def _strategy_scan_wrapper(
                         strategy_row["swing_timeframe"] = "1D" if swing_daily_mode else "daily_swing"
                     results.append(strategy_row)
                     _publish_partial(checked, force=len(results) == 1)
+                except stock_scan_runtime.ScanWorkTimeout:
+                    raise
                 except ScannerDataError as data_error:
                     _reject(data_error.code)
                     raise ScannerDataError(data_error.code, scan_diag) from None
@@ -21831,6 +21877,7 @@ def _strategy_scan_wrapper(
             raise ScannerDataError("scan_data_incomplete", scan_diag)
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
+        stock_scan_runtime.checkpoint("special_filter")
         results = _apply_special_strategy_post_filter(results, strat, strategy_name)
         # History/provider calls can outlive the existing 15-minute proof
         # budget. Do not publish an expired start-of-scan confirmation as new.
@@ -21843,7 +21890,9 @@ def _strategy_scan_wrapper(
         results = _current_momentum_results
         scan_diag["max_results"] = max_results
         results = results[:max_results]
+        stock_scan_runtime.checkpoint("enrichment")
         _enrich_stock_business_quality_rows(results)
+        stock_scan_runtime.checkpoint("publish")
         scan_diag["final_results"] = len(results)
         scan_diag["coverage"] = "complete"
         scan_diag.setdefault("stage_counts", {})["raw_matches_before_special_filter"] = scan_diag["raw_matches_before_special_filter"]
@@ -21859,8 +21908,11 @@ def _strategy_scan_wrapper(
         finalize_cache_file(_strat_cache, results, metadata=_metadata)
         if publish_generic_cache:
             save_cache_file(STRATEGY_SCAN_CACHE, results, metadata=_metadata)  # Fallback für alte Clients
-        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
+        print(f"[Strategy Scan] {strategy_name}: {len(results)} Treffer -> {_strat_cache}", flush=True)
         if send_email:
+            # Never inject a work timeout into SMTP/dedupe ownership handling.
+            stock_scan_runtime.current()["deadline"] = None
+            stock_scan_runtime.checkpoint("mail_guard")
             _send_strategy_scan_alerts(strategy_name, results, "stocks")
         _publish_stock_strategy_attempt(_attempt, "complete", diagnostics=scan_diag, result_count=len(results))
         return results
@@ -21876,6 +21928,7 @@ def _strategy_scan_wrapper(
         raise
 
 
+@stock_scan_runtime.bounded_sweep
 def _stock_strategy_alert_sweep_wrapper() -> None:
     """Run core stock strategy alerts automatically.
 
@@ -21904,6 +21957,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     all_rows: List[Dict[str, Any]] = []
     for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
         strategy_code = strategy_codes.get(strategy_name, "unknown_strategy")
+        print(f"[Strategy Sweep] {strategy_code}: START", flush=True)
         diagnostics["strategies_attempted"] += 1
         outcome: Dict[str, Any] = {"status": "error", "result_count": None}
         try:
@@ -21947,6 +22001,8 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
         finally:
             diagnostics["strategy_results"][strategy_code] = outcome
             _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
+            print(f"[Strategy Sweep] {strategy_code}: {outcome['status']} "
+                  f"results={outcome['result_count']} error={outcome.get('error_code', '-')}", flush=True)
             time.sleep(1)
 
     all_rows.sort(
@@ -21961,6 +22017,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     # second per-strategy batch or interpret a guarded call as SMTP acceptance.
     if all_rows:
         try:
+            stock_scan_runtime.checkpoint("mail_guard")
             _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows[:75]), "stocks")
             diagnostics["mail_status"] = "guarded"
         except Exception as exc:
@@ -23936,6 +23993,10 @@ _cache_lock = threading.Lock()
 _scan_threads: Dict[str, threading.Thread] = {}
 
 
+def _is_stock_strategy_worker(name):
+    return name == "strategy_scan" or name.startswith("strat_")
+
+
 def _scan_runtime_state(
     scan_name: str,
     scan_state: Dict[str, Any],
@@ -24226,6 +24287,15 @@ def _send_stuck_scan_mail(name, stuck_sec, timeout_min, hard=False, episode_key=
             "Der Serverbefehl fuer den spaeteren Hartlimit-Fall lautet: "
             "<code>systemctl restart tradingbot-api</code>."
         )
+    if _is_stock_strategy_worker(name):
+        progress = stock_scan_runtime.progress(name)
+        if progress.get("running"):
+            detail += (
+                f" Strategie: {html.escape(progress['strategy'])}; Phase: {html.escape(progress['phase'])}; "
+                f"Fortschritt: {progress['checked']}/{progress['total']}; "
+                f"Provider-Aufrufe: {progress['requests']}; "
+                f"Budget-Wartezeit: {progress['rate_wait_seconds']} Sekunden."
+            )
     if name == "crypto_explosion":
         progress = _ce_progress_snapshot()
         if progress.get("running"):
@@ -24445,6 +24515,15 @@ def _run_scan_safe(name, func, timeout_min=None):
     run_id = uuid.uuid4().hex
     with _scan_lock:
         active_thread = _scan_threads.get(name)
+        # Automatic and manual stock scans write the same leaf caches. Their
+        # different scheduler keys must not allow overlapping owners.
+        if _is_stock_strategy_worker(name):
+            for other, state in _scan_status.items():
+                if other != name and _is_stock_strategy_worker(other) and (
+                    state.get("running") or (other in _scan_threads and _scan_threads[other].is_alive())
+                ):
+                    print(f"[Scheduler] {name} skip: stock strategy engine owned by {other}", flush=True)
+                    return False
         sibling = {"crypto_explosion": "crypto_trade_signals", "crypto_trade_signals": "crypto_explosion"}.get(name)
         if sibling and _scan_status.get(sibling, {}).get("running"):
             print(f"[Scheduler] {name} skip: shared crypto engine owned by {sibling}")
@@ -24486,14 +24565,14 @@ def _run_scan_safe(name, func, timeout_min=None):
             _require_fresh_scan_cache(name, previous_cache_revision)
             succeeded = True
             elapsed = round(time.time() - start_t, 1)
-            print(f"[Scheduler] {name} DONE in {elapsed}s")
+            print(f"[Scheduler] {name} DONE in {elapsed}s", flush=True)
         except Exception as e:
             error_text = _sanitized_exception_text(e)
             if isinstance(e, ScannerDataError):
                 error_text = e.code
                 attempt_diagnostics = e.diagnostics
             elapsed = round(time.time() - start_t, 1)
-            print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}")
+            print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}", flush=True)
             _print_sanitized_traceback()
         finally:
             recoveries = []
@@ -24622,11 +24701,12 @@ def _scheduler_loop():
         ("money_flow", _money_flow_wrapper),
         ("orb", _orb_scanner_wrapper),
         ("bear", _bear_scan_wrapper),  # V2.5: Bear ist light (~30 API-Calls), nicht heavy
-        ("strategy_scan", _stock_strategy_alert_sweep_wrapper),
         ("cup_handle_watch", _cup_handle_watch_monitor_wrapper),
         ("turtle", _turtle_scan_wrapper),  # ~80 API-Calls (Snapshot + Bars)
     ]
     heavy_scans = [
+        # Full-universe daily histories are not a one-request light scan.
+        ("strategy_scan", _stock_strategy_alert_sweep_wrapper),
         ("bi_long", lambda: _bi_background_scan_wrapper("long")),
         ("bi_short", lambda: _bi_background_scan_wrapper("short")),
         ("biotech", _biotech_scan_wrapper),
@@ -27267,6 +27347,11 @@ def get_scan_status():
                 scans_copy[name]["running_since_sec"] = int(time.time() - status["_started_at"])
 
     # Progress-Daten aus /tmp/ Files anhängen (BI + Biotech)
+    for scan_key in scans_copy:
+        if _is_stock_strategy_worker(scan_key):
+            stock_progress = stock_scan_runtime.progress(scan_key)
+            if stock_progress and stock_progress.get("running") and scans_copy[scan_key]["running"]:
+                scans_copy[scan_key]["progress"] = stock_progress
     crypto_progress = _ce_progress_snapshot()
     if crypto_progress and "crypto_explosion" in scans_copy:
         scans_copy["crypto_explosion"]["progress"] = crypto_progress

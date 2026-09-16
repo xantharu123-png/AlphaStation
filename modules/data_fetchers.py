@@ -13,6 +13,7 @@ import json
 import time
 import threading
 import requests
+from modules import stock_scan_runtime
 import datetime as dt
 from datetime import datetime, timedelta
 
@@ -671,6 +672,7 @@ def _acquire_shared_polygon_token():
         return False
     deadline = time.time() + SHARED_BUDGET_MAX_WAIT_S
     while True:
+        stock_scan_runtime.checkpoint()
         try:
             acquired, wait_s = _shared_budget_try_consume(_shared_budget_per_min())
         except Exception as exc:  # flock/IO-Fehler (z.B. exotisches FS)
@@ -684,7 +686,7 @@ def _acquire_shared_polygon_token():
             # Max-Wartezeit-Schutz: lieber durchlassen (429 wird upstream
             # behandelt) als einen Scan-Thread dauerhaft zu blockieren.
             return True
-        time.sleep(min(wait_s, remaining))
+        stock_scan_runtime.budgeted_wait(min(wait_s, remaining), time.sleep)
 
 
 # ── rate_limited_get (originally line 895) ──
@@ -705,6 +707,7 @@ def rate_limited_get(url, params=None, timeout=15, calls_per_minute=200, **kwarg
     """
     global _last_api_call, _api_call_count, _api_call_window_start
 
+    stock_scan_runtime.checkpoint()
     # Stufe 1: gemeinsames Budget über beide Prozesse (blockiert ggf. bis
     # Fensterwechsel). Bei False greift ausschließlich Stufe 2 (Fallback).
     _acquire_shared_polygon_token()
@@ -730,7 +733,7 @@ def rate_limited_get(url, params=None, timeout=15, calls_per_minute=200, **kwarg
 
     # Sleep AUSSERHALB des Locks (andere Threads nicht blockieren)
     if sleep_time > 0:
-        time.sleep(sleep_time)
+        stock_scan_runtime.budgeted_wait(sleep_time, time.sleep)
 
     with _rate_lock:
         # Nach dem Sleep: Counter ggf. resetten
@@ -741,7 +744,15 @@ def rate_limited_get(url, params=None, timeout=15, calls_per_minute=200, **kwarg
         _last_api_call = now
         _api_call_count += 1
 
-    return requests.get(url, params=params, timeout=timeout, **kwargs)
+    timeout = stock_scan_runtime.request_timeout(timeout)
+    response = requests.get(url, params=params, timeout=timeout, **kwargs)
+    try:
+        stock_scan_runtime.checkpoint()
+    except stock_scan_runtime.ScanWorkTimeout:
+        if callable(getattr(response, "close", None)):
+            response.close()
+        raise
+    return response
 
 
 # ── fetch_daily_candles_crypto (originally line 1358) ──

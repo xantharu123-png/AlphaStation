@@ -251,6 +251,7 @@ def test_plan_mail_reaches_sender_off_session_and_keeps_pending_fill(monkeypatch
         def now(cls, tz=None):
             return now.astimezone(tz) if tz else now.replace(tzinfo=None)
     monkeypatch.setattr(api, "datetime", Clock)
+    monkeypatch.setattr(swing, "datetime", Clock)
     monkeypatch.setattr(api.time, "time", lambda: now.timestamp())
     monkeypatch.setattr(api, "_stock_trade_email_status", lambda *a, **k: {"allowed": False, "session": "CLOSED"})
     monkeypatch.setattr(api, "_EMAIL_COOLDOWN", {})

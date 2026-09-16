@@ -538,6 +538,7 @@ STOCK_ATTEMPT_ERROR_CODES = PUBLIC_SCAN_ERROR_CODES | frozenset({
 })
 STOCK_ATTEMPT_COUNTS = DIAGNOSTIC_COUNTS | frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed", "current_result_count",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
 })
 
 def _iso_timestamp(value):
@@ -1229,6 +1230,11 @@ def safe_strategy_attempt_summary(path, expected_slug):
         }
         if diagnostics.get("coverage") in ("complete", "incomplete"):
             result["coverage"] = diagnostics["coverage"]
+        if diagnostics.get("runtime_phase") in (
+            "starting", "universe", "history", "analyzing", "special_filter", "enrichment",
+            "publish", "mail_guard", "work_timeout", "error", "complete",
+        ):
+            result["runtime_phase"] = diagnostics["runtime_phase"]
         for key, allowed in (("stage_counts", STAGE_COUNTS), ("rejected", REJECTION_CODES),
                              ("data_failures", DATA_FAILURE_CODES), ("legitimate_filters", REJECTION_CODES)):
             counts = _count_projection(diagnostics.get(key), allowed)

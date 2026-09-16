@@ -251,11 +251,12 @@ def test_successful_leaf_has_distinct_running_then_complete_zero_attempt(monkeyp
         return writer(path, data, metadata)
     monkeypatch.setattr(api, "save_cache_file", capture)
     api._strategy_scan_wrapper(STRATEGIES[0], send_email=False)
-    assert [item["status"] for item in written] == ["running", "complete"]
-    assert written[0]["result_count"] is None and written[1]["result_count"] == 0
-    assert written[0]["run_id"] == written[1]["run_id"]
+    assert len(written) >= 2
+    assert all(item["status"] == "running" and item["result_count"] is None for item in written[:-1])
+    assert written[-1]["status"] == "complete" and written[-1]["result_count"] == 0
+    assert all(item["run_id"] == written[0]["run_id"] for item in written)
     assert len(written[0]["run_id"]) == 32
-    assert written[1]["diagnostics"]["coverage"] == "complete" and "error_code" not in written[1]
+    assert written[-1]["diagnostics"]["coverage"] == "complete" and "error_code" not in written[-1]
 
 
 def test_incomplete_sweep_attempt_records_each_current_outcome_and_guard_not_smtp(monkeypatch, tmp_path):
