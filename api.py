@@ -16616,7 +16616,7 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
                 # tmp_path SOFORT merken: crasht json.dump, muss der
                 # except-Zweig die Temp-Datei trotzdem aufraeumen koennen.
                 tmp_path = f.name
-                json.dump(cache_data, f, indent=2, default=_serialize_json)
+                json.dump(cache_data, f, separators=(",", ":"), default=_serialize_json)
             os.replace(tmp_path, filepath)
             tmp_path = None
         except Exception as e:
@@ -17257,6 +17257,14 @@ def _turtle_score_cap(score: float, change_pct: Any, rvol: Any, breakout_pct: An
     return max(0, min(100, capped)), flags
 
 
+_STOCK_PLAN_BUILD_REASONS = frozenset({
+    "invalid_entry_or_direction", "causal_structure_missing", "causal_structure_unavailable",
+    "crossed_resistance_unconfirmed", "crossed_support_unconfirmed", "no_structural_invalidation",
+    "invalid_stop_risk", "invalid_trade_geometry", "native_structure_plan",
+    "first_opposing_barrier_before_minimum_rr", "direction_missing", "plan_unavailable",
+})
+
+
 def _build_structured_trade_setup(
     direction: str,
     entry: float,
@@ -17273,21 +17281,27 @@ def _build_structured_trade_setup(
     vah: Optional[float] = None,
     structure_snapshot: Optional[StructureSnapshot] = None,
     require_causal_structure: bool = False,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build realistic sidebar trade levels from invalidation and target structure.
 
     The stop is placed behind a real invalidation level first. R:R is only used
     afterwards as a quality filter, not as the reason for the stop/target.
     """
+    def _unavailable(reason: str) -> None:
+        if isinstance(diagnostics, dict):
+            diagnostics.update(status="unavailable", reason=reason)
+        return None
+
     try:
         side = str(direction or "").upper()
         entry = float(entry or 0)
     except (TypeError, ValueError):
-        return None
+        return _unavailable("invalid_entry_or_direction")
     if side not in ("LONG", "SHORT") or not math.isfinite(entry) or entry <= 0:
-        return None
+        return _unavailable("invalid_entry_or_direction")
     if require_causal_structure and not isinstance(structure_snapshot, StructureSnapshot):
-        return None
+        return _unavailable("causal_structure_missing")
 
     atr_value = _alert_float(atr, 0.0) or 0.0
     if atr_value <= 0:
@@ -17318,17 +17332,17 @@ def _build_structured_trade_setup(
             "structure_unavailable",
         }.intersection(set(structure_snapshot.quality_flags))
         if unavailable_flags or not structure_snapshot.zones:
-            return None
+            return _unavailable("causal_structure_unavailable")
         # A quote or planned entry crossing a known level does not prove that
         # the level changed role. Only completed close/hold/retest evidence may
         # release a former resistance/support gate.
         for zone in structure_snapshot.zones:
             if side == "LONG" and "resistance" in zone.origin_roles:
                 if entry > zone.upper and zone.break_state != "reclaimed":
-                    return None
+                    return _unavailable("crossed_resistance_unconfirmed")
             elif side == "SHORT" and "support" in zone.origin_roles:
                 if entry < zone.lower and zone.break_state != "reclaimed":
-                    return None
+                    return _unavailable("crossed_support_unconfirmed")
         try:
             directional_structure = classify_for_trade(
                 structure_snapshot,
@@ -17429,14 +17443,14 @@ def _build_structured_trade_setup(
             # but an attractive ATR fallback must never replace real structure.
             stop = min(selected_stop, entry - min_risk)
         elif directional_structure is not None or require_causal_structure:
-            return None
+            return _unavailable("no_structural_invalidation")
         else:
             stop = entry - max(min_risk, atr_value * 1.2, entry * 0.03)
             stop_source = "ATR invalidation fallback (no confirmed structure)"
             warnings.append("Stop nur ATR-Ableitung; keine bestaetigte Invalidierungsstruktur")
         risk = entry - stop
         if risk <= 0:
-            return None
+            return _unavailable("invalid_stop_risk")
     else:
         stop_candidates = []
         if directional_structure is not None:
@@ -17451,14 +17465,14 @@ def _build_structured_trade_setup(
             selected_stop, stop_source = _unique_levels(structural_stops)[0]
             stop = max(selected_stop, entry + min_risk)
         elif directional_structure is not None or require_causal_structure:
-            return None
+            return _unavailable("no_structural_invalidation")
         else:
             stop = entry + max(min_risk, atr_value * 1.2, entry * 0.03)
             stop_source = "ATR invalidation fallback (no confirmed structure)"
             warnings.append("Stop nur ATR-Ableitung; keine bestaetigte Invalidierungsstruktur")
         risk = stop - entry
         if risk <= 0:
-            return None
+            return _unavailable("invalid_stop_risk")
 
     # Canonical target rule: TP1 is the first real opposing barrier.  If its
     # room is insufficient, keep that honest low-R target and require a
@@ -17588,7 +17602,7 @@ def _build_structured_trade_setup(
     tp2 = _round_trade_price_directional(tp2, upward=side == "SHORT")
     geometry = trade_geometry(entry, stop, tp1, tp2, side)
     if not geometry.get("valid"):
-        return None
+        return _unavailable("invalid_trade_geometry")
     risk = float(geometry["risk"])
     rr_tp1 = float(geometry["rr_tp1"])
     rr_tp2 = float(geometry["rr_tp2"])
@@ -17698,6 +17712,9 @@ def _build_structured_trade_setup(
                 f"{prefix}_causal_structure_validated": True,
             })
     result["level_quality"] = trade_level_quality(result)
+    if isinstance(diagnostics, dict):
+        diagnostics.update(status="built", reason=(
+            "first_opposing_barrier_before_minimum_rr" if barrier_gate else "native_structure_plan"))
     if nearest_barrier_meta is not None:
         barrier_key = "overhead_resistance" if side == "LONG" else "underlying_support"
         result[barrier_key] = nearest_barrier_meta
@@ -18373,6 +18390,7 @@ def _strategy_daily_history_metrics(
     direction: str = "LONG",
     spread: Optional[float] = None,
     four_hour_bars: Optional[List[Dict[str, Any]]] = None,
+    include_structure: bool = True,
 ) -> Dict[str, Any]:
     """Return swing-quality metrics from completed daily bars.
 
@@ -18479,7 +18497,7 @@ def _strategy_daily_history_metrics(
         as_of=cutoff_utc,
         four_hour_bars=four_hour_bars,
         spread=spread,
-    )
+    ) if include_structure else None
     level_structure: Optional[Dict[str, Any]] = None
     level_legacy: Optional[Dict[str, Any]] = None
     if level_snapshot is not None:
@@ -20797,7 +20815,7 @@ _STOCK_ATTEMPT_ERRORS = frozenset(ScannerDataError.CODES) | frozenset({
 _STOCK_ATTEMPT_COUNTS = frozenset({
     "checked", "total", "universe_count", "common_stock_universe_count",
     "raw_matches_before_special_filter", "final_results", "max_results",
-    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
 })
 _STOCK_ATTEMPT_STAGES = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -20820,7 +20838,7 @@ momentum:confirmation_expired_before_publication reversal_ad_gate reversal_ad:ad
 _STOCK_ATTEMPT_SWEEP_COUNTS = frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed",
     "current_result_count", "final_results",
-    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
 })
 _stock_attempt_lock = threading.Lock()
 _stock_attempt_run_ids: Dict[str, str] = {}
@@ -20868,6 +20886,7 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
     if not sweep:
         result["stage_counts"] = counts(source.get("stage_counts"), _STOCK_ATTEMPT_STAGES)
         result["rejected"] = counts(source.get("rejected"), _STOCK_ATTEMPT_REJECTIONS)
+        result["plan_build_counts"] = counts(source.get("plan_build_counts"), _STOCK_PLAN_BUILD_REASONS)
         return result
     if source.get("mail_status") in ("not_attempted", "guarded", "no_results", "error"):
         result["mail_status"] = source["mail_status"]
@@ -21351,8 +21370,7 @@ def _strategy_scan_wrapper(
                         _stage("vortag_filter")
                     vortag_pct = previous_change if previous_change is not None else 0.0
                     _history_direction = _infer_strategy_direction(strategy_name, filters).upper()
-                    history_metrics = _strategy_daily_history_metrics(
-                        daily_bars,
+                    _history_metric_args = dict(
                         price=price,
                         day_open=day_open,
                         day_high=day_high,
@@ -21362,6 +21380,12 @@ def _strategy_scan_wrapper(
                         symbol=ticker,
                         direction=_history_direction,
                         spread=(ask - bid) if ask > bid > 0 else None,
+                    )
+                    # RVOL and momentum gates use completed-bar metrics, not
+                    # level zones. Defer the expensive D/W engine until those
+                    # gates pass; survivor rows retain the full original data.
+                    history_metrics = _strategy_daily_history_metrics(
+                        daily_bars, include_structure=False, **_history_metric_args,
                     )
                     rvol = history_metrics.get("rvol20")
                     rvol_source = str(history_metrics.get("rvol_source") or "20D_completed_session")
@@ -21468,6 +21492,9 @@ def _strategy_scan_wrapper(
                             _reject("momentum:intraday_confirmation_stale")
                             continue
                         _stage("momentum_completed_daily_confirmation" if swing_daily_mode else "momentum_completed_5m_confirmation")
+                    history_metrics = _strategy_daily_history_metrics(
+                        daily_bars, **_history_metric_args,
+                    )
                     _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
                     _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
                     _range_pos = _alert_float(history_metrics.get("range_pos"))
@@ -21756,7 +21783,9 @@ def _strategy_scan_wrapper(
                     _strat_score = int(strategy_row.get("score") or _strat_score)
                     _strat_grade = str(strategy_row.get("grade") or _strat_grade)
                     _setup_direction = str(_score_meta.get("direction") or "").upper()
+                    _plan_diagnostics = {"status": "unavailable", "reason": "direction_missing"}
                     if _setup_direction in ("LONG", "SHORT"):
+                        _plan_diagnostics["reason"] = "plan_unavailable"
                         # Fetch 4H only for candidates that survived all broad
                         # filters.  This keeps the universe scan efficient while
                         # giving the actual trade plan D/W + execution-TF zones.
@@ -21801,6 +21830,7 @@ def _strategy_scan_wrapper(
                             float(history_metrics.get("range_pos") or close_pos * 100.0),
                             structure_snapshot=_level_snapshot,
                             require_causal_structure=True,
+                            diagnostics=_plan_diagnostics,
                         )
                         if _trade_setup:
                             _vrvp_as_of = analysis_as_of
@@ -21855,6 +21885,13 @@ def _strategy_scan_wrapper(
                                 "VRVP_VAL": _trade_setup.get("vrvp_val"),
                                 "VRVP_Timeframe": _trade_setup.get("vrvp_timeframe"),
                             })
+                    # These are builder-stage diagnostics, not a claim that
+                    # later VRVP, trade-health, mail or execution gates passed.
+                    strategy_row["native_plan_status"] = _plan_diagnostics["status"]
+                    strategy_row["native_plan_reason"] = _plan_diagnostics["reason"]
+                    _plan_counts = scan_diag.setdefault("plan_build_counts", {})
+                    _plan_reason = _plan_diagnostics["reason"]
+                    _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
                         strategy_row["entry_quality"] = "SWING_PLAN" if swing_daily_mode else "SWING_SETUP"
                         strategy_row["swing_timeframe"] = "1D" if swing_daily_mode else "daily_swing"
@@ -21955,7 +21992,8 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     }
     _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
     all_rows: List[Dict[str, Any]] = []
-    for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
+    for strategy_index, strategy_name in enumerate(_AUTO_STOCK_ALERT_STRATEGIES):
+        stock_scan_runtime.current()["remaining_leaves"] = len(_AUTO_STOCK_ALERT_STRATEGIES) - strategy_index
         strategy_code = strategy_codes.get(strategy_name, "unknown_strategy")
         print(f"[Strategy Sweep] {strategy_code}: START", flush=True)
         diagnostics["strategies_attempted"] += 1

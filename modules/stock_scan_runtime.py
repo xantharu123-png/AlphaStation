@@ -32,6 +32,7 @@ def diagnostics():
     return {"runtime_phase": state["phase"], "provider_requests": root["requests"],
             "history_cache_hits": root["cache_hits"],
             "rate_wait_seconds": int(root["rate_wait_seconds"]),
+            "leaf_elapsed_seconds": max(0, int(time.monotonic() - state["started"])),
             "elapsed_seconds": max(0, int(time.monotonic() - root["started"]))}
 
 
@@ -116,8 +117,15 @@ def scope(name, *, sweep=False):
         "rate_wait_seconds": 0.0, "cache": OrderedDict(), "cache_bytes": 0,
         "work_deadline": now + (SWEEP_WORK_SECONDS if sweep else LEAF_WORK_SECONDS),
     }
+    deadline = None if sweep else min(now + LEAF_WORK_SECONDS, root["work_deadline"])
+    remaining_leaves = previous.get("remaining_leaves", 0) if previous else 0
+    if deadline is not None and remaining_leaves > 0:
+        # Reserve a fair opportunity for every unattempted sibling. Fast
+        # finishes leave their unused time available to subsequent strategies.
+        share = max(0.0, root["work_deadline"] - now) / remaining_leaves
+        deadline = min(deadline, now + share)
     state = {"root": root, "strategy": _key(name), "phase": "starting", "phase_started_at": now,
-             "deadline": None if sweep else min(now + LEAF_WORK_SECONDS, root["work_deadline"])}
+             "started": now, "deadline": deadline}
     _LOCAL.state = state
     _publish(state, force=True)
     try:

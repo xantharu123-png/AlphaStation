@@ -92,6 +92,21 @@ momentum:intraday_confirmation_stale momentum:confirmation_expired_before_public
 reversal_ad:ad_confirms_selloff_falling_knife
 """.split())
 CACHE_MAX_BYTES = 8 * 1024 * 1024
+CRYPTO_SCAN_COUNTS = frozenset("""
+universe_count chart_checked max_chart_checks venue_workers result_count trade_now_count armed_count
+""".split())
+CRYPTO_VENUES = frozenset({"bybit", "binance", "mexc", "bitget"})
+CRYPTO_CACHE_NAMES = frozenset({"crypto_explosion_cache.json", "crypto_trade_signals_cache.json"})
+CRYPTO_ROW_STATES = {
+    "trade_action": frozenset({"JETZT_LONG", "JETZT_SHORT", "LONG_ARMED", "SHORT_WATCH"}),
+    "trade_signal": frozenset({"JETZT_TRADEN", "EXPLOSION_ARMED", "WARTEN"}),
+}
+PLAN_BUILD_CODES = frozenset("""
+invalid_entry_or_direction causal_structure_missing causal_structure_unavailable
+crossed_resistance_unconfirmed crossed_support_unconfirmed no_structural_invalidation
+invalid_stop_risk invalid_trade_geometry native_structure_plan
+first_opposing_barrier_before_minimum_rr direction_missing plan_unavailable
+""".split())
 # Mirrored protocol keys only. The root-invoked collector never imports app code.
 CONFLUENCE_COUNTS = frozenset("""
 evaluated schema_invalid below_required incomplete pre_hard_gate_qualified
@@ -538,7 +553,7 @@ STOCK_ATTEMPT_ERROR_CODES = PUBLIC_SCAN_ERROR_CODES | frozenset({
 })
 STOCK_ATTEMPT_COUNTS = DIAGNOSTIC_COUNTS | frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed", "current_result_count",
-    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds",
+    "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
 })
 
 def _iso_timestamp(value):
@@ -1060,28 +1075,61 @@ def local_health():
         connection.close()
 
 
+class _CacheReadError(ValueError):
+    """Code-owned cache failure category, never an OS/provider error message."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _read_cache_payload(path):
     """Bounded, read-only regular-file read; never wait on an exchanged FIFO."""
     path = Path(path)
     before = path.lstat()
-    if not stat.S_ISREG(before.st_mode) or before.st_size > CACHE_MAX_BYTES:
-        raise ValueError("Cache is not a bounded regular file")
+    if not stat.S_ISREG(before.st_mode):
+        raise _CacheReadError("not_regular")
+    if before.st_size > CACHE_MAX_BYTES:
+        raise _CacheReadError("too_large")
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as stream:
         opened = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_size > CACHE_MAX_BYTES
+        if (not stat.S_ISREG(opened.st_mode)
                 or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
-            raise ValueError("Cache file changed during open")
+            raise _CacheReadError("changed_during_read")
+        if opened.st_size > CACHE_MAX_BYTES:
+            raise _CacheReadError("too_large")
         raw = stream.read(CACHE_MAX_BYTES + 1)
         after = os.fstat(stream.fileno())
         if ((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-            raise ValueError("Cache file changed during read")
+            raise _CacheReadError("changed_during_read")
     if len(raw) > CACHE_MAX_BYTES:
-        raise ValueError("Cache exceeds bounded size")
+        raise _CacheReadError("too_large")
     return json.loads(raw.decode("utf-8"))
+
+
+def _crypto_row_state_counts(rows):
+    """Count stored protocol states; these are not fresh trade/mail approvals."""
+    counts = {"semantics": "cached_rows_not_live_confirmation_or_delivery", "invalid_rows": 0}
+    fields = (*CRYPTO_ROW_STATES, "execution_trigger_ok", "micro_trigger_ok")
+    counts.update({field: {} for field in fields})
+    for row in rows:
+        if not isinstance(row, dict):
+            counts["invalid_rows"] += 1
+            continue
+        for field in fields:
+            value = row.get(field)
+            if field not in row:
+                category = "_missing"
+            elif field in CRYPTO_ROW_STATES:
+                category = value if type(value) is str and value in CRYPTO_ROW_STATES[field] else "_unrecognized"
+            else:
+                category = str(value).lower() if type(value) is bool else "_unrecognized"
+            counts[field][category] = counts[field].get(category, 0) + 1
+    return counts
 
 
 def safe_cache_summary(path):
@@ -1089,7 +1137,7 @@ def safe_cache_summary(path):
     try:
         payload = _read_cache_payload(path)
         if not isinstance(payload, dict):
-            return {"available": False}
+            return {"available": False, "reason": "invalid_payload"}
         result = {"available": True}
         for key in ("checked", "total", "hits", "no_data", "count"):
             value = payload.get(key)
@@ -1115,6 +1163,21 @@ def safe_cache_summary(path):
             result["error_code"] = detail
         rows = payload.get("results")
         result["raw_rows"] = len(rows) if isinstance(rows, list) else None
+        if isinstance(rows, list) and Path(path).name in CRYPTO_CACHE_NAMES:
+            result["row_state_counts"] = _crypto_row_state_counts(rows)
+        scan_stats = payload.get("scan_stats")
+        if isinstance(scan_stats, dict):
+            projected = {"numeric_counts": {
+                key: value for key, value in scan_stats.items()
+                if key in CRYPTO_SCAN_COUNTS and _nonnegative_count(value)
+            }}
+            for key in ("source_degraded", "incomplete"):
+                if type(scan_stats.get(key)) is bool:
+                    projected[key] = scan_stats[key]
+            exchange_counts = _count_projection(scan_stats.get("by_exchange"), CRYPTO_VENUES)
+            if exchange_counts is not None:
+                projected["by_exchange"] = exchange_counts
+            result["scan_stats"] = projected
         diagnostics = payload.get("diagnostics") or {}
         if isinstance(diagnostics, dict):
             result["numeric_diagnostics"] = {
@@ -1164,12 +1227,24 @@ def safe_cache_summary(path):
                 counts = _count_projection(diagnostics.get(key), allowed)
                 if counts is not None:
                     result[key] = counts
+            plan_counts = _count_projection(diagnostics.get("plan_build_counts"), PLAN_BUILD_CODES)
+            if plan_counts is not None:
+                result["plan_build_counts"] = plan_counts
+                result["plan_build_count_semantics"] = "builder_outcomes_not_final_eligibility_or_delivery"
             if "confluence" in diagnostics:
                 result["confluence"] = _confluence_projection(
                     diagnostics["confluence"], BI_CACHE_SCANNERS.get(Path(path).name))
         return result
-    except (OSError, ValueError, TypeError):
-        return {"available": False}
+    except FileNotFoundError:
+        return {"available": False, "reason": "missing"}
+    except _CacheReadError as exc:
+        return {"available": False, "reason": exc.reason}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"available": False, "reason": "invalid_json"}
+    except OSError:
+        return {"available": False, "reason": "unreadable"}
+    except (ValueError, TypeError):
+        return {"available": False, "reason": "invalid_payload"}
 
 
 def _attempt_timestamp(value):
@@ -1240,6 +1315,10 @@ def safe_strategy_attempt_summary(path, expected_slug):
             counts = _count_projection(diagnostics.get(key), allowed)
             if counts is not None:
                 result[key] = counts
+        plan_counts = _count_projection(diagnostics.get("plan_build_counts"), PLAN_BUILD_CODES)
+        if plan_counts is not None:
+            result["plan_build_counts"] = plan_counts
+            result["plan_build_count_semantics"] = "builder_outcomes_not_final_eligibility_or_delivery"
         if is_sweep:
             children = diagnostics.get("strategy_results")
             if not isinstance(children, dict):

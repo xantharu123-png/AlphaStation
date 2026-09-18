@@ -583,6 +583,20 @@ def confirmed_pivot_evidence(
     completed = normalize_completed_bars(
         bars, timeframe=timeframe, as_of=cutoff, timestamp_mode=timestamp_mode
     )
+    return _confirmed_pivot_evidence_from_completed(
+        completed, timeframe=timeframe, cutoff=cutoff, left=left, right=right
+    )
+
+
+def _confirmed_pivot_evidence_from_completed(
+    completed: Tuple[CompletedBar, ...],
+    *,
+    timeframe: str,
+    cutoff: datetime,
+    left: int,
+    right: int,
+) -> Tuple[LevelEvidence, ...]:
+    """Use canonical bars normalized by this module at the same cutoff."""
     evidence: List[LevelEvidence] = []
     for index in range(left, len(completed) - right):
         pivot = completed[index]
@@ -638,6 +652,18 @@ def completed_session_evidence(
     completed = normalize_completed_bars(
         bars, timeframe=timeframe, as_of=cutoff, timestamp_mode=timestamp_mode
     )
+    return _completed_session_evidence_from_completed(
+        completed, timeframe=timeframe, cutoff=cutoff
+    )
+
+
+def _completed_session_evidence_from_completed(
+    completed: Tuple[CompletedBar, ...],
+    *,
+    timeframe: str,
+    cutoff: datetime,
+) -> Tuple[LevelEvidence, ...]:
+    """Use canonical bars normalized by this module at the same cutoff."""
     if not completed:
         return ()
     session = completed[-1]
@@ -964,20 +990,18 @@ def build_structure_snapshot(
         )
         completed_counts[timeframe] = len(completed)
         completed_by_timeframe[timeframe] = completed
-        evidence.extend(confirmed_pivot_evidence(
+        evidence.extend(_confirmed_pivot_evidence_from_completed(
             completed,
             timeframe=timeframe,
-            as_of=cutoff,
-            pivot_left=pivot_left,
-            pivot_right=pivot_right,
-            timestamp_mode="close",
+            cutoff=cutoff,
+            left=max(1, int(pivot_left)),
+            right=max(1, int(pivot_right)),
         ))
         if include_session_levels and timeframe in ("1D", "1W"):
-            evidence.extend(completed_session_evidence(
+            evidence.extend(_completed_session_evidence_from_completed(
                 completed,
                 timeframe=timeframe,
-                as_of=cutoff,
-                timestamp_mode="close",
+                cutoff=cutoff,
             ))
 
     normalized_atr = {
@@ -1030,17 +1054,16 @@ def build_structure_snapshot(
             after_confirmation[0] if after_confirmation else trigger_candidates[0]
         )
         zone_width = max(0.0, zone.upper - zone.lower)
-        transition = evaluate_break_reclaim(
+        transition = _evaluate_break_reclaim_from_completed(
             zone,
             trigger_bars,
-            as_of=cutoff,
-            direction=transition_direction,
+            cutoff=cutoff,
+            side=transition_direction,
             timeframe=trigger_timeframe,
-            breakout_buffer=max(tick * 1.0, quoted_spread * 0.25),
-            hold_bars=1,
+            buffer_value=max(tick * 1.0, quoted_spread * 0.25),
+            required_holds=1,
             require_retest=True,
-            retest_tolerance=max(tick * 2.0, quoted_spread * 0.75, zone_width * 0.20),
-            timestamp_mode="close",
+            tolerance=max(tick * 2.0, quoted_spread * 0.75, zone_width * 0.20),
         )
         flags = list(zone.quality_flags)
         if transition.state == "RECLAIMED":
@@ -1074,6 +1097,17 @@ def build_structure_snapshot(
         atr_by_timeframe=normalized_atr,
         completed_bar_counts=completed_counts,
         quality_flags=tuple(quality_flags),
+    )
+
+
+def _is_session_reference_only_zone(zone: LevelZone) -> bool:
+    """Session closes label prices; alone they do not establish supply/demand."""
+    non_projection = tuple(item for item in zone.evidence if not item.projection_only)
+    return bool(non_projection) and all(
+        item.source_family == "session"
+        and str(item.provenance.get("role_hint") or "").strip().lower() == "reference"
+        and _evidence_origin_role(item) is None
+        for item in non_projection
     )
 
 
@@ -1114,12 +1148,14 @@ def classify_for_trade(
         (
             zone for zone in opposing_pool
             if not zone.projection_only and zone.break_state != "reclaimed"
+            and not _is_session_reference_only_zone(zone)
         ),
         key=lambda zone: (distance(zone), -zone.strength, zone.zone_id),
     ))
     invalidation = tuple(
         zone for zone in invalidation
         if not zone.projection_only and zone.break_state != "broken"
+        and not _is_session_reference_only_zone(zone)
     )
     return DirectionalStructure(
         snapshot=snapshot,
@@ -1281,6 +1317,26 @@ def evaluate_break_reclaim(
         as_of=cutoff,
         timestamp_mode=timestamp_mode,
     )
+    return _evaluate_break_reclaim_from_completed(
+        zone, bars, cutoff=cutoff, side=side, timeframe=timeframe,
+        buffer_value=buffer_value, required_holds=required_holds,
+        require_retest=require_retest, tolerance=tolerance,
+    )
+
+
+def _evaluate_break_reclaim_from_completed(
+    zone: LevelZone,
+    bars: Tuple[CompletedBar, ...],
+    *,
+    cutoff: datetime,
+    side: str,
+    timeframe: str,
+    buffer_value: float,
+    required_holds: int,
+    require_retest: bool,
+    tolerance: float,
+) -> BreakReclaimEvidence:
+    """Evaluate module-normalized bars and validated parameters without re-sorting."""
     zone_confirmed_at = _coerce_datetime(zone.confirmed_at)
     if zone_confirmed_at > cutoff:
         raise ValueError("zone cannot be evaluated before it was confirmed")

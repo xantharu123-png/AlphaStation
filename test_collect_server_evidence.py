@@ -506,7 +506,8 @@ def test_cache_unsafe_type_or_oversized_file_never_opens(tmp_path, monkeypatch, 
     def forbidden_open(*args):
         raise AssertionError("An unsafe path must not be opened")
     monkeypatch.setattr(collector.os, "open", forbidden_open)
-    assert collector.safe_cache_summary(path) == {"available": False}
+    reason = "too_large" if kind == "oversized" else "not_regular"
+    assert collector.safe_cache_summary(path) == {"available": False, "reason": reason}
 
 
 def test_cache_exchange_to_other_inode_or_fifo_is_rejected_after_nonblocking_open(tmp_path, monkeypatch):
@@ -519,7 +520,7 @@ def test_cache_exchange_to_other_inode_or_fifo_is_rejected_after_nonblocking_ope
             return SimpleNamespace(st_mode=changed_mode, st_size=original.st_size,
                                    st_dev=original.st_dev, st_ino=original.st_ino + 1)
         monkeypatch.setattr(collector.os, "fstat", changed_file)
-        assert collector.safe_cache_summary(path) == {"available": False}
+        assert collector.safe_cache_summary(path) == {"available": False, "reason": "changed_during_read"}
 
 
 def test_cache_growth_during_read_still_has_hard_byte_bound(tmp_path, monkeypatch):
@@ -533,7 +534,7 @@ def test_cache_growth_during_read_still_has_hard_byte_bound(tmp_path, monkeypatc
     real_lstat = Path.lstat
     monkeypatch.setattr(Path, "lstat", lambda self: fake_stat if self == path else real_lstat(self))
     monkeypatch.setattr(collector.os, "fstat", lambda fd: fake_stat)
-    assert collector.safe_cache_summary(path) == {"available": False}
+    assert collector.safe_cache_summary(path) == {"available": False, "reason": "too_large"}
 
 
 def test_cache_in_place_write_during_read_is_unavailable_even_when_size_is_unchanged(tmp_path, monkeypatch):
@@ -556,7 +557,7 @@ def test_cache_in_place_write_during_read_is_unavailable_even_when_size_is_uncha
             os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1000000000))
             return raw
     monkeypatch.setattr(collector.os, "fdopen", MutatingReader)
-    assert collector.safe_cache_summary(path) == {"available": False}
+    assert collector.safe_cache_summary(path) == {"available": False, "reason": "changed_during_read"}
     assert path.stat().st_ino == original.st_ino and path.stat().st_size == original.st_size
 
 
@@ -657,7 +658,8 @@ def test_collection_reads_api_namespace_caches_and_override_progress_after_privi
 def test_collection_never_falls_back_to_host_cache_when_private_tmp_is_missing(tmp_path, monkeypatch):
     app, runtimes, state = _mock_collection(tmp_path, monkeypatch)
     result = collector.collect(app)
-    assert all(value == {"available": False} for value in result["scanner_caches"].values())
+    assert all(value == {"available": False, "reason": "missing"}
+               for value in result["scanner_caches"].values())
 
 
 def test_collection_rejects_process_restart_during_namespace_read(tmp_path, monkeypatch):
@@ -1007,6 +1009,25 @@ def test_strategy_attempt_projection_omits_raw_diagnostic_and_unknown_keys(tmp_p
     result = collector.safe_strategy_attempt_summary(path, "momentum_breakout_long")
     assert result["available"] is True and result["numeric_diagnostics"]["universe_count"] == 4
     assert result["rejected"]["missing_price_or_prev_close"] == 4
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("slug", ["momentum_breakout_long", "stock_strategy_sweep"])
+@pytest.mark.parametrize("elapsed,expected", [
+    (0, {"leaf_elapsed_seconds": 0}), (14, {"leaf_elapsed_seconds": 14}),
+    (True, {}), (-1, {}), (1.5, {}), ("PRIVATE_ELAPSED", {}), (None, {}), ({"PRIVATE": 8}, {}),
+])
+def test_strategy_attempt_exports_leaf_elapsed_separately_without_coercion(tmp_path, slug, elapsed, expected):
+    path = tmp_path / "attempt.json"
+    payload = _attempt_payload(slug)
+    payload["diagnostics"].update(elapsed_seconds=120, leaf_elapsed_seconds=elapsed)
+    path.write_text(json.dumps(payload), encoding="utf8")
+
+    result = collector.safe_strategy_attempt_summary(path, slug)
+
+    numeric = result["numeric_diagnostics"]
+    assert numeric["elapsed_seconds"] == 120
+    assert {key: value for key, value in numeric.items() if key == "leaf_elapsed_seconds"} == expected
     assert "PRIVATE" not in json.dumps(result)
 
 
