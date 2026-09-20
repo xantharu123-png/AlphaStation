@@ -787,8 +787,12 @@ def test_k2d_persisted_wait_queue_catches_trigger_between_full_sweeps_once(
     assert persisted_item["ticker"] == "CUPX"
     assert "_daily_bars" not in persisted_item["row"]
     assert set(persisted_item["row"]) <= (
-        api._CUP_HANDLE_WATCH_ROW_FIELDS | {"trade_setup"}
+        api._CUP_HANDLE_WATCH_ROW_FIELDS | {"trade_setup", "cup_pattern_evidence"}
     )
+    assert persisted_item["row"]["cup_pattern_evidence"] == {
+        "version": "cup_geometry_v1", "status": "unavailable", "timeframe": "1D",
+        "reason": "missing_session", "symbol": "CUPX",
+    }
 
     # Monday's fresh trigger arrives without another full strategy sweep.
     session_state.update({

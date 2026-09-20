@@ -174,6 +174,10 @@ from modules.cup_handle_watch_queue import (
     prune_for_session as _prune_cup_handle_watches,
     upsert_watch as _upsert_cup_handle_watch,
 )
+from modules.cup_pattern_evidence import (
+    build_cup_geometry_evidence as _build_cup_geometry_evidence,
+    project_cup_geometry_evidence as _project_cup_geometry_evidence,
+)
 try:
     from modules.watchdog_log import log_watchdog_event as _log_watchdog_event
 except Exception:  # pragma: no cover - Log-Ausfall darf Waechter nie stoppen
@@ -19617,6 +19621,7 @@ def _detect_cup_handle_breakout(
     # Teilfenster, dessen "Lip" bis zu 3% unter der echten Struktur lag
     # (gemeldeter Entry 98.09 statt echtem Rim 101.20).
     best_rank: Tuple[float, float, float] = (-1.0, -1.0, -1.0)
+    best_segment = None
     n = len(bars)
     max_window = min(n, 170)
 
@@ -19832,7 +19837,15 @@ def _detect_cup_handle_breakout(
             if best is None or _rank > best_rank:
                 best = match
                 best_rank = _rank
+                best_segment = segment
 
+    if best is not None:
+        # Descriptive only: use the already-selected original split, without
+        # re-ranking, rounding anchors, or changing any acceptance criterion.
+        best["cup_pattern_evidence"] = _build_cup_geometry_evidence(
+            best_segment, cup_length=best["cup_length"], handle_length=best["handle_length"],
+            session_getter=_daily_bar_date_str, number_getter=_bar_num,
+        )
     return best
 
 
@@ -20105,6 +20118,10 @@ def _cup_handle_watch_row(row: Dict[str, Any]) -> Dict[str, Any]:
             if key in _CUP_HANDLE_WATCH_SETUP_FIELDS
             and isinstance(value, (str, int, float, bool, type(None)))
         }
+    if isinstance(row, dict) and "cup_pattern_evidence" in row:
+        clean["cup_pattern_evidence"] = _project_cup_geometry_evidence(
+            row["cup_pattern_evidence"], symbol=_extract_alert_ticker(row),
+        )
     return clean
 
 
@@ -20429,6 +20446,9 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "pattern_timeframe": setup["timeframe"],
         "confirmation_timeframe": setup["confirmation_timeframe"],
         "pattern_score": setup["score"],
+        "cup_pattern_evidence": _project_cup_geometry_evidence(
+            setup.get("cup_pattern_evidence"), symbol=ticker,
+        ),
         "CupDepth%": setup["cup_depth_pct"],
         "HandleDepth%": setup["handle_depth_pct"],
         "Breakout_Level": setup["cup_lip"],
