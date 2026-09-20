@@ -262,20 +262,22 @@ STRATEGIES = {
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
     # =========================================================================
     "Wyckoff Accumulation ⬆": {
-        "description": " Wyckoff Akkumulation — Smart Money kauft leise in Trading Range",
+        "description": " Wyckoff Long — bestaetigter Ausbruch mit Ruecktest auf 1D",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
-        "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Akkumulation",
+        "logic": "Abgeschlossene Tageskerzen: SC -> AR -> ST -> SOS -> LPS mit Haltebestaetigung; Spring optional. Kein Nachweis institutioneller Kaeufe.",
         "needs_history": True,
         "pattern_type": "wyckoff_accumulation",
-        "history_days": 30
+        "history_days": 180,
+        "minimum_history_bars": 60
     },
     "Wyckoff Distribution ⬇": {
-        "description": " Wyckoff Distribution — Smart Money verkauft leise in Trading Range",
+        "description": " Wyckoff Short — bestaetigter Breakdown mit Ruecktest auf 1D",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
-        "logic": "Daily: Enge Range + abnehmendes Volumen + OBV-Divergenz = Distribution",
+        "logic": "Abgeschlossene Tageskerzen: BC -> AR -> ST -> SOW -> LPSY mit Haltebestaetigung; UTAD optional. Kein Nachweis institutioneller Verkaeufe.",
         "needs_history": True,
         "pattern_type": "wyckoff_distribution",
-        "history_days": 30
+        "history_days": 180,
+        "minimum_history_bars": 60
     },
     # =========================================================================
     # MA BOUNCE STRATEGIEN - Support/Resistance an Moving Averages

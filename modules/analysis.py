@@ -491,7 +491,7 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 0.0
 
 
-def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
+def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None, timeframe=None):
     """
     Analysiert Multi-Day Patterns basierend auf historischen Daten.
     V67.5: Komplett ueberarbeitete Berechnung und neue Pattern-Types.
@@ -501,11 +501,33 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
     - bull_flag: Starker Anstieg gefolgt von enger Konsolidierung
     - consolidation_breakout: Mehrtaegige enge Range + Breakout heute
     - churn: Hohes Volumen ohne Preisfortschritt (Smart Money Aktivitaet)
-    - wyckoff_accumulation: Range + abnehmendes Vol + OBV steigend = Akkumulation
-    - wyckoff_distribution: Range + abnehmendes Vol + OBV fallend = Distribution
+    - wyckoff_accumulation / distribution: canonical completed-event proof;
+      requires explicit as_of/timeframe and a confirmed Phase-D continuation.
 
     Returns: (is_valid, score, details)
     """
+    if pattern_type in {"wyckoff_accumulation", "wyckoff_distribution"}:
+        if as_of is None or not timeframe:
+            return False, 0, ["Wyckoff-Zeitkontext fehlt: as_of und timeframe erforderlich"]
+        from modules.wyckoff import analyze_wyckoff
+
+        direction = "LONG" if pattern_type == "wyckoff_accumulation" else "SHORT"
+        result = analyze_wyckoff(bars, as_of=as_of, timeframe=timeframe, direction=direction)
+        if result.get("status") != "ok":
+            return False, 0, ["Wyckoff nicht bewertbar: " + str(result.get("reason") or result.get("status"))]
+        matches = [item for item in result.get("patterns", []) if item.get("direction") == direction]
+        if not matches:
+            return False, 0, ["Keine kausal bestaetigte Wyckoff-Struktur"]
+        best = max(matches, key=lambda item: (item.get("trade_ready") is True, item.get("score", 0)))
+        ready = best.get("trade_ready") is True
+        details = [
+            f"Wyckoff {best.get('type')}, Phase {best.get('phase')} ({timeframe})",
+            "Modellqualitaet, keine Trefferwahrscheinlichkeit",
+            "Bestaetigte Fortsetzung" if ready else "Nur Kontext, kein Handelssignal",
+            "Ereignisse: " + ", ".join(str(event.get("name")) for event in best.get("events", [])),
+        ]
+        return ready, best.get("score", 0), details
+
     if len(bars) < 3:
         return False, 0, ["Nicht genug Daten (min. 3 Tage)"]
 
@@ -747,118 +769,6 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
             score += 5
             details.append(f"OBV neutral")
 
-    elif pattern_type == "wyckoff_accumulation":
-        # V67.5: NEUER Pattern-Type — Wyckoff Akkumulation mit Daily-Daten
-        # Akkumulation = Range + abnehmendes Volumen + OBV steigt (Smart Money kauft)
-        n = len(bars)
-
-        # Kriterium 1: Trading Range vorhanden (max 25 Punkte)
-        if total_range_pct < 15:
-            score += 25
-            details.append(f"Trading Range: {total_range_pct:.1f}% ueber {n} Tage")
-        elif total_range_pct < 25:
-            score += 15
-            details.append(f"Weite Range: {total_range_pct:.1f}%")
-        elif total_range_pct < 35:
-            score += 5
-            details.append(f"Sehr weite Range: {total_range_pct:.1f}%")
-
-        # Kriterium 2: Volumen nimmt ab (Erschoepfung des Verkaufsdrucks) (max 25 Punkte)
-        if n >= 6:
-            first_third_vol = historical_volume_baseline(
-                volumes[:n//3], lookback=max(1, n//3), minimum_periods=2
-            )
-            last_third_vol = historical_volume_baseline(
-                volumes[-(n//3):], lookback=max(1, n//3), minimum_periods=2
-            )
-            vol_decline = last_third_vol / first_third_vol if first_third_vol and last_third_vol else None
-
-            if vol_decline is None:
-                details.append("Volumenbasis fuer Wyckoff fehlt")
-            elif vol_decline < 0.7:
-                score += 25
-                details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
-            elif vol_decline < 0.9:
-                score += 15
-                details.append(f"Vol leicht abnehmend: {vol_decline:.2f}x")
-            elif vol_decline < 1.1:
-                score += 5
-                details.append(f"Vol stabil: {vol_decline:.2f}x")
-
-        # Kriterium 3: OBV steigt (Smart Money kauft in die Schwaeche) (max 25 Punkte)
-        if obv_trend > 0:
-            # OBV steigt waehrend Preis seitwaerts = AKKUMULATION
-            score += 25
-            details.append(f"OBV STEIGT trotz Range = Akkumulation!")
-        else:
-            details.append(f"OBV faellt = keine Akkumulation erkennbar")
-
-        # Kriterium 4: Preis haelt sich ueber Support (keine neuen Tiefs) (max 25 Punkte)
-        if n >= 10:
-            mid_idx = n // 2
-            first_half_low = min(b["low"] for b in bars[:mid_idx])
-            second_half_low = min(b["low"] for b in bars[mid_idx:])
-            # Higher Lows = bullisch
-            if second_half_low > first_half_low * 1.01:
-                score += 25
-                details.append(f"Higher Lows: ${second_half_low:.2f} > ${first_half_low:.2f}")
-            elif second_half_low >= first_half_low * 0.98:
-                score += 15
-                details.append(f"Stabile Lows: ~${second_half_low:.2f}")
-            else:
-                score += 5
-                details.append(f"Neue Lows: ${second_half_low:.2f} < ${first_half_low:.2f}")
-
-    elif pattern_type == "wyckoff_distribution":
-        # V67.5: NEUER Pattern-Type — Wyckoff Distribution mit Daily-Daten
-        # Distribution = Range + abnehmendes Volumen + OBV faellt (Smart Money verkauft)
-        n = len(bars)
-
-        # Kriterium 1: Trading Range vorhanden (max 25)
-        if total_range_pct < 15:
-            score += 25
-            details.append(f"Trading Range: {total_range_pct:.1f}% ueber {n} Tage")
-        elif total_range_pct < 25:
-            score += 15
-            details.append(f"Weite Range: {total_range_pct:.1f}%")
-
-        # Kriterium 2: Volumen nimmt ab (max 25)
-        if n >= 6:
-            first_third_vol = historical_volume_baseline(
-                volumes[:n//3], lookback=max(1, n//3), minimum_periods=2
-            )
-            last_third_vol = historical_volume_baseline(
-                volumes[-(n//3):], lookback=max(1, n//3), minimum_periods=2
-            )
-            vol_decline = last_third_vol / first_third_vol if first_third_vol and last_third_vol else None
-
-            if vol_decline is None:
-                details.append("Volumenbasis fuer Wyckoff fehlt")
-            elif vol_decline < 0.7:
-                score += 25
-                details.append(f"Vol stark abnehmend: {vol_decline:.2f}x")
-            elif vol_decline < 0.9:
-                score += 15
-                details.append(f"Vol leicht abnehmend: {vol_decline:.2f}x")
-
-        # Kriterium 3: OBV FAELLT (Smart Money verkauft) (max 25)
-        if obv_trend < 0:
-            score += 25
-            details.append(f"OBV FAELLT trotz Range = Distribution!")
-        else:
-            details.append(f"OBV steigt = keine Distribution erkennbar")
-
-        # Kriterium 4: Lower Highs (Schwaeche am Top) (max 25)
-        if n >= 10:
-            mid_idx = n // 2
-            first_half_high = max(b["high"] for b in bars[:mid_idx])
-            second_half_high = max(b["high"] for b in bars[mid_idx:])
-            if second_half_high < first_half_high * 0.99:
-                score += 25
-                details.append(f"Lower Highs: ${second_half_high:.2f} < ${first_half_high:.2f}")
-            elif second_half_high <= first_half_high * 1.02:
-                score += 15
-                details.append(f"Stabile Highs: ~${second_half_high:.2f}")
 
     elif pattern_type == "reversal_setup":
         # Prüfe ob es einen mehrtägigen Downtrend gab VOR dem heutigen Reversal
@@ -923,8 +833,6 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation"):
         "bear_flag": 35,
         "consolidation_breakout": 40,
         "churn": 45,
-        "wyckoff_accumulation": 50,   # Hoehere Schwelle — weniger False Positives
-        "wyckoff_distribution": 50,
         "reversal_setup": 40,
     }
     threshold = threshold_map.get(pattern_type, 40)
@@ -958,368 +866,24 @@ def _historical_relative_volume(volumes, index, lookback=20, minimum_periods=5):
     return current / baseline if baseline and baseline > 0 else None
 
 
-def find_wyckoff_for_chart(ohlcv_data):
+def find_wyckoff_for_chart(ohlcv_data, *, as_of=None, timeframe=None):
+    """Project the canonical engine, including explicitly non-tradable context.
+
+    The caller knows the market/session and must supply the timeframe, cutoff,
+    and any exchange-specific close_time. No clock or timeframe is guessed.
     """
-    Findet Wyckoff Patterns direkt aus Chart-OHLCV-Daten.
-    Korrekte Methodik: SC/BC definiert Range, Volume+Spread Analyse.
-    """
-    if not ohlcv_data or len(ohlcv_data) < 60:
+    if as_of is None or not timeframe:
         return []
-    
-    try:
-        opens = [d.get("open", d["close"]) for d in ohlcv_data]
-        closes = [d["close"] for d in ohlcv_data]
-        highs = [d["high"] for d in ohlcv_data]
-        lows = [d["low"] for d in ohlcv_data]
-        volumes = [d.get("volume", 0) for d in ohlcv_data]
-        current_price = closes[-1]
-        n = len(closes)
-        
-        def spread(i):
-            return highs[i] - lows[i]
-        def body_pos(i):
-            s = spread(i)
-            return (closes[i] - lows[i]) / s if s > 0 else 0.5
-        def avg_spread(i, lb=20):
-            s = max(0, i - lb)
-            return sum(spread(j) for j in range(s, i)) / max(1, i - s)
-        def avg_vol(i, lb=20):
-            ratio = _historical_relative_volume(volumes, i, lb)
-            if ratio is None:
-                return 0
-            try:
-                current = float(volumes[i])
-            except (TypeError, ValueError, OverflowError):
-                return 0
-            return current / ratio if ratio > 0 else 0
-        
-        atr, _ = calculate_atr_14(ohlcv_data)
-        if atr <= 0:
-            return []
-        
-        results = []
-        lookback_end = int(n * 0.5)
-        
-        # --- ACCUMULATION: Find SC ---
-        best_sc = None
-        for i in range(10, lookback_end):
-            av = avg_vol(i)
-            if av <= 0 or volumes[i] < av * 1.8:
-                continue
-            if spread(i) < avg_spread(i) * 1.3:
-                continue
-            if body_pos(i) < 0.45:
-                continue
-            prior_high = max(highs[max(0, i-15):i])
-            decline = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
-            if decline < 0.05:
-                continue
-            sc_score = (volumes[i] / av) * 10 + decline * 100
-            if not best_sc or sc_score > best_sc["score"]:
-                best_sc = {"idx": i, "low": lows[i], "vol_r": volumes[i] / av, "score": sc_score}
-        
-        if best_sc:
-            sc_idx = best_sc["idx"]
-            ar_idx, ar_high = None, 0
-            for i in range(sc_idx + 2, min(sc_idx + 20, n)):
-                if highs[i] > ar_high:
-                    ar_high = highs[i]
-                    ar_idx = i
-            
-            if ar_idx and ar_high > best_sc["low"]:
-                rh, rl = ar_high, best_sc["low"]
-                rw = rh - rl
-                rm = (rh + rl) / 2
-                
-                if 0.02 < rw / rm < 0.30:
-                    events = []
-                    score = 0
-                    
-                    # PS (Preliminary Support): VOR SC — erste Kaufreaktion
-                    for i in range(max(5, sc_idx - 20), sc_idx):
-                        av = avg_vol(i)
-                        if av > 0 and volumes[i] > av * 1.5 and closes[i] > opens[i] and body_pos(i) > 0.5:
-                            events.append({"name": "PS", "label": f"PS ${closes[i]:.1f}", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "below"})
-                            score += 5
-                            break
-                    
-                    events.append({"name": "SC", "label": f"SC ${rl:.1f}", "time": ohlcv_data[sc_idx]["time"], "price": rl, "pos": "below"})
-                    score += 20
-                    events.append({"name": "AR", "label": f"AR ${rh:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rh, "pos": "above"})
-                    score += 15
-                    
-                    # Multiple STs nahe Support mit abnehmendem Volume
-                    st_count = 0
-                    prev_st_vol = best_sc["vol_r"]
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if lows[i] <= rl + rw * 0.25:
-                            vr = _historical_relative_volume(volumes, i)
-                            if vr is None:
-                                continue
-                            if vr < prev_st_vol * 0.9:
-                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
-                                events.append({"name": st_label, "label": f"{st_label} ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
-                                score += 10 if st_count == 0 else 5
-                                prev_st_vol = vr
-                                st_count += 1
-                                if st_count >= 3:
-                                    break
-                    
-                    # Resistance Tests (Phase B): Rallies to AR zone on weak volume
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if highs[i] >= rh - rw * 0.20:
-                            vr = _historical_relative_volume(volumes, i)
-                            if vr is None:
-                                continue
-                            if vr < 1.3:
-                                events.append({"name": "RT", "label": f"RT ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
-                                score += 5
-                                break
-                    
-                    # Volume-Decay in Phase B
-                    if ar_idx + 20 < n:
-                        early_vol = historical_volume_baseline(
-                            volumes[ar_idx:ar_idx + 10], lookback=10, minimum_periods=5
-                        )
-                        mid_pt = ar_idx + (n - ar_idx) // 2
-                        if mid_pt + 10 <= n and early_vol:
-                            later_vol = historical_volume_baseline(
-                                volumes[mid_pt:mid_pt + 10], lookback=10, minimum_periods=5
-                            )
-                            if later_vol and later_vol < early_vol * 0.75:
-                                events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "below"})
-                                score += 5
-                    
-                    # Spring on LOW Volume
-                    spring_idx = None
-                    spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
-                    for i in range(spring_start, n - 3):
-                        if lows[i] < rl:
-                            vol_r = _historical_relative_volume(volumes, i)
-                            if vol_r is not None and vol_r < 0.85:
-                                for j in range(1, min(6, n - i)):
-                                    if closes[i + j] > rl + rw * 0.10:
-                                        spring_idx = i
-                                        events.append({"name": "Spring", "label": f"Spring ${lows[i]:.1f} (Vol {vol_r:.1f}x LOW)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
-                                        score += 25
-                                        break
-                            break
-                    
-                    # Test of Spring
-                    if spring_idx and spring_idx + 5 < n:
-                        for i in range(spring_idx + 2, min(spring_idx + 15, n)):
-                            if lows[i] <= lows[spring_idx] + rw * 0.05:
-                                vol_r = _historical_relative_volume(volumes, i)
-                                if vol_r is not None and vol_r < 0.7:
-                                    events.append({"name": "TestSpring", "label": f"Test Spring ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
-                                    score += 10
-                                    break
-                    
-                    # SOS: Wide Spread UP + High Volume
-                    sos_idx = None
-                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
-                        if closes[i] > rh and closes[i] > opens[i]:
-                            av = avg_vol(i)
-                            if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
-                                sos_idx = i
-                                events.append({"name": "SOS", "label": f"SOS ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "above"})
-                                score += 20
-                                break
-                    
-                    # LPS: Pullback NACH SOS, hält ÜBER range_high, LOW Volume
-                    if sos_idx and sos_idx + 3 < n:
-                        for i in range(sos_idx + 1, n):
-                            if lows[i] < closes[sos_idx]:
-                                vol_r = _historical_relative_volume(volumes, i)
-                                if vol_r is not None and lows[i] >= rh - rw * 0.10 and vol_r < 0.9:
-                                    events.append({"name": "LPS", "label": f"LPS ${lows[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
-                                    score += 15
-                                    break
-                    
-                    if score >= 35:
-                        has_spring = any(e["name"] == "Spring" for e in events)
-                        has_sos = any(e["name"] == "SOS" for e in events)
-                        phase = "D/E" if has_sos or current_price > rh else ("C" if has_spring else "B")
-                        entry = rh if current_price < rh else current_price
-                        spring_low = min([e["price"] for e in events if e["name"] == "Spring"], default=rl)
-                        stop_price = spring_low - atr * 0.3 if has_spring else rl - atr * 0.5
-                        results.append({
-                            "type": "Accumulation", "direction": "LONG", "emoji": "⬆",
-                            "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
-                            "range_high": rh, "range_low": rl,
-                            "range_start_time": ohlcv_data[sc_idx]["time"],
-                            "range_end_time": ohlcv_data[min(ar_idx + (n - ar_idx) // 2, n - 1)]["time"],
-                            "trade": {"entry": round(entry, 2), "stop": round(stop_price, 2),
-                                      "tp1": round(rh + rw * 0.75, 2), "tp2": round(rh + rw * 1.5, 2)}
-                        })
-        
-        # --- DISTRIBUTION: Find BC ---
-        best_bc = None
-        for i in range(10, lookback_end):
-            av = avg_vol(i)
-            if av <= 0 or volumes[i] < av * 1.8:
-                continue
-            if spread(i) < avg_spread(i) * 1.3:
-                continue
-            if body_pos(i) > 0.65:
-                continue
-            prior_low = min(lows[max(0, i-15):i])
-            rally = (highs[i] - prior_low) / prior_low if prior_low > 0 else 0
-            if rally < 0.05:
-                continue
-            bc_score = (volumes[i] / av) * 10 + rally * 100
-            if not best_bc or bc_score > best_bc["score"]:
-                best_bc = {"idx": i, "high": highs[i], "vol_r": volumes[i] / av, "score": bc_score}
-        
-        if best_bc:
-            bc_idx = best_bc["idx"]
-            ar_idx, ar_low = None, float('inf')
-            for i in range(bc_idx + 2, min(bc_idx + 20, n)):
-                if lows[i] < ar_low:
-                    ar_low = lows[i]
-                    ar_idx = i
-            
-            if ar_idx and ar_low < best_bc["high"]:
-                rh, rl = best_bc["high"], ar_low
-                rw = rh - rl
-                rm = (rh + rl) / 2
-                
-                if 0.02 < rw / rm < 0.30:
-                    events = []
-                    score = 0
-                    
-                    # PSY (Preliminary Supply): VOR BC — erste Verkaufsreaktion
-                    for i in range(max(5, bc_idx - 20), bc_idx):
-                        av = avg_vol(i)
-                        if av > 0 and volumes[i] > av * 1.5 and closes[i] < opens[i] and body_pos(i) < 0.5:
-                            events.append({"name": "PSY", "label": f"PSY ${closes[i]:.1f}", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "above"})
-                            score += 5
-                            break
-                    
-                    events.append({"name": "BC", "label": f"BC ${rh:.1f}", "time": ohlcv_data[bc_idx]["time"], "price": rh, "pos": "above"})
-                    score += 20
-                    events.append({"name": "AR", "label": f"AR ${rl:.1f}", "time": ohlcv_data[ar_idx]["time"], "price": rl, "pos": "below"})
-                    score += 15
-                    
-                    # Multiple STs nahe Resistance mit abnehmendem Volume
-                    st_count = 0
-                    prev_st_vol = best_bc["vol_r"]
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if highs[i] >= rh - rw * 0.25:
-                            vr = _historical_relative_volume(volumes, i)
-                            if vr is None:
-                                continue
-                            if vr < prev_st_vol * 0.9:
-                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
-                                events.append({"name": st_label, "label": f"{st_label} ${highs[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
-                                score += 10 if st_count == 0 else 5
-                                prev_st_vol = vr
-                                st_count += 1
-                                if st_count >= 3:
-                                    break
-                    
-                    # Support Tests (Phase B): Drops to AR zone on weak volume
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if lows[i] <= rl + rw * 0.20:
-                            vr = _historical_relative_volume(volumes, i)
-                            if vr is None:
-                                continue
-                            if vr < 1.3:
-                                events.append({"name": "ST-S", "label": f"ST-S ${lows[i]:.1f} (Vol {vr:.1f}x)", "time": ohlcv_data[i]["time"], "price": lows[i], "pos": "below"})
-                                score += 5
-                                break
-                    
-                    # Volume-Decay in Phase B
-                    if ar_idx + 20 < n:
-                        early_vol = historical_volume_baseline(
-                            volumes[ar_idx:ar_idx + 10], lookback=10, minimum_periods=5
-                        )
-                        mid_pt = ar_idx + (n - ar_idx) // 2
-                        if mid_pt + 10 <= n and early_vol:
-                            later_vol = historical_volume_baseline(
-                                volumes[mid_pt:mid_pt + 10], lookback=10, minimum_periods=5
-                            )
-                            if later_vol and later_vol < early_vol * 0.75:
-                                events.append({"name": "VolDecay", "label": f"Vol Decay: {later_vol/early_vol:.0%}", "time": ohlcv_data[mid_pt]["time"], "price": rm, "pos": "above"})
-                                score += 5
-                    
-                    # UTAD on LOW Volume
-                    utad_idx = None
-                    utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
-                    for i in range(utad_start, n - 3):
-                        if highs[i] > rh:
-                            vol_r = _historical_relative_volume(volumes, i)
-                            if vol_r is not None and vol_r < 0.85:
-                                for j in range(1, min(6, n - i)):
-                                    if closes[i + j] < rh - rw * 0.10:
-                                        utad_idx = i
-                                        events.append({"name": "UTAD", "label": f"UTAD ${highs[i]:.1f} (Vol {vol_r:.1f}x LOW)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
-                                        score += 25
-                                        break
-                            break
-                    
-                    # Test of UTAD
-                    if utad_idx and utad_idx + 5 < n:
-                        for i in range(utad_idx + 2, min(utad_idx + 15, n)):
-                            if highs[i] >= highs[utad_idx] - rw * 0.05:
-                                vol_r = _historical_relative_volume(volumes, i)
-                                if vol_r is not None and vol_r < 0.7:
-                                    events.append({"name": "TestUTAD", "label": f"Test UTAD ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
-                                    score += 10
-                                    break
-                    
-                    # SOW: Wide Spread DOWN + High Volume
-                    sow_idx = None
-                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
-                        if closes[i] < rl and closes[i] < opens[i]:
-                            av = avg_vol(i)
-                            if av > 0 and volumes[i] > av * 1.5 and spread(i) > avg_spread(i) * 1.3:
-                                sow_idx = i
-                                events.append({"name": "SOW", "label": f"SOW ${closes[i]:.1f} (High Vol)", "time": ohlcv_data[i]["time"], "price": closes[i], "pos": "below"})
-                                score += 20
-                                break
-                    
-                    # LPSY: Rally nach SOW scheitert nahe Range-Low, Low Volume
-                    if sow_idx and sow_idx + 3 < n:
-                        for i in range(sow_idx + 1, n):
-                            if highs[i] > closes[sow_idx]:
-                                vol_r = _historical_relative_volume(volumes, i)
-                                if vol_r is not None and highs[i] <= rl + rw * 0.10 and vol_r < 0.9:
-                                    events.append({"name": "LPSY", "label": f"LPSY ${highs[i]:.1f} (Vol {vol_r:.1f}x)", "time": ohlcv_data[i]["time"], "price": highs[i], "pos": "above"})
-                                    score += 15
-                                    break
-                    
-                    if score >= 35:
-                        has_utad = any(e["name"] == "UTAD" for e in events)
-                        has_sow = any(e["name"] == "SOW" for e in events)
-                        phase = "D/E" if has_sow or current_price < rl else ("C" if has_utad else "B")
-                        entry = rl if current_price > rl else current_price
-                        utad_high = max([e["price"] for e in events if e["name"] == "UTAD"], default=rh)
-                        stop_price = utad_high + atr * 0.3 if has_utad else rh + atr * 0.5
-                        results.append({
-                            "type": "Distribution", "direction": "SHORT", "emoji": "⬇",
-                            "phase": f"Phase {phase}", "score": min(score, 100), "events": events,
-                            "range_high": rh, "range_low": rl,
-                            "range_start_time": ohlcv_data[bc_idx]["time"],
-                            "range_end_time": ohlcv_data[min(ar_idx + (n - ar_idx) // 2, n - 1)]["time"],
-                            "trade": {"entry": round(entry, 2), "stop": round(stop_price, 2),
-                                      "tp1": round(rl - rw * 0.75, 2), "tp2": round(rl - rw * 1.5, 2)}
-                        })
-        
-        # Filter: Nur Patterns die RELEVANT sind (Range nahe am aktuellen Preis)
-        # PACS Beispiel: Accumulation bei $14-17, Preis jetzt $40 → historisch, nicht zeichnen
-        relevant = []
-        for r in results:
-            rh = r.get("range_high", 0)
-            rl = r.get("range_low", 0)
-            rm = (rh + rl) / 2 if (rh + rl) > 0 else 1
-            dist_pct = abs(current_price - rm) / rm * 100
-            if dist_pct <= 40:
-                relevant.append(r)
-        
-        return relevant
-    except Exception:
+    from modules.wyckoff import analyze_wyckoff
+
+    result = analyze_wyckoff(ohlcv_data, as_of=as_of, timeframe=timeframe)
+    if result.get("status") != "ok":
         return []
+    metadata = {key: result.get(key) for key in
+                ("model", "timeframe", "as_of", "bars_used", "latest_completed_at")}
+    return [{**item, **metadata, "data_status": result["status"],
+             "emoji": "⬆" if item.get("direction") == "LONG" else "⬇"}
+            for item in result.get("patterns", [])]
 
 
 def _detect_chart_patterns(bars, direction="long"):
@@ -1935,213 +1499,57 @@ def calculate_sr_from_historical(
 
 
 def calculate_accumulation_score(ticker, market_type, poly_key=None, days=20):
-    """
-    Berechnet Akkumulations-Score (0-100) basierend auf Wyckoff-Kriterien
-    
-    Kriterien:
-    1. Range Tightness: Je enger die Range, desto höher der Score
-    2. OBV Trend: Steigend bei flachem Preis = Akkumulation
-    3. Volume Pattern: Abnehmendes Volumen = Konsolidierung
-    4. Position in Range: Nahe Support = besserer Entry
-    5. Zeit in Range: Länger = mehr akkumuliert
-    
-    Returns: dict mit Score und Details
+    """Legacy OHLC-only price context; it cannot certify Wyckoff accumulation.
+
+    These historical adapters do not guarantee real volume or an explicit
+    completed-bar timeframe. A price spread is not a volume observation.
+    Keep compatibility fields, but leave the score/phase unavailable instead
+    of manufacturing OBV, a Spring, or a directional trade recommendation.
     """
     result = {
-        "score": 0,
-        "range_pct": 0,
-        "obv_trend": 0,
-        "volume_trend": 0,
-        "position_in_range": 0.5,
-        "days_in_range": 0,
-        "wyckoff_phase": "Unknown",
-        "interpretation": "",
-        "data_available": False
+        "score": None, "score_kind": "unavailable", "range_pct": None,
+        "obv_trend": None, "volume_trend": None, "position_in_range": None,
+        "days_in_range": 0, "wyckoff_phase": "Unknown", "data_available": False,
+        "analysis_status": "unavailable", "trade_ready": False,
+        "reason": "missing_volume_and_completed_timeframe_context",
+        "interpretation": "Wyckoff nicht bewertbar: echtes Volumen und abgeschlossener Zeitkontext fehlen",
     }
-    
     try:
-        # Historische Daten holen
         ohlc_data = None
-        
         if market_type == "Krypto":
-            # V67.5 FIX: CoinGecko braucht den vollen coin_id ("bitcoin"), nicht Symbol ("btc")
-            # Versuche zuerst symbol-to-id Mapping ueber Search API
-            coin_id = _resolve_coingecko_id(ticker)
-            ohlc_data = fetch_historical_data_crypto(coin_id, days)
+            ohlc_data = fetch_historical_data_crypto(_resolve_coingecko_id(ticker), days)
         elif market_type == "Aktien":
-            # Internationale Aktien: Yahoo (kein poly_key nötig)
-            _intl_suffixes = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
-            if any(ticker.upper().endswith(s) for s in _intl_suffixes):
+            international = (".DE", ".L", ".SW", ".PA", ".AS", ".BR", ".T", ".HK")
+            if any(ticker.upper().endswith(suffix) for suffix in international):
                 ohlc_data = _fetch_historical_yahoo(ticker, days)
             elif poly_key:
                 ohlc_data = fetch_historical_data_stocks(ticker, days, poly_key)
-        
         if not ohlc_data or len(ohlc_data) < 10:
-            result["interpretation"] = "Nicht genug historische Daten"
+            result["reason"] = "insufficient_price_history"
+            result["interpretation"] = "Nicht genug historische Preisdaten"
             return result
-        
-        result["data_available"] = True
-        
-        # Daten extrahieren - OHLC Format: [timestamp, open, high, low, close]
-        # Index: 0=timestamp, 1=open, 2=high, 3=low, 4=close
-        closes = [d[4] for d in ohlc_data if len(d) >= 5]
-        highs = [d[2] for d in ohlc_data if len(d) >= 5]
-        lows = [d[3] for d in ohlc_data if len(d) >= 5]
-        
-        # Für Volume: Polygon hat es im Result, CoinGecko nicht direkt
-        # Wir nehmen einfach den Preisspread als Proxy wenn kein Volume
-        volumes = []
-        for d in ohlc_data:
-            if len(d) >= 6 and d[5]:  # Volume ist Index 5 wenn vorhanden
-                volumes.append(d[5])
-            elif len(d) >= 5:
-                # Proxy: (High - Low) als "Activity"
-                volumes.append(abs(d[2] - d[3]) * 1000)
-        
-        if not closes or not highs or not lows:
-            result["interpretation"] = "Ungültiges Datenformat"
-            return result
-        
-        current_price = closes[-1]
-        period_high = max(highs)
-        period_low = min(lows)
-        
-        # 1. Range Tightness (max 25 Punkte)
-        range_pct = ((period_high - period_low) / current_price) * 100 if current_price > 0 else 100
-        result["range_pct"] = round(range_pct, 2)
-        
-        if range_pct < 10:
-            range_score = 25  # Sehr eng
-        elif range_pct < 15:
-            range_score = 20
-        elif range_pct < 20:
-            range_score = 15
-        elif range_pct < 30:
-            range_score = 10
-        else:
-            range_score = 5  # Zu volatil
-        
-        # 2. OBV Trend (max 25 Punkte)
-        obv, obv_trend = calculate_obv(closes, volumes)
-        result["obv_trend"] = round(obv_trend, 2)
-        
-        # Preis-Trend berechnen
-        price_change = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
-        
-        # OBV Score: Steigendes OBV bei flachem Preis = TOP!
-        if obv_trend > 10 and abs(price_change) < 10:
-            obv_score = 25  # Perfekte Akkumulation!
-        elif obv_trend > 5 and abs(price_change) < 15:
-            obv_score = 20
-        elif obv_trend > 0:
-            obv_score = 15
-        elif obv_trend > -10:
-            obv_score = 10
-        else:
-            obv_score = 5  # Distribution möglich
-        
-        # 3. Volume Trend (max 20 Punkte)
-        vol_change = 0  # V67.5 FIX: Default damit vol_change immer definiert ist
-        if len(volumes) >= 10:
-            first_half_vol = historical_volume_baseline(
-                volumes[:len(volumes)//2],
-                lookback=max(1, len(volumes)//2),
-                minimum_periods=3,
-            )
-            second_half_vol = historical_volume_baseline(
-                volumes[len(volumes)//2:],
-                lookback=max(1, len(volumes) - len(volumes)//2),
-                minimum_periods=3,
-            )
-            vol_change = (
-                ((second_half_vol - first_half_vol) / first_half_vol) * 100
-                if first_half_vol and second_half_vol
-                else 0
-            )
-            result["volume_trend"] = round(vol_change, 2)
-            
-            # Abnehmendes Volumen = Konsolidierung (gut für Akkumulation)
-            if vol_change < -20:
-                vol_score = 20  # Stark abnehmendes Volumen
-            elif vol_change < -10:
-                vol_score = 15
-            elif vol_change < 10:
-                vol_score = 10
-            else:
-                vol_score = 5  # Steigendes Volumen = etwas passiert
-        else:
-            vol_score = 10
-        
-        # 4. Position in Range (max 15 Punkte)
-        if period_high != period_low:
-            position = (current_price - period_low) / (period_high - period_low)
-        else:
-            position = 0.5
-        result["position_in_range"] = round(position, 2)
-        
-        # Nahe Support = besserer Entry für Long
-        if position < 0.3:
-            pos_score = 15  # Nahe Support
-        elif position < 0.5:
-            pos_score = 12
-        elif position < 0.7:
-            pos_score = 8
-        else:
-            pos_score = 5  # Nahe Resistance
-        
-        # 5. Stabilität (max 15 Punkte) - wie viele Tage in der Range?
-        range_tolerance = (period_high - period_low) * 0.1
-        days_in_range = 0
-        for i in range(len(closes) - 1, -1, -1):
-            if lows[i] >= (period_low - range_tolerance) and highs[i] <= (period_high + range_tolerance):
-                days_in_range += 1
-            else:
-                break
-        result["days_in_range"] = days_in_range
-        
-        if days_in_range >= 15:
-            stability_score = 15
-        elif days_in_range >= 10:
-            stability_score = 12
-        elif days_in_range >= 5:
-            stability_score = 8
-        else:
-            stability_score = 5
-        
-        # Gesamtscore
-        total_score = range_score + obv_score + vol_score + pos_score + stability_score
-        result["score"] = total_score
-        
-        # Wyckoff Phase bestimmen
-        if obv_trend > 10 and abs(price_change) < 5 and vol_change < 0:
-            result["wyckoff_phase"] = "Phase C (Spring/Test)"
-            result["interpretation"] = " Ideale Akkumulation! OBV steigt, Preis flach, Volumen sinkt"
-        elif obv_trend > 0 and range_pct < 20:
-            result["wyckoff_phase"] = "Phase B (Accumulation)"
-            result["interpretation"] = " Akkumulation läuft - Smart Money kauft"
-        elif obv_trend < -10 and range_pct < 20:
-            result["wyckoff_phase"] = "Phase D (Distribution?)"
-            result["interpretation"] = " Vorsicht: OBV fällt - mögliche Distribution"
-        elif range_pct > 25:
-            result["wyckoff_phase"] = "Phase A (Selling Climax)"
-            result["interpretation"] = " Hohe Volatilität - noch keine klare Akkumulation"
-        else:
-            result["wyckoff_phase"] = "Phase B (Range)"
-            result["interpretation"] = " In Range - beobachten für Entry"
-        
-        # Score-Interpretation
-        if total_score >= 80:
-            result["interpretation"] = " STRONG BUY ZONE! " + result["interpretation"]
-        elif total_score >= 60:
-            result["interpretation"] = " Good Setup. " + result["interpretation"]
-        elif total_score >= 40:
-            result["interpretation"] = " Neutral. " + result["interpretation"]
-        else:
-            result["interpretation"] = " Weak Setup. " + result["interpretation"]
-        
-    except Exception as e:
-        result["interpretation"] = f"Analyse-Fehler: {str(e)[:50]}"
-    
+        parsed = []
+        for raw in ohlc_data:
+            if len(raw) < 5:
+                raise ValueError("invalid_ohlc")
+            opened, high, low, closed = (float(value) for value in raw[1:5])
+            if (not all(math.isfinite(value) and value > 0 for value in (opened, high, low, closed))
+                    or low > min(opened, closed) or high < max(opened, closed) or low > high):
+                raise ValueError("invalid_ohlc")
+            parsed.append((high, low, closed))
+        high = max(row[0] for row in parsed)
+        low = min(row[1] for row in parsed)
+        current = parsed[-1][2]
+        result.update(
+            data_available=True, range_pct=(high - low) / current * 100.0,
+            position_in_range=(current - low) / (high - low) if high > low else 0.5,
+        )
+    except (TypeError, ValueError, KeyError, OverflowError):
+        result["reason"] = "invalid_price_history"
+        result["interpretation"] = "Ungueltige historische Preisdaten"
+    except Exception:
+        result["reason"] = "price_history_unavailable"
+        result["interpretation"] = "Historische Preisdaten nicht verfuegbar"
     return result
 
 
@@ -2299,57 +1707,18 @@ def generate_ai_chart_analysis(ticker, ohlcv_data, patterns, sr_levels, fib_leve
 
 
 def get_accumulation_display(ticker, market_type, poly_key=None):
-    """Erstellt eine formatierte Anzeige der Akkumulations-Analyse"""
+    """Display unavailable volume-based analysis honestly, without buy labels."""
     analysis = calculate_accumulation_score(ticker, market_type, poly_key)
-    
     if not analysis["data_available"]:
         return None, analysis
-    
-    # Score-Farbe
-    score = analysis["score"]
-    if score >= 80:
-        score_color = ""
-        score_label = "STRONG"
-    elif score >= 60:
-        score_color = ""
-        score_label = "GOOD"
-    elif score >= 40:
-        score_color = ""
-        score_label = "NEUTRAL"
-    else:
-        score_color = ""
-        score_label = "WEAK"
-    
-    # OBV Trend Interpretation
-    obv = analysis["obv_trend"]
-    if obv > 10:
-        obv_icon = ""
-        obv_text = "Steigend (Bullish)"
-    elif obv > 0:
-        obv_icon = "↗"
-        obv_text = "Leicht steigend"
-    elif obv > -10:
-        obv_icon = ""
-        obv_text = "Flach"
-    else:
-        obv_icon = ""
-        obv_text = "Fallend (Bearish)"
-    
     display = {
-        "score": score,
-        "score_color": score_color,
-        "score_label": score_label,
-        "range_pct": analysis["range_pct"],
-        "obv_trend": obv,
-        "obv_icon": obv_icon,
-        "obv_text": obv_text,
-        "volume_trend": analysis["volume_trend"],
-        "position": analysis["position_in_range"],
-        "days_in_range": analysis["days_in_range"],
-        "wyckoff_phase": analysis["wyckoff_phase"],
-        "interpretation": analysis["interpretation"]
+        "score": None, "score_color": "", "score_label": "NICHT BEWERTBAR",
+        "range_pct": analysis["range_pct"], "obv_trend": None, "obv_icon": "",
+        "obv_text": "Nicht verfuegbar", "volume_trend": None,
+        "position": analysis["position_in_range"], "days_in_range": 0,
+        "wyckoff_phase": "Unknown", "interpretation": analysis["interpretation"],
+        "analysis_status": analysis["analysis_status"], "trade_ready": False,
     }
-    
     return display, analysis
 
 

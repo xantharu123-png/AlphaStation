@@ -668,13 +668,13 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         ),
         "Wyckoff Accumulation": _clone_stock_strategy(
             "Wyckoff Accumulation ⬆",
-            description="Wyckoff-Akkumulation mit Mehrtagesstruktur und Smart-Money-Kontext.",
+            description="Wyckoff Long auf abgeschlossenen Tageskerzen: Ausbruch und Ruecktest bestaetigt.",
             merged_from=["Wyckoff Accumulation ⬆"],
             display_group="Smart Money",
         ),
         "Wyckoff Distribution": _clone_stock_strategy(
             "Wyckoff Distribution ⬇",
-            description="Wyckoff-Distribution für schleichende Schwäche vor dem Breakdown.",
+            description="Wyckoff Short auf abgeschlossenen Tageskerzen: Breakdown und Ruecktest bestaetigt.",
             merged_from=["Wyckoff Distribution ⬇"],
             display_group="Smart Money",
         ),
@@ -9269,6 +9269,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "orb_waiting_for_entry_confirmation",
     }
     no_trade_markers = {
+        "wyckoff_contract_invalid",
         "drop_too_extended_no_chase",
         "target_already_missed",
         "early_mover_no_chase",
@@ -9446,6 +9447,13 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     raw_score = score
     rvol = _extract_alert_rvol(row)
     reasons = []
+    if scanner_name in {"stock_strategy", "strategy_scan"} and not _stock_wyckoff_row_contract_valid(
+        row, as_of=datetime.fromtimestamp(now, tz=timezone.utc),
+    ):
+        # A high score or a valid generic plan cannot replace the strategy's
+        # own causal confirmation. This also protects cache-driven mail/audit
+        # paths that never pass through the fresh scanner result filter.
+        reasons.append("wyckoff_contract_invalid")
 
     if scanner_name == "new_listing":
         nl_fields = _extract_new_listing_signal_fields(row)
@@ -9514,11 +9522,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "grade_below_alert_threshold",
         "score_below_alert_threshold",
         "rvol_below_alert_threshold",
+        "wyckoff_contract_invalid",
     }
     base_actionable = not any(reason in reasons for reason in base_blockers)
     stock_diagnostics_allowed = (
         scanner_name in _STOCK_ALERT_SCANNERS
-        and not any(reason in reasons for reason in {"missing_ticker", "non_common_stock_product"})
+        and not any(reason in reasons for reason in {"missing_ticker", "non_common_stock_product", "wyckoff_contract_invalid"})
         and (raw_grade in _ALERT_TOP_GRADES or raw_score >= _ALERT_MIN_SCORE)
     )
     quality_gate_actionable = base_actionable or stock_diagnostics_allowed
@@ -13061,6 +13070,24 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if not results:
         return
+    if market_type == "stocks":
+        # Bind even nameless legacy rows to the requested Wyckoff strategy,
+        # before either regular-session or premarket enrichment/classification.
+        # A rejected row must not reach shadow tracking, dedupe or SMTP.
+        verified_results = [
+            row for row in results
+            if isinstance(row, dict) and _stock_wyckoff_row_contract_valid(
+                row, expected_strategy=strategy_name,
+            )
+        ]
+        # Non-object payloads are discarded too, but do not impersonate a
+        # Wyckoff evidence rejection in unrelated strategy diagnostics.
+        rejected = sum(isinstance(row, dict) for row in results) - len(verified_results)
+        if rejected:
+            _record_suppression_counts("stock_strategy", {"wyckoff_contract_invalid": rejected})
+        results = verified_results
+        if not results:
+            return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
     daily_close_confirmed_mode = False
     starter_swing_mode = market_type == "stocks" and all(stock_swing.validate(row) for row in results)
@@ -16117,8 +16144,103 @@ def _early_mover_visible_sort_key(row: Dict[str, Any]) -> tuple:
     )
 
 
+def _stock_wyckoff_row_contract_valid(
+    row: Dict[str, Any], *, as_of: Optional[datetime] = None,
+    expected_strategy: Optional[str] = None,
+) -> bool:
+    """Bind Wyckoff rows to causal, directional evidence, never just a score.
+
+    This is an evidence guard, not an execution approval. Native structure,
+    price freshness, costs and delivery gates remain separately mandatory.
+    """
+    if not isinstance(row, dict):
+        return False
+    sides = {"Wyckoff Accumulation": "LONG", "Wyckoff Distribution": "SHORT",
+             "wyckoff_accumulation": "LONG", "wyckoff_distribution": "SHORT"}
+    def canonical(value):
+        text = str(value or "").strip()
+        return STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(text), text)
+    identities = [canonical(row.get(key)) for key in ("Strategy", "strategy", "pattern_type")
+                  if row.get(key)]
+    expected = canonical(expected_strategy)
+    relevant = expected in sides or any(value.lower().startswith("wyckoff") for value in identities)
+    if not relevant:
+        return True
+    if expected in STRATEGIES and expected not in sides:
+        return False
+    directions = {sides[value] for value in identities if value in sides}
+    if expected in sides:
+        directions.add(sides[expected])
+    if len(directions) != 1 or any(value not in sides for value in identities):
+        return False
+    if not identities:
+        return False
+    direction = next(iter(directions))
+    evidence = row.get("wyckoff")
+    if not isinstance(evidence, dict):
+        return False
+    if (row.get("wyckoff_model") != "causal_wyckoff_v1"
+            or row.get("wyckoff_timeframe") != "1D"
+            or evidence.get("direction") != direction
+            or evidence.get("trade_ready") is not True
+            or evidence.get("signal_state") != "confirmed"
+            or evidence.get("phase") != "D"
+            or evidence.get("invalidation_reason")):
+        return False
+    for key in ("Signal_Direction", "direction"):
+        if row.get(key) and str(row[key]).upper() != direction:
+            return False
+    times = [_stock_attempt_datetime(value) for value in (
+        evidence.get("range_confirmed_at"), evidence.get("signal_confirmed_at"),
+        evidence.get("latest_completed_at"), row.get("wyckoff_as_of"))]
+    cutoff = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    if any(value is None for value in times) or not (times[0] <= times[1] <= times[2] <= times[3] <= cutoff):
+        return False
+    events = evidence.get("events")
+    if not isinstance(events, list):
+        return False
+    required = ["SC", "AR", "ST", "SOS", "LPS"] if direction == "LONG" else ["BC", "AR", "ST", "SOW", "LPSY"]
+    previous = None
+    for name in required:
+        event = next((event for event in events if isinstance(event, dict) and event.get("name") == name), None)
+        if event is None:
+            return False
+        observed = _stock_attempt_datetime(event.get("observed_at"))
+        confirmed = _stock_attempt_datetime(event.get("confirmed_at"))
+        event_volume = _alert_float(event.get("volume_ratio"))
+        if event_volume is None or not math.isfinite(event_volume) or event_volume <= 0:
+            return False
+        if observed is None or confirmed is None or not observed <= confirmed <= times[2]:
+            return False
+        if previous is not None and observed <= previous:
+            return False
+        previous = confirmed
+    if previous != times[1]:
+        return False
+    low, high, price = (_alert_float(value) for value in (
+        evidence.get("range_low"), evidence.get("range_high"), _extract_alert_price(row)))
+    if any(value is None or not math.isfinite(value) or value <= 0 for value in (low, high, price)):
+        return False
+    trade = evidence.get("trade")
+    if not isinstance(trade, dict) or trade.get("direction") != direction:
+        return False
+    levels = [_alert_float(trade.get(key)) for key in ("entry", "stop", "tp1", "tp2")]
+    if any(value is None or not math.isfinite(value) or value <= 0 for value in levels):
+        return False
+    entry, stop, tp1, tp2 = levels
+    geometry = trade_geometry(entry, stop, tp1, tp2, direction)
+    if not geometry.get("valid"):
+        return False
+    within_projection = (stop < price < tp1 if direction == "LONG" else tp1 < price < stop)
+    return bool(within_projection and low < high and (price > high if direction == "LONG" else price < low))
+
+
 def _stock_momentum_row_contract_valid(row: Dict[str, Any], *, as_of: Optional[datetime] = None) -> bool:
     """Reject legacy/unconfirmed Momentum entry rows, not personal positions."""
+    if not _stock_wyckoff_row_contract_valid(row, as_of=as_of):
+        return False
     strategy = str(row.get("Strategy") or row.get("strategy") or "")
     canonical = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(strategy), strategy)
     if canonical != "Momentum Breakout Long":
@@ -19061,8 +19183,48 @@ def _stock_previous_session_change(daily_bars, *, as_of):
     return (previous[-1]["close"] / previous[-2]["close"] - 1.0) * 100.0
 
 
+def _stock_wyckoff_daily_input(bars):
+    """Add exchange closes without silently deleting bad bars or completion flags."""
+    result = []
+    for raw in bars or []:
+        if not isinstance(raw, dict) or raw.get("close_time") is not None:
+            result.append(raw)
+            continue
+        adapted = _daily_level_bars([raw])
+        result.append({**raw, **adapted[0]} if adapted else raw)
+    return result
+
+
 def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Validate multi-day pattern strategies with real daily history."""
+    pattern_type = str(strat.get("pattern_type") or "")
+    if pattern_type in {"wyckoff_accumulation", "wyckoff_distribution"}:
+        from modules.wyckoff import analyze_wyckoff
+        direction = "LONG" if pattern_type == "wyckoff_accumulation" else "SHORT"
+        cutoff = candidate.get("_pattern_as_of")
+        report = analyze_wyckoff(_stock_wyckoff_daily_input(candidate.get("_daily_bars", [])), as_of=cutoff,
+                                 timeframe="1D", direction=direction)
+        diagnostic = candidate.get("_wyckoff_diagnostics")
+        ready = [pattern for pattern in report.get("patterns", [])
+                 if pattern.get("trade_ready") is True and pattern.get("direction") == direction]
+        if isinstance(diagnostic, dict):
+            invalidation = next((pattern.get("invalidation_reason") for pattern in report.get("patterns", [])
+                                 if pattern.get("invalidation_reason")), None)
+            reason = "confirmed" if ready else str(report.get("reason") or invalidation or "event_sequence_unconfirmed")
+            diagnostic[reason] = diagnostic.get(reason, 0) + 1
+        if not ready or report.get("status") != "ok":
+            return None
+        if float(candidate.get("Dollar_Volume", 0) or 0) < max(int(strat.get("min_dollar_volume", 0)), 500_000):
+            return None
+        pattern = max(ready, key=lambda item: float(item.get("score") or 0))
+        enriched = {key: value for key, value in candidate.items() if not key.startswith("_")}
+        enriched.update({"pattern_type": pattern_type, "wyckoff": pattern,
+                         "wyckoff_model": report["model"], "wyckoff_timeframe": "1D",
+                         "wyckoff_as_of": report["as_of"], "pattern_score": pattern["score"],
+                         "history_days": report["bars_used"],
+                         "pattern_details": ["1D: bestaetigte Ereignisfolge", "Phase D: Ausbruch und Ruecktest bestaetigt",
+                                             "Qualitaetswert, keine Gewinnwahrscheinlichkeit"]})
+        return enriched
     if strat.get("canonical_name") == "Turtle Breakout":
         # The public menu used to fall through to generic consolidation because
         # its config has no pattern_type. A Turtle result requires Donchian20.
@@ -20613,6 +20775,11 @@ def _apply_special_strategy_post_filter(
     strategy_name: str,
 ) -> List[Dict[str, Any]]:
     """Upgrade strategy scans from pure snapshot filters to setup validation."""
+    if str(strat.get("pattern_type") or "").startswith("wyckoff_"):
+        # Already checked before native-plan work with the scan's fixed clock.
+        # No top-220 truncation and no second provider request for this family.
+        return [row for row in candidates
+                if _stock_wyckoff_row_contract_valid(row, expected_strategy=strategy_name)]
     if not any(
         strat.get(flag)
         for flag in ("needs_history", "needs_volume_profile", "needs_harmonic", "needs_ma", "needs_cup_handle")
@@ -21430,12 +21597,27 @@ def _strategy_scan_wrapper(
                     else:
                         _stage("dollar_volume_filter")
 
+                    _is_wyckoff = str(strat.get("pattern_type") or "").startswith("wyckoff_")
                     with stock_scan_runtime.measure("history"):
-                        daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
+                        daily_bars = _fetch_strategy_daily_history(ticker, 180 if _is_wyckoff else 70, history_cache, True)
                     stock_scan_runtime.checkpoint("analyzing")
                     if swing_daily_mode:
                         daily_bars = [bar for bar in daily_bars if
                                       _daily_bar_date_str(bar) <= t["swing_analysis_session"]]
+                    _wyckoff_evidence = None
+                    if _is_wyckoff:
+                        _stage("wyckoff_analyzed")
+                        with stock_scan_runtime.measure("special_filter"):
+                            _wyckoff_evidence = _apply_pattern_strategy_filter({
+                                "_daily_bars": daily_bars,
+                                "_pattern_as_of": analysis_as_of,
+                                "_wyckoff_diagnostics": scan_diag.setdefault("wyckoff_reasons", {}),
+                                "Dollar_Volume": dollar_vol,
+                            }, strat)
+                        if not _wyckoff_evidence:
+                            _reject("wyckoff:event_sequence_unconfirmed_or_invalid")
+                            continue
+                        _stage("wyckoff_confirmed")
                     previous_change = _stock_previous_session_change(daily_bars, as_of=analysis_as_of)
                     if _has_vortag_filter:
                         if previous_change is None or not (vortag_min <= previous_change <= vortag_max):
@@ -21721,8 +21903,8 @@ def _strategy_scan_wrapper(
                         "strategy": strategy_name,
                         "Ticker": ticker,
                         "ticker": ticker,
-                        "Preis": round(price, 2),
-                        "price": round(price, 2),
+                        "Preis": price if _is_wyckoff else round(price, 2),
+                        "price": price if _is_wyckoff else round(price, 2),
                         "Change_Pct": round(change_pct, 2),
                         "change_pct": round(change_pct, 2),
                         "Volume": volume,
@@ -21832,6 +22014,10 @@ def _strategy_scan_wrapper(
                             f"{', '.join(_breakout_reason_parts[:3])}"
                         ) if _breakout_quality else "",
                     }
+                    if _wyckoff_evidence:
+                        strategy_row.update(_wyckoff_evidence)
+                        strategy_row["score"] = round(min(100, _strat_score * 0.4 + float(_wyckoff_evidence["pattern_score"]) * 0.6))
+                        strategy_row["grade"] = _strategy_score_to_grade(strategy_row["score"])
                     # Chaikin-A/D-Divergenz-Gate (nur Trend Reversal): nutzt die
                     # bereits geladenen daily_bars — KEINE neuen API-Calls.
                     # DISTRIBUTION = Falling Knife -> Reject; BULLISH_DIVERGENCE
@@ -28161,6 +28347,9 @@ def get_chart_data(
             if time.time() - _cached["ts"] < _ttl:
                 return _cached["data"]
 
+        # Freeze the cutoff BEFORE I/O: a candle still forming when requested
+        # cannot become confirmed only because the provider response was slow.
+        chart_as_of = datetime.now(timezone.utc)
         # Fetch OHLCV bars for the requested timeframe
         ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe=timeframe, bars=300)
         if not ohlcv or len(ohlcv) < 5:
@@ -28501,7 +28690,13 @@ def get_chart_data(
                 # Chart patterns (Double Top/Bottom, H&S, Triangles, Wedges)
                 try:
                     _lookback = min(_tfc["lookback"], len(ohlcv))
-                    chart_pats = detect_chart_patterns(ohlcv, lookback=_lookback)
+                    chart_pats = detect_chart_patterns(
+                        ohlcv, lookback=_lookback,
+                        wyckoff_context={"as_of": chart_as_of, "timeframe": timeframe,
+                                         "bars": (_stock_wyckoff_daily_input(ohlcv)
+                                                  if timeframe == "1D" and chart_market_context(ticker)["us_equity_session"]
+                                                  else ohlcv)},
+                    )
                     if chart_pats:
                         # CRITICAL: detect_chart_patterns Indizes sind relativ zu ohlcv[-lookback:]
                         # Wir brauchen den Offset zum vollen ohlcv-Array
@@ -28510,6 +28705,9 @@ def get_chart_data(
                         # Filtere Patterns mit zu wenig Bars-Abstand
                         filtered = []
                         for cp in chart_pats:
+                            if cp.get("model") == "causal_wyckoff_v1":
+                                filtered.append(cp)
+                                continue
                             dp = cp.get("draw_points", [])
                             if len(dp) >= 2:
                                 indices = [p.get("index", 0) for p in dp if p.get("index") is not None]
@@ -28526,6 +28724,10 @@ def get_chart_data(
                         chart_pats = filtered[:3]
 
                         for cp in chart_pats:
+                            if cp.get("model") == "causal_wyckoff_v1":
+                                # Wyckoff points carry market timestamps and
+                                # separate confirmation times, not slice indices.
+                                continue
                             # detect_index ist relativ zum Slice → Offset addieren
                             idx = cp.get("detect_index")
                             if idx is not None:
@@ -28572,7 +28774,7 @@ def get_chart_data(
                         if "chart_patterns" in patterns_result:
                             patterns_result["chart_patterns"] = [
                                 p for p in patterns_result["chart_patterns"]
-                                if p.get("type") != _opposing or p.get("confidence") == "High"
+                                if p.get("model") == "causal_wyckoff_v1" or p.get("type") != _opposing or p.get("confidence") == "High"
                             ]
 
                         # Order Blocks: Nur die zur Trend-Richtung passenden behalten
@@ -29534,6 +29736,22 @@ def get_scan_results(
             "final_results": 0,
             "warning": "strategy_cache_version_old_scan_again",
         }
+
+    if is_generic_stock_strategy:
+        # Shared legacy caches may belong to another strategy. In particular,
+        # a Gap row must not become a Wyckoff signal just because it has a good
+        # score/plan. The requested strategy binds the canonical proof gate.
+        verified_results = [
+            row for row in results
+            if isinstance(row, dict) and _stock_wyckoff_row_contract_valid(
+                row, expected_strategy=resolved_strategy or strategy,
+            )
+        ]
+        wyckoff_rejected = sum(isinstance(row, dict) for row in results) - len(verified_results)
+        if wyckoff_rejected:
+            diagnostics = dict(diagnostics or {})
+            diagnostics["wyckoff_contract_rejected"] = wyckoff_rejected
+        results = verified_results
 
     pre_policy_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)

@@ -48,6 +48,7 @@ snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
 change_filter price_filter close_position_filter gap_filter dollar_volume_filter
 vortag_filter rvol_filter momentum_breakout_gate momentum_completed_5m_confirmation
 reversal_ad_gate raw_matches_before_special_filter final_results
+wyckoff_analyzed wyckoff_confirmed
 """.split())
 # These are exact codes, never a wildcard for provider messages or ticker names.
 DATA_FAILURE_CODES = frozenset("""
@@ -90,6 +91,7 @@ momentum:intraday_failed_breakout momentum:intraday_stale_breakout
 momentum:intraday_stale_extension momentum:intraday_data_unavailable
 momentum:intraday_confirmation_stale momentum:confirmation_expired_before_publication
 reversal_ad:ad_confirms_selloff_falling_knife
+wyckoff:event_sequence_unconfirmed_or_invalid
 """.split())
 CACHE_MAX_BYTES = 8 * 1024 * 1024
 CRYPTO_SCAN_COUNTS = frozenset("""
@@ -106,6 +108,15 @@ invalid_entry_or_direction causal_structure_missing causal_structure_unavailable
 crossed_resistance_unconfirmed crossed_support_unconfirmed no_structural_invalidation
 invalid_stop_risk invalid_trade_geometry native_structure_plan
 first_opposing_barrier_before_minimum_rr direction_missing plan_unavailable
+""".split())
+WYCKOFF_REASONS = frozenset("""
+confirmed event_sequence_unconfirmed minimum_completed_bars_missing
+invalid_bar_timestamp invalid_bar_payload invalid_bar_volume invalid_bar_prices
+invalid_bar_value conflicting_completed_bars positive_volume_evidence_missing atr_unavailable
+range_failed range_failed_before_secondary_test spring_volume_unavailable
+breakout_failed confirmation_atr_unavailable post_confirmation_stop_breached
+latest_volume_evidence_missing projected_target_not_beyond_entry invalid_trade_geometry
+conflicting_directional_patterns
 """.split())
 # Mirrored protocol keys only. The root-invoked collector never imports app code.
 CONFLUENCE_COUNTS = frozenset("""
@@ -160,6 +171,7 @@ unclassified_scanner
 volume_spikes
 """.split())
 SUPPRESSION_REASONS = frozenset("""
+wyckoff_contract_invalid
 armed_watch_mail_hard_disabled
 batch_mail_not_sent
 bear_crash_drop_below_threshold
@@ -1240,6 +1252,9 @@ def safe_cache_summary(path):
                 if counts is not None:
                     result[key] = counts
             plan_counts = _count_projection(diagnostics.get("plan_build_counts"), PLAN_BUILD_CODES)
+            wyckoff_counts = _count_projection(diagnostics.get("wyckoff_reasons"), WYCKOFF_REASONS)
+            if wyckoff_counts is not None:
+                result["wyckoff_reasons"] = wyckoff_counts
             if plan_counts is not None:
                 result["plan_build_counts"] = plan_counts
                 result["plan_build_count_semantics"] = "builder_outcomes_not_final_eligibility_or_delivery"

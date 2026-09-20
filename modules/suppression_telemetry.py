@@ -96,6 +96,7 @@ ALLOWED_SUPPRESSION_SCANNERS = frozenset({
 })
 
 ALLOWED_SUPPRESSION_REASONS = frozenset({
+    "wyckoff_contract_invalid",
     # Stable fallback. It intentionally contains no fragment of the rejected
     # value, so an unexpected code reason cannot leak an identity.
     "unclassified_code_reason",

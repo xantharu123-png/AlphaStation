@@ -185,7 +185,11 @@ def test_live_scanner_and_chart_paths_share_canonical_wilder_atr():
     assert "build_bi_trade_plan(" in bi_source
     assert "calculate_wilder_atr(analysis_bars, period=5)" in inspect.getsource(build_bi_trade_plan)
     assert "or (bars[-1]" not in bi_source
-    assert "calculate_atr_14(ohlcv_data)" in wyckoff_source
+    # Wyckoff adapters now share the pure causal engine instead of duplicating ATR.
+    from modules import wyckoff as wyckoff_module
+    from modules.indicators import calculate_atr_14
+    assert "analyze_wyckoff(ohlcv_data, as_of=as_of, timeframe=timeframe)" in wyckoff_source
+    assert wyckoff_module.calculate_atr_14 is calculate_atr_14
     assert "atr_vals" not in wyckoff_source
     assert "_completed_stock_daily_atr(" in detail_source
     assert "as_of=_detail_cutoff" in detail_source

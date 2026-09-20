@@ -3180,525 +3180,94 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
 
 
 # ── scan_wyckoff_single (originally line 4766) ──
-def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour"):
+def scan_wyckoff_single(ticker, api_key, days=180, timeframe="hour", *, as_of=None, direction="ALL"):
+    """Legacy provider boundary backed by the same causal Wyckoff engine.
+
+    Legacy "hour" means 4H; "1hour" means 1H; "day" means 1D.
+    Context phases are not scanner trades. Raw invalid OHLCV is retained for
+    the engine's fail-closed validation rather than silently dropped.
     """
-    Scannt eine Aktie nach Wyckoff Accumulation/Distribution Patterns.
-    Korrekte Wyckoff-Methodik nach Richard Wyckoff / David Weis:
-    
-    ACCUMULATION (Schematic #1 & #2):
-      1. PS  (Preliminary Support): Erste Kaufreaktion nach Downtrend, Volume steigt
-      2. SC  (Selling Climax): Wide Spread DOWN + Ultra-High Volume + Close obere Haelfte (Absorption!)
-      3. AR  (Automatic Rally): Schneller Bounce, definiert Oberkante der Range
-      4. ST  (Secondary Test): Retest SC-Zone auf ABNEHMENDEM Volume, Spread enger
-      5. Spring/Shakeout: Kurzer Bruch unter SC-Low auf LOW Volume -> schnelle Recovery
-      6. Test of Spring: Retest Spring-Low auf noch niedrigerem Volume
-      7. SOS (Sign of Strength): Wide Spread UP + HIGH Volume ueber AR-Level
-      8. LPS (Last Point of Support): Pullback auf ABNEHMENDEM Volume, haelt ueber alter Resistance
-    
-    DISTRIBUTION (Schematic #1 & #2):
-      1. PSY (Preliminary Supply): Erste Verkaufsreaktion nach Uptrend
-      2. BC  (Buying Climax): Wide Spread UP + Ultra-High Volume + Close untere Haelfte
-      3. AR  (Automatic Reaction): Schneller Drop, definiert Unterkante der Range
-      4. ST  (Secondary Test): Retest BC-Zone auf abnehmendem Volume
-      5. UTAD (Upthrust After Distribution): Bruch ueber BC-High auf LOW Volume -> Failure
-      6. SOW (Sign of Weakness): Wide Spread DOWN + HIGH Volume unter AR-Level
-      7. LPSY (Last Point of Supply): Rally auf abnehmendem Volume, scheitert unter alter Support
-    
-    KRITISCH: Volume + Spread (Kerzengroesse) zusammen analysieren!
-    """
+    from zoneinfo import ZoneInfo
+    from modules.stock_swing_contract import session_close
+    from modules.wyckoff import analyze_wyckoff
+
+    mapping = {"hour": (4, "hour", "4H"), "4H": (4, "hour", "4H"),
+               "1hour": (1, "hour", "1H"), "1H": (1, "hour", "1H"),
+               "day": (1, "day", "1D"), "1D": (1, "day", "1D")}
+    if timeframe not in mapping or direction not in {"ALL", "LONG", "SHORT"}:
+        return None
+    cutoff = datetime.now(timezone.utc) if as_of is None else as_of
+    if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
+        return None
+    cutoff = cutoff.astimezone(timezone.utc)
+    multiplier, span, canonical_timeframe = mapping[timeframe]
     try:
-        from datetime import datetime, timedelta
-        
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 10)
-        
-        multiplier = 4
-        span = "hour"
-        if timeframe == "day":
-            multiplier = 1
-            span = "day"
-        elif timeframe == "1hour":
-            multiplier = 1
-            span = "hour"
-        
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
-        api_limit = 5000 if span == "hour" else 500
-        params = {"adjusted": "true", "sort": "asc", "limit": api_limit, "apiKey": api_key}
-        
-        resp = rate_limited_get(url, params=params, timeout=20)
-        data = resp.json()
-        
-        if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
+        start = cutoff - timedelta(days=int(days) + 10)
+        url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{span}/"
+               f"{start:%Y-%m-%d}/{cutoff:%Y-%m-%d}")
+        response = rate_limited_get(
+            url, params={"adjusted": "true", "sort": "asc",
+                         "limit": 5000 if span == "hour" else 500, "apiKey": api_key},
+            timeout=20)
+        if getattr(response, "status_code", 200) >= 400:
             return None
-        
-        raw_bars = completed_polygon_bars(data["results"], span=span,
-                                          multiplier=multiplier, as_of=datetime.now(timezone.utc))
-        if len(raw_bars) < 60:
+        payload = response.json()
+        if payload.get("status") not in {"OK", "DELAYED"} or not isinstance(payload.get("results"), list):
             return None
-        
-        opens = [b["o"] for b in raw_bars]
-        closes = [b["c"] for b in raw_bars]
-        highs = [b["h"] for b in raw_bars]
-        lows = [b["l"] for b in raw_bars]
-        volumes = [b["v"] for b in raw_bars]
-        current_price = closes[-1]
-        n = len(closes)
-        
-        # Helper: Spread (Kerzengroesse) und Body-Position
-        def spread(i):
-            return highs[i] - lows[i]
-        
-        def body_position(i):
-            """Wo schliesst die Kerze relativ zum Range? 0=Low, 1=High"""
-            s = spread(i)
-            return (closes[i] - lows[i]) / s if s > 0 else 0.5
-        
-        def is_wide_spread(i, lookback=20):
-            """Spread > 1.3x Durchschnitt"""
-            start = max(0, i - lookback)
-            avg_spread = sum(spread(j) for j in range(start, i)) / max(1, i - start)
-            return spread(i) > avg_spread * 1.3
-        
-        def is_high_volume(i, lookback=20):
-            """Volume > 1.5x Durchschnitt"""
-            ratio = _relative_volume_state(volumes, i, lookback=lookback)
-            return ratio is not None and ratio > 1.5, ratio or 0.0
-        
-        def is_low_volume(i, lookback=20):
-            """Volume < 0.7x Durchschnitt"""
-            ratio = _relative_volume_state(volumes, i, lookback=lookback)
-            return ratio is not None and ratio < 0.7, ratio or 0.0
-        
-        # ATR fuer Stop-Berechnung
-        atr, _ = calculate_atr_14(data)
-        if atr <= 0:
-            atr = current_price * 0.02
-        
-        results = []
-        lookback_end = int(n * 0.5)
-        
-        # ================================================================
-        # ACCUMULATION: Suche SC (Selling Climax) — DAS definiert die Range
-        # ================================================================
-        sc_candidates = []
-        for i in range(10, lookback_end):
-            hi_vol, vol_ratio = is_high_volume(i)
-            if not hi_vol or vol_ratio < 1.8:
+        prepared = []
+        eastern = ZoneInfo("America/New_York")
+        for raw in payload["results"]:
+            if not isinstance(raw, dict):
+                prepared.append(raw)  # Canonical validation must see bad rows.
                 continue
-            if not is_wide_spread(i):
-                continue
-            # SC: Close muss in oberer Haelfte sein (Absorption durch Smart Money)
-            # 0.45 = Close mindestens nahe Mitte der Kerze (strenger als 0.35)
-            if body_position(i) < 0.45:
-                continue
-            prior_high = max(highs[max(0, i-15):i])
-            decline_pct = (prior_high - lows[i]) / prior_high if prior_high > 0 else 0
-            if decline_pct < 0.05:
-                continue
-            sc_candidates.append({
-                "idx": i, "price": lows[i], "close": closes[i],
-                "vol_ratio": vol_ratio, "decline": decline_pct,
-                "score": vol_ratio * 10 + decline_pct * 100
-            })
-        
-        if sc_candidates:
-            sc_candidates.sort(key=lambda x: x["score"], reverse=True)
-            sc = sc_candidates[0]
-            sc_idx = sc["idx"]
-            sc_low = sc["price"]
-            
-            # PS (Preliminary Support): VOR SC — erste Kaufreaktion
-            ps_idx = None
-            for i in range(max(5, sc_idx - 20), sc_idx):
-                hi_vol, vr = is_high_volume(i)
-                if hi_vol and closes[i] > opens[i] and body_position(i) > 0.5:
-                    ps_idx = i
-                    break
-            
-            # AR (Automatic Rally): Hoechster Punkt 3-20 Bars NACH SC
-            ar_idx, ar_high = None, 0
-            for i in range(sc_idx + 2, min(sc_idx + 20, n)):
-                if highs[i] > ar_high:
-                    ar_high = highs[i]
-                    ar_idx = i
-            
-            if ar_idx and ar_high > sc_low:
-                range_low = sc_low
-                range_high = ar_high
-                range_width = range_high - range_low
-                range_mid = (range_high + range_low) / 2
-                
-                if 0.02 < range_width / range_mid < 0.30:
-                    events = []
-                    event_bars = {}
-                    score = 0
-                    
-                    if ps_idx:
-                        events.append(f"PS @ ${closes[ps_idx]:.2f}")
-                        event_bars["PS"] = {"idx": ps_idx, "price": closes[ps_idx], "ts": raw_bars[ps_idx]["t"]}
-                        score += 10
-                    
-                    events.append(f"SC @ ${sc_low:.2f} (Vol {sc['vol_ratio']:.1f}x, Close obere Haelfte)")
-                    event_bars["SC"] = {"idx": sc_idx, "price": sc_low, "ts": raw_bars[sc_idx]["t"]}
-                    score += 20
-                    
-                    events.append(f"AR @ ${ar_high:.2f}")
-                    event_bars["AR"] = {"idx": ar_idx, "price": ar_high, "ts": raw_bars[ar_idx]["t"]}
-                    score += 15
-                    
-                    # Multiple STs auf abnehmendem Volume — Tests nahe SUPPORT (SC-Zone)
-                    st_count = 0
-                    prev_st_vol = sc["vol_ratio"]
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if lows[i] <= range_low + range_width * 0.25:
-                            hi_vol, vr = is_high_volume(i)
-                            if vr < prev_st_vol * 0.9:
-                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
-                                events.append(f"{st_label} @ ${lows[i]:.2f} (Vol {vr:.1f}x)")
-                                event_bars[st_label] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
-                                score += 10 if st_count == 0 else 5
-                                prev_st_vol = vr
-                                st_count += 1
-                                if st_count >= 3:
-                                    break
-                    
-                    # Phase B: Tests nahe RESISTANCE (AR-Zone) — Price rallies TO but fails AT AR
-                    # Wichtig: Volume sollte bei Rallies zur Resistance ABNEHMEN
-                    rt_count = 0
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if highs[i] >= range_high - range_width * 0.20:
-                            hi_vol, vr = is_high_volume(i)
-                            # Rally zur Resistance auf normalem/niedrigem Volume = Schwäche
-                            if not hi_vol or vr < 1.3:
-                                rt_label = f"RT{rt_count + 1}" if rt_count > 0 else "RT"
-                                events.append(f"{rt_label} @ ${highs[i]:.2f} (Resistance Test, Vol {vr:.1f}x)")
-                                event_bars[rt_label] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
-                                score += 5
-                                rt_count += 1
-                                if rt_count >= 2:
-                                    break
-                    
-                    # Volume-Decay in Phase B
-                    if ar_idx + 20 < n:
-                        early_values = _positive_volume_values(
-                            volumes[ar_idx:ar_idx + 10]
-                        )
-                        early_range_vol = (
-                            sum(early_values) / len(early_values)
-                            if len(early_values) >= 5
-                            else None
-                        )
-                        mid_point = ar_idx + (n - ar_idx) // 2
-                        if mid_point + 10 <= n:
-                            later_values = _positive_volume_values(
-                                volumes[mid_point:mid_point + 10]
-                            )
-                            later_range_vol = (
-                                sum(later_values) / len(later_values)
-                                if len(later_values) >= 5
-                                else None
-                            )
-                            if (
-                                early_range_vol is not None
-                                and later_range_vol is not None
-                                and later_range_vol < early_range_vol * 0.75
-                            ):
-                                events.append(f"Vol Decay: {later_range_vol/early_range_vol:.0%}")
-                                score += 5
-                    
-                    # Spring: Break unter SC-Low auf LOW VOLUME
-                    spring_idx = None
-                    spring_start = max(ar_idx + 5, int(sc_idx + (n - sc_idx) * 0.3))
-                    for i in range(spring_start, n - 3):
-                        if lows[i] < range_low:
-                            low_vol, lvr = is_low_volume(i)
-                            if low_vol or lvr < 0.85:
-                                for j in range(1, min(6, n - i)):
-                                    if closes[i + j] > range_low + range_width * 0.10:
-                                        spring_idx = i
-                                        events.append(f"Spring @ ${lows[i]:.2f} (Vol {lvr:.1f}x LOW)")
-                                        event_bars["Spring"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
-                                        score += 25
-                                        break
-                            break
-                    
-                    # Test of Spring
-                    if spring_idx and spring_idx + 5 < n:
-                        for i in range(spring_idx + 2, min(spring_idx + 15, n)):
-                            if lows[i] <= lows[spring_idx] + range_width * 0.05:
-                                low_vol, lvr = is_low_volume(i)
-                                if low_vol:
-                                    events.append(f"Test Spring @ ${lows[i]:.2f} (Vol {lvr:.1f}x)")
-                                    event_bars["TestSpring"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
-                                    score += 10
-                                    break
-                    
-                    # SOS: Wide Spread UP + HIGH Volume ueber AR-Level
-                    sos_idx = None
-                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
-                        if closes[i] > range_high and closes[i] > opens[i]:
-                            hi_vol, vr = is_high_volume(i)
-                            if hi_vol and is_wide_spread(i):
-                                sos_idx = i
-                                events.append(f"SOS @ ${closes[i]:.2f} (Vol {vr:.1f}x, Wide Spread)")
-                                event_bars["SOS"] = {"idx": i, "price": closes[i], "ts": raw_bars[i]["t"]}
-                                score += 20
-                                break
-                    
-                    if not sos_idx and current_price > range_high:
-                        events.append(f"SOS (schwach): ${current_price:.2f} > Range ${range_high:.2f}")
-                        score += 8
-                    
-                    # LPS: Pullback NACH SOS, haelt UEBER range_high, LOW Volume
-                    if sos_idx and sos_idx + 3 < n:
-                        for i in range(sos_idx + 1, n):
-                            if lows[i] < closes[sos_idx]:
-                                low_vol, lvr = is_low_volume(i)
-                                if lows[i] >= range_high - range_width * 0.10:
-                                    if low_vol or lvr < 0.9:
-                                        events.append(f"LPS @ ${lows[i]:.2f} (Vol {lvr:.1f}x)")
-                                        event_bars["LPS"] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
-                                        score += 15
-                                        break
-                    
-                    if score >= 35:
-                        if sos_idx or current_price > range_high * 1.02:
-                            phase = "Phase D/E — Markup beginning"
-                            phase_short = "D/E"
-                        elif spring_idx:
-                            phase = "Phase C — Spring (Smart Money Shakeout)"
-                            phase_short = "C"
-                        elif st_count >= 1:
-                            phase = "Phase B — Cause Building"
-                            phase_short = "B"
-                        else:
-                            phase = "Phase A — Selling Exhaustion"
-                            phase_short = "A"
-                        
-                        if spring_idx:
-                            entry = range_high
-                            stop = lows[spring_idx] - atr * 0.3
-                        else:
-                            entry = range_high
-                            stop = range_low - atr * 0.5
-                        
-                        tp1 = range_high + range_width * 0.75
-                        tp2 = range_high + range_width * 1.5
-                        geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
-                        if geometry["valid"]:
-                            results.append({
-                                "type": "Accumulation", "direction": "LONG",
-                                "phase": phase, "phase_short": phase_short,
-                                "score": min(score, 100), "events": events, "event_bars": event_bars,
-                                "range_high": round(range_high, 2), "range_low": round(range_low, 2),
-                                "range_start_ts": raw_bars[sc_idx]["t"],
-                                "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
-                                "entry": round(entry, 2), "stop": round(stop, 2),
-                                "tp1": round(tp1, 2), "tp2": round(tp2, 2),
-                                "rr": geometry["rr_tp1"], "current_price": round(current_price, 2),
-                            })
-        
-        # ================================================================
-        # DISTRIBUTION: Suche BC (Buying Climax)
-        # ================================================================
-        bc_candidates = []
-        for i in range(10, lookback_end):
-            hi_vol, vol_ratio = is_high_volume(i)
-            if not hi_vol or vol_ratio < 1.8:
-                continue
-            if not is_wide_spread(i):
-                continue
-            if body_position(i) > 0.65:
-                continue
-            prior_low = min(lows[max(0, i-15):i])
-            rally_pct = (highs[i] - prior_low) / prior_low if prior_low > 0 else 0
-            if rally_pct < 0.05:
-                continue
-            bc_candidates.append({
-                "idx": i, "price": highs[i], "close": closes[i],
-                "vol_ratio": vol_ratio, "rally": rally_pct,
-                "score": vol_ratio * 10 + rally_pct * 100
-            })
-        
-        if bc_candidates:
-            bc_candidates.sort(key=lambda x: x["score"], reverse=True)
-            bc = bc_candidates[0]
-            bc_idx = bc["idx"]
-            bc_high = bc["price"]
-            
-            psy_idx = None
-            for i in range(max(5, bc_idx - 20), bc_idx):
-                hi_vol, vr = is_high_volume(i)
-                if hi_vol and closes[i] < opens[i] and body_position(i) < 0.5:
-                    psy_idx = i
-                    break
-            
-            ar_idx, ar_low = None, float('inf')
-            for i in range(bc_idx + 2, min(bc_idx + 20, n)):
-                if lows[i] < ar_low:
-                    ar_low = lows[i]
-                    ar_idx = i
-            
-            if ar_idx and ar_low < bc_high:
-                range_high = bc_high
-                range_low = ar_low
-                range_width = range_high - range_low
-                range_mid = (range_high + range_low) / 2
-                
-                if 0.02 < range_width / range_mid < 0.30:
-                    events = []
-                    event_bars = {}
-                    score = 0
-                    
-                    if psy_idx:
-                        events.append(f"PSY @ ${closes[psy_idx]:.2f}")
-                        event_bars["PSY"] = {"idx": psy_idx, "price": closes[psy_idx], "ts": raw_bars[psy_idx]["t"]}
-                        score += 10
-                    
-                    events.append(f"BC @ ${bc_high:.2f} (Vol {bc['vol_ratio']:.1f}x, Close untere Haelfte)")
-                    event_bars["BC"] = {"idx": bc_idx, "price": bc_high, "ts": raw_bars[bc_idx]["t"]}
-                    score += 20
-                    
-                    events.append(f"AR @ ${ar_low:.2f}")
-                    event_bars["AR"] = {"idx": ar_idx, "price": ar_low, "ts": raw_bars[ar_idx]["t"]}
-                    score += 15
-                    
-                    st_count = 0
-                    prev_st_vol = bc["vol_ratio"]
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if highs[i] >= range_high - range_width * 0.25:
-                            hi_vol, vr = is_high_volume(i)
-                            if vr < prev_st_vol * 0.9:
-                                st_label = f"ST{st_count + 1}" if st_count > 0 else "ST"
-                                events.append(f"{st_label} @ ${highs[i]:.2f} (Vol {vr:.1f}x)")
-                                event_bars[st_label] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
-                                score += 10 if st_count == 0 else 5
-                                prev_st_vol = vr
-                                st_count += 1
-                                if st_count >= 3:
-                                    break
-                    
-                    # Phase B: Tests nahe SUPPORT (AR-Zone) — Drops TO but holds AT AR
-                    # Volume sollte bei Drops zur Support ABNEHMEN
-                    st_support_count = 0
-                    for i in range(ar_idx + 3, min(n - 5, ar_idx + int((n - ar_idx) * 0.7))):
-                        if lows[i] <= range_low + range_width * 0.20:
-                            hi_vol, vr = is_high_volume(i)
-                            if not hi_vol or vr < 1.3:
-                                st_s_label = f"ST-S{st_support_count + 1}" if st_support_count > 0 else "ST-S"
-                                events.append(f"{st_s_label} @ ${lows[i]:.2f} (Support Test, Vol {vr:.1f}x)")
-                                event_bars[st_s_label] = {"idx": i, "price": lows[i], "ts": raw_bars[i]["t"]}
-                                score += 5
-                                st_support_count += 1
-                                if st_support_count >= 2:
-                                    break
-                    
-                    # UTAD: Break ueber BC-High auf LOW Volume -> Failure
-                    utad_idx = None
-                    utad_start = max(ar_idx + 5, int(bc_idx + (n - bc_idx) * 0.3))
-                    for i in range(utad_start, n - 3):
-                        if highs[i] > range_high:
-                            low_vol, lvr = is_low_volume(i)
-                            if low_vol or lvr < 0.85:
-                                for j in range(1, min(6, n - i)):
-                                    if closes[i + j] < range_high - range_width * 0.10:
-                                        utad_idx = i
-                                        events.append(f"UTAD @ ${highs[i]:.2f} (Vol {lvr:.1f}x LOW)")
-                                        event_bars["UTAD"] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
-                                        score += 25
-                                        break
-                            break
-                    
-                    # SOW: Wide Spread DOWN + HIGH Volume unter AR-Level
-                    sow_idx = None
-                    for i in range(max(ar_idx + 10, n - int(n * 0.4)), n):
-                        if closes[i] < range_low and closes[i] < opens[i]:
-                            hi_vol, vr = is_high_volume(i)
-                            if hi_vol and is_wide_spread(i):
-                                sow_idx = i
-                                events.append(f"SOW @ ${closes[i]:.2f} (Vol {vr:.1f}x, Wide Spread)")
-                                event_bars["SOW"] = {"idx": i, "price": closes[i], "ts": raw_bars[i]["t"]}
-                                score += 20
-                                break
-                    
-                    if not sow_idx and current_price < range_low:
-                        events.append(f"SOW (schwach): ${current_price:.2f} < Range ${range_low:.2f}")
-                        score += 8
-                    
-                    # LPSY: Rally auf abnehmendem Volume, scheitert unter Range Low
-                    if sow_idx and sow_idx + 3 < n:
-                        for i in range(sow_idx + 1, n):
-                            if highs[i] > closes[sow_idx]:
-                                low_vol, lvr = is_low_volume(i)
-                                if highs[i] <= range_low + range_width * 0.10:
-                                    if low_vol or lvr < 0.9:
-                                        events.append(f"LPSY @ ${highs[i]:.2f} (Vol {lvr:.1f}x)")
-                                        event_bars["LPSY"] = {"idx": i, "price": highs[i], "ts": raw_bars[i]["t"]}
-                                        score += 15
-                                        break
-                    
-                    if score >= 35:
-                        if sow_idx or current_price < range_low * 0.98:
-                            phase = "Phase D/E — Markdown beginning"
-                            phase_short = "D/E"
-                        elif utad_idx:
-                            phase = "Phase C — UTAD (Failed Breakout)"
-                            phase_short = "C"
-                        elif st_count >= 1:
-                            phase = "Phase B — Cause Building"
-                            phase_short = "B"
-                        else:
-                            phase = "Phase A — Buying Exhaustion"
-                            phase_short = "A"
-                        
-                        if utad_idx:
-                            entry = range_low
-                            stop = highs[utad_idx] + atr * 0.3
-                        else:
-                            entry = range_low
-                            stop = range_high + atr * 0.5
-                        
-                        tp1 = range_low - range_width * 0.75
-                        tp2 = range_low - range_width * 1.5
-                        geometry = trade_geometry(entry, stop, tp1, tp2, "SHORT")
-                        if geometry["valid"]:
-                            results.append({
-                                "type": "Distribution", "direction": "SHORT",
-                                "phase": phase, "phase_short": phase_short,
-                                "score": min(score, 100), "events": events, "event_bars": event_bars,
-                                "range_high": round(range_high, 2), "range_low": round(range_low, 2),
-                                "range_start_ts": raw_bars[bc_idx]["t"],
-                                "range_end_ts": raw_bars[min(n-1, ar_idx + (n - ar_idx) // 2)]["t"],
-                                "entry": round(entry, 2), "stop": round(stop, 2),
-                                "tp1": round(tp1, 2), "tp2": round(tp2, 2),
-                                "rr": geometry["rr_tp1"], "current_price": round(current_price, 2),
-                            })
-        
-        if not results:
+            bar = dict(raw)
+            try:
+                opened = datetime.fromtimestamp(float(raw["t"]) / 1000, tz=timezone.utc)
+                bar["open_time"] = opened.isoformat()
+                if span == "day":
+                    session_date = opened.astimezone(eastern).date()
+                    closed = session_close(session_date.isoformat())
+                    if closed is None:
+                        return None  # No equity candle on an unknown/closed session.
+                    bar["close_time"] = closed.isoformat()
+            except (TypeError, ValueError, KeyError, OverflowError, OSError):
+                pass  # Keep invalid timestamp evidence, never repair or discard it.
+            prepared.append(bar)
+        result = analyze_wyckoff(
+            prepared, as_of=cutoff, timeframe=canonical_timeframe, direction=direction)
+        if result.get("status") != "ok":
             return None
-        best = max(results, key=lambda x: x["score"])
-        best["ticker"] = ticker
+        ready = [row for row in result.get("patterns", [])
+                 if row.get("trade_ready") is True and isinstance(row.get("trade"), dict)
+                 and (direction == "ALL" or row.get("direction") == direction)]
+        if not ready:
+            return None
+        best = dict(max(ready, key=lambda row: row.get("score", 0)))
+        best.update(best["trade"])
+        best.update(ticker=ticker, phase_short=best.get("phase"),
+                    model=result.get("model"), timeframe=result.get("timeframe"),
+                    as_of=result.get("as_of"), latest_completed_at=result.get("latest_completed_at"),
+                    data_status=result.get("status"))
         return best
     except Exception:
         return None
 
 
 # ── scan_wyckoff_batch (originally line 5254) ──
-def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="LONG"):
-    """Scannt mehrere Aktien nach Wyckoff Patterns."""
+def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="LONG", *, as_of=None):
+    """Return confirmed trades in the requested direction at one fixed cutoff."""
+    if direction not in {"ALL", "LONG", "SHORT"}:
+        return []
+    cutoff = datetime.now(timezone.utc) if as_of is None else as_of
     results = []
     for i, ticker in enumerate(tickers):
-        try:
-            result = scan_wyckoff_single(ticker, api_key, days, timeframe)
-            if result and (direction == "ALL" or result["direction"] == direction):
-                results.append(result)
-        except Exception:
-            continue
-        # Polygon Starter: ~100 Calls/Min → 0.15s zwischen Calls
+        result = scan_wyckoff_single(
+            ticker, api_key, days, timeframe, direction=direction, as_of=cutoff)
+        if result:
+            results.append(result)
         if i % 10 == 9:
-            time.sleep(1.5)  # 10 Calls in ~1.5s + 1.5s Pause = ~80/Min
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results
+            time.sleep(1.5)  # Provider pacing; not a claim about a subscription quota.
+    return sorted(results, key=lambda row: row.get("score", 0), reverse=True)
 
 
 # ── detect_volume_imbalances (originally line 9744) ──
@@ -5005,7 +4574,7 @@ def find_harmonic_for_chart(ohlcv_data):
         return []
 
 
-def detect_chart_patterns(ohlcv_data, lookback=50):
+def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
     """
     Erkennt Chart-Patterns automatisch.
     
@@ -5681,56 +5250,44 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                             "draw_points": [{"index": 0, "price": base_low}, {"index": base_end, "price": base_high}, {"index": base_end, "price": base_low}, {"index": len(closes)-1, "price": current_price}]
                         })
         
-        # === WYCKOFF ACCUMULATION / DISTRIBUTION ===
-        # Delegiert an find_wyckoff_for_chart() mit korrekter SC/BC-Methodik
-        # (alte Version benutzte falsche 25/50/25 Datenaufteilung)
-        
-        if len(closes) >= 60 and not any("Wyckoff" in p.get("pattern", "") for p in patterns):
-            try:
-                from modules.analysis import find_wyckoff_for_chart
-                wyckoff_results = find_wyckoff_for_chart(data)
-                for wr in wyckoff_results:
-                    w_type = wr.get("type", "Accumulation")
-                    w_phase = wr.get("phase", "Phase B")
-                    w_score = wr.get("score", 0)
-                    w_events = wr.get("events", [])
-                    w_rh = wr.get("range_high", 0)
-                    w_rl = wr.get("range_low", 0)
-                    w_rw = w_rh - w_rl if w_rh > w_rl else 0
-                    
-                    if w_score >= 35:
-                        event_strs = [e["label"] if isinstance(e, dict) else str(e) for e in w_events[:3]]
-                        
-                        if w_type == "Accumulation":
-                            phase_emoji = "[+]" if "D" in w_phase else "[~]" if "C" in w_phase else "[o]"
-                            target = round(w_rh + w_rw, 2)
-                            p_type = "bullish"
-                        else:
-                            phase_emoji = "[-]" if "D" in w_phase else "[!]" if "C" in w_phase else "[o]"
-                            target = round(w_rl - w_rw, 2)
-                            p_type = "bearish"
-                        
-                        confidence = "High" if w_score >= 70 else "Medium" if w_score >= 50 else "Low"
-                        
-                        patterns.append({
-                            "pattern": f"Wyckoff {w_type}",
-                            "emoji": wr.get("emoji", ""),
-                            "type": p_type,
-                            "phase": w_phase,
-                            "phase_emoji": phase_emoji,
-                            "range_low": round(w_rl, 2),
-                            "range_high": round(w_rh, 2),
-                            "events": event_strs,
-                            "score": w_score,
-                            "target": target,
-                            "confidence": confidence,
-                            "description": f"Wyckoff {w_type} — {w_phase}. Range ${w_rl:.2f}-${w_rh:.2f}. Events: {', '.join(event_strs)}",
-                            "draw_points": [{"index": 0, "price": w_rl}, {"index": len(data)-1, "price": w_rh}, {"index": len(data)-1, "price": (w_rl + w_rh) / 2}]
-                        })
-            
-            except Exception:
-                pass  # Wyckoff detection failed silently
-        
+        # === WYCKOFF: one causal engine with an explicit market/time context ===
+        if isinstance(wyckoff_context, dict):
+            from modules.analysis import find_wyckoff_for_chart
+
+            wyckoff_rows = find_wyckoff_for_chart(
+                wyckoff_context.get("bars", ohlcv_data),
+                as_of=wyckoff_context.get("as_of"),
+                timeframe=wyckoff_context.get("timeframe"))
+            for row in wyckoff_rows:
+                ready = row.get("trade_ready") is True
+                trade = row.get("trade") if ready else None
+                events = row.get("events", [])
+                event_labels = [str(event.get("name") or "") for event in events]
+                direction = row.get("direction")
+                quality = row.get("score", 0)
+                phase = row.get("phase", "")
+                state_label = "Bestaetigte Fortsetzung" if ready else "Kontext, kein Handelssignal"
+                patterns.append({
+                    **row,
+                    "pattern": f"Wyckoff {row.get('type', '')}",
+                    "type": ("bullish" if direction == "LONG" else "bearish") if ready else "neutral",
+                    "context_bias": "bullish" if direction == "LONG" else "bearish",
+                    "phase": phase, "phase_emoji": "[+]" if ready else "[o]",
+                    "time": max((event["confirmation_time"] for event in events
+                                 if event.get("confirmation_time") is not None), default=None),
+                    "events": event_labels, "event_evidence": events,
+                    "target": trade.get("tp1") if isinstance(trade, dict) else None,
+                    "target_basis": trade.get("target_basis") if isinstance(trade, dict) else None,
+                    "trade": trade,
+                    "confidence": "High" if quality >= 70 else "Medium" if quality >= 50 else "Low",
+                    "description": (f"Wyckoff {row.get('type')} — Phase {phase}. {state_label}. "
+                                    f"Modellqualitaet {quality}/100, keine Trefferwahrscheinlichkeit. "
+                                    f"Ereignisse: {', '.join(event_labels)}"),
+                    "index_basis": "time",
+                    "draw_points": [{"time": event["time"], "price": event["price"]}
+                                    for event in events if event.get("time") is not None
+                                    and event.get("price") is not None],
+                })
         # === WOLFE WAVES ===
         # 5-Punkt-Reversal: Überschuss an Linie 1→3, Target = Linie 1→4
         
@@ -6284,6 +5841,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50):
                           "Three White Soldiers", "Three Black Crows"}
 
             for p in patterns:
+                if p.get("model") == "causal_wyckoff_v1":
+                    continue  # Exact observed/confirmed event times, never an estimated slice index.
                 if p.get("detect_index") is not None:
                     continue  # Bereits gesetzt, nicht überschreiben
 
