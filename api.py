@@ -20769,10 +20769,22 @@ def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) 
     return enriched
 
 
+def _special_strategy_candidate_limit(strat):
+    """One unchanged admission limit for ranking and retained native contexts."""
+    if strat.get("needs_harmonic"):
+        return 120
+    if strat.get("needs_cup_handle") or strat.get("needs_ma"):
+        return 180
+    if strat.get("needs_volume_profile"):
+        return 160
+    return 220
+
+
 def _apply_special_strategy_post_filter(
     candidates: List[Dict[str, Any]],
     strat: Dict[str, Any],
     strategy_name: str,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Upgrade strategy scans from pure snapshot filters to setup validation."""
     if str(strat.get("pattern_type") or "").startswith("wyckoff_"):
@@ -20794,15 +20806,20 @@ def _apply_special_strategy_post_filter(
         return []
 
     history_cache: Dict[str, List[Dict[str, Any]]] = {}
-    candidate_limit = 220
-    if strat.get("needs_harmonic"):
-        candidate_limit = 120
-    elif strat.get("needs_cup_handle"):
-        candidate_limit = 180
-    elif strat.get("needs_ma"):
-        candidate_limit = 180
-    elif strat.get("needs_volume_profile"):
-        candidate_limit = 160
+    candidate_limit = _special_strategy_candidate_limit(strat)
+    cup_diagnostics = diagnostics if strat.get("needs_cup_handle") and isinstance(diagnostics, dict) else None
+    if cup_diagnostics is not None:
+        cup_diagnostics.update(special_filter_input_count=len(candidates),
+                               special_filter_checked_count=0,
+                               special_filter_unexamined_count=len(candidates),
+                               special_filter_limit=candidate_limit)
+
+    def checked_candidate():
+        # A finished special attempt includes an explicit insufficient-history
+        # rejection, but never an interrupted provider/native/shape operation.
+        if cup_diagnostics is not None:
+            cup_diagnostics["special_filter_checked_count"] += 1
+            cup_diagnostics["special_filter_unexamined_count"] -= 1
 
     min_history = max(int(strat.get("history_days", 0) or 0), 20)
     if strat.get("needs_volume_profile"):
@@ -20820,7 +20837,26 @@ def _apply_special_strategy_post_filter(
                                       total=min(len(candidates), candidate_limit))
         ticker = candidate.get("ticker") or candidate.get("Ticker")
         if not ticker:
+            checked_candidate()
             continue
+
+        # Cup's unchanged generic score selected this exact slot before native
+        # work. Pop the private context before copying/enriching any public row.
+        native_context = candidate.pop("_deferred_native_plan", None)
+        if native_context is not None:
+            native_diagnostics = diagnostics if diagnostics is not None else {}
+            try:
+                _enrich_stock_strategy_native_plan(candidate, native_context, native_diagnostics)
+            except stock_scan_runtime.ScanWorkTimeout:
+                raise
+            except ScannerDataError as data_error:
+                rejected = native_diagnostics.setdefault("rejected", {})
+                rejected[data_error.code] = int(rejected.get(data_error.code, 0)) + 1
+                raise ScannerDataError(data_error.code, native_diagnostics) from None
+            except Exception:
+                rejected = native_diagnostics.setdefault("rejected", {})
+                rejected["exception"] = int(rejected.get("exception", 0)) + 1
+                raise ScannerDataError("scan_data_incomplete", native_diagnostics) from None
 
         daily_bars = _stock_completed_pattern_history(
             _fetch_strategy_daily_history(str(ticker), min_history, history_cache, True),
@@ -20828,6 +20864,7 @@ def _apply_special_strategy_post_filter(
                    if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
         )
         if len(daily_bars) < min_history:
+            checked_candidate()
             continue
 
         enriched = dict(candidate)
@@ -20836,26 +20873,32 @@ def _apply_special_strategy_post_filter(
         if strat.get("needs_history"):
             enriched = _apply_pattern_strategy_filter(enriched, strat)
             if not enriched:
+                checked_candidate()
                 continue
         if strat.get("needs_volume_profile"):
             enriched = _apply_void_strategy_filter(enriched, strat, strategy_name)
             if not enriched:
+                checked_candidate()
                 continue
         if strat.get("needs_harmonic"):
             enriched = _apply_harmonic_strategy_filter(enriched, strat)
             if not enriched:
+                checked_candidate()
                 continue
         if strat.get("needs_cup_handle"):
             enriched = _apply_cup_handle_strategy_filter(enriched, strat)
             if not enriched:
+                checked_candidate()
                 continue
         if strat.get("needs_ma"):
             enriched = _apply_ma_strategy_filter(enriched, strat)
             if not enriched:
+                checked_candidate()
                 continue
 
         enriched.pop("_daily_bars", None)
         filtered.append(enriched)
+        checked_candidate()
 
     filtered.sort(key=lambda x: (-float(x.get("score", 0) or 0), -float(x.get("Dollar_Volume", 0) or 0), -abs(float(x.get("Change_Pct", 0) or 0))))
     print(f"[Strategy Scan] {strategy_name}: {len(filtered)}/{min(len(candidates), candidate_limit)} Kandidaten nach Spezial-Check")
@@ -21050,6 +21093,8 @@ _STOCK_ATTEMPT_COUNTS = frozenset({
     "checked", "total", "universe_count", "common_stock_universe_count",
     "raw_matches_before_special_filter", "final_results", "max_results",
     "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
+    "special_filter_input_count", "special_filter_checked_count",
+    "special_filter_unexamined_count", "special_filter_limit",
 })
 _STOCK_ATTEMPT_STAGES = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -21336,6 +21381,132 @@ def _stock_strategy_result_attempt(strategy_name: str, scan_state: Dict[str, Any
     return state, public
 
 
+def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
+    """Apply unchanged native-plan work; Cup invokes this only after admission."""
+    ticker = context["ticker"]
+    daily_bars = context["daily_bars"]
+    history_metrics = context["history_metrics"]
+    price = context["price"]
+    prev_atr_pct = context["prev_atr_pct"]
+    day_high, day_low = context["day_high"], context["day_low"]
+    close_pos = context["close_pos"]
+    bid, ask = context["bid"], context["ask"]
+    analysis_as_of = context["analysis_as_of"]
+    _setup_direction = str(context.get("direction") or "").upper()
+    _plan_diagnostics = {"status": "unavailable", "reason": "direction_missing"}
+    if _setup_direction in ("LONG", "SHORT"):
+        _plan_diagnostics["reason"] = "plan_unavailable"
+        # Fetch 4H only for candidates that survived all broad
+        # filters.  This keeps the universe scan efficient while
+        # giving the actual trade plan D/W + execution-TF zones.
+        with stock_scan_runtime.measure("execution_history"):
+            _level_4h_bars = _fetch_recent_stock_4h_bars(ticker, limit=40)
+        with stock_scan_runtime.measure("structure"):
+            _level_snapshot = _build_stock_level_snapshot(
+                daily_bars,
+                symbol=ticker,
+                current_price=price,
+                direction=_setup_direction,
+                atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                as_of=analysis_as_of,
+                four_hour_bars=_level_4h_bars,
+                spread=(ask - bid) if ask > bid > 0 else None,
+            )
+        if _level_snapshot is not None:
+            _level_legacy = legacy_level_adapter(
+                _level_snapshot,
+                entry=price,
+                direction=_setup_direction,
+            )
+            strategy_row["Level_Model"] = _level_snapshot.model
+            strategy_row["level_model"] = _level_snapshot.model
+            strategy_row["Level_Structure"] = _level_snapshot.to_dict()
+            strategy_row["level_structure"] = _level_snapshot.to_dict()
+            strategy_row["Level_Legacy"] = _level_legacy
+            if _level_legacy.get("supports"):
+                strategy_row["Support_1"] = _round_trade_price(
+                    _level_legacy["supports"][0]["price"]
+                )
+            if _level_legacy.get("resistances"):
+                strategy_row["Resistance_1"] = _round_trade_price(
+                    _level_legacy["resistances"][0]["price"]
+                )
+        with stock_scan_runtime.measure("plan"):
+            _trade_setup = _build_structured_trade_setup(
+                _setup_direction,
+                price,
+                float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                float(strategy_row.get("Support_1") or history_metrics.get("support_1") or 0.0),
+                float(strategy_row.get("Resistance_1") or history_metrics.get("resistance_1") or 0.0),
+                float(history_metrics.get("high_20d") or day_high),
+                float(history_metrics.get("low_20d") or day_low),
+                float(history_metrics.get("range_pos") or close_pos * 100.0),
+                structure_snapshot=_level_snapshot,
+                require_causal_structure=True,
+                diagnostics=_plan_diagnostics,
+            )
+        if _trade_setup:
+            _vrvp_as_of = analysis_as_of
+            _vrvp = build_vrvp_structure(
+                daily_bars,
+                price,
+                _setup_direction,
+                timeframe="1D",
+                num_bins=24,
+                min_bars=30,
+                lookback=90,
+                as_of=_vrvp_as_of,
+                date_session_context="us_equity_regular",
+            )
+            _vrvp_atr = (
+                _completed_stock_daily_atr(
+                    daily_bars,
+                    as_of=_vrvp_as_of,
+                    period=14,
+                    lookback=90,
+                )
+                or float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0))
+            )
+            _trade_setup = apply_vrvp_to_trade_setup(
+                _trade_setup,
+                _vrvp,
+                direction=_setup_direction,
+                asset_type="stock_swing",
+                atr=_vrvp_atr,
+            )
+            strategy_row.update({
+                "Entry": _trade_setup["entry"],
+                "StopLoss": _trade_setup["stop"],
+                "TP1": _trade_setup["tp1"],
+                "TP2": _trade_setup["tp2"],
+                "entry": _trade_setup["entry"],
+                "stop_loss": _trade_setup["stop"],
+                "tp1": _trade_setup["tp1"],
+                "tp2": _trade_setup["tp2"],
+                "trade_setup": _trade_setup,
+                "Trade_Setup_Source": "stock_strategy_20d_vrvp_structure" if _trade_setup.get("vrvp_applied") else "stock_strategy_20d_structure",
+                "level_model": _trade_setup.get("level_model"),
+                "structure_status": _trade_setup.get("structure_status"),
+                "structure_reason": _trade_setup.get("structure_reason"),
+                "structure_decision": _trade_setup.get("structure_decision"),
+                "nearest_barrier": _trade_setup.get("nearest_barrier"),
+                "barrier_gate": _trade_setup.get("barrier_gate"),
+                "barrier_gate_active": bool(_trade_setup.get("barrier_gate")),
+                "target_quality": _trade_setup.get("target_quality"),
+                "VRVP_POC": _trade_setup.get("vrvp_poc"),
+                "VRVP_VAH": _trade_setup.get("vrvp_vah"),
+                "VRVP_VAL": _trade_setup.get("vrvp_val"),
+                "VRVP_Timeframe": _trade_setup.get("vrvp_timeframe"),
+            })
+    # These are builder-stage diagnostics, not a claim that
+    # later VRVP, trade-health, mail or execution gates passed.
+    strategy_row["native_plan_status"] = _plan_diagnostics["status"]
+    strategy_row["native_plan_reason"] = _plan_diagnostics["reason"]
+    _plan_counts = scan_diag.setdefault("plan_build_counts", {})
+    _plan_reason = _plan_diagnostics["reason"]
+    _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
+
+
 @stock_scan_runtime.bounded_leaf
 def _strategy_scan_wrapper(
     strategy_name: str, send_email: bool = True, *, publish_generic_cache: bool = True,
@@ -21373,6 +21544,7 @@ def _strategy_scan_wrapper(
         # Full Snapshot zuerst: ruhige Struktur-Setups (MA Bounce, Flags,
         # Wyckoff, Compression) entstehen oft NICHT in den Top-Gainern/Losern.
         results = []
+        _cup_native_pool = []
         _all_snapshot_tickers = _fetch_strategy_snapshot_universe(strategy_name)
         common_stock_universe, common_stock_source = _load_common_stock_universe()
         session_name, _session_label = get_current_trading_session()
@@ -21451,7 +21623,9 @@ def _strategy_scan_wrapper(
                 _last_attempt_publish = now
             if not force and now - _last_partial_publish < 1.5:
                 return
-            preview = sorted(
+            # Cup shape validation happens only after generic top-N admission.
+            # Publish progress, never pre-pattern candidates as Cup results.
+            preview = [] if strat.get("needs_cup_handle") else sorted(
                 (dict(row) for row in results if isinstance(row, dict) and _stock_momentum_row_contract_valid(row)),
                 key=lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0))),
             )[:max_results]
@@ -22044,123 +22218,28 @@ def _strategy_scan_wrapper(
                     # Variablen nachziehen (entry_quality-Check nutzt _strat_grade).
                     _strat_score = int(strategy_row.get("score") or _strat_score)
                     _strat_grade = str(strategy_row.get("grade") or _strat_grade)
-                    _setup_direction = str(_score_meta.get("direction") or "").upper()
-                    _plan_diagnostics = {"status": "unavailable", "reason": "direction_missing"}
-                    if _setup_direction in ("LONG", "SHORT"):
-                        _plan_diagnostics["reason"] = "plan_unavailable"
-                        # Fetch 4H only for candidates that survived all broad
-                        # filters.  This keeps the universe scan efficient while
-                        # giving the actual trade plan D/W + execution-TF zones.
-                        with stock_scan_runtime.measure("execution_history"):
-                            _level_4h_bars = _fetch_recent_stock_4h_bars(ticker, limit=40)
-                        with stock_scan_runtime.measure("structure"):
-                            _level_snapshot = _build_stock_level_snapshot(
-                                daily_bars,
-                                symbol=ticker,
-                                current_price=price,
-                                direction=_setup_direction,
-                                atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                                as_of=analysis_as_of,
-                                four_hour_bars=_level_4h_bars,
-                                spread=(ask - bid) if ask > bid > 0 else None,
-                            )
-                        if _level_snapshot is not None:
-                            _level_legacy = legacy_level_adapter(
-                                _level_snapshot,
-                                entry=price,
-                                direction=_setup_direction,
-                            )
-                            strategy_row["Level_Model"] = _level_snapshot.model
-                            strategy_row["level_model"] = _level_snapshot.model
-                            strategy_row["Level_Structure"] = _level_snapshot.to_dict()
-                            strategy_row["level_structure"] = _level_snapshot.to_dict()
-                            strategy_row["Level_Legacy"] = _level_legacy
-                            if _level_legacy.get("supports"):
-                                strategy_row["Support_1"] = _round_trade_price(
-                                    _level_legacy["supports"][0]["price"]
-                                )
-                            if _level_legacy.get("resistances"):
-                                strategy_row["Resistance_1"] = _round_trade_price(
-                                    _level_legacy["resistances"][0]["price"]
-                                )
-                        with stock_scan_runtime.measure("plan"):
-                            _trade_setup = _build_structured_trade_setup(
-                                _setup_direction,
-                                price,
-                                float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                                float(strategy_row.get("Support_1") or history_metrics.get("support_1") or 0.0),
-                                float(strategy_row.get("Resistance_1") or history_metrics.get("resistance_1") or 0.0),
-                                float(history_metrics.get("high_20d") or day_high),
-                                float(history_metrics.get("low_20d") or day_low),
-                                float(history_metrics.get("range_pos") or close_pos * 100.0),
-                                structure_snapshot=_level_snapshot,
-                                require_causal_structure=True,
-                                diagnostics=_plan_diagnostics,
-                            )
-                        if _trade_setup:
-                            _vrvp_as_of = analysis_as_of
-                            _vrvp = build_vrvp_structure(
-                                daily_bars,
-                                price,
-                                _setup_direction,
-                                timeframe="1D",
-                                num_bins=24,
-                                min_bars=30,
-                                lookback=90,
-                                as_of=_vrvp_as_of,
-                                date_session_context="us_equity_regular",
-                            )
-                            _vrvp_atr = (
-                                _completed_stock_daily_atr(
-                                    daily_bars,
-                                    as_of=_vrvp_as_of,
-                                    period=14,
-                                    lookback=90,
-                                )
-                                or float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0))
-                            )
-                            _trade_setup = apply_vrvp_to_trade_setup(
-                                _trade_setup,
-                                _vrvp,
-                                direction=_setup_direction,
-                                asset_type="stock_swing",
-                                atr=_vrvp_atr,
-                            )
-                            strategy_row.update({
-                                "Entry": _trade_setup["entry"],
-                                "StopLoss": _trade_setup["stop"],
-                                "TP1": _trade_setup["tp1"],
-                                "TP2": _trade_setup["tp2"],
-                                "entry": _trade_setup["entry"],
-                                "stop_loss": _trade_setup["stop"],
-                                "tp1": _trade_setup["tp1"],
-                                "tp2": _trade_setup["tp2"],
-                                "trade_setup": _trade_setup,
-                                "Trade_Setup_Source": "stock_strategy_20d_vrvp_structure" if _trade_setup.get("vrvp_applied") else "stock_strategy_20d_structure",
-                                "level_model": _trade_setup.get("level_model"),
-                                "structure_status": _trade_setup.get("structure_status"),
-                                "structure_reason": _trade_setup.get("structure_reason"),
-                                "structure_decision": _trade_setup.get("structure_decision"),
-                                "nearest_barrier": _trade_setup.get("nearest_barrier"),
-                                "barrier_gate": _trade_setup.get("barrier_gate"),
-                                "barrier_gate_active": bool(_trade_setup.get("barrier_gate")),
-                                "target_quality": _trade_setup.get("target_quality"),
-                                "VRVP_POC": _trade_setup.get("vrvp_poc"),
-                                "VRVP_VAH": _trade_setup.get("vrvp_vah"),
-                                "VRVP_VAL": _trade_setup.get("vrvp_val"),
-                                "VRVP_Timeframe": _trade_setup.get("vrvp_timeframe"),
-                            })
-                    # These are builder-stage diagnostics, not a claim that
-                    # later VRVP, trade-health, mail or execution gates passed.
-                    strategy_row["native_plan_status"] = _plan_diagnostics["status"]
-                    strategy_row["native_plan_reason"] = _plan_diagnostics["reason"]
-                    _plan_counts = scan_diag.setdefault("plan_build_counts", {})
-                    _plan_reason = _plan_diagnostics["reason"]
-                    _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
+                    _native_context = {
+                        "ticker": ticker, "daily_bars": daily_bars,
+                        "history_metrics": history_metrics, "direction": _score_meta.get("direction"),
+                        "price": price, "prev_atr_pct": prev_atr_pct,
+                        "day_high": day_high, "day_low": day_low, "close_pos": close_pos,
+                        "bid": bid, "ask": ask, "analysis_as_of": analysis_as_of,
+                    }
+                    if strat.get("needs_cup_handle"):
+                        # Native enrichment never changes generic admission rank.
+                        # Keep only contexts for the same eventual top-180 pool.
+                        strategy_row["_deferred_native_plan"] = _native_context
+                    else:
+                        _enrich_stock_strategy_native_plan(strategy_row, _native_context, scan_diag)
                     if _score_meta.get("direction") == "long" and _strat_grade in _ALERT_TOP_GRADES:
                         strategy_row["entry_quality"] = "SWING_PLAN" if swing_daily_mode else "SWING_SETUP"
                         strategy_row["swing_timeframe"] = "1D" if swing_daily_mode else "daily_swing"
                     results.append(strategy_row)
+                    if strat.get("needs_cup_handle"):
+                        _cup_native_pool.append(strategy_row)
+                        _cup_native_pool.sort(key=lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0))))
+                        if len(_cup_native_pool) > _special_strategy_candidate_limit(strat):
+                            _cup_native_pool.pop().pop("_deferred_native_plan", None)
                     _publish_partial(checked, force=len(results) == 1)
                 except stock_scan_runtime.ScanWorkTimeout:
                     raise
@@ -22181,7 +22260,7 @@ def _strategy_scan_wrapper(
         scan_diag["raw_matches_before_special_filter"] = len(results)
         stock_scan_runtime.checkpoint("special_filter")
         with stock_scan_runtime.measure("special_filter"):
-            results = _apply_special_strategy_post_filter(results, strat, strategy_name)
+            results = _apply_special_strategy_post_filter(results, strat, strategy_name, scan_diag)
         # History/provider calls can outlive the existing 15-minute proof
         # budget. Do not publish an expired start-of-scan confirmation as new.
         _current_momentum_results = []
@@ -24327,7 +24406,7 @@ def _public_scan_error_code(value: Any) -> Optional[str]:
     if not value:
         return None
     text_value = str(value)
-    if text_value in ScannerDataError.CODES:
+    if text_value in _STOCK_ATTEMPT_ERRORS:
         return text_value
     lowered = text_value.lower()
     if "zeitbudget" in lowered or "timeout" in lowered:

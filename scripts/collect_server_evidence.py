@@ -41,6 +41,7 @@ DIAGNOSTIC_COUNTS = frozenset("""
 total checked history_available analyzed indicator_passed data_failures
 analysis_errors final_results universe_count common_stock_universe_count
 raw_matches_before_special_filter max_results quarantined_symbols
+special_filter_input_count special_filter_checked_count special_filter_unexamined_count special_filter_limit
 transport_requests transport_retries transport_recovered_incidents transport_retry_budget_exhausted
 """.split())
 STAGE_COUNTS = frozenset("""
