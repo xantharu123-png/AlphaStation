@@ -84,6 +84,7 @@ sys.path.insert(0, str(BASE_DIR))
 from modules.trade_levels import format_target_reachability_text, normalize_alert_trade_levels, target_reachability, trade_plan_quality
 from modules.trade_health import calculate_trade_health  # Q3/B4: zentrales Health-Gate wie api
 from modules.data_fetchers import rate_limited_get, redact_sensitive_query_values
+from modules.scan_schedule import automatic_scan_allowed
 from modules.stock_execution import (
     aggregate_regular_session_4h_bars,
     stock_swing_4h_execution_state,
@@ -8056,6 +8057,8 @@ def run_service():
 
     def _check_fixed_schedule(scanner_name, now_et):
         """Prüft ob ein Scanner mit fester Uhrzeit jetzt laufen soll."""
+        if not automatic_scan_allowed(scanner_name, now_et):
+            return (False, None)
         times = SCHEDULE_TIMES.get(scanner_name, [])
         today_str = now_et.strftime("%Y-%m-%d")
         for h, m in times:
@@ -8104,7 +8107,7 @@ def run_service():
             log.error(f"Init New Listing: {e}")
         time.sleep(10)
 
-    if "bi_long" in _bg_scans:
+    if "bi_long" in _bg_scans and automatic_scan_allowed("bi_long"):
         try:
             _bg_heartbeat_touch("bi_long (init)")
             _run_bi_scanner(poly_key, "long")
@@ -8113,7 +8116,7 @@ def run_service():
             log.error(f"Init BI Long: {e}")
         time.sleep(10)
 
-    if "bi_short" in _bg_scans:
+    if "bi_short" in _bg_scans and automatic_scan_allowed("bi_short"):
         try:
             _bg_heartbeat_touch("bi_short (init)")
             _run_bi_scanner(poly_key, "short")
@@ -8121,13 +8124,15 @@ def run_service():
         except Exception as e:
             log.error(f"Init BI Short: {e}")
 
-    if "biotech" in _bg_scans:
+    if "biotech" in _bg_scans and automatic_scan_allowed("biotech"):
         # Biotech Scanner nach 2 Min starten (nicht sofort — spart API-Calls beim Init)
         time.sleep(120)
         try:
-            _bg_heartbeat_touch("biotech (init)")
-            _run_biotech_scanner(poly_key)
-            last_run["biotech"] = time.time()
+            # The startup delay can cross Friday midnight in New York.
+            if automatic_scan_allowed("biotech"):
+                _bg_heartbeat_touch("biotech (init)")
+                _run_biotech_scanner(poly_key)
+                last_run["biotech"] = time.time()
         except Exception as e:
             log.error(f"Init Biotech: {e}")
 
@@ -8165,7 +8170,8 @@ def run_service():
         # ── Feste Zeitplan-Scanner (Aktien) — stündlich + E-Mail Alert ──
         for scanner_name in SCHEDULE_TIMES:
             should_run, slot_key = _check_fixed_schedule(scanner_name, now_et)
-            if should_run:
+            # Recheck now: an earlier sequential worker may have crossed midnight.
+            if should_run and automatic_scan_allowed(scanner_name):
                 _running_scanners.add(scanner_name)  # B-05: Mark as running
                 _bg_heartbeat_touch(scanner_name)    # Waechter: dieser Scan laeuft jetzt
                 try:
@@ -8197,6 +8203,8 @@ def run_service():
 
         # ── Interval-basierte Scanner (Crypto + ORB) ──
         for scanner_name, interval in SCHEDULE_INTERVAL.items():
+            if not automatic_scan_allowed(scanner_name):
+                continue
             if now - last_run.get(scanner_name, 0) >= interval:
                 # B-05: Check for overlap
                 if scanner_name in _running_scanners:

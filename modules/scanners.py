@@ -16,6 +16,7 @@ import tempfile
 import uuid
 import datetime as dt
 from modules import stock_swing_contract as stock_swing
+from modules import scan_control
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -1286,6 +1287,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 }
                 next_url = None
                 for _page in range(12):  # Max 12 Seiten = 12000 Aktien
+                    scan_control.safe_point()
                     if next_url:
                         # Never embed credentials in pagination URLs: request
                         # exceptions and traces routinely render the URL.
@@ -1395,6 +1397,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         analysis_errors = 0
 
         for candidate in candidates:
+            # Explicit owner boundary: no provider/cache lock is held here.
+            # Parking preserves this worker's candidate list, scores and data cutoff.
+            scan_control.safe_point()
             # ── Stop-Signal prüfen ──
             if _bi_should_stop(direction):
                 avg_sc = round(score_sum / max(1, score_count)) if score_count else 0
@@ -1880,6 +1885,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 continue
 
         # Finale Sortierung + Speichern
+        scan_control.seal()
         if _bi_should_stop(direction):
             raise BITransportStopped()
         if analysis_errors or funnel["data_failures"] or checked != total:

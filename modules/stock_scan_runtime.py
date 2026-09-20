@@ -8,10 +8,12 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from functools import wraps
 import json
+import math
 import re
 import threading
 import time
 import zlib
+from modules import scan_control
 
 
 LEAF_WORK_SECONDS = 20 * 60
@@ -59,10 +61,12 @@ def measure(label):
         yield
         return
     started = time.monotonic()
+    paused_before = state["root"].get("excluded_pause_seconds", 0.)
     try:
         yield
     finally:
-        elapsed = max(0.0, time.monotonic() - started)
+        excluded = state["root"].get("excluded_pause_seconds", 0.) - paused_before
+        elapsed = max(0.0, time.monotonic() - started - excluded)
         totals = state["stage_elapsed_seconds"]
         totals[label] = min((2**63 - 1) / 1000, totals.get(label, 0.0) + elapsed)
 
@@ -74,6 +78,53 @@ class ScanWorkTimeout(RuntimeError):
 
 def current():
     return getattr(_LOCAL, "state", None)
+
+
+def exclude_pause(seconds):
+    """Remove an actual safe-point park from every active nested work budget."""
+    state = current()
+    if state is None or type(seconds) not in (int, float) or seconds <= 0:
+        return
+    try:
+        if not math.isfinite(seconds):
+            return
+    except OverflowError:
+        return
+    root = state["root"]
+    root["excluded_pause_seconds"] = root.get("excluded_pause_seconds", 0.) + seconds
+    root["started"] += seconds
+    root["work_deadline"] += seconds
+    for key in ("last_progress_at", "published", "logged"):
+        if key in root:
+            root[key] += seconds
+    active = state
+    while active is not None:
+        active["started"] += seconds
+        active["phase_started_at"] += seconds
+        if active.get("deadline") is not None:
+            active["deadline"] += seconds
+        active = active.get("parent")
+
+
+def safe_point():
+    """Opt-in parking, never called implicitly from provider checkpoints."""
+    try:
+        paused = scan_control.safe_point()
+    except scan_control.ScanRestartRequired as exc:
+        exclude_pause(exc.paused_seconds)
+        raise
+    exclude_pause(paused)
+    return paused
+
+
+def seal():
+    try:
+        paused = scan_control.seal()
+    except scan_control.ScanRestartRequired as exc:
+        exclude_pause(exc.paused_seconds)
+        raise
+    exclude_pause(paused)
+    return paused
 
 
 def _key(name):
@@ -156,7 +207,7 @@ def scope(name, *, sweep=False):
         share = max(0.0, root["work_deadline"] - now) / remaining_leaves
         deadline = min(deadline, now + share)
     state = {"root": root, "strategy": _key(name), "phase": "starting", "phase_started_at": now,
-             "started": now, "deadline": deadline, "stage_elapsed_seconds": {}}
+             "started": now, "deadline": deadline, "stage_elapsed_seconds": {}, "parent": previous}
     _LOCAL.state = state
     _publish(state, force=True)
     try:

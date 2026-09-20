@@ -40,7 +40,7 @@ from copy import deepcopy
 from typing import Optional, Dict, List, Any, Tuple, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -99,6 +99,7 @@ except ImportError as _auth_err:
 import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 from modules import stock_scan_runtime
+from modules import scan_control, scan_schedule
 
 # Import scanner modules
 from modules.scanners import (
@@ -14617,6 +14618,13 @@ class BIScanRequest(BaseModel):
     market_type: str = "stocks"
 
 
+class ScanControlRequest(BaseModel):
+    scanner: str
+    run_id: str
+    action: str
+    auto_resume: bool = True
+
+
 class TradeReminderRequest(BaseModel):
     ticker: str
     asset_type: str = "crypto"  # crypto or stock
@@ -14668,6 +14676,8 @@ class ScanResultsResponse(BaseModel):
     checked: Optional[int] = None
     total: Optional[int] = None
     progress_detail: Optional[str] = None
+    scan_control: Optional[Dict[str, Any]] = None
+    scan_schedule: Optional[Dict[str, Any]] = None
 
 
 # ── Utility Functions ──
@@ -20853,6 +20863,7 @@ def _apply_special_strategy_post_filter(
 
     filtered: List[Dict[str, Any]] = []
     for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
+        _scan_control_point()
         stock_scan_runtime.checkpoint("special_filter", checked=candidate_index,
                                       total=min(len(candidates), candidate_limit))
         ticker = candidate.get("ticker") or candidate.get("Ticker")
@@ -20938,6 +20949,9 @@ def _bi_background_scan_wrapper(direction: str) -> None:
         print(f"[BI {direction}] Scan completed")
         # Email Alert bei Grade S/A
         _check_and_alert(scan_name, cache)
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(cache)
+        raise
     except Exception as e:
         _remove_partial_cache(cache)
         print(f"BI background scan error ({direction}): {e}")
@@ -21538,6 +21552,7 @@ def _strategy_scan_wrapper(
     scan_diag: Dict[str, Any] = {}
     _publish_stock_strategy_attempt(_attempt, "running")
     try:
+        _scan_control_point()
         stock_scan_runtime.checkpoint("universe")
         strat = STRATEGIES.get(strategy_name)
         if not strat:
@@ -21672,6 +21687,7 @@ def _strategy_scan_wrapper(
         _publish_partial(0, force=True)
 
         for checked, t in enumerate(_all_snapshot_tickers, start=1):
+                _scan_control_point()
                 _publish_partial(checked)
                 try:
                     ticker = str(t.get("ticker", "")).upper().strip()
@@ -22278,6 +22294,7 @@ def _strategy_scan_wrapper(
             raise ScannerDataError("scan_data_incomplete", scan_diag)
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
+        _scan_control_point()
         stock_scan_runtime.checkpoint("special_filter")
         with stock_scan_runtime.measure("special_filter"):
             results = _apply_special_strategy_post_filter(results, strat, strategy_name, scan_diag)
@@ -22292,8 +22309,19 @@ def _strategy_scan_wrapper(
         results = _current_momentum_results
         scan_diag["max_results"] = max_results
         results = results[:max_results]
+        _scan_control_point()
         stock_scan_runtime.checkpoint("enrichment")
         _enrich_stock_business_quality_rows(results)
+        _scan_control_point(finishing=send_email)
+        # Both enrichment and a real pause may outlive a confirmation. Check
+        # again AFTER the last possible park, before publishing any new rows.
+        _fresh_results = []
+        for _candidate in results:
+            if _stock_momentum_row_contract_valid(_candidate):
+                _fresh_results.append(_candidate)
+            else:
+                _reject("momentum:confirmation_expired_before_publication")
+        results = _fresh_results
         stock_scan_runtime.checkpoint("publish")
         scan_diag["final_results"] = len(results)
         scan_diag["coverage"] = "complete"
@@ -22319,6 +22347,9 @@ def _strategy_scan_wrapper(
         _publish_stock_strategy_attempt(_attempt, "complete", diagnostics=scan_diag, result_count=len(results))
         return results
 
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(_strat_cache)
+        raise
     except Exception as e:
         _publish_stock_strategy_attempt(
             _attempt, "error", diagnostics=e.diagnostics if isinstance(e, ScannerDataError) else scan_diag, error=e,
@@ -22358,6 +22389,7 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
     all_rows: List[Dict[str, Any]] = []
     for strategy_index, strategy_name in enumerate(_AUTO_STOCK_ALERT_STRATEGIES):
+        _scan_control_point()
         stock_scan_runtime.current()["remaining_leaves"] = len(_AUTO_STOCK_ALERT_STRATEGIES) - strategy_index
         strategy_code = strategy_codes.get(strategy_name, "unknown_strategy")
         print(f"[Strategy Sweep] {strategy_code}: START", flush=True)
@@ -22415,6 +22447,8 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
         )
     )
     diagnostics["current_result_count"] = len(all_rows)
+    # Finish delivery ownership without ever parking inside SMTP/dedupe locks.
+    _scan_control_point(finishing=True)
     # Keep the existing global ranking, 25-per-strategy contribution, combined
     # cluster context and mail helper's 50-row inspection budget. Never send a
     # second per-strategy batch or interpret a guarded call as SMTP acceptance.
@@ -24400,6 +24434,118 @@ def _is_stock_strategy_worker(name):
     return name == "strategy_scan" or name.startswith("strat_")
 
 
+_scan_resume_restarts: Dict[str, Dict[str, Any]] = {}
+
+
+def _scan_control_supported(name):
+    return name in {"bi_long", "bi_short"} or _is_stock_strategy_worker(name)
+
+
+def _is_heavy_stock_worker(name):
+    return _is_stock_strategy_worker(name) or name in {"bi_long", "bi_short", "biotech"}
+
+
+def _scan_control_data_token(name):
+    """Same-process daily evidence only; a live snapshot must restart fresh."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(timezone.utc)
+    if not stock_swing.enabled():
+        return ("live_requires_restart", time.monotonic())
+    try:
+        session = stock_swing.completed_sessions(now, 1)[0]
+        settings = STRATEGIES
+        if name in {"bi_long", "bi_short"}:
+            from modules.scanners import _bi_config_load
+            settings = {"strategies": STRATEGIES, "bi": _bi_config_load()}
+        config = json.dumps(settings, sort_keys=True, default=str, allow_nan=False)
+        return ("daily", now.astimezone(ZoneInfo("America/New_York")).date().isoformat(),
+                session, BUILD_REVISION, STOCK_STRATEGY_CACHE_VERSION,
+                hashlib.sha256(config.encode()).hexdigest())
+    except Exception:
+        return None  # Missing calendar/config evidence is never resumable.
+
+
+def _scan_control_point(*, finishing=False):
+    """Only call at outer safe boundaries, never inside IO/SMTP/file locks."""
+    return stock_scan_runtime.seal() if finishing else stock_scan_runtime.safe_point()
+
+
+def _scan_schedule_for(name, status=None):
+    status = status if isinstance(status, dict) else {}
+    try:
+        # Existing scheduler strings use host-local datetime.now/fromtimestamp.
+        next_run = datetime.fromisoformat(status.get("next_run") or "").timestamp()
+    except (ValueError, TypeError, OverflowError, OSError):
+        next_run = None
+    return scan_schedule.schedule_snapshot(name, next_run=next_run)
+
+
+def _scan_resume_at(name, status, now=None):
+    now = time.time() if now is None else now
+    schedule_name = "strategy_scan" if _is_stock_strategy_worker(name) else name
+    interval = max(60.0, _effective_scan_interval_min(schedule_name) * 60)
+    try:
+        due = datetime.fromisoformat(status.get("next_run") or "").timestamp()
+    except (ValueError, TypeError, OverflowError, OSError):
+        due = float(status.get("_started_at") or now) + interval
+    if due <= now:
+        due += (math.floor((now - due) / interval) + 1) * interval
+    return scan_schedule.next_allowed_at(due)
+
+
+def _scan_control_snapshot(name, status=None):
+    if status is None:
+        with _scan_lock:
+            status = dict(_scan_status.get(name) or {})
+    raw = scan_control.snapshot(name) if _scan_control_supported(name) else {}
+    matches = bool(raw and raw.get("run_id") == status.get("last_run_id"))
+    state = raw.get("state", "finished") if matches else "finished"
+    pending = _scan_resume_restarts.get(name)
+    if pending and pending.get("run_id") == status.get("last_run_id"):
+        state = "restart_required"
+    def stamp(value):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).isoformat() if value is not None else None
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    return {
+        "supported": _scan_control_supported(name), "owner_scan_key": name,
+        "run_id": status.get("last_run_id"), "state": state,
+        "worker_alive": bool(status.get("running") or (
+            name in _scan_threads and _scan_threads[name].is_alive())),
+        "paused_seconds": max(0.0, float(raw.get("paused_seconds", 0))) if matches else 0,
+        "paused_at": stamp(raw.get("paused_at")) if matches else None,
+        "resume_at": stamp(raw.get("resume_at")) if matches else None,
+        "auto_resume": bool(raw.get("auto_resume")) if matches else False,
+        "scope": "strategy_round" if name == "strategy_scan" else "scanner",
+    }
+
+
+def _scan_is_parked(name):
+    return scan_control.snapshot(name).get("state") == "paused"
+
+
+def _drain_scan_resume_restarts():
+    """A data-epoch change may restart only AFTER its old worker has exited."""
+    with _scan_lock:
+        pending = list(_scan_resume_restarts.items())
+    for name, request in pending:
+        if request["automatic"] and not scan_schedule.automatic_scan_allowed(name):
+            continue
+        with _scan_lock:
+            state = _scan_status.get(name) or {}
+            if state.get("last_run_id") != request["run_id"]:
+                _scan_resume_restarts.pop(name, None)
+                continue
+            thread = request["thread"]
+            if thread.is_alive() or state.get("running"):
+                continue
+        if _run_scan_safe(name, request["func"], expected_previous_run_id=request["run_id"]):
+            with _scan_lock:
+                if _scan_resume_restarts.get(name) is request:
+                    _scan_resume_restarts.pop(name, None)
+
+
 def _scan_runtime_state(
     scan_name: str,
     scan_state: Dict[str, Any],
@@ -24410,11 +24556,16 @@ def _scan_runtime_state(
     running = bool(scan_state.get("running"))
     started_at = _alert_float(scan_state.get("_started_at"), 0.0) or 0.0
     elapsed_seconds = int(max(0.0, (now_ts or time.time()) - started_at)) if running and started_at else 0
+    control = scan_control.snapshot(scan_name)
+    owned = bool(control and control.get("run_id") == scan_state.get("last_run_id"))
+    if owned:
+        elapsed_seconds = max(0, int(elapsed_seconds - control.get("paused_seconds", 0)))
+    parked = owned and control.get("state") == "paused"
     configured_timeout = timeout_minutes if timeout_minutes is not None else _SCAN_TIMEOUTS.get(scan_name, 10)
     timeout_minutes = max(0.01, float(configured_timeout))
-    timed_out = bool(running and started_at and elapsed_seconds > timeout_minutes * 60)
+    timed_out = bool(running and not parked and started_at and elapsed_seconds > timeout_minutes * 60)
     return {
-        "runtime_health": "stuck" if timed_out else ("running" if running else "idle"),
+        "runtime_health": "paused" if parked else ("stuck" if timed_out else ("running" if running else "idle")),
         "runtime_seconds": elapsed_seconds if running else 0,
         "timeout_minutes": timeout_minutes,
         "timeout_exceeded": timed_out,
@@ -24449,7 +24600,9 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
     def _with_runtime(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload["cache_data_health"] = payload.get("cache_health", "not_tracked")
         payload.update(runtime)
-        if runtime["runtime_health"] == "running":
+        if runtime["runtime_health"] == "paused":
+            payload["cache_health"] = "paused"
+        elif runtime["runtime_health"] == "running":
             payload["cache_health"] = "running"
         elif runtime["runtime_health"] == "stuck":
             payload["cache_health"] = "stuck"
@@ -24457,6 +24610,8 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
                 f"Scan laeuft seit {runtime['runtime_seconds']}s; "
                 f"Zeitbudget {runtime['timeout_minutes']}min ueberschritten"
             )
+        elif payload["cache_health"] in {"missing", "stale", "not_tracked"} and not scan_schedule.automatic_scan_allowed(scan_name):
+            payload["cache_health"] = "scheduled_pause"
         return payload
 
     if not cache_path:
@@ -24831,7 +24986,10 @@ def _scan_watchdog_check(name, now=None):
             return None
         started_at = float(state["_started_at"])
         timeout_min = _SCAN_TIMEOUTS.get(name, 10)
-        stuck_sec = now - started_at
+        runtime = _scan_runtime_state(name, state, now_ts=now, timeout_minutes=timeout_min)
+        if runtime["runtime_health"] == "paused":
+            return None
+        stuck_sec = runtime["runtime_seconds"]
         if stuck_sec <= timeout_min * 60:
             return None
         hard = stuck_sec > _stuck_hard_cap_sec(name)
@@ -24907,7 +25065,7 @@ def _scan_watchdog_check(name, now=None):
         return None
 
 
-def _run_scan_safe(name, func, timeout_min=None):
+def _run_scan_safe(name, func, timeout_min=None, *, expected_previous_run_id=None):
     """Start exactly one non-blocking worker for a scanner.
 
     Python threads cannot be killed safely. A timeout is therefore health
@@ -24916,13 +25074,18 @@ def _run_scan_safe(name, func, timeout_min=None):
     if timeout_min is None:
         timeout_min = _SCAN_TIMEOUTS.get(name, 10)
     run_id = uuid.uuid4().hex
+    controlled = _scan_control_supported(name)
+    data_token = _scan_control_data_token(name) if controlled else None
     with _scan_lock:
+        if (expected_previous_run_id is not None
+                and _scan_status.get(name, {}).get("last_run_id") != expected_previous_run_id):
+            return False
         active_thread = _scan_threads.get(name)
         # Automatic and manual stock scans write the same leaf caches. Their
         # different scheduler keys must not allow overlapping owners.
-        if _is_stock_strategy_worker(name):
+        if _is_heavy_stock_worker(name):
             for other, state in _scan_status.items():
-                if other != name and _is_stock_strategy_worker(other) and (
+                if other != name and _is_heavy_stock_worker(other) and (
                     state.get("running") or (other in _scan_threads and _scan_threads[other].is_alive())
                 ):
                     print(f"[Scheduler] {name} skip: stock strategy engine owned by {other}", flush=True)
@@ -24947,6 +25110,12 @@ def _run_scan_safe(name, func, timeout_min=None):
             else:
                 print(f"[Scheduler] {name} already running - skipping")
             return False
+        if controlled:
+            scan_control.register(
+                name, run_id, data_token=data_token,
+                current_data_token=lambda: _scan_control_data_token(name),
+                auto_allowed=lambda: scan_schedule.automatic_scan_allowed(name),
+            )
         _scan_status[name]["running"] = True
         _scan_status[name]["_started_at"] = time.time()
         _scan_status[name]["_run_id"] = run_id
@@ -24959,25 +25128,38 @@ def _run_scan_safe(name, func, timeout_min=None):
 
     def _worker():
         start_t = time.time()
+        def paused_seconds():
+            control = scan_control.snapshot(name)
+            return float(control.get("paused_seconds", 0)) if control.get("run_id") == run_id else 0.0
+        def active_seconds():
+            return max(0.0, time.time() - start_t - paused_seconds())
         succeeded = False
         error_text = None
         attempt_diagnostics = None
+        restart_required = None
         previous_cache_revision = _scan_cache_revision(SCAN_CACHE_MAP.get(name))
         try:
-            func()
+            with scan_control.bind(name, run_id) if controlled else nullcontext():
+                _scan_control_point()
+                func()
             _require_fresh_scan_cache(name, previous_cache_revision)
             succeeded = True
-            elapsed = round(time.time() - start_t, 1)
+            elapsed = round(active_seconds(), 1)
             print(f"[Scheduler] {name} DONE in {elapsed}s", flush=True)
+        except scan_control.ScanRestartRequired as interrupted:
+            restart_required = interrupted
+            print(f"[Scheduler] {name}: paused data epoch changed; fresh scan queued", flush=True)
         except Exception as e:
             error_text = _sanitized_exception_text(e)
             if isinstance(e, ScannerDataError):
                 error_text = e.code
                 attempt_diagnostics = e.diagnostics
-            elapsed = round(time.time() - start_t, 1)
+            elapsed = round(active_seconds(), 1)
             print(f"[Scheduler] {name} ERROR after {elapsed}s: {error_text}", flush=True)
             _print_sanitized_traceback()
         finally:
+            if controlled:
+                scan_control.end(name, run_id)
             recoveries = []
             with _scan_lock:
                 state = _scan_status.get(name)
@@ -24990,11 +25172,21 @@ def _run_scan_safe(name, func, timeout_min=None):
                     # Nur ein erfolgreicher Lauf darf Cache-/Scheduler-Frische signalisieren.
                     if succeeded:
                         state["last_run"] = datetime.now().isoformat()
+                        if paused_seconds() > 0 or expected_previous_run_id is not None:
+                            # Epoch changes discard the parked stack, but its
+                            # fresh replacement still completes a resume. The
+                            # scheduler's local launch time belongs to the old
+                            # attempt and must not trigger an immediate rerun.
+                            state["_resume_completed_at"] = time.time()
+                            schedule_key = "strategy_scan" if _is_stock_strategy_worker(name) else name
+                            due = time.time() + _effective_scan_interval_min(schedule_key) * 60
+                            state["next_run"] = datetime.fromtimestamp(due).isoformat()
                         state.pop("last_error", None)
                         # Completion ends the incident even when SMTP fails.
                         # Retry delivery separately: never resurrect a healthy
                         # incident or inflate its duration by the retry delay.
                         episode_started = state.pop("_episode_started_at", None)
+                        prior_episode_pause = state.pop("_episode_paused_seconds", 0.0)
                         if episode_started is not None:
                             recovered_at = time.time()
                             delivery = state.get("_stuck_warning_delivery", {}).get(int(episode_started), {})
@@ -25002,7 +25194,9 @@ def _run_scan_safe(name, func, timeout_min=None):
                                 int(episode_started), {
                                     "started_at": float(episode_started),
                                     "recovered_at": recovered_at,
-                                    "run_seconds": max(0.0, recovered_at - start_t),
+                                    "run_seconds": active_seconds(),
+                                    "episode_seconds": max(0.0, recovered_at - float(episode_started)
+                                                           - prior_episode_pause - paused_seconds()),
                                     "warning_delivered": bool(delivery.get("announced")),
                                 },
                             )
@@ -25012,15 +25206,25 @@ def _run_scan_safe(name, func, timeout_min=None):
                                 if not deliveries:
                                     state.pop("_stuck_warning_delivery", None)
                         recoveries = list(state.get("_pending_stuck_recoveries", {}).items())
+                    elif restart_required is not None:
+                        # A planned interruption is neither success nor crash.
+                        # Preserve last_run and wait for the actual thread exit.
+                        _scan_resume_restarts[name] = {
+                            "run_id": run_id, "func": func,
+                            "thread": threading.current_thread(),
+                            "automatic": restart_required.automatic,
+                        }
                     else:
                         state["last_error"] = error_text or "Unbekannter Scan-Fehler"
                         if attempt_diagnostics is not None:
                             state["last_attempt_diagnostics"] = attempt_diagnostics
+                    if not succeeded and state.get("_episode_started_at") is not None:
+                        state["_episode_paused_seconds"] = state.get("_episode_paused_seconds", 0.0) + paused_seconds()
             for episode_key, recovery in recoveries:
                 try:
                     outcome = _send_stuck_recovery_mail(
                         name,
-                        max(0.0, recovery["recovered_at"] - recovery["started_at"]),
+                        recovery.get("episode_seconds", max(0.0, recovery["recovered_at"] - recovery["started_at"])),
                         recovery["started_at"],
                         recovered_at=recovery["recovered_at"],
                         run_seconds=recovery["run_seconds"],
@@ -25049,6 +25253,8 @@ def _run_scan_safe(name, func, timeout_min=None):
     try:
         t.start()
     except Exception:
+        if controlled:
+            scan_control.end(name, run_id)
         with _scan_lock:
             _scan_threads.pop(name, None)
             state = _scan_status.get(name)
@@ -25137,6 +25343,11 @@ def _scheduler_loop():
     for name, func in scan_tasks:
         if not _scheduler_running:
             break
+        _drain_scan_resume_restarts()
+        if not scan_schedule.automatic_scan_allowed(name):
+            with _scan_lock:
+                _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
+            continue
         interval_sec = _effective_scan_interval_min(name) * 60
         cache_file = SCAN_CACHE_MAP.get(name)
         cache_age = None
@@ -25163,7 +25374,7 @@ def _scheduler_loop():
                         print("[Scheduler] market_context: crash_monitor wartet zu lange, nutze letzten Cache")
                         break
                     time.sleep(3)
-            started = _run_scan_safe(name, func)
+            started = scan_schedule.automatic_scan_allowed(name) and _run_scan_safe(name, func)
             if started:
                 last_run_times[name] = time.time()
                 with _scan_lock:
@@ -25177,11 +25388,14 @@ def _scheduler_loop():
                 _wait_start = time.time()
                 while _scan_status[name]["running"] and _scheduler_running:
                     time.sleep(10)
+                    _drain_scan_resume_restarts()
+                    if _scan_is_parked(name):
+                        break  # Keep ownership, let light jobs proceed.
                     _wait_sec = int(time.time() - _wait_start)
                     if _wait_sec > 3600:  # Max 1h warten
                         print(f"[Scheduler] {name} Timeout nach 1h — weiter")
                         break
-                print(f"[Scheduler] {name} fertig nach {int(time.time() - _wait_start)}s — nächster Scan")
+                print(f"[Scheduler] {name}: Startwartephase beendet nach {int(time.time() - _wait_start)}s", flush=True)
             else:
                 time.sleep(3)  # Leichte Scans: nur kurzer Stagger
 
@@ -25191,6 +25405,7 @@ def _scheduler_loop():
             last_run_times[name] = 0  # Will run on next check
 
     while _scheduler_running:
+        _drain_scan_resume_restarts()
         now = time.time()
         for name, func in scan_tasks:
             if not _scheduler_running:
@@ -25199,7 +25414,7 @@ def _scheduler_loop():
                 # AUDIT 2026-07-29 (Punkt C): dynamischer Takt — strategy_scan
                 # im Opening-Fenster (9:25–11:30 ET) alle 10 statt 30 Minuten.
                 interval_sec = _effective_scan_interval_min(name) * 60
-                elapsed = now - last_run_times.get(name, 0)
+                elapsed = now - max(last_run_times.get(name, 0), _scan_status[name].get("_resume_completed_at", 0))
                 is_running = _scan_status[name]["running"]
                 started_at = _scan_status[name].get("_started_at")
 
@@ -25208,6 +25423,10 @@ def _scheduler_loop():
             # _scan_watchdog_check. Ein isolierter Thread wird nie dupliziert.
             _scan_watchdog_check(name, now)
 
+            if not scan_schedule.automatic_scan_allowed(name):
+                with _scan_lock:
+                    _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
+                continue
             if elapsed >= interval_sec and not is_running:
                 if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):
                     print("[Scheduler] market_context skip: crash_monitor laeuft gerade")
@@ -25223,7 +25442,7 @@ def _scheduler_loop():
                     if _other_heavy_running:
                         continue  # Nächstes Mal probieren
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
-                started = _run_scan_safe(name, func)  # Non-blocking
+                started = scan_schedule.automatic_scan_allowed(name) and _run_scan_safe(name, func)
                 if started:
                     last_run_times[name] = time.time()
                     with _scan_lock:
@@ -27743,11 +27962,13 @@ def get_scan_status():
                 "last_attempt_at": status.get("last_attempt_at"),
                 "next_run": status["next_run"],
                 "interval_min": status["interval_min"],
+                "control": _scan_control_snapshot(name, status),
+                "schedule": _scan_schedule_for(name, status),
                 **cache_health,
             }
             # Add runtime info for running scans
             if status["running"] and status.get("_started_at"):
-                scans_copy[name]["running_since_sec"] = int(time.time() - status["_started_at"])
+                scans_copy[name]["running_since_sec"] = cache_health.get("runtime_seconds", 0)
 
     # Progress-Daten aus /tmp/ Files anhängen (BI + Biotech)
     for scan_key in scans_copy:
@@ -27780,6 +28001,36 @@ def get_scan_status():
         "health_counts": health_counts,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.post("/api/scan-control")
+def control_scan(request: ScanControlRequest, authorization: Optional[str] = Header(None)):
+    """Administrator controls one existing shared worker, never starts a duplicate."""
+    _require_admin(authorization)
+    name = request.scanner
+    if (len(name) > 96 or not re.fullmatch(r"[a-z0-9_]+", name)
+            or not _scan_control_supported(name) or request.action not in {"pause", "resume"}):
+        raise HTTPException(status_code=400, detail="scan_control_unsupported")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", request.run_id):
+        raise HTTPException(status_code=409, detail="scan_control_stale_run")
+    with _scan_lock:
+        state = dict(_scan_status.get(name) or {})
+        thread = _scan_threads.get(name)
+        if (state.get("last_run_id") != request.run_id or not state.get("running")
+                or thread is None or not thread.is_alive()):
+            raise HTTPException(status_code=409, detail="scan_control_stale_run")
+    try:
+        if request.action == "pause":
+            due = _scan_resume_at(name, state) if request.auto_resume else None
+            if request.auto_resume and due is None:
+                raise ValueError("scan_control_schedule_unavailable")
+            scan_control.request_pause(name, request.run_id, auto_resume=request.auto_resume, resume_at=due)
+        else:
+            scan_control.request_resume(name, request.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="scan_control_state_changed") from exc
+    return {"status": "pause_requested" if request.action == "pause" else "resume_requested",
+            "control": _scan_control_snapshot(name)}
 
 
 @app.get("/api/ticker-search")
@@ -29744,7 +29995,7 @@ def get_scan_results(
         cache_file = BI_CACHE_LONG
         normalize_map = _BI_KEY_MAP
 
-    scanner_name = "strategy_scan"
+    scanner_name = "strategy_scan" if strategy or direction else "bi_long"
     if direction:
         scanner_name = f"bi_{direction}"
     elif strategy:
@@ -29788,6 +30039,17 @@ def get_scan_results(
     if status_key:
         with _scan_lock:
             scan_state = dict(_scan_status.get(status_key, {}))
+            if (scanner_name == "strategy_scan" and market_type == "stocks"
+                    and resolved_strategy in _AUTO_STOCK_ALERT_STRATEGIES
+                    and not scan_state.get("running")
+                    and (_scan_status.get("strategy_scan", {}).get("running")
+                         or "strategy_scan" in _scan_resume_restarts
+                         or ("strategy_scan" in _scan_threads and _scan_threads["strategy_scan"].is_alive()))):
+                status_key = "strategy_scan"
+                scan_state = dict(_scan_status[status_key])
+
+    public_control = _scan_control_snapshot(status_key, scan_state)
+    public_schedule = _scan_schedule_for(status_key, scan_state)
 
     results, cached_at, cache_meta, is_partial = load_live_cache_file(
         cache_file,
@@ -29896,6 +30158,8 @@ def get_scan_results(
         diagnostics=diagnostics,
         warnings=warnings,
         exclusion_policy=quality["exclusion_policy"],
+        scan_control=public_control,
+        scan_schedule=public_schedule,
         scan_running=bool(scan_state.get("running")) if scan_state else None,
         scan_error=scan_error,
         scan_run_id=scan_state.get("last_run_id"),
@@ -30005,6 +30269,8 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         warnings=quality["warnings"],
         exclusion_policy=quality["exclusion_policy"],
         scan_running=bool(scan_state.get("running")),
+        scan_control=_scan_control_snapshot(scanner_name, scan_state),
+        scan_schedule=_scan_schedule_for(scanner_name, scan_state),
         scan_error=scan_error,
         scan_run_id=scan_state.get("last_run_id"),
         scan_last_attempt_at=scan_state.get("last_attempt_at"),

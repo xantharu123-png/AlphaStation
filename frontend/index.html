@@ -2509,7 +2509,14 @@ function SchedulerStatus({ status }) {
 
     const scanEntries = status.scans ? Object.entries(status.scans) : [];
     const activeCount = scanEntries.length;
-    const runningCount = scanEntries.filter(([_, s]) => s.running).length;
+    const pausedCount = scanEntries.filter(([_, scan]) => {
+        const control = scannerControlValue(scan.control);
+        return control?.state === 'paused' && control.worker_alive;
+    }).length;
+    const runningCount = scanEntries.filter(([_, scan]) => {
+        const control = scannerControlValue(scan.control);
+        return scan.running && !(control?.state === 'paused' && control.worker_alive);
+    }).length;
     const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error', 'stuck'].includes(s.cache_health)).length;
     const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', penny_stocks: 'Pennystock Suche', penny_positions: 'Pennystock Positionen', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
     const healthLabels = {
@@ -2529,7 +2536,7 @@ function SchedulerStatus({ status }) {
                     className={`flex items-center gap-2 text-sm px-3 py-1 rounded ${staleCount > 0 ? 'bg-amber-100 text-amber-800 hover:bg-amber-200' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
                 >
                     <span>{runningCount > 0 ? '...' : '*'}</span>
-                    <span>Auto-Scans: {activeCount}{runningCount > 0 ? ` (${runningCount} aktiv)` : ''}{staleCount > 0 ? `, ${staleCount} pruefen` : ''}</span>
+                    <span>Auto-Scans: {activeCount}{runningCount > 0 ? ` (${runningCount} aktiv)` : ''}{pausedCount > 0 ? `, ${pausedCount} pausiert` : ''}{staleCount > 0 ? `, ${staleCount} pruefen` : ''}</span>
                 </button>
 
                 {showDetails && (
@@ -2539,12 +2546,14 @@ function SchedulerStatus({ status }) {
                         </div>
                         {scanEntries.map(([key, scan]) => {
                             const [label, cls] = healthLabels[scan.cache_health] || healthLabels.not_tracked;
+                            const controlled = scannerControlValue(scan.control);
+                            const controlLabel = controlled && !['running', 'finished'].includes(controlled.state) ? scannerControlPresentation(controlled).label : null;
                             return (
                                 <div key={key} className="text-xs border-b border-gray-100 pb-2 mb-2 last:border-0 last:mb-0">
                                     <div className="flex justify-between gap-3">
                                         <span className="font-medium">{scanNames[key] || key}</span>
                                         <span className={scan.running ? 'text-orange-500 font-semibold' : cls}>
-                                            {scan.cache_health === 'stuck' ? label : scan.running ? 'laeuft' : label}
+                                            {controlLabel || (scan.cache_health === 'stuck' ? label : scan.running ? 'laeuft' : label)}
                                         </span>
                                     </div>
                                     <div className="text-gray-500 mt-1">Letzter: {getRelativeTime(scan.last_run)} | Naechster: {getRelativeTime(scan.next_run, true)}</div>
@@ -2561,7 +2570,8 @@ function SchedulerStatus({ status }) {
 }
 
 // ScanControl Component
-function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null, progressOverride = null }) {
+function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null, progressOverride = null,
+    controlFeed = null, canControl = false }) {
     // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
     const timing = scanKey ? getScanTiming(schedulerStatus, scanKey) : { lastScan, nextScan };
     const displayLast = timing.lastScan || lastScan;
@@ -2571,7 +2581,15 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     const schedulerRunning = scanKey && schedulerStatus?.scans?.[scanKey]?.running;
     const runningSinceSec = schedulerRunning ? (schedulerStatus.scans[scanKey].running_since_sec || 0) : 0;
     const scanHealth = scanKey ? schedulerStatus?.scans?.[scanKey] : null;
-    const anyScanning = isScanning || schedulerRunning || progressOverride?.running;
+    const control = controlFeed?.control || null;
+    const controlView = scannerControlPresentation(control);
+    const paused = control?.state === 'paused' && control.worker_alive;
+    const anyScanning = isScanning || schedulerRunning || progressOverride?.running || control?.worker_alive;
+    const [autoResume, setAutoResume] = useState(true);
+    useEffect(() => {
+        setAutoResume(control?.state === 'paused' ? control.auto_resume : true);
+    }, [control?.owner_scan_key, control?.run_id]);
+    const scheduleNotice = scannerScheduleNotice(controlFeed?.schedule);
 
     return (
         <div className="card border border-gray-200 p-4 rounded-lg scan-control-card">
@@ -2580,19 +2598,43 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                     <button onClick={onScan} disabled={anyScanning} className="button w-full sm:w-auto" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                         {anyScanning ? (
                             <>
-                                <span className="loading-spinner"></span>
-                                {schedulerRunning && !isScanning ? 'Auto-Scan läuft...' : 'Scannt...'}
+                                {!paused && <span className="loading-spinner"></span>}
+                                {control && !['running', 'finished'].includes(control.state) ? controlView.label : schedulerRunning && !isScanning ? 'Auto-Scan läuft...' : 'Scannt...'}
                             </>
                         ) : (
                             'Scan starten'
                         )}
                     </button>
+                    {canControl && control && (controlView.canPause || controlView.canResume || controlFeed.controlPending) && <button
+                        type="button" className="button button-secondary w-full sm:w-auto"
+                        disabled={!!controlFeed.controlPending}
+                        onClick={() => controlFeed.setControl(controlView.canResume ? 'resume' : 'pause', autoResume)}>
+                        {controlFeed.controlPending === 'pause' ? 'Pause angefordert...'
+                            : controlFeed.controlPending === 'resume' ? 'Fortsetzung angefordert...'
+                            : controlView.canResume ? 'Fortsetzen' : 'Pausieren'}
+                    </button>}
                     <div className="flex flex-col gap-1 text-sm text-gray-500 sm:flex-row sm:items-center sm:gap-4">
                         {displayLast && <div>Letzter: {displayLast}</div>}
-                        {displayNext && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
+                        {displayNext && !scheduleNotice && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
                     </div>
                 </div>
             </div>
+            {scheduleNotice && <div className="mt-3 rounded bg-blue-50 p-2 text-xs text-blue-900">{scheduleNotice}</div>}
+            {control && control.state !== 'finished' && <div className="mt-3 text-sm" role="status" aria-live="polite">
+                <div className="font-semibold">{controlView.text}</div>
+                {control.scope === 'strategy_round' && <div className="mt-1 text-xs">Pausiert die gesamte Aktienrunde, nicht nur die ausgewaehlte Strategie.</div>}
+                {['paused', 'pause_requested'].includes(control.state) && <div className="mt-1 text-xs">Waehrend der Pause warten andere schwere Aktien-Scans. Krypto und Positionspflege werden dadurch nicht pausiert.</div>}
+                {canControl && controlView.canPause && <label className="mt-2 flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={autoResume} disabled={!!controlFeed.controlPending} onChange={event => setAutoResume(event.target.checked)} />
+                    Automatisch beim naechsten Lauf fortsetzen
+                </label>}
+                {paused && <div className="mt-1 text-xs">{control.auto_resume
+                    ? `Automatische Fortsetzung: ${scannerUtcLabel(control.resume_at) || 'Zeitpunkt noch nicht bestaetigt'}.`
+                    : 'Automatische Fortsetzung ausgeschaltet; manuell fortsetzen.'}</div>}
+                <div className="mt-1 text-xs text-gray-500">Nur im laufenden Serverprozess; keine Fortsetzungsgarantie nach einem Server-Neustart.</div>
+            </div>}
+            {controlFeed?.controlNotice && <div className="mt-2 text-xs text-blue-800" role="status">{controlFeed.controlNotice}</div>}
+            {controlFeed?.controlError && <div className="mt-2 text-xs text-red-700" role="alert">{controlFeed.controlError}</div>}
             {anyScanning && (() => {
                 const prog = progressOverride?.running ? progressOverride : scanKey && schedulerStatus?.scans?.[scanKey]?.progress;
                 const hasProgress = prog && prog.total > 0;
@@ -2602,12 +2644,14 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                     <div style={{ width: '100%', height: hasProgress ? '6px' : '4px', backgroundColor: '#e5e7eb', borderRadius: '3px', overflow: 'hidden' }}>
                         {hasProgress ? (
                             <div style={{ width: `${pct}%`, height: '100%', backgroundColor: '#3b82f6', borderRadius: '3px', transition: 'width 0.5s ease' }}></div>
+                        ) : paused ? (
+                            <div style={{ width: '100%', height: '100%', backgroundColor: '#94a3b8' }}></div>
                         ) : (
                             <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
                         )}
                     </div>
                     <div className="text-xs text-blue-600 mt-1 font-semibold">
-                        {hasProgress
+                        {paused ? `Pausierter Zwischenstand: ${hasProgress ? `${prog.checked}/${prog.total} geprueft` : 'Fortschritt noch nicht bestaetigt'}` : hasProgress
                             ? `${prog.checked} / ${prog.total} analysiert — ${prog.hits} ${prog.hits_label || 'Treffer'} (${pct}%)`
                             : schedulerRunning && !isScanning
                                 ? `Auto-Scan läuft seit ${runningSinceSec > 60 ? Math.floor(runningSinceSec / 60) + ' min' : runningSinceSec + 's'}...`
@@ -2631,8 +2675,9 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     );
 }
 
-function LiveScanStatus({ active = false, partial = false, checked = null, total = null, detail = '', count = 0, itemLabel = 'Treffer' }) {
+function LiveScanStatus({ active = false, partial = false, checked = null, total = null, detail = '', count = 0, itemLabel = 'Treffer', control = null }) {
     if (!active && !partial) return null;
+    const paused = control?.state === 'paused' && control?.worker_alive === true;
     const checkedNumber = Number(checked);
     const totalNumber = Number(total);
     const hasProgress = Number.isFinite(checkedNumber) && Number.isFinite(totalNumber) && totalNumber > 0;
@@ -2641,7 +2686,7 @@ function LiveScanStatus({ active = false, partial = false, checked = null, total
         <div className="-mt-4 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-800">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-semibold">
-                    Live-Zwischenstand: {hasProgress ? `${checkedNumber}/${totalNumber} geprueft` : 'Scan wird vorbereitet'}
+                    {paused ? 'Pausierter Zwischenstand:' : 'Live-Zwischenstand:'} {hasProgress ? `${checkedNumber}/${totalNumber} geprueft` : paused ? 'Fortschritt unbekannt' : 'Scan wird vorbereitet'}
                 </span>
                 <span>{count} {itemLabel} bereits sichtbar</span>
             </div>
@@ -2649,7 +2694,7 @@ function LiveScanStatus({ active = false, partial = false, checked = null, total
                 {hasProgress ? (
                     <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{width: `${percent}%`}}></div>
                 ) : (
-                    <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-400 via-blue-600 to-blue-400 animate-pulse"></div>
+                    <div className={`h-full w-full rounded-full ${paused ? 'bg-slate-400' : 'bg-gradient-to-r from-blue-400 via-blue-600 to-blue-400 animate-pulse'}`}></div>
                 )}
             </div>
             {detail && <div className="mt-1 text-[11px] text-blue-600">{detail}</div>}
@@ -5662,8 +5707,8 @@ function App() {
             {/* Main Content — only visible when not on pricing/account pages */}
             {!showPricing && !showAccount && (
                 <div className="main-shell" onClickCapture={markActiveListSelection}>
-                    {activeTab === 'scanner' && <ScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
-                    {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
+                    {activeTab === 'scanner' && <ScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} canControl={isAdmin} />}
+                    {activeTab === 'bi-scanner' && <BIScannerTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} canControl={isAdmin} />}
                     {activeTab === 'biotech' && <BiotechTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'btc-divergenz' && <BTCDivergenzTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
                     {activeTab === 'early-movers' && <EarlyMoversTab onSelectTicker={gatedSelectTicker} scanCache={scanCache} updateScanCache={updateScanCache} schedulerStatus={schedulerStatus} />}
@@ -5722,6 +5767,61 @@ function scannerPublicFailure(status = 0, payload = null, retryHeader = null) {
         : 'Scanner-Daten konnten nicht geladen werden. Verbindung pruefen; kein neues Ergebnis.';
 }
 
+function scannerControlValue(raw) {
+    if (!raw || typeof raw !== 'object' || raw.supported !== true
+        || !['running', 'pause_requested', 'paused', 'finishing', 'finished', 'restart_required'].includes(raw.state)
+        || typeof raw.worker_alive !== 'boolean' || typeof raw.owner_scan_key !== 'string'
+        || !/^(bi_long|bi_short|strategy_scan|strat_[a-z0-9_]{1,90})$/.test(raw.owner_scan_key)
+        || typeof raw.run_id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(raw.run_id)
+        || !['strategy_round', 'scanner'].includes(raw.scope)) return null;
+    const utc = value => typeof value === 'string' && value.length <= 40
+        && /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|\+00:00)$/.test(value) && Number.isFinite(Date.parse(value)) ? value : null;
+    return { supported: true, owner_scan_key: raw.owner_scan_key, run_id: raw.run_id, state: raw.state,
+        worker_alive: raw.worker_alive, scope: raw.owner_scan_key === 'strategy_scan' ? 'strategy_round' : raw.scope,
+        auto_resume: raw.auto_resume === true, resume_at: utc(raw.resume_at), paused_at: utc(raw.paused_at),
+        paused_seconds: typeof raw.paused_seconds === 'number' && Number.isFinite(raw.paused_seconds)
+            && raw.paused_seconds >= 0 && raw.paused_seconds <= 315360000 ? Math.floor(raw.paused_seconds) : null };
+}
+
+function scannerControlSnapshot(info, schedulerState = null) {
+    const result = scannerControlValue(info?.scan_control);
+    const scheduler = scannerControlValue(schedulerState?.control);
+    if (result && info?.scan_run_id && result.run_id !== info.scan_run_id) return null;
+    if (!result && scheduler && info?.scan_run_id && scheduler.run_id !== info.scan_run_id) return null;
+    if (result && scheduler && (result.run_id !== scheduler.run_id || result.owner_scan_key !== scheduler.owner_scan_key)) return null;
+    return result || scheduler;
+}
+
+function scannerControlPresentation(control) {
+    if (!control) return null;
+    const alive = control.worker_alive;
+    const labels = {
+        running: ['Scan laeuft', 'Scan laeuft.'],
+        pause_requested: ['Pause angefordert', 'Pause angefordert – laufende Abfrage wird beendet. Noch nicht pausiert.'],
+        paused: ['Pausiert', 'Pausiert. Der Worker bleibt im laufenden Serverprozess erhalten. Kein neuer Ergebnisstand.'],
+        finishing: ['Abschluss laeuft', 'Abschluss laeuft. Bitte auf die bestaetigte Beendigung warten.'],
+        finished: ['Beendet', 'Worker beendet; der Ergebnisstand wird separat geprueft.'],
+        restart_required: ['Neuer Scan erforderlich', 'Fortsetzung mit alten Daten nicht moeglich – neuer Scan erforderlich.'],
+    };
+    if (!alive && ['paused', 'pause_requested'].includes(control.state)) return {
+        label: 'Status unbestaetigt', text: 'Pausenstatus nicht bestaetigt – Status erneut laden.', canPause: false, canResume: false,
+    };
+    return { label: labels[control.state][0], text: labels[control.state][1],
+        canPause: alive && control.state === 'running', canResume: alive && control.state === 'paused' };
+}
+
+function scannerUtcLabel(value) {
+    return typeof value === 'string' && value.length <= 40 && /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|\+00:00)$/.test(value)
+        && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : null;
+}
+
+function scannerScheduleNotice(schedule) {
+    if (schedule?.automatic_paused !== true || schedule.reason !== 'weekend' || schedule.timezone !== 'America/New_York') return null;
+    const next = scannerUtcLabel(schedule.next_eligible_at);
+    return 'Automatische Aktien-Scans: Wochenendpause (America/New_York). Manuelle Starts bleiben moeglich.'
+        + (next ? ` Naechster zulaessiger Auto-Start: ${next}.` : ' Naechster Auto-Start noch nicht bestaetigt.');
+}
+
 function scannerFailureDetails(info) {
     const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const diag = object(info?.diagnostics);
@@ -5759,8 +5859,11 @@ function scannerTimestamp(value) {
 }
 
 function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = null) {
-    if (data?.scan_error) return 'error';
     if (expectedRunId && data?.scan_run_id && data.scan_run_id !== expectedRunId) return 'superseded';
+    const control = scannerControlSnapshot(data);
+    if (control && ['pause_requested', 'paused', 'finishing'].includes(control.state) && control.worker_alive) return control.state;
+    if (control?.state === 'restart_required') return control.worker_alive ? 'finishing' : 'restart_required';
+    if (data?.scan_error) return 'error';
     if (data?.scan_running || data?.partial) return 'running';
     const diag = data?.diagnostics || {};
     const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
@@ -5783,6 +5886,8 @@ function scannerSnapshotInfo(data) {
         scan_error: data?.scan_error || null,
         partial: !!data?.partial,
         scan_running: !!data?.scan_running,
+        scan_control: scannerControlValue(data?.scan_control),
+        scan_schedule: scannerScheduleNotice(data?.scan_schedule) ? data.scan_schedule : null,
         checked: data?.checked ?? data?.diagnostics?.checked ?? null,
         total: data?.total ?? data?.diagnostics?.total ?? null,
         progress_detail: data?.progress_detail || data?.diagnostics?.progress_detail || '',
@@ -5801,6 +5906,9 @@ function biSnapshotCountLabel({ info, loading, hasLoaded, count }) {
 
 function scannerEvidenceState({ info, loading, running, error, hasLoaded, count, kind = 'strategy' }) {
     const diag = info?.diagnostics || {};
+    if (error) return { tone: 'error', text: error };
+    const control = scannerControlSnapshot(info);
+    if (control && !['running', 'finished'].includes(control.state) && (control.worker_alive || control.state === 'restart_required')) return { tone: 'control', text: scannerControlPresentation(control).text };
     const stale = (info?.warnings || []).some(w => /^(Cache alt:|Strategie-Cache ist alt)/.test(String(w)))
         || diag.warning === 'strategy_cache_version_old_scan_again';
     if (error || info?.scan_error) return { tone: 'error', text: error || scannerPublicFailure(200, info) };
@@ -5860,7 +5968,8 @@ function scannerDiagnosticSummary(diagnostics) {
         rejected: [...counts].sort((a, b) => b[1] - a[1]).slice(0, 4) };
 }
 
-function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix, scanCache, updateScanCache, schedulerState = null }) {
+function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix, scanCache, updateScanCache, schedulerState = null,
+    controlEnabled = false, isAdmin = false, controlUrl = null }) {
     const cacheKey = `${cachePrefix}:snapshot:${scopeKey}`;
     const saved = scanCache[cacheKey] || null;
     const cached = saved && (!saved.scopeKey || saved.scopeKey === scopeKey) ? { ...saved, scopeKey } : null;
@@ -5870,6 +5979,9 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
     const [isScanning, setIsScanning] = useState(false);
     const [error, setError] = useState(null);
     const [notice, setNotice] = useState(null);
+    const [controlPending, setControlPending] = useState(null);
+    const [controlNotice, setControlNotice] = useState(null);
+    const [controlError, setControlError] = useState(null);
     const scopeRef = useRef(scopeKey);
     const mountedRef = useRef(true);
     const pollRef = useRef(null);
@@ -5881,7 +5993,13 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
     const startingRef = useRef(false);
     const finalSnapshotRef = useRef(cached);
     const schedulerSeenRef = useRef(null);
+    const controlPostRef = useRef(null);
+    const controlVerifiedRef = useRef(false);
+    const activeControlRef = useRef(null);
+    const controlRequestRef = useRef(null);
     scopeRef.current = scopeKey;
+    activeControlRef.current = controlEnabled && controlVerifiedRef.current && snapshot.scopeKey === scopeKey
+        ? scannerControlSnapshot(snapshot.info, schedulerState) : null;
 
     const current = () => mountedRef.current && scopeRef.current === scopeKey;
     const stopPolling = () => {
@@ -5909,13 +6027,32 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             if (!res.ok) throw new Error(scannerPublicFailure(res.status, data, res.headers?.get('Retry-After')));
             if (!data || !Array.isArray(data.data) || data.data.some(item => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error('Ungueltige Scanner-Antwort. Kein bestaetigter Ergebnisstand.');
             const info = scannerSnapshotInfo(data);
+            controlVerifiedRef.current = true;
+            activeControlRef.current = controlEnabled ? scannerControlSnapshot(info, schedulerState) : null;
+            const pendingControl = controlRequestRef.current;
+            if (pendingControl && !controlPostRef.current) {
+                const observed = activeControlRef.current;
+                if (!observed || observed.run_id !== pendingControl.run_id || observed.owner_scan_key !== pendingControl.owner_scan_key
+                    || (pendingControl.action === 'pause' && observed.state !== 'running')
+                    || (pendingControl.action === 'resume' && observed.state !== 'paused')) {
+                    controlRequestRef.current = null; setControlPending(null); setControlNotice(null);
+                }
+            }
             let next = { scopeKey, items: data.data, info };
             if (data.scan_error && (!data.cached_at || data.partial) && finalSnapshotRef.current?.scopeKey === scopeKey) {
-                next = { ...finalSnapshotRef.current, info: { ...finalSnapshotRef.current.info, scan_error: data.scan_error, diagnostics: info.diagnostics } };
+                // Keep the last result rows, never the previous worker's control identity.
+                next = { ...finalSnapshotRef.current, info: { ...finalSnapshotRef.current.info,
+                    scan_error: data.scan_error, diagnostics: info.diagnostics,
+                    scan_control: info.scan_control, scan_schedule: info.scan_schedule,
+                    scan_running: info.scan_running, scan_run_id: info.scan_run_id,
+                    scan_last_attempt_at: info.scan_last_attempt_at, scan_last_completed_at: info.scan_last_completed_at } };
             }
             setSnapshot(next);
             setHasLoaded(true);
-            setError(data.scan_error ? scannerPublicFailure(200, data) : null);
+            const verifiedControl = scannerControlSnapshot(info);
+            const deliberateControl = verifiedControl && !['running', 'finished'].includes(verifiedControl.state)
+                && (verifiedControl.worker_alive || verifiedControl.state === 'restart_required');
+            setError(data.scan_error && !deliberateControl ? scannerPublicFailure(200, data) : null);
             if (!data.partial && !data.scan_error && data.cached_at) {
                 finalSnapshotRef.current = next;
                 updateScanCache(cacheKey, next);
@@ -5924,6 +6061,10 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             return data;
         } catch (err) {
             if (!current() || controller.signal.aborted || serial !== readSerialRef.current) return null;
+            controlVerifiedRef.current = false;
+            activeControlRef.current = null;
+            controlRequestRef.current = null;
+            setControlPending(null); setControlNotice(null);
             if (finalSnapshotRef.current?.scopeKey === scopeKey) setSnapshot(finalSnapshotRef.current);
             setError(err?.message && err.message.startsWith('Ungueltige Scanner-Antwort') ? err.message
                 : err?.message && /^(Scanner-Anfrage|Anmeldung|Keine Berechtigung|Scan derzeit|Scan konnte)/.test(err.message) ? err.message
@@ -5944,6 +6085,12 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             if (!data) { stopPolling(); scanning(false); return; }
             const outcome = scannerPollOutcome(data, previousStamp, observedRunning, expectedRunId);
             if (outcome === 'running') observedRunning = true;
+            if (['pause_requested', 'paused', 'finishing'].includes(outcome)) observedRunning = true;
+            if (outcome === 'restart_required') {
+                stopPolling(); scanning(false); setError(null);
+                setNotice('Fortsetzung mit alten Daten nicht moeglich – neuer Scan erforderlich.');
+                return;
+            }
             if (outcome === 'complete') {
                 stopPolling(); scanning(false);
                 setNotice(null);
@@ -6015,10 +6162,62 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         }
     };
 
+    const setControl = async (action, autoResume = true) => {
+        if (!current() || !controlEnabled || !isAdmin || !controlUrl || controlPostRef.current || controlRequestRef.current) return;
+        const target = activeControlRef.current;
+        const view = scannerControlPresentation(target);
+        if (!target || (action === 'pause' ? !view?.canPause : action === 'resume' ? !view?.canResume : true)) return;
+        const operation = operationRef.current;
+        const controller = new AbortController();
+        controlPostRef.current = controller;
+        controlRequestRef.current = { action, owner_scan_key: target.owner_scan_key, run_id: target.run_id };
+        setControlPending(action); setControlError(null); setControlNotice(null);
+        const sameRequest = () => current() && !controller.signal.aborted && operation === operationRef.current
+            && activeControlRef.current?.run_id === target.run_id && activeControlRef.current?.owner_scan_key === target.owner_scan_key;
+        try {
+            const response = await fetch(controlUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ scanner: target.owner_scan_key, run_id: target.run_id, action, auto_resume: autoResume === true }), signal: controller.signal });
+            let ack = null;
+            try { ack = await response.json(); } catch (_) {}
+            if (!sameRequest()) return;
+            if (!response.ok) {
+                const text = response.status === 401 ? 'Anmeldung abgelaufen. Steuerung nicht bestaetigt.'
+                    : response.status === 403 ? 'Keine Berechtigung zur Scan-Steuerung.'
+                    : response.status === 409 ? 'Scanlauf oder Zustand hat sich geaendert. Status erneut laden.'
+                    : response.status === 429 ? 'Scan-Steuerung derzeit begrenzt. Bitte erneut versuchen.'
+                    : 'Scan-Steuerung fehlgeschlagen. Der Workerstatus ist unveraendert zu pruefen.';
+                setControlError(text); controlRequestRef.current = null; setControlPending(null); return;
+            }
+            const confirmed = scannerControlValue(ack?.control);
+            if (ack?.status !== (action === 'pause' ? 'pause_requested' : 'resume_requested')
+                || !confirmed || confirmed.run_id !== target.run_id || confirmed.owner_scan_key !== target.owner_scan_key) {
+                setControlError('Steuerungsantwort passt nicht zum angeforderten Lauf. Status erneut laden.');
+                controlRequestRef.current = null; setControlPending(null); return;
+            }
+            // An acknowledgement never sets paused/running optimistically.
+            setControlNotice(action === 'pause' ? 'Pause angefordert. Warte auf bestaetigten Workerstatus.'
+                : 'Fortsetzung angefordert. Warte auf bestaetigten Workerstatus.');
+        } catch (_) {
+            if (sameRequest()) {
+                setControlError('Steuerung nicht bestaetigt. Verbindung unterbrochen; der Server kann den Auftrag erhalten haben.');
+                controlRequestRef.current = null; setControlPending(null);
+            }
+        } finally {
+            if (controlPostRef.current === controller) controlPostRef.current = null;
+            if (current() && operation === operationRef.current && !sameRequest()) {
+                controlRequestRef.current = null; setControlPending(null); setControlNotice(null);
+            }
+            if (sameRequest() && !pollingRef.current) refresh();
+        }
+    };
+
     useEffect(() => {
         mountedRef.current = true;
         operationRef.current += 1;
         startingRef.current = false;
+        controlVerifiedRef.current = false;
+        controlRequestRef.current = null;
+        setControlPending(null); setControlNotice(null); setControlError(null);
         stopPolling();
         const savedInitial = scanCache[cacheKey] || null;
         const initial = savedInitial && (!savedInitial.scopeKey || savedInitial.scopeKey === scopeKey) ? { ...savedInitial, scopeKey } : null;
@@ -6033,10 +6232,12 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             stopPolling();
             if (readAbortRef.current) readAbortRef.current.abort();
             if (postAbortRef.current) postAbortRef.current.abort();
+            if (controlPostRef.current) controlPostRef.current.abort();
+            controlPostRef.current = null;
         };
     }, [scopeKey, resultsUrl]);
 
-    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null, schedulerState?.last_attempt_at || null, schedulerState?.run_id || null]);
+    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null, schedulerState?.last_attempt_at || null, schedulerState?.run_id || null, schedulerState?.control?.state || null, schedulerState?.schedule || null]);
     useEffect(() => {
         const previous = schedulerSeenRef.current;
         schedulerSeenRef.current = schedulerRevision;
@@ -6050,7 +6251,11 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         diagnostics: sameScope ? snapshot.info?.diagnostics || null : null,
         loading: !sameScope || loading, hasLoaded: sameScope && hasLoaded,
         isScanning: sameScope && isScanning, error: sameScope ? error : null,
-        notice: sameScope ? notice : null, start, refresh };
+        notice: sameScope ? notice : null, start, refresh, setControl,
+        control: sameScope ? activeControlRef.current : null,
+        schedule: sameScope && controlEnabled ? snapshot.info?.scan_schedule || schedulerState?.schedule || null : null,
+        controlPending: sameScope ? controlPending : null, controlNotice: sameScope ? controlNotice : null,
+        controlError: sameScope ? controlError : null };
 }
 
 function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
@@ -6106,7 +6311,7 @@ function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
 }
 
 // Scanner Tab
-function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null, canControl = false }) {
     const defaultStockStrategy = 'Momentum Breakout Long';
     const [strategy, setStrategy] = useState(scanCache.scanner_strategy || defaultStockStrategy);
     const [marketType, setMarketType] = useState('stocks');
@@ -6151,6 +6356,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         scopeKey: `${marketType}:${strategy}`, resultsUrl,
         startUrl: `${API}/api/scan`, startBody: { strategy, market_type: marketType },
         cachePrefix: 'scanner', scanCache, updateScanCache, schedulerState,
+        controlEnabled: marketType === 'stocks', isAdmin: canControl, controlUrl: `${API}/api/scan-control`,
     });
     const { results, isScanning, info: scanInfo } = feed;
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
@@ -6215,7 +6421,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey}
+                controlFeed={marketType === 'stocks' ? feed : null} canControl={canControl} />
 
             <LiveScanStatus
                 active={isScanning || scanInfo?.scan_running || !!schedulerState?.running}
@@ -6225,6 +6432,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 detail={scanInfo?.progress_detail}
                 count={results.length}
                 itemLabel="Treffer"
+                control={feed.control}
             />
 
             <ScannerEvidence feed={feed} kind="strategy" running={!!schedulerState?.running} />
@@ -6365,7 +6573,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 }
 
 // BI Scanner Tab
-function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
+function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null, canControl = false }) {
     const [direction, setDirection] = useState('long');
     const scannerKey = direction === 'long' ? 'bi_long' : 'bi_short';
     const feed = useScannerFeed({
@@ -6374,6 +6582,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
         startUrl: `${API}/api/bi-scan`, startBody: { direction },
         cachePrefix: 'bi', scanCache, updateScanCache,
         schedulerState: schedulerStatus?.scans?.[scannerKey] || null,
+        controlEnabled: true, isAdmin: canControl, controlUrl: `${API}/api/scan-control`,
     });
     const { results, diagnostics, isScanning, info: liveInfo } = feed;
     const { sorted, toggleSort, sortKey } = useSortable(results, 'score');
@@ -6389,7 +6598,8 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} />
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'}
+                controlFeed={feed} canControl={canControl} />
 
             <ScannerEvidence feed={feed} kind="bi" running={!!schedulerStatus?.scans?.[scannerKey]?.running} />
 
