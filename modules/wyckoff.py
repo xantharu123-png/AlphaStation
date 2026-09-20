@@ -17,7 +17,7 @@ from modules.level_zones import CompletedBar, normalize_completed_bars
 from modules.trade_levels import trade_geometry
 
 
-MODEL = "causal_wyckoff_v1"
+MODEL = "causal_wyckoff_v2"
 UTC = timezone.utc
 
 
@@ -114,6 +114,53 @@ def _oriented(bar, sign):
             "low": sign * (bar.low if sign == 1 else bar.high)}
 
 
+def _annotate_evidence(row, bars):
+    """Describe detected evidence, never manufacture canonical subwaves.
+
+    A/B/C/D are interpretive event intervals, not exact historical boundaries.
+    The first ST belongs to stopping action in A; its completed confirmation
+    starts our inferred B interval. An absent Spring/UTAD does not manufacture C.
+    """
+    occurrences = {}
+    for sequence, item in enumerate(row["events"], 1):
+        name = item["name"]
+        occurrences[name] = occurrences.get(name, 0) + 1
+        item.update(sequence=sequence, occurrence=occurrences[name])
+    events = row["events"]
+    sc, ar = events[:2]
+    st = next((item for item in events if item["name"] == "ST"), None)
+    spring = next((item for item in events if item["name"] in {"Spring", "UTAD"}), None)
+    sos = next((item for item in events if item["name"] in {"SOS", "SOW"}), None)
+    phases = []
+
+    def phase(name, first, proof, basis, *, confirmation_start=False):
+        phases.append({"phase": name,
+                       "start_time": first["confirmation_time"] if confirmation_start else first["time"],
+                       "confirmed_time": proof["confirmation_time"],
+                       "end_time": int(bars[-1].opened_at.timestamp()),
+                       "observed_at": first["confirmed_at"] if confirmation_start else first["observed_at"],
+                       "confirmed_at": proof["confirmed_at"],
+                       "status": "invalidated" if row["signal_state"] == "invalidated" else
+                                 ("developing" if name == "A" and st is None else "inferred"),
+                       "basis": basis})
+
+    phase("A", sc, st or ar, "climax_reaction_first_secondary_test" if st else "climax_reaction_only")
+    if st:
+        phase("B", st, st, "range_after_first_secondary_test", confirmation_start=True)
+    if spring:
+        phase("C", spring, spring, "optional_counter_boundary_test_and_recovery")
+    if sos:
+        phase("D", sos, sos, "volume_confirmed_range_break")
+    for current, following in zip(phases, phases[1:]):
+        current["end_time"] = following["start_time"]
+    row.update(phase_evidence=phases, phase_basis="inferred_event_intervals",
+               sequence_basis="chronological_display_ordinal_not_canonical_subwave",
+               model_scope="climax_reversal", unmodelled_phases=["E"],
+               limitations=["preliminary_support_supply_not_modelled", "reaccumulation_redistribution_not_modelled",
+                            "unclimactic_variants_not_modelled", "phase_boundaries_inferred_not_exact",
+                            "quality_score_not_win_probability"])
+
+
 def _detect_direction(bars, direction, atr):
     sign = 1 if direction == "LONG" else -1
     prices = [_oriented(bar, sign) for bar in bars]
@@ -130,7 +177,12 @@ def _detect_direction(bars, direction, atr):
                 "confirmation_time": int(bars[confirmed].opened_at.timestamp()),
                 "observed_at": _iso(bars[observed].closed_at),
                 "confirmed_at": _iso(bars[confirmed].closed_at),
-                "price": sign * price, "volume_ratio": rvol[observed]}
+                "price": sign * price, "volume_ratio": rvol[observed],
+                # The first secondary test completes stopping action (A).
+                # Phase B is inferred from its confirmation, not from the
+                # occurrence of the test itself.
+                "phase": {"SC": "A", "AR": "A", "ST": "A", "Spring": "C",
+                          "SOS": "D", "LPS": "D"}[name]}
 
     candidates = []
     for sc in range(20, len(bars) - 5):
@@ -141,12 +193,30 @@ def _detect_direction(bars, direction, atr):
         if (rvol[sc] is None or rvol[sc] < 1.8 or spreads[sc] < average_spread[sc] * 1.3
                 or position < .45 or decline < .05 or prices[sc - 1]["close"] <= candle["close"]):
             continue
-        # One right-hand completed bar confirms AR. Its extremum alone must
-        # not be backdated as a known range while the rally/reaction continues.
-        ar = next((index for index in range(sc + 2, min(sc + 20, len(bars) - 1))
-                   if bars[index].volume > 0 and bars[index + 1].volume > 0
-                   and prices[index]["high"] >= prices[index - 1]["high"]
-                   and prices[index]["high"] > prices[index + 1]["high"]), None)
+        # Form the range chronologically: a small first local peak is not
+        # irrevocably the automatic rally/reaction while it is still unfolding.
+        # Only completed right-hand confirmations may update its outer pivot.
+        # The first confirmed secondary test freezes that pivot; neither a
+        # later high nor a later failed breakout may rewrite a proven range.
+        ar, st = None, None
+        for confirmed in range(sc + 3, len(bars)):
+            index = confirmed - 1
+            if (index < sc + 20 and bars[index].volume > 0 and bars[confirmed].volume > 0
+                    and prices[index]["high"] >= prices[index - 1]["high"]
+                    and prices[index]["high"] > prices[confirmed]["high"]
+                    and (ar is None or prices[index]["high"] > prices[ar]["high"])):
+                ar = index
+            if ar is None or index < ar + 3:
+                continue
+            tentative_width = prices[ar]["high"] - candle["low"]
+            if (candle["low"] - tentative_width * .02 <= prices[index]["low"] <= candle["low"] + tentative_width * .25
+                    and prices[index]["close"] >= candle["low"]
+                    and prices[confirmed]["close"] > prices[index]["close"]
+                    and bars[confirmed].volume > 0
+                    and rvol[index] is not None and rvol[index] <= min(1.2, rvol[sc] * .75)
+                    and spreads[index] <= spreads[sc]):
+                st = index
+                break
         if ar is None:
             continue
         lower, upper = candle["low"], prices[ar]["high"]
@@ -163,6 +233,7 @@ def _detect_direction(bars, direction, atr):
                "range_start_time": int(bars[sc].opened_at.timestamp()),
                "range_end_time": int(bars[-1].opened_at.timestamp()),
                "range_confirmed_at": _iso(bars[ar + 1].closed_at),
+               "range_confirmed_time": int(bars[ar + 1].opened_at.timestamp()),
                "signal_confirmed_at": None, "latest_completed_at": _iso(bars[-1].closed_at),
                "invalidation_reason": None, "trade": None}
         candidates.append(row)
@@ -171,16 +242,9 @@ def _detect_direction(bars, direction, atr):
             row.update(signal_state="invalidated", invalidation_reason=reason,
                        trade_ready=False, trade=None, signal_confirmed_at=None)
 
-        st = next((index for index in range(ar + 3, len(bars) - 1)
-                   if lower - width * .02 <= prices[index]["low"] <= lower + width * .25
-                   and prices[index]["close"] >= lower
-                   and prices[index + 1]["close"] > prices[index]["close"]
-                   and bars[index + 1].volume > 0
-                   and rvol[index] is not None and rvol[index] <= min(1.2, rvol[sc] * .75)
-                   and spreads[index] <= spreads[sc]), None)
         if st is None:
-            if prices[-1]["close"] < lower:
-                invalidate("range_failed")
+            if any(bar["close"] < lower for bar in prices[sc + 1:]):
+                invalidate("range_failed_before_secondary_test")
             continue
         # SC/BC establishes the outer boundary, not AR. A failed climax
         # cannot be resurrected by a later rally/reaction and secondary test.
@@ -189,7 +253,7 @@ def _detect_direction(bars, direction, atr):
             continue
         events.append(event("ST", st, st + 1, prices[st]["low"]))
         row.update(phase="B", score=50)
-        spring_confirmed = None
+        sos = None
         broken = False
         index = st + 2
         while index < len(bars):
@@ -210,31 +274,28 @@ def _detect_direction(bars, direction, atr):
                     break
                 events.append(event("Spring", index, recovery, prices[index]["low"]))
                 row.update(phase="C", variant="spring", score=60)
-                spring_confirmed = recovery
                 index = recovery + 1
             else:
+                if (prices[index]["close"] > upper
+                        and prices[index]["close"] > prices[index]["open"]
+                        and rvol[index] is not None and rvol[index] >= 1.5
+                        and spreads[index] >= average_spread[index] * 1.3
+                        and (prices[index]["close"] - prices[index]["low"]) / spreads[index] >= .65):
+                    sos = index
+                    break
                 index += 1
         if broken:
             continue
-        start = max(st + 2, (spring_confirmed + 1) if spring_confirmed is not None else 0)
-        sos_candidates = [index for index in range(start, len(bars))
-                          if prices[index]["close"] > upper
-                          and prices[index]["close"] > prices[index]["open"]
-                          and rvol[index] is not None and rvol[index] >= 1.5
-                          and spreads[index] >= average_spread[index] * 1.3
-                          and (prices[index]["close"] - prices[index]["low"]) / spreads[index] >= .65]
-        if not sos_candidates:
+        if sos is None:
             continue
-        last_failed = max((index for index in range(start, len(bars))
-                           if prices[index]["close"] < upper), default=start - 1)
-        active = [index for index in sos_candidates if index > last_failed]
-        sos = active[0] if active else sos_candidates[-1]
         events.append(event("SOS", sos, sos, prices[sos]["close"]))
         row.update(phase="D", score=row["score"] + 20)
-        if not active:
-            invalidate("breakout_failed")
-            continue
-        lps = next((index for index in range(sos + 1, len(bars) - 1)
+        failed_at = next((index for index in range(sos + 1, len(bars))
+                          if prices[index]["close"] < upper), None)
+        # Preserve already confirmed LPS evidence after a later failure, but
+        # do not build an LPS from candles after that first failed breakout.
+        lps_end = min(len(bars) - 1, failed_at - 1) if failed_at is not None else len(bars) - 1
+        lps = next((index for index in range(sos + 1, lps_end)
                     if upper - width * .10 <= prices[index]["low"] <= upper + width * .10
                     and prices[index]["low"] < prices[sos]["close"]
                     and prices[index]["close"] >= upper
@@ -243,9 +304,14 @@ def _detect_direction(bars, direction, atr):
                     and rvol[index] is not None and rvol[index] < .9
                     and spreads[index] <= spreads[sos]), None)
         if lps is None:
+            if failed_at is not None:
+                invalidate("breakout_failed")
             continue
         events.append(event("LPS", lps, lps + 1, prices[lps]["low"]))
         row["score"] = min(100, row["score"] + 20)
+        if failed_at is not None:
+            invalidate("breakout_failed")
+            continue
         entry = bars[-1].close
         # Freeze invalidation geometry at signal confirmation. Later volatility
         # must not widen a past stop or make a stopped-out setup look alive.
@@ -328,6 +394,8 @@ def analyze_wyckoff(bars: Sequence[Mapping[str, Any]], *, as_of, timeframe: str,
                 pattern.update(trade_ready=False, signal_state="invalidated", trade=None,
                                signal_confirmed_at=None,
                                invalidation_reason="conflicting_directional_patterns")
+    for pattern in all_patterns:
+        _annotate_evidence(pattern, completed)
     result["patterns"] = [pattern for pattern in all_patterns if side == "ALL" or pattern["direction"] == side]
     return result
 

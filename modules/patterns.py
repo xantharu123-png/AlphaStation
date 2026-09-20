@@ -5266,7 +5266,9 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                 direction = row.get("direction")
                 quality = row.get("score", 0)
                 phase = row.get("phase", "")
-                state_label = "Bestaetigte Fortsetzung" if ready else "Kontext, kein Handelssignal"
+                state_label = ("Ungueltige Struktur, kein Handelssignal"
+                               if row.get("signal_state") == "invalidated"
+                               else "Bestaetigte Fortsetzung" if ready else "Kontext, kein Handelssignal")
                 patterns.append({
                     **row,
                     "pattern": f"Wyckoff {row.get('type', '')}",
@@ -5841,7 +5843,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                           "Three White Soldiers", "Three Black Crows"}
 
             for p in patterns:
-                if p.get("model") == "causal_wyckoff_v1":
+                if str(p.get("model") or "").startswith("causal_wyckoff_"):
                     continue  # Exact observed/confirmed event times, never an estimated slice index.
                 if p.get("detect_index") is not None:
                     continue  # Bereits gesetzt, nicht überschreiben

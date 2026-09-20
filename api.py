@@ -100,6 +100,7 @@ import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 from modules import stock_scan_runtime
 from modules import scan_control, scan_schedule
+from modules.wyckoff import MODEL as WYCKOFF_MODEL
 
 # Import scanner modules
 from modules.scanners import (
@@ -16193,7 +16194,7 @@ def _stock_wyckoff_row_contract_valid(
     evidence = row.get("wyckoff")
     if not isinstance(evidence, dict):
         return False
-    if (row.get("wyckoff_model") != "causal_wyckoff_v1"
+    if (row.get("wyckoff_model") != WYCKOFF_MODEL
             or row.get("wyckoff_timeframe") != "1D"
             or evidence.get("direction") != direction
             or evidence.get("trade_ready") is not True
@@ -29055,7 +29056,7 @@ def get_chart_data(
                         # Filtere Patterns mit zu wenig Bars-Abstand
                         filtered = []
                         for cp in chart_pats:
-                            if cp.get("model") == "causal_wyckoff_v1":
+                            if cp.get("model") == WYCKOFF_MODEL:
                                 filtered.append(cp)
                                 continue
                             dp = cp.get("draw_points", [])
@@ -29068,13 +29069,15 @@ def get_chart_data(
                             else:
                                 filtered.append(cp)
 
-                        # Nur die besten 3 Patterns (nach Confidence sortieren)
+                        # Keep causal evidence outside the generic top-three cap.
+                        # Unrelated chart shapes must not hide Wyckoff phases.
                         conf_order = {"High": 3, "Medium": 2, "Low": 1}
                         filtered.sort(key=lambda x: conf_order.get(x.get("confidence", "Low"), 0), reverse=True)
-                        chart_pats = filtered[:3]
+                        chart_pats = ([p for p in filtered if p.get("model") == WYCKOFF_MODEL]
+                                      + [p for p in filtered if p.get("model") != WYCKOFF_MODEL][:3])
 
                         for cp in chart_pats:
-                            if cp.get("model") == "causal_wyckoff_v1":
+                            if cp.get("model") == WYCKOFF_MODEL:
                                 # Wyckoff points carry market timestamps and
                                 # separate confirmation times, not slice indices.
                                 continue
@@ -29124,7 +29127,7 @@ def get_chart_data(
                         if "chart_patterns" in patterns_result:
                             patterns_result["chart_patterns"] = [
                                 p for p in patterns_result["chart_patterns"]
-                                if p.get("model") == "causal_wyckoff_v1" or p.get("type") != _opposing or p.get("confidence") == "High"
+                                if p.get("model") == WYCKOFF_MODEL or p.get("type") != _opposing or p.get("confidence") == "High"
                             ]
 
                         # Order Blocks: Nur die zur Trend-Richtung passenden behalten

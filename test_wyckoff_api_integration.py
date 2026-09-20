@@ -98,7 +98,7 @@ def test_chart_passes_selected_timeframe_and_does_not_remap_causal_event_times(m
         bar["time"] = int(bar["open_time"].timestamp())
     seen = []
     point = {"time": bars[40]["time"], "price": 96., "confirmed_at": "2026-02-12T00:00:00Z"}
-    pattern = {"model": "causal_wyckoff_v1", "pattern": "Wyckoff", "type": "bullish",
+    pattern = {"model": api.WYCKOFF_MODEL, "pattern": "Wyckoff", "type": "bullish",
                "time": bars[86]["time"], "index_basis": "time", "draw_points": [point],
                "trade_ready": False, "phase": "B", "confidence": "Low"}
     def detect(raw, *, lookback, wyckoff_context):
@@ -118,9 +118,9 @@ def test_chart_passes_selected_timeframe_and_does_not_remap_causal_event_times(m
 
 def test_context_and_confirmed_chart_labels_are_not_buy_probability_claims():
     html = Path("frontend/index.html").read_text(encoding="utf-8")
-    begin = html.index("function chartPatternLabel(")
+    begin = html.index("function isWyckoffPattern(")
     end = html.index("function usePublicPlans()", begin)
-    script = html[begin:end] + "\nconsole.log(JSON.stringify([chartPatternLabel({model:'causal_wyckoff_v1',pattern:'Wyckoff',timeframe:'4H',phase:'B'}),chartPatternLabel({model:'causal_wyckoff_v1',pattern:'Wyckoff',timeframe:'1D',phase:'D',trade_ready:true})]));"
+    script = html[begin:end] + "\nconsole.log(JSON.stringify([chartPatternLabel({model:'causal_wyckoff_v2',pattern:'Wyckoff',timeframe:'4H',phase:'B'}),chartPatternLabel({model:'causal_wyckoff_v2',pattern:'Wyckoff',timeframe:'1D',phase:'D',trade_ready:true})]));"
     labels = json.loads(subprocess.check_output(["node", "-e", script], text=True, encoding="utf-8"))
     assert "4H" in labels[0] and "kein Handelssignal" in labels[0]
     assert "1D" in labels[1] and "Handelsplan separat" in labels[1]

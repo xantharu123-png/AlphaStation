@@ -193,7 +193,7 @@ def test_chart_render_and_both_scanner_click_paths_preserve_evidence():
     assert '{index + 1} · {anchor.label}' in component
     assert "minBarSpacing: cupEvidence.anchors.length ? 0.5 : 4" in sidebar
     assert "scannerData === prevOverlaysRef.current._scannerData" in sidebar
-    assert "useState(() => isCupScannerSelection(scannerData) ? '1D' : '4H')" in sidebar
+    assert "useState(() => isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData) ? '1D' : '4H')" in sidebar
     selection_effect = sidebar[sidebar.index("// Default only for a newly selected Cup row"):sidebar.index("const TIMEFRAMES")]
     assert "}, [scannerData]);" in selection_effect
     assert "[scannerData, timeframe]" not in selection_effect

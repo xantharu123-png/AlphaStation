@@ -1,5 +1,10 @@
 # Wyckoff: audit and causal recognition contract
 
+Historical v1 audit. For the subsequent same-day range/context corrections,
+model migration and inspectable chart evidence, see
+[Wyckoff v2](WYCKOFF_V2_2026-09-20.md). The old test totals below refer only to
+the v1 verification; they are not evidence for later revisions or deployment.
+
 ## Scope and deployment boundary
 
 This change concerns the two public stock Wyckoff strategies, their chart

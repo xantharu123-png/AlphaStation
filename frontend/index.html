@@ -560,17 +560,129 @@ window.fetch = (input, init = {}) => {
     return rawFetch(input, init);
 };
 
+function isWyckoffPattern(pattern) {
+    return typeof pattern?.model === 'string' && pattern.model.startsWith('causal_wyckoff_');
+}
+
+function isWyckoffScannerSelection(row) {
+    return !!row && !row.isCrypto && (!!row.wyckoff || [row.scanner, row.strategy, row.Strategy, row.canonicalStrategy, row.pattern_type]
+        .some(name => typeof name === 'string' && /wyckoff/i.test(name)));
+}
+
+function wyckoffPatternColor(pattern) {
+    if (pattern?.signal_state === 'invalidated' || pattern?.trade_ready !== true) return '#94a3b8';
+    return pattern.type === 'bullish' || pattern.direction === 'LONG' ? '#10b981' : '#ef4444';
+}
+
+function wyckoffDate(value) {
+    const date = typeof value === 'number' && Number.isFinite(value) ? new Date(value * 1000)
+        : typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) ? new Date(value) : null;
+    return date && Number.isFinite(date.getTime()) ? date.toISOString().replace('T', ' ').replace('.000Z', ' UTC') : 'nicht belegt';
+}
+
+function wyckoffEvidence(pattern) {
+    if (!isWyckoffPattern(pattern)) return { events: [], phases: [] };
+    const allowedNames = new Set(['SC', 'BC', 'AR', 'ST', 'Spring', 'UTAD', 'SOS', 'SOW', 'LPS', 'LPSY']);
+    const source = Array.isArray(pattern.event_evidence) ? pattern.event_evidence : Array.isArray(pattern.events) ? pattern.events : [];
+    const counts = {};
+    const events = source.filter(event => event && allowedNames.has(event.name)
+        && typeof event.time === 'number' && Number.isSafeInteger(event.time) && event.time > 0
+        && typeof event.price === 'number' && Number.isFinite(event.price) && event.price > 0)
+        .slice().sort((a, b) => a.time - b.time).map((event, index) => {
+            counts[event.name] = (counts[event.name] || 0) + 1;
+            const occurrence = Number.isSafeInteger(event.occurrence) && event.occurrence > 0 ? event.occurrence : counts[event.name];
+            return { ...event, sequence: index + 1, occurrence,
+                label: `${event.name}${event.name === 'ST' || occurrence > 1 ? ' #' + occurrence : ''}`,
+                phaseLabel: /^[A-D]$/.test(event.phase || '') ? event.phase : 'nicht zugeordnet' };
+        });
+    const phases = ['A', 'B', 'C', 'D', 'E'].map(phase => {
+        const proof = Array.isArray(pattern.phase_evidence) ? pattern.phase_evidence.find(row => row?.phase === phase) : null;
+        return { phase, proof, label: phase === 'E' ? 'nicht modelliert' : !proof ? 'nicht belegt'
+            : proof.status === 'invalidated' ? 'ungueltig' : proof.status === 'developing' ? 'in Entwicklung, noch kein ST' : 'modellbasiert belegt' };
+    });
+    return { events, phases };
+}
+
+// Projection only: no detector, no interpolation and no connections between events.
+function projectWyckoffChartEvidence(pattern, candles, timeframe) {
+    const empty = { points: [], markers: [], rangeLines: [] };
+    if (!isWyckoffPattern(pattern) || pattern.timeframe !== timeframe || !Array.isArray(candles)) return empty;
+    const counts = new Map();
+    candles.forEach(candle => counts.set(candle.time, (counts.get(candle.time) || 0) + 1));
+    const exact = time => typeof time === 'number' && Number.isSafeInteger(time) && counts.get(time) === 1;
+    const color = wyckoffPatternColor(pattern);
+    const points = wyckoffEvidence(pattern).events.filter(event => {
+        if (!exact(event.time) || !exact(event.confirmation_time) || event.confirmation_time < event.time) return false;
+        const candle = candles.find(row => row.time === event.time);
+        return typeof candle.low === 'number' && typeof candle.high === 'number'
+            && Number.isFinite(candle.low) && Number.isFinite(candle.high) && candle.low > 0
+            && candle.high >= candle.low && event.price >= candle.low - 1e-6 && event.price <= candle.high + 1e-6;
+    }).map(event => ({ ...event, color }));
+    const grouped = new Map();
+    points.forEach(event => {
+        const key = event.time;
+        // Dates and exact prices stay in the accessible evidence table;
+        // short chart labels remain readable on mobile and dense ranges.
+        const label = `${event.sequence} ${event.label}`;
+        if (grouped.has(key)) grouped.get(key).text += ' / ' + label;
+        else grouped.set(key, { time: event.time, position: 'aboveBar', color, shape: 'circle', text: label });
+    });
+    const rangeLines = [];
+    const ar = points.find(event => event.name === 'AR');
+    const start = pattern.range_confirmed_time ?? ar?.confirmation_time;
+    const end = pattern.range_end_time;
+    if (exact(start) && exact(end) && start < end && typeof pattern.range_low === 'number'
+        && typeof pattern.range_high === 'number' && Number.isFinite(pattern.range_low)
+        && Number.isFinite(pattern.range_high) && pattern.range_low > 0 && pattern.range_high > pattern.range_low) {
+        [['Unterstuetzung', pattern.range_low], ['Widerstand', pattern.range_high]].forEach(([name, price]) => {
+            rangeLines.push({ name, color, data: [{ time: start, value: price }, { time: end, value: price }] });
+        });
+    }
+    return { points, markers: [...grouped.values()], rangeLines };
+}
+
+function renderWyckoffChartEvidence({ pattern, candles, timeframe, chart, series, markers, LineStyle }) {
+    const evidence = projectWyckoffChartEvidence(pattern, candles, timeframe);
+    evidence.points.forEach(event => {
+        const point = chart.addLineSeries({ color: event.color, lineVisible: false, pointMarkersVisible: true,
+            pointMarkersRadius: 4, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+        point.setData([{ time: event.time, value: event.price }]);
+        series.push(point);
+    });
+    evidence.rangeLines.forEach(boundary => {
+        const line = chart.addLineSeries({ color: boundary.color, lineWidth: 1, lineStyle: LineStyle.Dashed,
+            title: `Wyckoff ${boundary.name}`, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+        line.setData(boundary.data);
+        series.push(line);
+    });
+    markers.push(...evidence.markers);
+}
+
 function chartPatternLabel(pattern) {
-    if (pattern.model !== 'causal_wyckoff_v1') return `${pattern.pattern} (${pattern.confidence || ''})`;
+    if (!isWyckoffPattern(pattern)) return `${pattern.pattern} (${pattern.confidence || ''})`;
     const state = pattern.signal_state === 'invalidated' ? 'ungueltig' :
         pattern.trade_ready === true ? 'Muster bestaetigt; Handelsplan separat' : 'Kontext; kein Handelssignal';
     return `${pattern.pattern} · ${pattern.timeframe || '?'} · Phase ${pattern.phase || '?'} · ${state}`;
 }
 
 function chartPatternEvidence(pattern) {
-    if (pattern.model !== 'causal_wyckoff_v1') return '';
+    if (!isWyckoffPattern(pattern)) return '';
     return (pattern.event_evidence || pattern.events || []).filter(event => event && typeof event === 'object')
         .map(event => `${event.name}: beobachtet ${event.observed_at}; bestaetigt ${event.confirmed_at}`).join('\n');
+}
+
+function wyckoffDisplayRows(patterns, scannerRow, direction) {
+    const rows = (Array.isArray(patterns) ? patterns : []).filter(pattern => isWyckoffPattern(pattern)
+        && (!direction || direction === 'NEUTRAL' || (direction === 'SHORT' ? pattern.type !== 'bullish' : pattern.type !== 'bearish')))
+        .map(pattern => ({ pattern, source: 'Geladene Chartdaten', stored: false }));
+    const stored = scannerRow?.wyckoff;
+    if (stored && typeof stored === 'object') {
+        const pattern = { ...stored, model: stored.model || scannerRow.wyckoff_model,
+            timeframe: stored.timeframe || scannerRow.wyckoff_timeframe,
+            pattern: stored.pattern || `Wyckoff ${stored.direction === 'SHORT' ? 'Distribution' : 'Akkumulation'}` };
+        if (isWyckoffPattern(pattern)) rows.unshift({ pattern, source: 'Gespeicherter Scannerstand, keine aktuelle Neubestaetigung', stored: true });
+    }
+    return rows;
 }
 
 function usePublicPlans() {
@@ -2841,6 +2953,46 @@ function formatFundingRate(row) {
     return Number.isFinite(Number(raw)) ? `${Number(raw).toFixed(3)}%` : 'Nicht verfügbar';
 }
 
+function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction }) {
+    const selectedWyckoff = isWyckoffScannerSelection(scannerRow);
+    const rows = wyckoffDisplayRows(patterns, scannerRow, direction);
+    if (!rows.length && !selectedWyckoff) return null;
+    return <section className="mb-3 mt-3 rounded border border-slate-300 p-3 text-xs" aria-label="Wyckoff-Phasen und Ereignisse">
+        <h4 className="font-semibold">Wyckoff nachpruefen · Chart {timeframe}</h4>
+        <p className="mt-1">A–E sind Phasen; die Zahlen an Ereignissen zeigen nur deren zeitliche Reihenfolge, keine Elliott-Wellen und keine feste A1–A5-Regel. ST #1 / #2 bezeichnet wiederholte Tests.</p>
+        {selectedWyckoff && <p className="mt-1">Aktien-Scannersignal: 1D. Der gewaehlte Chart berechnet seine eigene Struktur; ein anderer Zeitrahmen ist keine Bestaetigung des Scannerstands.</p>}
+        {selectedWyckoff && timeframe !== '1D' && <button type="button" className="button button-secondary mt-2" onClick={onDaily}>Wyckoff im 1D-Chart pruefen</button>}
+        {!rows.length && <p className="mt-2">In den geladenen Chartdaten liegt kein nachpruefbarer Wyckoff-Nachweis vor. Ein gespeichertes Signal wird hier nicht neu bestaetigt.</p>}
+        {rows.map(({ pattern, source, stored }, index) => {
+            const evidence = wyckoffEvidence(pattern);
+            return <details key={`${pattern.direction || pattern.type}-${index}`} className="mt-3 rounded border border-slate-300 p-2">
+                <summary className="cursor-pointer font-semibold">{chartPatternLabel(pattern)} · {evidence.events.length} datierte Ereignisse</summary>
+                <p className="mt-2 font-semibold">{source} · {pattern.timeframe || 'Zeitrahmen unbekannt'}</p>
+                {stored && <p>Diese historischen Scanner-Anker werden nicht auf einen anderen Zeitrahmen uebertragen. Chart-Markierungen stammen ausschliesslich aus der aktuellen Chartanalyse.</p>}
+                <p className="mt-2">Modell: {pattern.model} · begrenztes Climax-Umkehrmodell, keine vollstaendige Wyckoff-Lehre. Phasengrenzen sind aus Ereignissen abgeleitet, keine exakt beobachtbaren Marktwechsel.</p>
+                <p className="mt-1">Range: {Number.isFinite(pattern.range_low) ? pattern.range_low : '—'} bis {Number.isFinite(pattern.range_high) ? pattern.range_high : '—'} · bekannt ab {wyckoffDate(pattern.range_confirmed_at)}. Linien beginnen erst an der Bestaetigungskerze; Punkte markieren das Ereignis, nicht einen damaligen Einstieg.</p>
+                <div className="mt-2 flex flex-wrap gap-2">{evidence.phases.map(row => <span key={row.phase} className="rounded bg-slate-100 px-2 py-1 text-slate-800">Phase {row.phase}: {row.label}</span>)}</div>
+                <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-label="Wyckoff-Ereignistabelle">
+                    <table className="w-full text-left"><caption className="text-left py-2">Ereignisse: beobachtet ist nicht gleichzeitig bestaetigt. Alle Zeiten UTC.</caption>
+                        <thead><tr>{['Nr. / Ereignis', 'Phase', 'Beobachtet', 'Bestaetigt', 'Preis', 'Volumenfaktor'].map(label => <th key={label} scope="col" className="p-2">{label}</th>)}</tr></thead>
+                        <tbody>{evidence.events.map(event => <tr key={`${event.sequence}-${event.time}`} className="border-t border-slate-200">
+                            <th scope="row" className="p-2 whitespace-nowrap">{event.sequence} · {event.label}</th><td className="p-2">{event.phaseLabel}</td>
+                            <td className="p-2 whitespace-nowrap">{wyckoffDate(event.observed_at)}</td><td className="p-2 whitespace-nowrap">{wyckoffDate(event.confirmed_at)}</td>
+                            <td className="p-2">{event.price.toLocaleString('de-CH', { maximumFractionDigits: 6 })}</td><td className="p-2">{typeof event.volume_ratio === 'number' && Number.isFinite(event.volume_ratio) ? event.volume_ratio.toFixed(2) + '×' : 'nicht verfuegbar'}</td>
+                        </tr>)}</tbody>
+                    </table>
+                </div>
+                <dl className="mt-2 grid gap-2 sm:grid-cols-2">{evidence.phases.map(row => <div key={row.phase} className="rounded bg-slate-100 p-2 text-slate-800">
+                    <dt className="font-semibold">Phase {row.phase} · {row.label}</dt>
+                    {row.proof && row.phase !== 'E' && <dd>Beginn: {wyckoffDate(row.proof.start_time)}<br />Erst belegt: {wyckoffDate(row.proof.confirmed_at)}<br />Zeitraum bis: {wyckoffDate(row.proof.end_time)}</dd>}
+                    {!row.proof && row.phase === 'C' && <dd>Spring / UTAD ist optional; ohne Ereignis wird Phase C nicht erfunden.</dd>}
+                </div>)}</dl>
+                <p className="mt-2">Musterqualitaet ist keine Gewinnwahrscheinlichkeit. Keine Aussage ueber institutionelle Kaeufe oder Verkaeufe; Handelsplan, Kosten und Ausfuehrung sind separat zu pruefen.</p>
+            </details>;
+        })}
+    </section>;
+}
+
 // Cup scanner evidence: descriptive anchors from the selected scan window only.
 // This projection never detects a new pattern or reconstructs missing evidence.
 function isCupScannerSelection(row) {
@@ -3002,8 +3154,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [sidebarMode, setSidebarMode] = useState('normal');
     const [customWidth, setCustomWidth] = useState(null);
     const [customHeight, setCustomHeight] = useState(null);
-    const [timeframe, setTimeframe] = useState(() => isCupScannerSelection(scannerData) ? '1D' : '4H');
-    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
+    const [timeframe, setTimeframe] = useState(() => isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData) ? '1D' : '4H');
+    const [overlays, setOverlays] = useState(() => ({ ema: true, vwap: false, sr: false, fib: false, patterns: isWyckoffScannerSelection(scannerData), bb: false, vrvp: true, vol: false }));
     const [reminderBusy, setReminderBusy] = useState(false);
     const [activeReminder, setActiveReminder] = useState(null);
     const [personalPositions, setPersonalPositions] = useState([]);
@@ -3024,7 +3176,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     useEffect(() => {
         if (cupSelectionRef.current !== scannerData) {
             cupSelectionRef.current = scannerData;
-            if (isCupScannerSelection(scannerData)) setTimeframe('1D');
+            if (isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData)) setTimeframe('1D');
+            if (isWyckoffScannerSelection(scannerData)) setOverlays(previous => ({ ...previous, patterns: true }));
         }
     }, [scannerData]);
 
@@ -3629,6 +3782,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
                         .sort((a, b) => (_sevOrder[a.severity] || 2) - (_sevOrder[b.severity] || 2));
                     _sorted.forEach(p => {
+                        if (isWyckoffPattern(p)) {
+                            renderWyckoffChartEvidence({ pattern: p, candles, timeframe, chart: chart.current,
+                                series: overlaySeriesRef.current, markers, LineStyle });
+                            return;
+                        }
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
                         if (markerTime && !_usedTimes.has(markerTime)) {
                             _usedTimes.add(markerTime);
@@ -4787,6 +4945,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 )}
 
                 <CupPatternEvidence evidence={cupEvidence} onDaily={() => setTimeframe('1D')} />
+                <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
+                    onDaily={() => setTimeframe('1D')} scannerRow={scannerData} direction={viewDirection} />
                 {/* Pattern Info */}
                 {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
                 {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
@@ -4795,7 +4955,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
                         {filtered.map((p, i) => (
-                            <span key={i} title={chartPatternEvidence(p)} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${p.model === 'causal_wyckoff_v1' && !p.trade_ready ? 'bg-gray-700 text-gray-200' : p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                            <span key={i} title={chartPatternEvidence(p)} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'bg-gray-700 text-gray-200' : p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {chartPatternLabel(p)}
                             </span>
                         ))}
@@ -12091,6 +12251,11 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
                         .sort((a, b) => (_sevOrder2[a.severity] || 2) - (_sevOrder2[b.severity] || 2));
                     _sorted2.forEach(p => {
+                        if (isWyckoffPattern(p)) {
+                            renderWyckoffChartEvidence({ pattern: p, candles, timeframe, chart: chartRef.current,
+                                series: overlaySeriesRef.current, markers, LineStyle });
+                            return;
+                        }
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
                         if (markerTime && !_usedTimes2.has(markerTime)) {
                             _usedTimes2.add(markerTime);
@@ -12398,6 +12563,8 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         <div ref={chartContainer} style={{ position: 'relative', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
                     </div>
 
+                    <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
+                        onDaily={() => setTimeframe('1D')} direction={(d.confluence?.direction || '').toUpperCase()} />
                     {/* Pattern badges */}
                     {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                         const _vd = (d.confluence?.direction || '').toUpperCase();
@@ -12406,9 +12573,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
                             {filtered.map((p, i) => (
                                 <span key={i} title={chartPatternEvidence(p)} style={{ display: 'inline-block', padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-                                    background: p.model === 'causal_wyckoff_v1' && !p.trade_ready ? 'rgba(148,163,184,0.15)' : p.type === 'bullish' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
-                                    color: p.model === 'causal_wyckoff_v1' && !p.trade_ready ? '#94a3b8' : p.type === 'bullish' ? '#10b981' : '#ef4444',
-                                    border: `1px solid ${p.model === 'causal_wyckoff_v1' && !p.trade_ready ? 'rgba(148,163,184,0.3)' : p.type === 'bullish' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                    background: isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'rgba(148,163,184,0.15)' : p.type === 'bullish' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                                    color: isWyckoffPattern(p) ? wyckoffPatternColor(p) : p.type === 'bullish' ? '#10b981' : '#ef4444',
+                                    border: `1px solid ${isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'rgba(148,163,184,0.3)' : p.type === 'bullish' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
                                 }}>
                                     {chartPatternLabel(p)}
                                 </span>
