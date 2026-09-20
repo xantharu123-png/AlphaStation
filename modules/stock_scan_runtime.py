@@ -22,6 +22,9 @@ _PROGRESS_LOCK = threading.Lock()
 _PROGRESS = {}
 PHASES = frozenset({"starting", "universe", "history", "analyzing", "special_filter",
                     "enrichment", "publish", "mail_guard", "work_timeout", "error", "complete"})
+STAGE_TIMING_LABELS = frozenset({"history", "structure", "execution_history", "plan",
+                                 "cache_publish", "special_filter"})
+STAGE_TIMING_SEMANTICS = "per_leaf_inclusive_elapsed_ms_not_additive"
 
 
 def diagnostics():
@@ -32,8 +35,36 @@ def diagnostics():
     return {"runtime_phase": state["phase"], "provider_requests": root["requests"],
             "history_cache_hits": root["cache_hits"],
             "rate_wait_seconds": int(root["rate_wait_seconds"]),
+            "stage_elapsed_ms": {
+                label: min(2**63 - 1, max(0, int(seconds * 1000)))
+                for label, seconds in state["stage_elapsed_seconds"].items()
+                if label in STAGE_TIMING_LABELS
+            },
+            "stage_timing_semantics": STAGE_TIMING_SEMANTICS,
             "leaf_elapsed_seconds": max(0, int(time.monotonic() - state["started"])),
             "elapsed_seconds": max(0, int(time.monotonic() - root["started"]))}
+
+
+@contextmanager
+def measure(label):
+    """Measure completed code blocks without changing budget/error behavior.
+
+    Values are cumulative for the current leaf, including failed blocks. A
+    nested block also contributes to its outer stage, so timings are explicitly
+    not additive. Unfinished blocks are absent until they return or unwind.
+    Labels are code-owned; outside an opted-in scan this helper is a no-op.
+    """
+    state = current()
+    if state is None or type(label) is not str or label not in STAGE_TIMING_LABELS:
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = max(0.0, time.monotonic() - started)
+        totals = state["stage_elapsed_seconds"]
+        totals[label] = min((2**63 - 1) / 1000, totals.get(label, 0.0) + elapsed)
 
 
 class ScanWorkTimeout(RuntimeError):
@@ -125,7 +156,7 @@ def scope(name, *, sweep=False):
         share = max(0.0, root["work_deadline"] - now) / remaining_leaves
         deadline = min(deadline, now + share)
     state = {"root": root, "strategy": _key(name), "phase": "starting", "phase_started_at": now,
-             "started": now, "deadline": deadline}
+             "started": now, "deadline": deadline, "stage_elapsed_seconds": {}}
     _LOCAL.state = state
     _publish(state, force=True)
     try:

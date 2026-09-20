@@ -216,6 +216,51 @@ class LevelEvidence:
 
 
 @dataclass(frozen=True)
+class ReclaimHistory:
+    """Direction anchors bound to one exact, currently known zone geometry."""
+
+    zone_id: str
+    lower: float
+    upper: float
+    membership_confirmed_at: datetime
+    confirmation_times: Tuple[Tuple[str, datetime], ...]
+
+    def __post_init__(self) -> None:
+        lower, upper = _safe_float(self.lower), _safe_float(self.upper)
+        if lower is None or upper is None or not 0 < lower <= upper:
+            raise ValueError("reclaim history requires finite positive zone bounds")
+        confirmed = _coerce_datetime(self.membership_confirmed_at)
+        anchors = []
+        seen = set()
+        for direction, raw_time in self.confirmation_times:
+            side = str(direction).strip().upper()
+            time = _coerce_datetime(raw_time)
+            if side not in {"LONG", "SHORT"} or side in seen or time > confirmed:
+                raise ValueError("invalid direction-specific reclaim confirmation")
+            seen.add(side)
+            anchors.append((side, time))
+        if not anchors or not str(self.zone_id or "").strip():
+            raise ValueError("reclaim history requires a zone identity and anchors")
+        object.__setattr__(self, "zone_id", str(self.zone_id).strip())
+        object.__setattr__(self, "lower", lower)
+        object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "membership_confirmed_at", confirmed)
+        object.__setattr__(self, "confirmation_times", tuple(sorted(anchors)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "model": "connected_role_geometry_v1",
+            "zone_id": self.zone_id,
+            "lower": self.lower,
+            "upper": self.upper,
+            "membership_confirmed_at": _iso(self.membership_confirmed_at),
+            "confirmed_at_by_direction": {
+                direction: _iso(time) for direction, time in self.confirmation_times
+            },
+        }
+
+
+@dataclass(frozen=True)
 class LevelZone:
     zone_id: str
     lower: float
@@ -232,6 +277,26 @@ class LevelZone:
     origin_roles: Tuple[str, ...] = ()
     break_reclaim_evidence: Optional["BreakReclaimEvidence"] = None
     quality_flags: Tuple[str, ...] = ()
+    reclaim_confirmation_times: Tuple[Tuple[str, datetime], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.reclaim_confirmation_times:
+            history = ReclaimHistory(
+                self.zone_id, self.lower, self.upper, self.confirmed_at,
+                self.reclaim_confirmation_times,
+            )
+            object.__setattr__(self, "reclaim_confirmation_times", history.confirmation_times)
+        else:
+            object.__setattr__(self, "reclaim_confirmation_times", ())
+
+    @property
+    def reclaim_history(self) -> Optional[ReclaimHistory]:
+        if not any(time < self.confirmed_at for _, time in self.reclaim_confirmation_times):
+            return None
+        return ReclaimHistory(
+            self.zone_id, self.lower, self.upper, self.confirmed_at,
+            self.reclaim_confirmation_times,
+        )
 
     @property
     def projection_only(self) -> bool:
@@ -242,6 +307,7 @@ class LevelZone:
         return tuple(sorted({item.source_name for item in self.evidence}))
 
     def to_dict(self) -> Dict[str, Any]:
+        history = self.reclaim_history
         return {
             "zone_id": self.zone_id,
             "lower": self.lower,
@@ -253,6 +319,7 @@ class LevelZone:
             "independent_structural_sources": self.independent_structural_sources,
             "touch_count": self.touch_count,
             "confirmed_at": _iso(self.confirmed_at),
+            **({"reclaim_history": history.to_dict()} if history else {}),
             "break_state": self.break_state,
             "strength": self.strength,
             "origin_roles": list(self.origin_roles),
@@ -374,6 +441,7 @@ class BreakReclaimEvidence:
     retest_required: bool
     retest_observed: bool
     completed_bars_used: int
+    reclaim_history: Optional[ReclaimHistory] = None
 
     def __post_init__(self) -> None:
         state = str(self.state or "").strip().upper()
@@ -395,6 +463,23 @@ class BreakReclaimEvidence:
         required = int(self.hold_bars_required)
         observed = int(self.hold_bars_observed)
         completed = int(self.completed_bars_used)
+
+        if self.reclaim_history is not None:
+            history = self.reclaim_history
+            if not isinstance(history, ReclaimHistory):
+                raise ValueError("reclaim history must be validated immutable evidence")
+            anchor = dict(history.confirmation_times).get(direction)
+            expected_boundary = history.upper if direction == "LONG" else history.lower
+            if (
+                history.zone_id != str(self.zone_id or "").strip()
+                or boundary != expected_boundary
+                or anchor != zone_confirmed_at
+                or not zone_confirmed_at < history.membership_confirmed_at <= as_of
+                or (state == "RECLAIMED" and (
+                    last_completed_at is None or last_completed_at < history.membership_confirmed_at
+                ))
+            ):
+                raise ValueError("reclaim history does not bind this zone, direction and cutoff")
 
         if zone_confirmed_at > as_of:
             raise ValueError("zone confirmation cannot be after break/reclaim as_of")
@@ -436,7 +521,8 @@ class BreakReclaimEvidence:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "model": "break_reclaim_close_hold_v1",
+            "model": "break_reclaim_close_hold_v2" if self.reclaim_history else "break_reclaim_close_hold_v1",
+            **({"reclaim_history": self.reclaim_history.to_dict()} if self.reclaim_history else {}),
             "state": self.state,
             "reason": self.reason,
             "direction": self.direction,
@@ -778,6 +864,64 @@ def _evidence_origin_role(item: LevelEvidence) -> Optional[str]:
     return None
 
 
+def _connected_role_confirmation_times(
+    members: Sequence[Tuple[LevelEvidence, float, float]],
+    lower: float,
+    upper: float,
+) -> Tuple[Tuple[str, datetime], ...]:
+    """Find when the full current geometry and each causal role both existed.
+
+    Bounds use the same noise padding as this snapshot, not a reconstructed
+    historical ATR. Later evidence can inherit old proof only when a connected
+    union of actual role-bearing members already covers *both* current bounds.
+    References and projections cannot provide missing extent or a bridge.
+    """
+    structural = sorted(
+        (row for row in members
+         if not row[0].projection_only and _evidence_origin_role(row[0]) is not None),
+        key=lambda row: (row[1], row[2]),
+    )
+    if not structural:
+        return ()
+    times = sorted({row[0].confirmed_at for row in structural})
+
+    def covered_by(time: datetime) -> bool:
+        covered = lower
+        for item, start, end in structural:
+            if item.confirmed_at > time:
+                continue
+            if start > covered:
+                return False
+            covered = max(covered, end)
+            if covered >= upper:
+                return True
+        return False
+
+    if not covered_by(times[-1]):
+        return ()
+    # Coverage is monotonic as confirmed members are added. Binary search
+    # avoids replaying every possible prefix for unusually crowded zones.
+    left, right = 0, len(times) - 1
+    while left < right:
+        middle = (left + right) // 2
+        if covered_by(times[middle]):
+            right = middle
+        else:
+            left = middle + 1
+    geometry_time = times[left]
+    result = []
+    for direction, role in (("LONG", "resistance"), ("SHORT", "support")):
+        role_times = [row[0].confirmed_at for row in structural
+                      if _evidence_origin_role(row[0]) == role]
+        if role_times:
+            result.append((direction, max(geometry_time, min(role_times))))
+    return tuple(result)
+
+
+def _reclaim_confirmation_at(zone: LevelZone, direction: str) -> datetime:
+    return dict(zone.reclaim_confirmation_times).get(direction, zone.confirmed_at)
+
+
 def build_level_zones(
     evidence: Iterable[LevelEvidence],
     *,
@@ -922,6 +1066,9 @@ def build_level_zones(
                 strength=round(combined_strength, 6),
                 origin_roles=origin_roles,
                 quality_flags=tuple(flags),
+                reclaim_confirmation_times=_connected_role_confirmation_times(
+                    members, cluster_lower, cluster_upper
+                ),
             ))
             members = []
             cluster_lower = cluster_upper = 0.0
@@ -1045,11 +1192,19 @@ def build_structure_snapshot(
             evaluated_zones.append(zone)
             continue
 
+        confirmation = _reclaim_confirmation_at(zone, transition_direction)
         after_confirmation = [
             candidate
             for candidate in trigger_candidates
-            if any(bar.closed_at > zone.confirmed_at for bar in candidate[2])
+            if any(bar.closed_at > confirmation for bar in candidate[2])
         ]
+        if confirmation < zone.confirmed_at:
+            covering_membership = [
+                candidate for candidate in after_confirmation
+                if candidate[2][-1].closed_at >= zone.confirmed_at
+            ]
+            if covering_membership:
+                after_confirmation = covering_membership
         _seconds, trigger_timeframe, trigger_bars = (
             after_confirmation[0] if after_confirmation else trigger_candidates[0]
         )
@@ -1337,9 +1492,9 @@ def _evaluate_break_reclaim_from_completed(
     tolerance: float,
 ) -> BreakReclaimEvidence:
     """Evaluate module-normalized bars and validated parameters without re-sorting."""
-    zone_confirmed_at = _coerce_datetime(zone.confirmed_at)
-    if zone_confirmed_at > cutoff:
+    if _coerce_datetime(zone.confirmed_at) > cutoff:
         raise ValueError("zone cannot be evaluated before it was confirmed")
+    zone_confirmed_at = _coerce_datetime(_reclaim_confirmation_at(zone, side))
     bars = tuple(bar for bar in bars if bar.closed_at > zone_confirmed_at)
     last_completed = bars[-1] if bars else None
     boundary = zone.upper if side == "LONG" else zone.lower
@@ -1375,6 +1530,9 @@ def _evaluate_break_reclaim_from_completed(
     if active_break is None:
         state = "INTACT"
         reason = "no_active_completed_break_close"
+    elif zone_confirmed_at < zone.confirmed_at and last_completed.closed_at < zone.confirmed_at:
+        state = "RECLAIM_PENDING"
+        reason = "latest_zone_membership_not_covered"
     elif observed_holds < required_holds:
         state = "RECLAIM_PENDING"
         reason = "completed_hold_bars_missing"
@@ -1401,6 +1559,7 @@ def _evaluate_break_reclaim_from_completed(
         retest_required=bool(require_retest),
         retest_observed=retest_observed,
         completed_bars_used=len(bars),
+        reclaim_history=zone.reclaim_history if zone_confirmed_at < zone.confirmed_at else None,
     )
 
 
@@ -1418,6 +1577,7 @@ def legacy_level_adapter(
     )
 
     def row(zone: LevelZone, kind: str) -> Dict[str, Any]:
+        history = zone.reclaim_history
         return {
             "price": zone.reference,
             "zone_low": zone.lower,
@@ -1428,6 +1588,7 @@ def legacy_level_adapter(
             "weight": zone.strength,
             "zone_id": zone.zone_id,
             "confirmed_at": _iso(zone.confirmed_at),
+            **({"reclaim_history": history.to_dict()} if history else {}),
             "independent_sources": zone.independent_sources,
             "projection_only": zone.projection_only,
         }
@@ -1454,6 +1615,7 @@ __all__ = [
     "DirectionalStructure",
     "LevelEvidence",
     "LevelZone",
+    "ReclaimHistory",
     "StructureDecision",
     "StructureSnapshot",
     "build_level_zones",

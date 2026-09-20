@@ -209,7 +209,8 @@ def test_h10_save_cache_file_keeps_old_file_on_failure(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("simulierter Crash mitten im Serialisieren")
 
-    monkeypatch.setattr(api.json, "dump", boom)
+    # The compact writer encodes once with dumps before its atomic replace.
+    monkeypatch.setattr(api.json, "dumps", boom)
     with pytest.raises(RuntimeError, match="simulierter Crash"):
         api.save_cache_file(str(target), [{"x": 1}])
 

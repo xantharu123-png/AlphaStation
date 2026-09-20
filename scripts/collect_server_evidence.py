@@ -555,6 +555,17 @@ STOCK_ATTEMPT_COUNTS = DIAGNOSTIC_COUNTS | frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed", "current_result_count",
     "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
 })
+STOCK_STAGE_TIMING_LABELS = frozenset({
+    "history", "structure", "execution_history", "plan", "cache_publish", "special_filter",
+})
+
+
+def _project_stock_stage_timings(diagnostics, result):
+    """Only bounded code-owned durations; never trust a source semantics label."""
+    timings = _count_projection(diagnostics.get("stage_elapsed_ms"), STOCK_STAGE_TIMING_LABELS)
+    if timings is not None:
+        result["stage_elapsed_ms"] = timings
+        result["stage_timing_semantics"] = "per_leaf_inclusive_elapsed_ms_not_additive"
 
 def _iso_timestamp(value):
     """Canonical ISO time only; legacy naive server times stay explicitly naive."""
@@ -1180,6 +1191,7 @@ def safe_cache_summary(path):
             result["scan_stats"] = projected
         diagnostics = payload.get("diagnostics") or {}
         if isinstance(diagnostics, dict):
+            _project_stock_stage_timings(diagnostics, result)
             result["numeric_diagnostics"] = {
                 key: value for key, value in diagnostics.items()
                 if key in DIAGNOSTIC_COUNTS and _nonnegative_count(value)
@@ -1299,6 +1311,7 @@ def safe_strategy_attempt_summary(path, expected_slug):
         diagnostics = payload.get("diagnostics")
         if not isinstance(diagnostics, dict):
             raise ValueError("Missing attempt diagnostics")
+        _project_stock_stage_timings(diagnostics, result)
         result["numeric_diagnostics"] = {
             key: value for key, value in diagnostics.items()
             if key in STOCK_ATTEMPT_COUNTS and _nonnegative_count(value)

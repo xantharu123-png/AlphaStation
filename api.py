@@ -15002,7 +15002,8 @@ def _confirmed_break_reclaim_evidence(
     for raw in candidates:
         if not isinstance(raw, dict):
             continue
-        if str(raw.get("model") or "") != "break_reclaim_close_hold_v1":
+        evidence_model = str(raw.get("model") or "")
+        if evidence_model not in {"break_reclaim_close_hold_v1", "break_reclaim_close_hold_v2"}:
             continue
         if str(raw.get("state") or "").upper() != "RECLAIMED":
             continue
@@ -15053,11 +15054,68 @@ def _confirmed_break_reclaim_evidence(
             or evidence_as_of is None
             or last_close is None
             or not timeframe
-            or not math.isclose(zone_confirmed_at, barrier_confirmed_at, abs_tol=1.0)
             or not (zone_confirmed_at < break_closed_at <= last_completed_at <= evidence_as_of)
             or completed_used < hold_observed + 1
         ):
             continue
+        if evidence_model == "break_reclaim_close_hold_v1":
+            # Legacy evidence always starts at the full zone confirmation.
+            # New metadata must never weaken this existing contract.
+            if not math.isclose(zone_confirmed_at, barrier_confirmed_at, abs_tol=1.0):
+                continue
+        else:
+            # An older anchor is valid only for the exact current zone geometry
+            # established by the canonical connected-role coverage model. Both
+            # the barrier and proof must carry the same independently projected
+            # basis; a timestamp asserted solely by the proof is insufficient.
+            history = barrier.get("reclaim_history")
+            proof_history = raw.get("reclaim_history")
+            history_keys = {
+                "model", "zone_id", "lower", "upper", "membership_confirmed_at",
+                "confirmed_at_by_direction",
+            }
+            if (
+                not isinstance(history, dict)
+                or not isinstance(proof_history, dict)
+                or set(history) != history_keys
+                or proof_history != history
+                or history.get("model") != "connected_role_geometry_v1"
+                or history.get("zone_id") != barrier_zone_id
+            ):
+                continue
+            history_lower = _alert_float(history.get("lower"), None)
+            history_upper = _alert_float(history.get("upper"), None)
+            barrier_lower = _alert_float(barrier.get("zone_low"), None)
+            barrier_upper = _alert_float(barrier.get("zone_high"), None)
+            membership = _crypto_market_timestamp_seconds(history.get("membership_confirmed_at"))
+            anchors = history.get("confirmed_at_by_direction")
+            if (
+                history_lower is None or history_upper is None
+                or barrier_lower is None or barrier_upper is None
+                or not (0 < history_lower <= history_upper)
+                or not math.isclose(history_lower, barrier_lower, rel_tol=1e-9, abs_tol=1e-9)
+                or not math.isclose(history_upper, barrier_upper, rel_tol=1e-9, abs_tol=1e-9)
+                or membership is None
+                or not math.isclose(membership, barrier_confirmed_at, rel_tol=0.0, abs_tol=1e-6)
+                or not (zone_confirmed_at < membership <= last_completed_at <= evidence_as_of)
+                or not isinstance(anchors, dict)
+                or not anchors
+                or not set(anchors).issubset({"LONG", "SHORT"})
+                or expected_direction not in anchors
+            ):
+                continue
+            parsed_anchors = {
+                side: _crypto_market_timestamp_seconds(value) if isinstance(value, str) else None
+                for side, value in anchors.items()
+            }
+            if (
+                any(value is None or value > membership for value in parsed_anchors.values())
+                or not math.isclose(
+                    parsed_anchors[expected_direction], zone_confirmed_at,
+                    rel_tol=0.0, abs_tol=1e-6,
+                )
+            ):
+                continue
         timeframe_seconds = _timeframe_seconds(timeframe)
         item_observed_at = _crypto_trade_observation_timestamp(item)
         if (
@@ -16596,11 +16654,11 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
     """Save cache file with timestamp (thread-safe).
 
     AUDIT H-10: atomarer Write (tempfile im Zielverzeichnis + os.replace,
-    Vorbild bg_service._atomic_write_json). Vorher konnte ein Crash mitten im
-    json.dump eine halb geschriebene Cache-Datei hinterlassen, die alle Reader
+    Vorbild bg_service._atomic_write_json). Vorher konnte ein Crash waehrend
+    der Serialisierung eine halb geschriebene Cache-Datei hinterlassen, die alle Reader
     (Alerts, Endpoints) mit JSONDecodeError gebrochen haette.
     """
-    with _cache_lock:
+    with stock_scan_runtime.measure("cache_publish"), _cache_lock:
         tmp_path = None
         try:
             cache_data = {
@@ -16613,10 +16671,12 @@ def save_cache_file(filepath: str, data: List[Dict], metadata: Optional[Dict[str
             with tempfile.NamedTemporaryFile(
                 mode="w", dir=tmp_dir, delete=False, suffix=".tmp"
             ) as f:
-                # tmp_path SOFORT merken: crasht json.dump, muss der
+                # tmp_path SOFORT merken: crasht die Serialisierung, muss der
                 # except-Zweig die Temp-Datei trotzdem aufraeumen koennen.
                 tmp_path = f.name
-                json.dump(cache_data, f, separators=(",", ":"), default=_serialize_json)
+                # One encoded payload avoids Python-level writes per nested
+                # field. The final cache still changes only after os.replace.
+                f.write(json.dumps(cache_data, separators=(",", ":"), default=_serialize_json))
             os.replace(tmp_path, filepath)
             tmp_path = None
         except Exception as e:
@@ -17385,6 +17445,7 @@ def _build_structured_trade_setup(
                 ):
                     continue
                 timeframes = sorted({item.timeframe for item in zone.evidence})
+                reclaim_history = zone.reclaim_history
                 rows.append({
                     "price": float(target_price),
                     "room_distance": 0.0 if overlapping else abs(float(target_price) - entry),
@@ -17397,6 +17458,7 @@ def _build_structured_trade_setup(
                     "strength": zone.strength,
                     "independent_sources": zone.independent_sources,
                     "confirmed_at": zone.confirmed_at.isoformat().replace("+00:00", "Z"),
+                    **({"reclaim_history": reclaim_history.to_dict()} if reclaim_history else {}),
                     "zone": zone,
                 })
         # Legacy point levels lack a stable zone id/confirmation timestamp and
@@ -17490,19 +17552,24 @@ def _build_structured_trade_setup(
         barrier_gate = (
             "BREAK_RECLAIM_REQUIRED" if side == "LONG" else "BREAK_SUPPORT_REQUIRED"
         ) if wait_for_reclaim else None
+        barrier_history = first_barrier.get("reclaim_history")
+        has_bound_history = isinstance(barrier_history, dict)
+        has_canonical_geometry = directional_structure is not None and first_barrier.get("zone") is not None
+        reclaim_boundary = first_barrier["zone_high"] if side == "LONG" else first_barrier["zone_low"]
         nearest_barrier_meta = {
             "side": "resistance" if side == "LONG" else "support",
             "price": _round_trade_price(tp1),
-            "zone_low": _round_trade_price(first_barrier["zone_low"]),
-            "zone_high": _round_trade_price(first_barrier["zone_high"]),
+            # Canonical certificates bind exact geometry, not display prices.
+            # Preserve it for both v1 and historical v2 reclaim verification.
+            "zone_low": first_barrier["zone_low"] if has_canonical_geometry else _round_trade_price(first_barrier["zone_low"]),
+            "zone_high": first_barrier["zone_high"] if has_canonical_geometry else _round_trade_price(first_barrier["zone_high"]),
             "source": first_barrier["source"],
             "timeframe": first_barrier["timeframe"],
             "zone_id": first_barrier["zone_id"],
             "confirmed_at": first_barrier.get("confirmed_at"),
+            **({"reclaim_history": barrier_history} if has_bound_history else {}),
             "overlapping": bool(first_barrier.get("overlapping")),
-            "reclaim_boundary": _round_trade_price(
-                first_barrier["zone_high"] if side == "LONG" else first_barrier["zone_low"]
-            ),
+            "reclaim_boundary": reclaim_boundary if has_canonical_geometry else _round_trade_price(reclaim_boundary),
             "strength": round(float(first_barrier["strength"]), 3),
             "independent_sources": int(first_barrier["independent_sources"]),
             "distance_r": round(barrier_r, 3),
@@ -20877,6 +20944,9 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
         return {key: raw[key] for key in sorted(allowed)
                 if type(raw.get(key)) is int and 0 <= raw[key] <= 10**9}
     result = counts(source, _STOCK_ATTEMPT_SWEEP_COUNTS if sweep else _STOCK_ATTEMPT_COUNTS)
+    if isinstance(source.get("stage_elapsed_ms"), dict):
+        result["stage_elapsed_ms"] = counts(source["stage_elapsed_ms"], stock_scan_runtime.STAGE_TIMING_LABELS)
+        result["stage_timing_semantics"] = stock_scan_runtime.STAGE_TIMING_SEMANTICS
     if isinstance(source.get("runtime_phase"), str) and source["runtime_phase"] in stock_scan_runtime.PHASES:
         result["runtime_phase"] = source["runtime_phase"]
     if source.get("final_results") is None:
@@ -21233,7 +21303,10 @@ def _strategy_scan_wrapper(
                     "diagnostics": partial_diag,
                 },
             )
-            _last_partial_publish = now
+            # Serialization itself may take longer than the refresh interval.
+            # Start the next interval AFTER the write, avoiding a feedback loop
+            # that rewrites the same large preview for every rejected symbol.
+            _last_partial_publish = time.monotonic()
 
         _publish_partial(0, force=True)
 
@@ -21357,7 +21430,8 @@ def _strategy_scan_wrapper(
                     else:
                         _stage("dollar_volume_filter")
 
-                    daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
+                    with stock_scan_runtime.measure("history"):
+                        daily_bars = _fetch_strategy_daily_history(ticker, 70, history_cache, True)
                     stock_scan_runtime.checkpoint("analyzing")
                     if swing_daily_mode:
                         daily_bars = [bar for bar in daily_bars if
@@ -21384,9 +21458,10 @@ def _strategy_scan_wrapper(
                     # RVOL and momentum gates use completed-bar metrics, not
                     # level zones. Defer the expensive D/W engine until those
                     # gates pass; survivor rows retain the full original data.
-                    history_metrics = _strategy_daily_history_metrics(
-                        daily_bars, include_structure=False, **_history_metric_args,
-                    )
+                    with stock_scan_runtime.measure("structure"):
+                        history_metrics = _strategy_daily_history_metrics(
+                            daily_bars, include_structure=False, **_history_metric_args,
+                        )
                     rvol = history_metrics.get("rvol20")
                     rvol_source = str(history_metrics.get("rvol_source") or "20D_completed_session")
                     if rvol is None:
@@ -21492,9 +21567,10 @@ def _strategy_scan_wrapper(
                             _reject("momentum:intraday_confirmation_stale")
                             continue
                         _stage("momentum_completed_daily_confirmation" if swing_daily_mode else "momentum_completed_5m_confirmation")
-                    history_metrics = _strategy_daily_history_metrics(
-                        daily_bars, **_history_metric_args,
-                    )
+                    with stock_scan_runtime.measure("structure"):
+                        history_metrics = _strategy_daily_history_metrics(
+                            daily_bars, **_history_metric_args,
+                        )
                     _breakout10 = _alert_float(history_metrics.get("breakout_10d_pct"))
                     _breakout20 = _alert_float(history_metrics.get("breakout_20d_pct"))
                     _range_pos = _alert_float(history_metrics.get("range_pos"))
@@ -21789,17 +21865,19 @@ def _strategy_scan_wrapper(
                         # Fetch 4H only for candidates that survived all broad
                         # filters.  This keeps the universe scan efficient while
                         # giving the actual trade plan D/W + execution-TF zones.
-                        _level_4h_bars = _fetch_recent_stock_4h_bars(ticker, limit=40)
-                        _level_snapshot = _build_stock_level_snapshot(
-                            daily_bars,
-                            symbol=ticker,
-                            current_price=price,
-                            direction=_setup_direction,
-                            atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                            as_of=analysis_as_of,
-                            four_hour_bars=_level_4h_bars,
-                            spread=(ask - bid) if ask > bid > 0 else None,
-                        )
+                        with stock_scan_runtime.measure("execution_history"):
+                            _level_4h_bars = _fetch_recent_stock_4h_bars(ticker, limit=40)
+                        with stock_scan_runtime.measure("structure"):
+                            _level_snapshot = _build_stock_level_snapshot(
+                                daily_bars,
+                                symbol=ticker,
+                                current_price=price,
+                                direction=_setup_direction,
+                                atr14=float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                                as_of=analysis_as_of,
+                                four_hour_bars=_level_4h_bars,
+                                spread=(ask - bid) if ask > bid > 0 else None,
+                            )
                         if _level_snapshot is not None:
                             _level_legacy = legacy_level_adapter(
                                 _level_snapshot,
@@ -21819,19 +21897,20 @@ def _strategy_scan_wrapper(
                                 strategy_row["Resistance_1"] = _round_trade_price(
                                     _level_legacy["resistances"][0]["price"]
                                 )
-                        _trade_setup = _build_structured_trade_setup(
-                            _setup_direction,
-                            price,
-                            float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
-                            float(strategy_row.get("Support_1") or history_metrics.get("support_1") or 0.0),
-                            float(strategy_row.get("Resistance_1") or history_metrics.get("resistance_1") or 0.0),
-                            float(history_metrics.get("high_20d") or day_high),
-                            float(history_metrics.get("low_20d") or day_low),
-                            float(history_metrics.get("range_pos") or close_pos * 100.0),
-                            structure_snapshot=_level_snapshot,
-                            require_causal_structure=True,
-                            diagnostics=_plan_diagnostics,
-                        )
+                        with stock_scan_runtime.measure("plan"):
+                            _trade_setup = _build_structured_trade_setup(
+                                _setup_direction,
+                                price,
+                                float(history_metrics.get("atr14") or price * (prev_atr_pct / 100.0)),
+                                float(strategy_row.get("Support_1") or history_metrics.get("support_1") or 0.0),
+                                float(strategy_row.get("Resistance_1") or history_metrics.get("resistance_1") or 0.0),
+                                float(history_metrics.get("high_20d") or day_high),
+                                float(history_metrics.get("low_20d") or day_low),
+                                float(history_metrics.get("range_pos") or close_pos * 100.0),
+                                structure_snapshot=_level_snapshot,
+                                require_causal_structure=True,
+                                diagnostics=_plan_diagnostics,
+                            )
                         if _trade_setup:
                             _vrvp_as_of = analysis_as_of
                             _vrvp = build_vrvp_structure(
@@ -21915,7 +21994,8 @@ def _strategy_scan_wrapper(
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("Change_Pct", 0))))
         scan_diag["raw_matches_before_special_filter"] = len(results)
         stock_scan_runtime.checkpoint("special_filter")
-        results = _apply_special_strategy_post_filter(results, strat, strategy_name)
+        with stock_scan_runtime.measure("special_filter"):
+            results = _apply_special_strategy_post_filter(results, strat, strategy_name)
         # History/provider calls can outlive the existing 15-minute proof
         # budget. Do not publish an expired start-of-scan confirmation as new.
         _current_momentum_results = []
