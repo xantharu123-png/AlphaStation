@@ -101,6 +101,7 @@ from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, s
 from modules import stock_scan_runtime
 from modules import scan_control, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
+from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
 
 # Import scanner modules
 from modules.scanners import (
@@ -3491,6 +3492,19 @@ def _alert_signal_identity_key(
         "tp2": _identity_number(_first_trade_level(row, ("tp2", "TP2", "take_profit_2"))),
         "reference": str(explicit_reference or "").strip().lower(),
     }
+    evidence = row.get("wyckoff")
+    if (scanner_name in {"stock_strategy", "strategy_scan"}
+            and isinstance(evidence, dict)
+            and validate_wyckoff_entry_trigger(evidence, as_of=row.get("wyckoff_as_of"),
+                                               timeframe="1D", model=WYCKOFF_MODEL) is not None
+            and _stock_wyckoff_row_contract_valid(row)):
+        # The same confirmed trigger stays the same opportunity when the
+        # current quote/derived plan moves. A new retest has a new trigger ID.
+        payload.update(reference=evidence["entry_trigger"]["trigger_id"],
+                       structure_id=evidence["structure_id"],
+                       timeframe="1d", model=WYCKOFF_MODEL)
+        for field in ("entry", "stop", "tp1", "tp2"):
+            payload.pop(field, None)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()[:20]
     return f"{str(scanner_name or '').strip().lower()}_{symbol}_{digest}"
@@ -16199,7 +16213,7 @@ def _stock_wyckoff_row_contract_valid(
             or evidence.get("direction") != direction
             or evidence.get("trade_ready") is not True
             or evidence.get("signal_state") != "confirmed"
-            or evidence.get("phase") != "D"
+            or evidence.get("phase") not in ("D", "E")
             or evidence.get("invalidation_reason")):
         return False
     for key in ("Signal_Direction", "direction"):
@@ -16213,26 +16227,7 @@ def _stock_wyckoff_row_contract_valid(
         cutoff = cutoff.replace(tzinfo=timezone.utc)
     if any(value is None for value in times) or not (times[0] <= times[1] <= times[2] <= times[3] <= cutoff):
         return False
-    events = evidence.get("events")
-    if not isinstance(events, list):
-        return False
-    required = ["SC", "AR", "ST", "SOS", "LPS"] if direction == "LONG" else ["BC", "AR", "ST", "SOW", "LPSY"]
-    previous = None
-    for name in required:
-        event = next((event for event in events if isinstance(event, dict) and event.get("name") == name), None)
-        if event is None:
-            return False
-        observed = _stock_attempt_datetime(event.get("observed_at"))
-        confirmed = _stock_attempt_datetime(event.get("confirmed_at"))
-        event_volume = _alert_float(event.get("volume_ratio"))
-        if event_volume is None or not math.isfinite(event_volume) or event_volume <= 0:
-            return False
-        if observed is None or confirmed is None or not observed <= confirmed <= times[2]:
-            return False
-        if previous is not None and observed <= previous:
-            return False
-        previous = confirmed
-    if previous != times[1]:
+    if validate_wyckoff_entry_trigger(evidence, as_of=times[3], timeframe="1D", model=WYCKOFF_MODEL) is None:
         return False
     low, high, price = (_alert_float(value) for value in (
         evidence.get("range_low"), evidence.get("range_high"), _extract_alert_price(row)))
@@ -16245,6 +16240,9 @@ def _stock_wyckoff_row_contract_valid(
     if any(value is None or not math.isfinite(value) or value <= 0 for value in levels):
         return False
     entry, stop, tp1, tp2 = levels
+    trigger_stop = _alert_float(evidence["entry_trigger"].get("stop"))
+    if trigger_stop is None or not math.isfinite(trigger_stop) or trigger_stop <= 0 or stop != trigger_stop:
+        return False
     geometry = trade_geometry(entry, stop, tp1, tp2, direction)
     if not geometry.get("valid"):
         return False
@@ -19221,10 +19219,12 @@ def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, A
                                  timeframe="1D", direction=direction)
         diagnostic = candidate.get("_wyckoff_diagnostics")
         ready = [pattern for pattern in report.get("patterns", [])
-                 if pattern.get("trade_ready") is True and pattern.get("direction") == direction]
+                 if isinstance(pattern, dict) and pattern.get("direction") == direction
+                 and validate_wyckoff_entry_trigger(pattern, as_of=report.get("as_of"),
+                                                    timeframe="1D", model=WYCKOFF_MODEL) is not None]
         if isinstance(diagnostic, dict):
             invalidation = next((pattern.get("invalidation_reason") for pattern in report.get("patterns", [])
-                                 if pattern.get("invalidation_reason")), None)
+                                 if isinstance(pattern, dict) and pattern.get("invalidation_reason")), None)
             reason = "confirmed" if ready else str(report.get("reason") or invalidation or "event_sequence_unconfirmed")
             diagnostic[reason] = diagnostic.get(reason, 0) + 1
         if not ready or report.get("status") != "ok":
@@ -19236,8 +19236,9 @@ def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, A
         enriched.update({"pattern_type": pattern_type, "wyckoff": pattern,
                          "wyckoff_model": report["model"], "wyckoff_timeframe": "1D",
                          "wyckoff_as_of": report["as_of"], "pattern_score": pattern["score"],
+                         "setup_key": "wyckoff:" + pattern["entry_trigger"]["trigger_id"],
                          "history_days": report["bars_used"],
-                         "pattern_details": ["1D: bestaetigte Ereignisfolge", "Phase D: Ausbruch und Ruecktest bestaetigt",
+                         "pattern_details": ["1D: bestaetigte Ereignisfolge", f"Phase {pattern['phase']}: Ausbruch und Ruecktest bestaetigt",
                                              "Qualitaetswert, keine Gewinnwahrscheinlichkeit"]})
         return enriched
     if strat.get("canonical_name") == "Turtle Breakout":

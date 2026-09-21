@@ -85,10 +85,10 @@ def test_phase_intervals_and_ordinals_are_real_evidence_not_numbered_subwaves(di
     bars = textbook_bars(direction, spring=spring)
     result = analyze(bars, direction)
     row = selected(result, direction)
-    assert result["model"] == MODEL == "causal_wyckoff_v2"
+    assert result["model"] == MODEL == "causal_wyckoff_v3"
     assert row["sequence_basis"] == "chronological_display_ordinal_not_canonical_subwave"
     assert row["phase_basis"] == "inferred_event_intervals"
-    assert row["unmodelled_phases"] == ["E"]
+    assert row["unmodelled_phases"] == []
     assert [item["sequence"] for item in row["events"]] == list(range(1, len(row["events"]) + 1))
     assert all(item["occurrence"] == 1 for item in row["events"])
     st = next(item for item in row["events"] if item["name"] == "ST")

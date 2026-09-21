@@ -52,7 +52,7 @@ def _pattern(*, ready=False, direction="LONG", score=90):
 @pytest.fixture
 def engine(monkeypatch):
     calls = []
-    response = {"model": "causal_wyckoff_v2", "status": "ok", "reason": "",
+    response = {"model": "causal_wyckoff_v3", "status": "ok", "reason": "",
                 "timeframe": "1D", "as_of": AS_OF.isoformat(), "bars_used": 80,
                 "latest_completed_at": _bars()[-1]["close_time"], "patterns": []}
     module = ModuleType("modules.wyckoff")
@@ -119,7 +119,7 @@ def test_chart_wrapper_preserves_context_without_inventing_trade(engine):
     actual = analysis.find_wyckoff_for_chart(_bars(), as_of=AS_OF, timeframe="1D")
     assert len(actual) == 1
     assert actual[0]["trade_ready"] is False and actual[0]["trade"] is None
-    assert actual[0]["model"] == "causal_wyckoff_v2"
+    assert actual[0]["model"] == "causal_wyckoff_v3"
     assert actual[0]["timeframe"] == "1D"
     assert actual[0]["events"] == result["patterns"][0]["events"]
     assert actual[0]["range_low"] == 98.1234567
@@ -134,7 +134,7 @@ def test_chart_detector_uses_context_bars_and_real_event_times(engine, ready):
     actual = patterns.detect_chart_patterns(
         _bars(), lookback=50,
         wyckoff_context={"as_of": AS_OF, "timeframe": "1D", "bars": prepared})
-    rows = [row for row in actual if row.get("model") == "causal_wyckoff_v2"]
+    rows = [row for row in actual if row.get("model") == "causal_wyckoff_v3"]
     assert len(rows) == 1
     assert len(calls[0][0]) == 80
     assert calls[0][0][0]["close_time"] == prepared[0]["close_time"]
@@ -274,7 +274,7 @@ def test_real_engine_scanner_chart_and_drawing_share_same_event_proof(direction,
     assert selected["trade"] == proof["trade"]
     plotted = patterns.detect_chart_patterns(
         bars, lookback=50, wyckoff_context={"bars": bars, "as_of": cutoff, "timeframe": timeframe})
-    projected = next(row for row in plotted if row.get("model") == "causal_wyckoff_v2"
+    projected = next(row for row in plotted if row.get("model") == "causal_wyckoff_v3"
                      and row["direction"] == direction)
     assert projected["event_evidence"] == proof["events"]
     assert projected["target"] == proof["trade"]["tp1"]

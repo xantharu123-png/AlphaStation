@@ -5267,7 +5267,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                 quality = row.get("score", 0)
                 phase = row.get("phase", "")
                 state_label = ("Ungueltige Struktur, kein Handelssignal"
-                               if row.get("signal_state") == "invalidated"
+                               if row.get("structure_state") == "failed"
                                else "Bestaetigte Fortsetzung" if ready else "Kontext, kein Handelssignal")
                 patterns.append({
                     **row,

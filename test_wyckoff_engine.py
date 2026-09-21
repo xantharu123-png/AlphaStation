@@ -233,7 +233,7 @@ def test_new_completed_hold_does_not_rewrite_confirmed_events_or_stop(direction)
 
 
 @pytest.mark.parametrize("requested", ["ALL", "LONG", "SHORT"])
-def test_two_conflicting_live_sequences_do_not_create_opposing_entry_signals(requested):
+def test_consumed_old_long_context_does_not_block_a_new_short_trigger(requested):
     bars = textbook_bars("LONG")
     for bar in textbook_bars("SHORT"):
         for name in ("open", "high", "low", "close"):
@@ -243,8 +243,12 @@ def test_two_conflicting_live_sequences_do_not_create_opposing_entry_signals(req
         bars.append(bar)
     result = analyze(bars, requested, count=200)
     assert result["patterns"]
-    assert all(not row["trade_ready"] for row in result["patterns"])
-    assert all(row["invalidation_reason"] == "conflicting_directional_patterns" for row in result["patterns"])
+    for row in result["patterns"]:
+        if row["direction"] == "LONG":
+            assert not row["trade_ready"] and row["entry_state"] == "target_passed"
+        else:
+            assert row["trade_ready"] and row["entry_state"] == "ready"
+        assert row["structure_state"] != "failed"
 
 
 def test_mirror_sequences_have_equal_quality_and_opposite_geometry():

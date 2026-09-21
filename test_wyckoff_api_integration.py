@@ -120,10 +120,10 @@ def test_context_and_confirmed_chart_labels_are_not_buy_probability_claims():
     html = Path("frontend/index.html").read_text(encoding="utf-8")
     begin = html.index("function isWyckoffPattern(")
     end = html.index("function usePublicPlans()", begin)
-    script = html[begin:end] + "\nconsole.log(JSON.stringify([chartPatternLabel({model:'causal_wyckoff_v2',pattern:'Wyckoff',timeframe:'4H',phase:'B'}),chartPatternLabel({model:'causal_wyckoff_v2',pattern:'Wyckoff',timeframe:'1D',phase:'D',trade_ready:true})]));"
+    script = html[begin:end] + "\nconsole.log(JSON.stringify([chartPatternLabel({model:'causal_wyckoff_v3',pattern:'Wyckoff',timeframe:'4H',phase:'B',structure_state:'developing',entry_state:'no_trigger'}),chartPatternLabel({model:'causal_wyckoff_v3',pattern:'Wyckoff',timeframe:'1D',phase:'D',structure_state:'confirmed',entry_state:'ready',trade_ready:true})]));"
     labels = json.loads(subprocess.check_output(["node", "-e", script], text=True, encoding="utf-8"))
     assert "4H" in labels[0] and "kein Handelssignal" in labels[0]
-    assert "1D" in labels[1] and "Handelsplan separat" in labels[1]
+    assert "1D" in labels[1] and "Handelsfreigabe separat" in labels[1]
     assert html.count("{chartPatternLabel(p)}") == 2
 
 

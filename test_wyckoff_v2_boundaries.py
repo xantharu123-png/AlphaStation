@@ -12,13 +12,14 @@ from test_wyckoff_engine import BASE, textbook_bars
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_old_model_cannot_reuse_cached_signal_even_when_other_proof_is_valid(direction):
+@pytest.mark.parametrize("old_model", ["causal_wyckoff_v1", "causal_wyckoff_v2"])
+def test_old_model_cannot_reuse_cached_signal_even_when_other_proof_is_valid(direction, old_model):
     strategy, raw = candidate(direction)
     row = api._apply_pattern_strategy_filter(raw, api.STRATEGIES[strategy])
-    assert row and row["wyckoff_model"] == MODEL == "causal_wyckoff_v2"
+    assert row and row["wyckoff_model"] == MODEL == "causal_wyckoff_v3"
     row["Strategy"] = strategy
     assert api._stock_wyckoff_row_contract_valid(row, as_of=BASE + timedelta(days=100))
-    row["wyckoff_model"] = "causal_wyckoff_v1"
+    row["wyckoff_model"] = old_model
     row.update(score=100, grade="S", trade_signal="TRADEABLE")
     assert not api._stock_wyckoff_row_contract_valid(row, as_of=BASE + timedelta(days=100))
 

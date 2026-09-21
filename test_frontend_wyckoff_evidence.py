@@ -65,7 +65,7 @@ def test_phase_and_event_numbering_is_not_a_wave_count_or_invented_phase_c():
     assert evidence["events"][3]["phaseLabel"] == "B"
     phases = {row["phase"]: row for row in evidence["phases"]}
     assert phases["C"]["label"] == "nicht belegt"
-    assert phases["E"]["label"] == "nicht modelliert"
+    assert phases["E"]["label"] == "im Altmodell nicht modelliert"
 
 
 @pytest.mark.parametrize("state,ready,color", [("context", False, "#94a3b8"),
@@ -98,7 +98,7 @@ def test_two_events_on_one_candle_keep_two_prices_without_duplicate_series_times
     result = project(pattern)
     assert len(result["points"]) == 5 and len(result["markers"]) == 4
     assert [row["price"] for row in result["points"] if row["time"] == duplicate["time"]] == [91, 89]
-    assert any("ST #1" in row["text"] and "Spring" in row["text"] for row in result["markers"])
+    assert any("ST#1" in row["text"] and "SP" in row["text"] for row in result["markers"])
 
 
 @pytest.mark.parametrize("case", ["missing", "duplicate", "bad_price", "price_outside_bar", "future_confirmation"])
@@ -114,7 +114,7 @@ def test_unmatched_event_proof_does_not_become_a_chart_point(case):
 
 
 def test_other_timeframe_never_projects_daily_event_points_or_range():
-    assert project(timeframe="4H") == dict(points=[], markers=[], rangeLines=[])
+    assert project(timeframe="4H") == dict(points=[], markers=[], rangeLines=[], swingLines=[], phaseSegments=[])
 
 
 def test_bad_range_or_unconfirmed_start_never_creates_a_boundary():
@@ -155,14 +155,14 @@ def test_missing_phase_proof_does_not_paint_a_complete_phase_history():
     pattern, _ = fixture()
     pattern.pop("phase_evidence")
     rows = evaluate("wyckoffEvidence(" + json.dumps(pattern) + ").phases")
-    assert [row["label"] for row in rows] == ["nicht belegt"] * 4 + ["nicht modelliert"]
+    assert [row["label"] for row in rows] == ["nicht belegt"] * 4 + ["im Altmodell nicht modelliert"]
 
 
 def test_phase_a_in_development_is_not_reported_as_a_completed_phase():
     pattern, _ = fixture()
     pattern["phase_evidence"][0]["status"] = "developing"
     rows = evaluate("wyckoffEvidence(" + json.dumps(pattern) + ").phases")
-    assert rows[0]["label"] == "in Entwicklung, noch kein ST"
+    assert rows[0]["label"] == "in Entwicklung"
 
 
 @pytest.mark.parametrize("field", ["scanner", "strategy", "Strategy", "canonicalStrategy", "pattern_type"])

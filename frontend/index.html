@@ -570,8 +570,37 @@ function isWyckoffScannerSelection(row) {
 }
 
 function wyckoffPatternColor(pattern) {
+    if (pattern?.model === 'causal_wyckoff_v3') {
+        if (['failed', 'unclear'].includes(pattern.structure_state)) return '#94a3b8';
+        if (!['confirmed', 'continuation'].includes(pattern.structure_state)) return '#d97706';
+        return pattern.direction === 'LONG' ? '#10b981' : '#ef4444';
+    }
     if (pattern?.signal_state === 'invalidated' || pattern?.trade_ready !== true) return '#94a3b8';
     return pattern.type === 'bullish' || pattern.direction === 'LONG' ? '#10b981' : '#ef4444';
+}
+
+function wyckoffStates(pattern) {
+    const current = pattern?.model === 'causal_wyckoff_v3';
+    const structure = { developing: 'im Aufbau', confirmed: 'bestaetigt', continuation: 'Fortsetzung',
+        failed: 'gescheitert', unclear: 'unklar' }[pattern?.structure_state] || 'nicht getrennt belegt';
+    const entry = { no_trigger: 'kein Trigger', ready: 'Trigger bereit; Handelsfreigabe separat', expired: 'abgelaufen',
+        target_passed: 'Ziel bereits passiert', invalid_geometry: 'ungueltige Geometrie', data_missing: 'Daten fehlen',
+        stopped: 'Stop dieses Einstiegs verletzt', ambiguous: 'Intrabar-Reihenfolge unklar; kein Einstieg',
+        conflict: 'widerspruechliche Evidenz' }[pattern?.entry_state] || 'nicht belegt';
+    const trigger = pattern?.entry_trigger;
+    const events = Array.isArray(pattern?.event_evidence) ? pattern.event_evidence : Array.isArray(pattern?.events) ? pattern.events : [];
+    const eventIds = new Set(events.map(event => event?.event_id).filter(id => typeof id === 'string' && id));
+    const ready = current && ['confirmed', 'continuation'].includes(pattern.structure_state)
+        && pattern.entry_state === 'ready' && pattern.trade_ready === true
+        && typeof trigger?.trigger_id === 'string' && !!trigger.trigger_id
+        && wyckoffDate(trigger.confirmed_at) !== 'nicht belegt'
+        && ['origin', 'reaction', 'test', 'breakout', 'retest'].every(key => eventIds.has(trigger.event_ids?.[key]));
+    return { current, structure, entry, ready };
+}
+
+function wyckoffNumber(value, digits = 2) {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? value.toLocaleString('de-CH', { maximumFractionDigits: digits }) : 'nicht verfuegbar';
 }
 
 function wyckoffDate(value) {
@@ -581,37 +610,51 @@ function wyckoffDate(value) {
 }
 
 function wyckoffEvidence(pattern) {
-    if (!isWyckoffPattern(pattern)) return { events: [], phases: [] };
+    if (!isWyckoffPattern(pattern)) return { events: [], phases: [], swings: [], pending: null };
+    const current = pattern.model === 'causal_wyckoff_v3';
     const allowedNames = new Set(['SC', 'BC', 'AR', 'ST', 'Spring', 'UTAD', 'SOS', 'SOW', 'LPS', 'LPSY']);
     const source = Array.isArray(pattern.event_evidence) ? pattern.event_evidence : Array.isArray(pattern.events) ? pattern.events : [];
     const counts = {};
-    const events = source.filter(event => event && allowedNames.has(event.name)
+    const events = source.filter(event => event && typeof event.name === 'string' && event.name.trim()
+        && (current || allowedNames.has(event.name))
         && typeof event.time === 'number' && Number.isSafeInteger(event.time) && event.time > 0
         && typeof event.price === 'number' && Number.isFinite(event.price) && event.price > 0)
         .slice().sort((a, b) => a.time - b.time).map((event, index) => {
             counts[event.name] = (counts[event.name] || 0) + 1;
             const occurrence = Number.isSafeInteger(event.occurrence) && event.occurrence > 0 ? event.occurrence : counts[event.name];
             return { ...event, sequence: index + 1, occurrence,
-                label: `${event.name}${event.name === 'ST' || occurrence > 1 ? ' #' + occurrence : ''}`,
-                phaseLabel: /^[A-D]$/.test(event.phase || '') ? event.phase : 'nicht zugeordnet' };
+                label: `${event.name}${['ST', 'LPS', 'LPSY'].includes(event.name) || occurrence > 1 ? ' #' + occurrence : ''}`,
+                phaseLabel: /^[A-E]$/.test(event.phase || '') ? event.phase : 'nicht zugeordnet' };
         });
     const phases = ['A', 'B', 'C', 'D', 'E'].map(phase => {
         const proof = Array.isArray(pattern.phase_evidence) ? pattern.phase_evidence.find(row => row?.phase === phase) : null;
-        return { phase, proof, label: phase === 'E' ? 'nicht modelliert' : !proof ? 'nicht belegt'
-            : proof.status === 'invalidated' ? 'ungueltig' : proof.status === 'developing' ? 'in Entwicklung, noch kein ST' : 'modellbasiert belegt' };
+        return { phase, proof, label: phase === 'E' && !current ? 'im Altmodell nicht modelliert' : !proof ? 'nicht belegt'
+            : proof.status === 'invalidated' ? 'ungueltig' : proof.status === 'developing' ? 'in Entwicklung'
+            : proof.status === 'inferred' ? 'modellbasiert abgeleitet'
+            : ['confirmed', 'context', 'continuation'].includes(proof.status) ? 'modellbasiert belegt' : 'Status nicht belegt' };
     });
-    return { events, phases };
+    const swingCounts = {};
+    const swings = (current && Array.isArray(pattern.swings) ? pattern.swings : [])
+        .filter(swing => swing?.status === 'confirmed' && typeof swing.swing_id === 'string'
+            && ['UP', 'DOWN'].includes(swing.direction)).map(swing => {
+            const key = `${swing.degree}-${swing.direction}`;
+            swingCounts[key] = (swingCounts[key] || 0) + 1;
+            return { ...swing, label: `${swing.direction === 'UP' ? 'Aufschwung' : 'Abschwung'} ${swingCounts[key]}` };
+        });
+    const pending = current && pattern.provisional_swing?.status === 'unconfirmed' ? pattern.provisional_swing : null;
+    return { events, phases, swings, pending };
 }
 
-// Projection only: no detector, no interpolation and no connections between events.
+// Projection only: exact evidence coordinates; event dots are never joined into invented waves.
 function projectWyckoffChartEvidence(pattern, candles, timeframe) {
-    const empty = { points: [], markers: [], rangeLines: [] };
+    const empty = { points: [], markers: [], rangeLines: [], swingLines: [], phaseSegments: [] };
     if (!isWyckoffPattern(pattern) || pattern.timeframe !== timeframe || !Array.isArray(candles)) return empty;
     const counts = new Map();
     candles.forEach(candle => counts.set(candle.time, (counts.get(candle.time) || 0) + 1));
     const exact = time => typeof time === 'number' && Number.isSafeInteger(time) && counts.get(time) === 1;
     const color = wyckoffPatternColor(pattern);
-    const points = wyckoffEvidence(pattern).events.filter(event => {
+    const proof = wyckoffEvidence(pattern);
+    const points = proof.events.filter(event => {
         if (!exact(event.time) || !exact(event.confirmation_time) || event.confirmation_time < event.time) return false;
         const candle = candles.find(row => row.time === event.time);
         return typeof candle.low === 'number' && typeof candle.high === 'number'
@@ -623,7 +666,11 @@ function projectWyckoffChartEvidence(pattern, candles, timeframe) {
         const key = event.time;
         // Dates and exact prices stay in the accessible evidence table;
         // short chart labels remain readable on mobile and dense ranges.
-        const label = `${event.sequence} ${event.label}`;
+        const code = { RangeOrigin: 'RO', Ctest: 'C-Test', InRangeSOS: 'D+', InRangeSOW: 'D-',
+            EFollowThrough: 'E', UpperTest: 'UT', LowerTest: 'LT', Spring: 'SP', SpringTest: 'SP-T',
+            UTADTest: 'UT-T', Backup: 'BK' }[event.name] || (event.name.length <= 6 ? event.name : event.name.slice(0, 5) + '…');
+        const ordinal = ['ST', 'LPS', 'LPSY'].includes(event.name) || event.occurrence > 1 ? '#' + event.occurrence : '';
+        const label = `${event.sequence} ${code}${ordinal}`;
         if (grouped.has(key)) grouped.get(key).text += ' / ' + label;
         else grouped.set(key, { time: event.time, position: 'aboveBar', color, shape: 'circle', text: label });
     });
@@ -638,10 +685,32 @@ function projectWyckoffChartEvidence(pattern, candles, timeframe) {
             rangeLines.push({ name, color, data: [{ time: start, value: price }, { time: end, value: price }] });
         });
     }
-    return { points, markers: [...grouped.values()], rangeLines };
+    const endpoint = (time, price) => {
+        if (!exact(time) || typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return false;
+        const candle = candles.find(row => row.time === time);
+        return Number.isFinite(candle.low) && Number.isFinite(candle.high)
+            && price >= candle.low - 1e-6 && price <= candle.high + 1e-6;
+    };
+    const swingLines = [...proof.swings, ...(proof.pending ? [proof.pending] : [])].filter(swing =>
+        endpoint(swing.start_time, swing.start_price) && endpoint(swing.end_time, swing.end_price)
+        && swing.start_time < swing.end_time
+        && (swing.status === 'unconfirmed' || (exact(swing.confirmation_time) && swing.confirmation_time >= swing.end_time)))
+        .map(swing => ({ ...swing, color: swing.status === 'unconfirmed' ? '#94a3b8' : swing.direction === 'UP' ? '#38bdf8' : '#fb923c',
+            data: [{ time: swing.start_time, value: swing.start_price }, { time: swing.end_time, value: swing.end_price }] }));
+    const phaseColors = { A: '#64748b', B: '#a78bfa', C: '#f59e0b', D: '#38bdf8', E: '#34d399' };
+    const phaseSegments = pattern.model !== 'causal_wyckoff_v3' || !rangeLines.length ? [] : proof.phases.filter(row => row.proof
+        && ['inferred', 'confirmed', 'context', 'continuation'].includes(row.proof.status)
+        && exact(row.proof.start_time) && exact(row.proof.end_time) && exact(row.proof.confirmed_time)
+        && row.proof.confirmed_time >= row.proof.start_time && row.proof.start_time <= row.proof.end_time)
+        .map(row => ({ phase: row.phase, color: phaseColors[row.phase], confirmation_time: row.proof.confirmed_time,
+            // Inferred historical interval; the separate marker is at first confirmation, never backdated.
+            data: [...new Set([row.proof.start_time, row.proof.end_time])].map(time => ({ time, value: pattern.range_low })) }));
+    phaseSegments.forEach(segment => grouped.set(`phase-${segment.phase}`, { time: segment.confirmation_time, position: 'belowBar',
+        color: segment.color, shape: 'square', text: segment.phase }));
+    return { points, markers: [...grouped.values()].sort((a, b) => a.time - b.time), rangeLines, swingLines, phaseSegments };
 }
 
-function renderWyckoffChartEvidence({ pattern, candles, timeframe, chart, series, markers, LineStyle }) {
+function renderWyckoffChartEvidence({ pattern, candles, timeframe, chart, series, markers, LineStyle, showInternalSwings = false }) {
     const evidence = projectWyckoffChartEvidence(pattern, candles, timeframe);
     evidence.points.forEach(event => {
         const point = chart.addLineSeries({ color: event.color, lineVisible: false, pointMarkersVisible: true,
@@ -655,14 +724,34 @@ function renderWyckoffChartEvidence({ pattern, candles, timeframe, chart, series
         line.setData(boundary.data);
         series.push(line);
     });
-    markers.push(...evidence.markers);
+    evidence.phaseSegments.forEach(segment => {
+        const line = chart.addLineSeries({ color: segment.color, lineWidth: 3, lineStyle: LineStyle.Solid,
+            lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+        line.setData(segment.data);
+        series.push(line);
+    });
+    evidence.swingLines.filter(swing => showInternalSwings || swing.degree === 'major').forEach(swing => {
+        const line = chart.addLineSeries({ color: swing.color, lineWidth: swing.degree === 'major' ? 2 : 1,
+            lineStyle: swing.status === 'unconfirmed' ? LineStyle.Dashed : LineStyle.Solid,
+            lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+        line.setData(swing.data);
+        series.push(line);
+    });
+    const timeScale = typeof chart.timeScale === 'function' ? chart.timeScale() : null;
+    const plotWidth = typeof timeScale?.width === 'function' ? timeScale.width() : null;
+    const compact = Number.isFinite(plotWidth) && plotWidth > 0 && plotWidth < 480;
+    const ordinals = new Map();
+    evidence.points.forEach(event => ordinals.set(event.time, [...(ordinals.get(event.time) || []), event.sequence]));
+    markers.push(...evidence.markers.map(marker => compact && marker.position === 'aboveBar'
+        ? { ...marker, text: (ordinals.get(marker.time) || []).join('/') } : marker));
 }
 
 function chartPatternLabel(pattern) {
     if (!isWyckoffPattern(pattern)) return `${pattern.pattern} (${pattern.confidence || ''})`;
-    const state = pattern.signal_state === 'invalidated' ? 'ungueltig' :
-        pattern.trade_ready === true ? 'Muster bestaetigt; Handelsplan separat' : 'Kontext; kein Handelssignal';
-    return `${pattern.pattern} · ${pattern.timeframe || '?'} · Phase ${pattern.phase || '?'} · ${state}`;
+    const states = wyckoffStates(pattern);
+    const state = !states.current ? 'Altmodell: historischer Kontext; kein Handelssignal'
+        : `Struktur ${states.structure} · Einstieg: ${states.entry} · ${states.ready ? 'Handelsfreigabe separat' : 'Chartkontext; kein Handelssignal'}`;
+    return `${pattern.pattern || 'Wyckoff ' + (pattern.structure_type || pattern.direction || '')} · ${pattern.timeframe || '?'} · Phase ${pattern.phase || '?'} · ${state}`;
 }
 
 function chartPatternEvidence(pattern) {
@@ -2953,39 +3042,71 @@ function formatFundingRate(row) {
     return Number.isFinite(Number(raw)) ? `${Number(raw).toFixed(3)}%` : 'Nicht verfügbar';
 }
 
-function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction }) {
+function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction, showInternalSwings = false, onToggleInternalSwings }) {
     const selectedWyckoff = isWyckoffScannerSelection(scannerRow);
     const rows = wyckoffDisplayRows(patterns, scannerRow, direction);
     if (!rows.length && !selectedWyckoff) return null;
     return <section className="mb-3 mt-3 rounded border border-slate-300 p-3 text-xs" aria-label="Wyckoff-Phasen und Ereignisse">
         <h4 className="font-semibold">Wyckoff nachpruefen · Chart {timeframe}</h4>
-        <p className="mt-1">A–E sind Phasen; die Zahlen an Ereignissen zeigen nur deren zeitliche Reihenfolge, keine Elliott-Wellen und keine feste A1–A5-Regel. ST #1 / #2 bezeichnet wiederholte Tests.</p>
+        <p className="mt-1">A–E sind Phasen; die Zahlen an Ereignissen zeigen nur deren zeitliche Reihenfolge, keine Elliott-Wellen und keine feste A1–A5-Regel. ST #1 / #2 bezeichnet wiederholte Tests. Swing-Zahlen gelten lokal je Strukturgrad und Richtung.</p>
+        <p className="mt-1">Zeitrahmen: {timeframe}. Strukturgrad: grosse / interne Swings derselben Historie, kein Wechsel auf 1H. Aktien-Signale bleiben auf abgeschlossenen 1D-Sessions; 1W ist uebergeordneter Kontext, 1H eine getrennte Detailansicht.</p>
+        {onToggleInternalSwings && <label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={showInternalSwings} onChange={onToggleInternalSwings} className="mt-0.5" />Interne Swings im Chart einblenden (inkl. gestricheltem, unbestaetigtem letzten Abschnitt)</label>}
+        <p className="mt-1">Chart-Legende: Range gestrichelt, grosse Swings staerker, intern duenn; blau aufwaerts, orange abwaerts. Farbige Range-Unterkante: abgeleitete Phasenabschnitte. A–E-Marker stehen erst an der Bestaetigungskerze. Auf schmalen Charts stehen nur Ereignisnummern; Namen und Zeiten stehen in der Ereignistabelle. Ereigniscodes: E = Fortsetzung, BK = Backup, C-Test = Test ohne Spring, RO = Range-Ursprung. Strukturfarbe ist keine Einstiegsfreigabe.</p>
         {selectedWyckoff && <p className="mt-1">Aktien-Scannersignal: 1D. Der gewaehlte Chart berechnet seine eigene Struktur; ein anderer Zeitrahmen ist keine Bestaetigung des Scannerstands.</p>}
         {selectedWyckoff && timeframe !== '1D' && <button type="button" className="button button-secondary mt-2" onClick={onDaily}>Wyckoff im 1D-Chart pruefen</button>}
         {!rows.length && <p className="mt-2">In den geladenen Chartdaten liegt kein nachpruefbarer Wyckoff-Nachweis vor. Ein gespeichertes Signal wird hier nicht neu bestaetigt.</p>}
         {rows.map(({ pattern, source, stored }, index) => {
             const evidence = wyckoffEvidence(pattern);
-            return <details key={`${pattern.direction || pattern.type}-${index}`} className="mt-3 rounded border border-slate-300 p-2">
+            const states = wyckoffStates(pattern);
+            const children = rows.filter(row => pattern.structure_id && row.pattern.parent_structure_id === pattern.structure_id);
+            const structureType = { Accumulation: 'Akkumulation', Distribution: 'Distribution', Reaccumulation: 'Reakkumulation', Redistribution: 'Redistribution' }[pattern.structure_type] || 'nicht belegt';
+            return <details key={`${stored ? 'stored' : 'chart'}-${pattern.structure_id || index}`} className="mt-3 min-w-0 rounded border border-slate-300 p-2">
                 <summary className="cursor-pointer font-semibold">{chartPatternLabel(pattern)} · {evidence.events.length} datierte Ereignisse</summary>
                 <p className="mt-2 font-semibold">{source} · {pattern.timeframe || 'Zeitrahmen unbekannt'}</p>
                 {stored && <p>Diese historischen Scanner-Anker werden nicht auf einen anderen Zeitrahmen uebertragen. Chart-Markierungen stammen ausschliesslich aus der aktuellen Chartanalyse.</p>}
-                <p className="mt-2">Modell: {pattern.model} · begrenztes Climax-Umkehrmodell, keine vollstaendige Wyckoff-Lehre. Phasengrenzen sind aus Ereignissen abgeleitet, keine exakt beobachtbaren Marktwechsel.</p>
+                <p className="mt-2">Modell: {pattern.model} · {states.current ? 'versionierte Umkehr- und Fortsetzungsevidenz' : 'historisches Climax-Umkehrmodell; als neues Signal gesperrt'}, keine vollstaendige Wyckoff-Lehre. Phasengrenzen sind aus Ereignissen abgeleitet, keine exakt beobachtbaren Marktwechsel.</p>
+                {states.current && <div className="mt-2 rounded border border-slate-300 p-2">
+                    <p><strong>Struktur: {structureType} · {states.structure}.</strong> Einstieg: {states.entry}. Ein abgelaufener oder ausgestoppter Plan widerlegt historische Phasen nicht. Ein neuer Einstieg benoetigt einen neuen bestaetigten Trigger und alle Handelsgates.</p>
+                    <p className="mt-1 break-all">Struktur-ID: {pattern.structure_id || 'nicht belegt'}<br />Uebergeordnete Range: {pattern.parent_structure_id || 'keine belegt'}</p>
+                    {children.length > 0 && <p className="mt-1 break-all">Eigene untergeordnete Ranges: {children.map(row => row.pattern.structure_id).join(' · ')}. Deren Phase ersetzt die uebergeordnete Historie nicht.</p>}
+                    <p className="mt-1">Historie: {pattern.history_context?.status === 'complete' ? 'Pflichtanker im geladenen Fenster belegt' : 'unvollstaendig / nicht belegt'} · {wyckoffNumber(pattern.history_context?.available_bars, 0)} Kerzen · Vortrend: {wyckoffNumber(pattern.history_context?.prior_trend_bars, 0)} Kerzen · Fenster ab {wyckoffDate(pattern.history_context?.window_start_at)}. Eine angeforderte 180-Bar-Historie ist kein Vollstaendigkeitsnachweis.</p>
+                </div>}
                 <p className="mt-1">Range: {Number.isFinite(pattern.range_low) ? pattern.range_low : '—'} bis {Number.isFinite(pattern.range_high) ? pattern.range_high : '—'} · bekannt ab {wyckoffDate(pattern.range_confirmed_at)}. Linien beginnen erst an der Bestaetigungskerze; Punkte markieren das Ereignis, nicht einen damaligen Einstieg.</p>
                 <div className="mt-2 flex flex-wrap gap-2">{evidence.phases.map(row => <span key={row.phase} className="rounded bg-slate-100 px-2 py-1 text-slate-800">Phase {row.phase}: {row.label}</span>)}</div>
-                <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-label="Wyckoff-Ereignistabelle">
+                <details className="mt-2"><summary className="cursor-pointer font-semibold">Ereignisfolge und genaue Zeiten ({evidence.events.length})</summary>
+                <div className="mt-2 max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Wyckoff-Ereignistabelle">
                     <table className="w-full text-left"><caption className="text-left py-2">Ereignisse: beobachtet ist nicht gleichzeitig bestaetigt. Alle Zeiten UTC.</caption>
                         <thead><tr>{['Nr. / Ereignis', 'Phase', 'Beobachtet', 'Bestaetigt', 'Preis', 'Volumenfaktor'].map(label => <th key={label} scope="col" className="p-2">{label}</th>)}</tr></thead>
-                        <tbody>{evidence.events.map(event => <tr key={`${event.sequence}-${event.time}`} className="border-t border-slate-200">
-                            <th scope="row" className="p-2 whitespace-nowrap">{event.sequence} · {event.label}</th><td className="p-2">{event.phaseLabel}</td>
+                        <tbody>{evidence.events.map(event => <tr key={event.event_id || `${event.sequence}-${event.time}`} className="border-t border-slate-200">
+                            <th scope="row" className="p-2 whitespace-nowrap" title={event.event_id}>{event.sequence} · {event.label}</th><td className="p-2">{event.phaseLabel}</td>
                             <td className="p-2 whitespace-nowrap">{wyckoffDate(event.observed_at)}</td><td className="p-2 whitespace-nowrap">{wyckoffDate(event.confirmed_at)}</td>
                             <td className="p-2">{event.price.toLocaleString('de-CH', { maximumFractionDigits: 6 })}</td><td className="p-2">{typeof event.volume_ratio === 'number' && Number.isFinite(event.volume_ratio) ? event.volume_ratio.toFixed(2) + '×' : 'nicht verfuegbar'}</td>
                         </tr>)}</tbody>
                     </table>
                 </div>
+                </details>
+                {states.current && <details className="mt-2"><summary className="cursor-pointer font-semibold">Swings: {evidence.swings.length} bestaetigt · {evidence.pending ? 'letzter Abschnitt unbestaetigt' : 'kein offener Abschnitt belegt'}</summary>
+                    <p className="mt-1">Strecke und Volumen stammen aus dem jeweiligen Abschnitt. Volumen je Kerze macht unterschiedliche Dauern vergleichbar; kein Kauf-/Verkaufsdelta und keine automatische Staerkerangliste.</p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2" aria-label="Wyckoff-Swingevidenz">{[...evidence.swings, ...(evidence.pending ? [evidence.pending] : [])].map(swing => <article key={swing.swing_id || 'pending'} className="min-w-0 rounded border border-slate-300 p-2">
+                        <h5 className="font-semibold">{swing.degree === 'major' ? 'Grosser' : 'Interner'} Swing · {swing.label || (swing.direction === 'UP' ? 'Aufwaerts' : 'Abwaerts')} · {swing.status === 'unconfirmed' ? 'unbestaetigt; kein Ereignis/Trigger' : 'bestaetigt'}</h5>
+                        <p>Start: {wyckoffDate(swing.start_at)} · {wyckoffNumber(swing.start_price, 6)}<br />Ende: {wyckoffDate(swing.end_at)} · {wyckoffNumber(swing.end_price, 6)}<br />Bestaetigt: {swing.status === 'unconfirmed' ? 'noch nicht' : wyckoffDate(swing.confirmed_at)}</p>
+                        <p className="mt-1">Strecke: {wyckoffNumber(swing.distance, 6)} · {wyckoffNumber(swing.duration_bars, 0)} Kerzen · Fortschritt: {wyckoffNumber(swing.progress_atr)} ATR<br />Volumen gesamt: {wyckoffNumber(swing.cumulative_volume, 0)} · je Kerze: {wyckoffNumber(swing.volume_per_bar)}</p>
+                        <details className="mt-1"><summary className="cursor-pointer">Swing-ID</summary><p className="break-all">{swing.swing_id || 'kein bestaetigter Anker'}</p></details>
+                    </article>)}</div>
+                </details>}
+                {states.current && <details className="mt-2"><summary className="cursor-pointer font-semibold">Einstiegsplan und Trigger · {states.entry}</summary>
+                    <p className="mt-1">{states.ready ? 'Technische Triggerkette bereit; Risiko, Kosten und Zustellung werden separat geprueft.' : 'Chartkontext ist kein Scanner-Treffer, Tracking-Einstieg oder Signal-Mail.'}</p>
+                    {pattern.entry_trigger ? <div className="mt-1"><p className="break-all">Trigger-ID: {pattern.entry_trigger.trigger_id || 'nicht belegt'}</p><p>Bestaetigt: {wyckoffDate(pattern.entry_trigger.confirmed_at)}</p>
+                        <ul className="mt-1 space-y-1">{Object.entries(pattern.entry_trigger.event_ids || {}).map(([role, id]) => {
+                            const event = evidence.events.find(row => row.event_id === id);
+                            return <li key={role} className="break-all">{role}: {event ? `${event.label} · ${wyckoffDate(event.confirmed_at)}` : 'Anker in diesem Fenster nicht belegt'}<br />{id}</li>;
+                        })}</ul></div> : <p>Kein bestaetigter Einstiegstrigger belegt.</p>}
+                </details>}
                 <dl className="mt-2 grid gap-2 sm:grid-cols-2">{evidence.phases.map(row => <div key={row.phase} className="rounded bg-slate-100 p-2 text-slate-800">
                     <dt className="font-semibold">Phase {row.phase} · {row.label}</dt>
-                    {row.proof && row.phase !== 'E' && <dd>Beginn: {wyckoffDate(row.proof.start_time)}<br />Erst belegt: {wyckoffDate(row.proof.confirmed_at)}<br />Zeitraum bis: {wyckoffDate(row.proof.end_time)}</dd>}
-                    {!row.proof && row.phase === 'C' && <dd>Spring / UTAD ist optional; ohne Ereignis wird Phase C nicht erfunden.</dd>}
+                    {row.proof && <dd>Abgeleiteter Beginn: {wyckoffDate(row.proof.start_time)}<br />Erst belegt: {wyckoffDate(row.proof.confirmed_at)}<br />Zeitraum bis: {wyckoffDate(row.proof.end_time)}</dd>}
+                    {!row.proof && row.phase === 'C' && <dd>Spring / UTAD ist optional. Ein Test innerhalb der Range benoetigt eigene Richtungsbestaetigung; ohne Evidenz wird C nicht erfunden.</dd>}
+                    {!row.proof && row.phase === 'E' && states.current && <dd>Kein belegter Ausbruch mit anschliessender Fortsetzung ausserhalb der Range. Zeitablauf oder Zielerreichung allein ist keine Phase E.</dd>}
                 </div>)}</dl>
                 <p className="mt-2">Musterqualitaet ist keine Gewinnwahrscheinlichkeit. Keine Aussage ueber institutionelle Kaeufe oder Verkaeufe; Handelsplan, Kosten und Ausfuehrung sind separat zu pruefen.</p>
             </details>;
@@ -3784,7 +3905,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     _sorted.forEach(p => {
                         if (isWyckoffPattern(p)) {
                             renderWyckoffChartEvidence({ pattern: p, candles, timeframe, chart: chart.current,
-                                series: overlaySeriesRef.current, markers, LineStyle });
+                                series: overlaySeriesRef.current, markers, LineStyle, showInternalSwings: overlays.wyckoffSwings });
                             return;
                         }
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
@@ -4946,7 +5067,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
                 <CupPatternEvidence evidence={cupEvidence} onDaily={() => setTimeframe('1D')} />
                 <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
-                    onDaily={() => setTimeframe('1D')} scannerRow={scannerData} direction={viewDirection} />
+                    onDaily={() => setTimeframe('1D')} scannerRow={scannerData} direction={viewDirection}
+                    showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                 {/* Pattern Info */}
                 {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
                 {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
@@ -4955,7 +5077,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
                         {filtered.map((p, i) => (
-                            <span key={i} title={chartPatternEvidence(p)} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'bg-gray-700 text-gray-200' : p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                            <span key={i} title={chartPatternEvidence(p)} style={isWyckoffPattern(p) ? { color: wyckoffPatternColor(p) } : undefined} className={`inline-block mr-2 mb-1 px-2 py-1 rounded ${isWyckoffPattern(p) ? 'bg-slate-900' : p.type === 'bullish' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
                                 {chartPatternLabel(p)}
                             </span>
                         ))}
@@ -10544,8 +10666,8 @@ function StrategieGuideTab() {
         'Trend Reversal': 'Sucht kontrollierte Bodenbildung nach einem mehrtägigen Abverkauf. Interessant ist nicht jeder grüne Tag, sondern nur Reversals mit Struktur, Volumen und klarer Veränderung im Verhalten.',
         'MA Bounce Long': 'Fasst Pullbacks an EMA 21, SMA 50 und SMA 200 zusammen. Ein gutes Long-Setup liegt vor, wenn der Trend intakt ist, der Preis kontrolliert zurücksetzt und genau an einer starken Durchschnittslinie wieder Käufer findet.',
         'MA Bounce Short': 'Scant Rejections an fallenden SMA-Zonen. Das Setup ist besonders nützlich, wenn eine schwache Aktie zurück an einen Widerstands-MA läuft und dort wieder abgewiesen wird.',
-        'Wyckoff Accumulation': 'Long-Erkennung auf abgeschlossenen Tageskerzen (1D): Verkaufsclimax, Erholung, Test, volumenbestaetigter Ausbruch und gehaltener Ruecktest. Mindestens 60 Kerzen, bis zu 180 angefordert. Fruehe Phasen sind nur Chart-Kontext, keine Scanner-Signale. Score bedeutet Musterqualitaet, nicht Gewinnwahrscheinlichkeit.',
-        'Wyckoff Distribution': 'Short-Erkennung auf abgeschlossenen Tageskerzen (1D): Kaufclimax, Reaktion, Test, volumenbestaetigter Breakdown und gehaltener Ruecktest. Mindestens 60 Kerzen, bis zu 180 angefordert. Struktur, Risiko und Mailfreigabe werden danach separat geprueft.',
+        'Wyckoff Accumulation': 'Long-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Reakkumulationsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Ausbruch, gehaltenen Ruecktest und eigenen Trigger. Bis zu 180 Kerzen angefordert; fehlende Pflichtanker bleiben unvollstaendig. Phasen und intakte Struktur allein sind kein Einstieg. Score bedeutet Musterqualitaet, nicht Gewinnwahrscheinlichkeit.',
+        'Wyckoff Distribution': 'Short-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Redistributionsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Breakdown, gehaltenen Ruecktest und eigenen Trigger. Phase D innerhalb der Range oder Phase E allein ersetzt dieses Gate nicht. Struktur, Einstiegsplan, Risiko und Mailfreigabe bleiben getrennt.',
         // === AKTIEN ===
         'Volume Surge': 'Erkennt Aktien, bei denen plötzlich viel mehr gehandelt wird als üblich UND sich der Preis gleichzeitig bewegt. Wenn beides zusammenkommt, steckt oft echtes Interesse dahinter — nicht nur zufälliges Rauschen. Besonders nützlich um früh in einen Move einzusteigen.',
         'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
@@ -12253,7 +12375,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     _sorted2.forEach(p => {
                         if (isWyckoffPattern(p)) {
                             renderWyckoffChartEvidence({ pattern: p, candles, timeframe, chart: chartRef.current,
-                                series: overlaySeriesRef.current, markers, LineStyle });
+                                series: overlaySeriesRef.current, markers, LineStyle, showInternalSwings: overlays.wyckoffSwings });
                             return;
                         }
                         const markerTime = p.time || (candles.length > 0 ? candles[candles.length - 1].time : null);
@@ -12564,7 +12686,8 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     </div>
 
                     <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
-                        onDaily={() => setTimeframe('1D')} direction={(d.confluence?.direction || '').toUpperCase()} />
+                        onDaily={() => setTimeframe('1D')} direction={(d.confluence?.direction || '').toUpperCase()}
+                        showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                     {/* Pattern badges */}
                     {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                         const _vd = (d.confluence?.direction || '').toUpperCase();
@@ -12573,9 +12696,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
                             {filtered.map((p, i) => (
                                 <span key={i} title={chartPatternEvidence(p)} style={{ display: 'inline-block', padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-                                    background: isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'rgba(148,163,184,0.15)' : p.type === 'bullish' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                                    background: isWyckoffPattern(p) ? '#0f172a' : p.type === 'bullish' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
                                     color: isWyckoffPattern(p) ? wyckoffPatternColor(p) : p.type === 'bullish' ? '#10b981' : '#ef4444',
-                                    border: `1px solid ${isWyckoffPattern(p) && (p.trade_ready !== true || p.signal_state === 'invalidated') ? 'rgba(148,163,184,0.3)' : p.type === 'bullish' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                    border: `1px solid ${isWyckoffPattern(p) ? 'rgba(148,163,184,0.3)' : p.type === 'bullish' ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
                                 }}>
                                     {chartPatternLabel(p)}
                                 </span>

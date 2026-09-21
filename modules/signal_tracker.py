@@ -862,6 +862,27 @@ def _execution_confirmation_context(row: Any) -> Dict[str, Any]:
     ):
         _context_put_text(payload, target, sources, aliases, limit=limit)
 
+    # Preserve nominated Wyckoff anchors independently of repeated descriptive
+    # tests. This is audit evidence, never another execution approval.
+    wyckoff = row.get("wyckoff") if isinstance(row, Mapping) else None
+    if isinstance(wyckoff, Mapping):
+        evidence: Dict[str, Any] = {}
+        for field in ("model", "structure_id", "structure_type", "structure_state",
+                      "entry_state", "phase", "parent_structure_id", "timeframe",
+                      "signal_confirmed_at", "range_confirmed_at"):
+            _context_put_text(evidence, field, [wyckoff], (field,), limit=160)
+        entry_trigger = wyckoff.get("entry_trigger")
+        if isinstance(entry_trigger, Mapping):
+            _context_put_text(evidence, "trigger_id", [entry_trigger], ("trigger_id",), limit=160)
+            refs = entry_trigger.get("event_ids")
+            if isinstance(refs, Mapping):
+                event_refs: Dict[str, Any] = {}
+                for role in ("origin", "reaction", "test", "breakout", "retest"):
+                    _context_put_text(event_refs, role, [refs], (role,), limit=160)
+                if event_refs:
+                    evidence["event_ids"] = event_refs
+        if evidence:
+            payload["wyckoff"] = evidence
     trigger = next(
         (
             source.get("intraday_trigger")
