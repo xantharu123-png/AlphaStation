@@ -51,7 +51,13 @@ def _cup_fixture(monkeypatch, *, count=225, varied=False, rejected=()):
         assert "_deferred_native_plan" not in row
         assert row["native_plan_reason"] == "fixture_no_structure"
         cup_calls.append(row["ticker"])
-        return None if row["ticker"] in rejected else row
+        if row["ticker"] in rejected:
+            return None
+        # This test stubs pattern recognition to measure admission/ranking,
+        # not morphology. Model the new successful-detector receipt too.
+        return dict(row, cup_pattern_version=api.CUP_PATTERN_CONTRACT_VERSION,
+                    pattern_timeframe="1D", cup_rim_level=101.,
+                    Breakout_Level=101., cup_confirmation_level=101., cup_confirmation_close=102.)
 
     monkeypatch.setattr(api, "_fetch_strategy_daily_history", history)
     monkeypatch.setattr(api, "_fetch_recent_stock_4h_bars", execution)

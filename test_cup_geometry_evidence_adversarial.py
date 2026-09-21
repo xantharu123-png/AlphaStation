@@ -75,18 +75,22 @@ def test_handle_low_on_breakout_keeps_distinct_low_and_close_without_relabeling(
     assert projected["geometry_issues"] == evidence["geometry_issues"]
 
 
-def test_overlapping_regions_report_selected_chronology_mismatch_without_new_pattern_search():
+def test_inverted_chronology_is_rejected_but_legacy_evidence_stays_honest():
     bars = _dated(_cup_handle_bars())
     bars[61].update(_bar(100, high=101.2, low=99, volume=1_150_000))
     bars[65].update(_bar(71, high=72, low=70, volume=1_150_000))
     setup = api._detect_cup_handle_breakout(bars, current_price=101.7)
-    assert setup is not None  # Descriptive evidence is not a new admission gate.
-    evidence = setup["cup_pattern_evidence"]
+    assert setup is None  # Current morphology requires left rim < bottom < right rim.
+    # Old cached evidence is still described honestly; its drawing must not
+    # silently reorder the same historical points to manufacture a new cup.
+    evidence = build_cup_geometry_evidence(
+        bars, cup_length=90, handle_length=10,
+        session_getter=api._daily_bar_date_str, number_getter=api._bar_num,
+    )
     anchors = evidence["anchors"]
     assert anchors["right_rim"]["index"] < anchors["bottom"]["index"]
     assert evidence["geometry_status"] == "chronology_mismatch"
     assert "bottom_not_before_right_rim" in evidence["geometry_issues"]
-    assert evidence == _describe_selected(bars, setup)[1]
     projected = project_cup_geometry_evidence(evidence, symbol="EXPD")
     assert projected["anchors"] == anchors
     assert projected["geometry_status"] == "chronology_mismatch"

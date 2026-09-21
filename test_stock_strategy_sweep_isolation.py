@@ -192,6 +192,13 @@ def test_existing_combined_guard_preserves_strategy_dedupe_and_next_sweep_cooldo
     from test_cluster_warning_mail import _mock_sweep_env, _sweep_row
     rows = {STRATEGIES[1]: [_sweep_row("DUP"), _sweep_row("DUP"), _sweep_row("OTHER")],
             STRATEGIES[3]: [_sweep_row("DUP")]}
+    # This fixture represents a current, close-confirmed Cup result; the test
+    # isolates strategy-aware dedupe rather than rejection of legacy patterns.
+    rows[STRATEGIES[3]][0].update(
+        cup_pattern_version=api.CUP_PATTERN_CONTRACT_VERSION,
+        pattern_timeframe="1D", cup_rim_level=9.95,
+        cup_confirmation_level=9.95, cup_confirmation_close=10.0,
+    )
     real_guard = api._send_strategy_scan_alerts
     cache, _, state = _mock_sweep(monkeypatch, tmp_path, rows)
     sent = _mock_sweep_env(monkeypatch, {"DUP", "OTHER"})

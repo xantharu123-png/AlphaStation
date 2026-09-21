@@ -102,6 +102,12 @@ from modules import stock_scan_runtime
 from modules import scan_control, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
+from modules.cup_shape import validate_cup_shape
+from modules.cup_signal_contract import (
+    CUP_PATTERN_CONTRACT_VERSION,
+    cup_signal_contract_reason as _cup_signal_contract_reason,
+    cup_signal_contract_valid as _cup_signal_contract_valid,
+)
 
 # Import scanner modules
 from modules.scanners import (
@@ -817,7 +823,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 9
+STOCK_STRATEGY_CACHE_VERSION = 10
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -9467,6 +9473,10 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     raw_score = score
     rvol = _extract_alert_rvol(row)
     reasons = []
+    if scanner_name in {"stock_strategy", "strategy_scan"}:
+        cup_reason = _cup_signal_contract_reason(row)
+        if cup_reason:
+            reasons.append(cup_reason)
     if scanner_name in {"stock_strategy", "strategy_scan"} and not _stock_wyckoff_row_contract_valid(
         row, as_of=datetime.fromtimestamp(now, tz=timezone.utc),
     ):
@@ -9544,9 +9554,11 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "rvol_below_alert_threshold",
         "wyckoff_contract_invalid",
     }
-    base_actionable = not any(reason in reasons for reason in base_blockers)
+    cup_contract_blocked = any(reason.startswith("cup_contract_") for reason in reasons)
+    base_actionable = not cup_contract_blocked and not any(reason in reasons for reason in base_blockers)
     stock_diagnostics_allowed = (
         scanner_name in _STOCK_ALERT_SCANNERS
+        and not cup_contract_blocked
         and not any(reason in reasons for reason in {"missing_ticker", "non_common_stock_product", "wyckoff_contract_invalid"})
         and (raw_grade in _ALERT_TOP_GRADES or raw_score >= _ALERT_MIN_SCORE)
     )
@@ -12333,6 +12345,9 @@ def _stock_swing_delayed_observation(row, levels, as_of):
 
 
 def _revalidate_stock_swing_plan(row, *, now_ts, scanner_name):
+    cup_reason = _cup_signal_contract_reason(row)
+    if cup_reason:
+        return {"ok": False, "reason": cup_reason}
     as_of = datetime.fromtimestamp(now_ts, timezone.utc)
     if scanner_name not in _STOCK_SWING_ALERT_SCANNERS or not _scanner_uses_swing_horizon(scanner_name):
         return {"ok": False, "reason": "swing_mode_not_allowed_for_scanner"}
@@ -12391,6 +12406,9 @@ def _revalidate_stock_strategy_mail_candidate(
     recipient-executable fill.  The tracker waits for a complete post-alert
     interval before establishing the entry.
     """
+    cup_reason = _cup_signal_contract_reason(row)
+    if cup_reason:
+        return {"ok": False, "reason": cup_reason}
     if stock_swing.is_swing(row):
         return _revalidate_stock_swing_plan(
             row, now_ts=float(now_ts if now_ts is not None else time.time()), scanner_name=scanner_name,
@@ -13091,6 +13109,26 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     if not results:
         return
     if market_type == "stocks":
+        # Old Cup caches/watches never acquire the new morphology/close proof
+        # through premarket, swing, enrichment, tracking or final mail checks.
+        cup_rejections = {}
+        cup_verified = []
+        canonical_strategy = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(strategy_name), strategy_name)
+        # A sweep title is an owner, not a strategy identity. Mixed sweeps
+        # still validate every row's Cup provenance, without treating their
+        # aggregate title as a conflicting non-Cup strategy.
+        expected_cup_strategy = canonical_strategy if canonical_strategy in STRATEGIES else None
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            reason = _cup_signal_contract_reason(row, strategy_name=expected_cup_strategy)
+            if reason:
+                cup_rejections[reason] = cup_rejections.get(reason, 0) + 1
+            else:
+                cup_verified.append(row)
+        if cup_rejections:
+            _record_suppression_counts("stock_strategy", cup_rejections)
+        results = cup_verified
         # Bind even nameless legacy rows to the requested Wyckoff strategy,
         # before either regular-session or premarket enrichment/classification.
         # A rejected row must not reach shadow tracking, dedupe or SMTP.
@@ -16252,6 +16290,8 @@ def _stock_wyckoff_row_contract_valid(
 
 def _stock_momentum_row_contract_valid(row: Dict[str, Any], *, as_of: Optional[datetime] = None) -> bool:
     """Reject legacy/unconfirmed Momentum entry rows, not personal positions."""
+    if not _cup_signal_contract_valid(row):
+        return False
     if not _stock_wyckoff_row_contract_valid(row, as_of=as_of):
         return False
     strategy = str(row.get("Strategy") or row.get("strategy") or "")
@@ -19507,7 +19547,7 @@ def _bar_num(bar: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
         if key in bar:
             try:
                 value = float(bar.get(key) or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 value = default
             if math.isfinite(value):
                 return value
@@ -19602,6 +19642,13 @@ def _detect_cup_handle_breakout(
     current_price: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Strict daily Cup-and-Handle detector for actionable long breakouts only."""
+    if not isinstance(daily_bars, (list, tuple)) or not daily_bars:
+        return None
+    if any(not isinstance(bar, dict) for bar in daily_bars):
+        return None
+    # Never drop a broken confirmation bar and silently promote the prior one.
+    if any(_bar_num(daily_bars[-1], field, field[0]) <= 0 for field in ("high", "low", "close")):
+        return None
     cleaned = [
         bar for bar in daily_bars
         if _bar_num(bar, "high", "h") > 0 and _bar_num(bar, "low", "l") > 0 and _bar_num(bar, "close", "c") > 0
@@ -19613,9 +19660,20 @@ def _detect_cup_handle_breakout(
     data_gaps = bool(daily_bars) and (len(daily_bars) - len(cleaned)) / len(daily_bars) > 0.02
 
     bars = cleaned[-180:]
+    for bar in bars:
+        high, low, close = (_bar_num(bar, field, field[0]) for field in ("high", "low", "close"))
+        if not low <= close <= high:
+            return None
+        if any(isinstance(bar.get(field, bar.get(field[0])), bool) for field in ("open", "high", "low", "close")):
+            return None
+        if ("open" in bar or "o" in bar) and not low <= _bar_num(bar, "open", "o") <= high:
+            return None
     last = bars[-1]
-    price = float(current_price or _bar_num(last, "close", "c") or 0)
-    if price <= 0:
+    try:
+        price = float(_bar_num(last, "close", "c") if current_price is None else current_price)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(current_price, bool) or not math.isfinite(price) or price <= 0:
         return None
 
     # AUDIT K-1: Anti-Fenster-Shopping — globales Referenzhoch der letzten
@@ -19634,6 +19692,7 @@ def _detect_cup_handle_breakout(
     # (gemeldeter Entry 98.09 statt echtem Rim 101.20).
     best_rank: Tuple[float, float, float] = (-1.0, -1.0, -1.0)
     best_segment = None
+    structural_resistance = 0.0
     n = len(bars)
     max_window = min(n, 170)
 
@@ -19648,18 +19707,11 @@ def _detect_cup_handle_breakout(
                 continue
 
             cup_len = len(cup)
-            left = cup[:max(8, int(cup_len * 0.32))]
-            middle = cup[int(cup_len * 0.22):int(cup_len * 0.78)]
-            right = cup[int(cup_len * 0.62):]
-            if not left or not middle or not right:
+            shape = validate_cup_shape(cup)
+            if shape is None:
                 continue
-
-            left_lip = max(_bar_num(bar, "high", "h") for bar in left)
-            right_lip = max(_bar_num(bar, "high", "h") for bar in right)
-            cup_lip = max(left_lip, right_lip)
-            bottom = min(_bar_num(bar, "low", "l") for bar in middle)
-            if cup_lip <= 0 or bottom <= 0 or bottom >= cup_lip:
-                continue
+            cup_lip = shape["cup_lip"]
+            bottom = shape["bottom"]
 
             # AUDIT K-1: Fenster-Lip muss >= 97% des globalen Pre-Breakout-
             # Hochs sein — ein "Lip" 3%+ unter der echten Struktur ist kein
@@ -19667,19 +19719,10 @@ def _detect_cup_handle_breakout(
             if global_pre_breakout_high > 0 and cup_lip < global_pre_breakout_high * 0.97:
                 continue
 
-            depth_abs = cup_lip - bottom
-            depth_pct = depth_abs / cup_lip * 100
-            if depth_pct < 10 or depth_pct > 45:
-                continue
-
-            lip_ratio = right_lip / left_lip if left_lip > 0 else 0
-            if lip_ratio < 0.86 or lip_ratio > 1.16:
-                continue
-
-            bottom_zone = bottom + depth_abs * 0.18
-            rounded_bottom_bars = sum(1 for bar in middle if _bar_num(bar, "low", "l") <= bottom_zone)
-            if rounded_bottom_bars < 3:
-                continue
+            depth_abs = shape["depth_abs"]
+            depth_pct = shape["depth_pct"]
+            lip_ratio = shape["lip_ratio"]
+            rounded_bottom_bars = shape["rounded_bottom_bars"]
 
             handle_high = max(_bar_num(bar, "high", "h") for bar in handle)
             handle_low = min(_bar_num(bar, "low", "l") for bar in handle)
@@ -19717,16 +19760,15 @@ def _detect_cup_handle_breakout(
                     if _rising_steps / (len(_drift_lows) - 1) >= 0.8:
                         continue
 
-            close_pos = 0.5
-            last_high = _bar_num(last, "high", "h")
-            last_low = _bar_num(last, "low", "l")
-            if last_high > last_low:
-                close_pos = (handle_close - last_low) / (last_high - last_low)
-            breakout_confirmed = (
-                handle_close >= cup_lip * 1.002
-                or (last_high >= cup_lip * 1.006 and close_pos >= 0.65)
+            # Keep the highest structurally valid resistance BEFORE testing
+            # the close. Otherwise a failed close can shop a shorter window
+            # that cuts away the true left rim. The handle also cannot leave
+            # unbroken overhead resistance. No current quote or wick is proof.
+            confirmation_level = max(
+                cup_lip, max(_bar_num(bar, "high", "h") for bar in handle[:-1]),
             )
-            if not breakout_confirmed:
+            structural_resistance = max(structural_resistance, confirmation_level)
+            if handle_close < confirmation_level * 1.002:
                 continue
 
             extension_pct = (price - cup_lip) / cup_lip * 100
@@ -19820,6 +19862,10 @@ def _detect_cup_handle_breakout(
                 continue
 
             match = {
+                "cup_shape_evidence": shape,
+                "cup_pattern_version": CUP_PATTERN_CONTRACT_VERSION,
+                "cup_rim_level": cup_lip,
+                "cup_confirmation_close": handle_close,
                 "score": score,
                 "score_components": score_components,
                 "cup_depth_pct": round(depth_pct, 2),
@@ -19852,6 +19898,9 @@ def _detect_cup_handle_breakout(
                 best_segment = segment
 
     if best is not None:
+        if _bar_num(last, "close", "c") < structural_resistance * 1.002:
+            return None
+        best["cup_confirmation_level"] = structural_resistance
         # Descriptive only: use the already-selected original split, without
         # re-ranking, rounding anchors, or changing any acceptance criterion.
         best["cup_pattern_evidence"] = _build_cup_geometry_evidence(
@@ -20092,6 +20141,7 @@ def _cup_handle_next_session_trigger_state(
 
 
 _CUP_HANDLE_WATCH_ROW_FIELDS = frozenset({
+    "cup_pattern_version", "cup_rim_level", "cup_confirmation_close", "cup_confirmation_level",
     "ticker", "Ticker", "price", "Preis", "Price", "current_price",
     "Prev_Close", "prev_close", "Dollar_Volume", "score", "grade",
     "base_grade", "RVOL", "rvol", "Change_Pct", "change_pct",
@@ -20163,10 +20213,14 @@ def _queue_cup_handle_next_session_watch(
     breakout_level: Any,
 ) -> bool:
     """Persist one WAIT row without affecting scanner/mail behavior on error."""
+    if not _cup_signal_contract_valid(row, strategy_name="Cup and Handle Breakout"):
+        return False
     ticker = _extract_alert_ticker(row)
     expiry_ts = _cup_handle_watch_expiry_ts(target_session_date)
     level = _alert_float(breakout_level, None)
     if not ticker or not confirmation_date or not target_session_date or not expiry_ts or not level:
+        return False
+    if level != _round_level_price(row["cup_rim_level"]):
         return False
     now_ts = time.time()
     identity = f"{ticker}|{confirmation_date}|{target_session_date}"
@@ -20199,6 +20253,8 @@ def _queue_cup_handle_next_session_watch(
 def _promote_cup_handle_watch_row(
     queued_row: Dict[str, Any], trigger_state: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
+    if not _cup_signal_contract_valid(queued_row, strategy_name="Cup and Handle Breakout"):
+        return None
     observed_ts = _stock_market_timestamp_seconds(
         trigger_state.get("trigger_observed_ts")
     )
@@ -20283,8 +20339,11 @@ def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[st
             level = _alert_float(claim.get("breakout_level"), None)
             valid = bool(
                 isinstance(row, dict)
+                and _cup_signal_contract_valid(row, strategy_name="Cup and Handle Breakout")
                 and ticker
                 and level
+                and ticker == _extract_alert_ticker(row)
+                and level == _round_level_price(row["cup_rim_level"])
                 and str(claim.get("confirmation_date") or "")
                 == str(expected_confirmation_date or "")
                 and str(claim.get("target_session_date") or "") == session_date
@@ -20458,6 +20517,10 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         "pattern_timeframe": setup["timeframe"],
         "confirmation_timeframe": setup["confirmation_timeframe"],
         "pattern_score": setup["score"],
+        "cup_pattern_version": setup.get("cup_pattern_version"),
+        "cup_rim_level": setup.get("cup_rim_level"),
+        "cup_confirmation_close": setup.get("cup_confirmation_close"),
+        "cup_confirmation_level": setup.get("cup_confirmation_level"),
         "cup_pattern_evidence": _project_cup_geometry_evidence(
             setup.get("cup_pattern_evidence"), symbol=ticker,
         ),
@@ -30103,6 +30166,14 @@ def get_scan_results(
         }
 
     if is_generic_stock_strategy:
+        cup_verified = [row for row in results if _cup_signal_contract_valid(
+            row, strategy_name=resolved_strategy or strategy,
+        )]
+        cup_rejected = len(results) - len(cup_verified)
+        if cup_rejected:
+            diagnostics = dict(diagnostics or {})
+            diagnostics["cup_contract_rejected"] = cup_rejected
+        results = cup_verified
         # Shared legacy caches may belong to another strategy. In particular,
         # a Gap row must not become a Wyckoff signal just because it has a good
         # score/plan. The requested strategy binds the canonical proof gate.

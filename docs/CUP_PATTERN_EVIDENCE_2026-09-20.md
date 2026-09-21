@@ -11,7 +11,9 @@ uebergeordnete Muster bleibt eine Bodenbildung mit Rueckkehr zum Rand und
 anschliessendem kleinerem Henkel; nicht jede Seitwaertsbewegung ist eine Tasse.
 Diese Aenderung fuehrt weder neue Glaettungs-/Zickzack-Gates ein noch lockert
 sie bestehende Schwellen. Der zuvor reproduzierte Docht-/Schlusskursfehler
-und die schwache Rundungspruefung werden dadurch nicht als repariert behauptet.
+und die schwache Rundungspruefung waren in diesem Aenderungsschritt noch offen.
+Sie wurden anschliessend gesondert korrigiert und geprueft:
+[Cup-Form und Schlusskurs, 21.09.2026](CUP_PATTERN_REPAIR_2026-09-21.md).
 
 Fachlicher Bezug: [Fidelity: Cup with Handle](https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/cup-with-handle).
 

@@ -28,6 +28,7 @@ from modules.volume_metrics import completed_bar_rvol, historical_volume_baselin
 from modules.bi_trade_plan import bi_consolidation_days, bi_range_context
 from modules.fibonacci_levels import select_confirmed_swing_leg, project_fibonacci
 from modules.stock_bars import completed_polygon_bars
+from modules.cup_shape import validate_cup_shape
 
 
 log = logging.getLogger(__name__)
@@ -5126,6 +5127,13 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                     left_span = bottom_idx - left_idx
                     right_span = right_idx - bottom_idx
                     time_symmetry = max(left_span, right_span) / max(1, min(left_span, right_span))
+                    cup_shape = validate_cup_shape(data[left_idx:right_idx + 1])
+                    shape_matches_anchors = bool(
+                        cup_shape
+                        and cup_shape["left_rim_index"] == 0
+                        and cup_shape["bottom_index"] + left_idx == bottom_idx
+                        and cup_shape["right_rim_index"] + left_idx == right_idx
+                    )
 
                     if handle_lows and handle_highs and 0.10 < cup_depth < 0.40:
                         handle_low = min(handle_lows)
@@ -5137,14 +5145,16 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                         near_pivot = cup_lip * 0.95 <= current_price <= cup_lip * 1.15
 
                         if (
-                            rim_price_symmetry <= 0.08
+                            shape_matches_anchors
+                            and rim_price_symmetry <= 0.08
                             and time_symmetry <= 2.5
                             and 0 <= handle_depth <= 0.50
                             and handle_range <= cup_depth * 0.50
                             and handle_above_mid
                             and near_pivot
                         ):
-                            broke_out = current_price >= cup_lip
+                            confirmation_level = max(cup_lip, max(handle_highs[:-1], default=cup_lip))
+                            broke_out = current_price >= confirmation_level * 1.002
                             target = cup_lip + cup_height
                             patterns.append({
                                 "pattern": "Cup & Handle",
@@ -5154,10 +5164,12 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                                 "breakout_level": round(cup_lip, 4),
                                 "target": round(target, 4),
                                 "confidence": "High" if broke_out else "Medium",
+                                "signal_scope": "chart_structure_only",
+                                "cup_shape_version": cup_shape["version"],
                                 "description": (
-                                    f"Cup & Handle - Breakout @ ${cup_lip:.4f}. Target: ${target:.4f}"
+                                    f"Cup & Handle - Chartstruktur, kein Scannersignal. Schluss ueber ${confirmation_level:.4f}. Target: ${target:.4f}"
                                     if broke_out
-                                    else f"Cup & Handle formiert sich - Pivot @ ${cup_lip:.4f} noch nicht ausgebrochen. Target: ${target:.4f}"
+                                    else f"Cup & Handle formiert sich - Chartstruktur, kein Scannersignal. Pivot @ ${confirmation_level:.4f} noch nicht per Schluss bestaetigt. Target: ${target:.4f}"
                                 ),
                                 "draw_points": [
                                     {"index": left_idx, "price": left_rim},

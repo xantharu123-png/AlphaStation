@@ -270,6 +270,12 @@ def test_premarket_mixed_batch_suppresses_cup_watch_per_row(monkeypatch):
         ticker="CUPX",
         Ticker="CUPX",
         Strategy="Cup and Handle Breakout",
+        # Current detector receipt; confirmed shape does not authorize PM entry.
+        cup_pattern_version=api.CUP_PATTERN_CONTRACT_VERSION,
+        pattern_timeframe="1D",
+        cup_rim_level=9.95,
+        cup_confirmation_level=9.95,
+        cup_confirmation_close=10.0,
         daily_close_confirmed=True,
         daily_close_confirmation_date="2026-08-28",
         last_daily_bar_date="2026-08-28",

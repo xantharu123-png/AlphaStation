@@ -674,7 +674,14 @@ def test_cup_watch_unconfirmed_claim_is_counted_once_by_owner(monkeypatch):
             "breakout_level": 10.0,
             "confirmation_date": "2026-08-28",
             "target_session_date": "2026-08-31",
-            "row": {"ticker": "ONE"},
+            # Current daily pattern, still awaiting the next-session trigger.
+            "row": {
+                "ticker": "ONE",
+                "cup_pattern_version": api.CUP_PATTERN_CONTRACT_VERSION,
+                "pattern_timeframe": "1D", "cup_rim_level": 10.0,
+                "cup_confirmation_level": 10.0,
+                "cup_confirmation_close": 10.0 * 1.002,
+            },
         }],
     )
     monkeypatch.setattr(
