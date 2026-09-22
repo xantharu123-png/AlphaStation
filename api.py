@@ -19637,24 +19637,56 @@ def _score_cup_handle_breakout_quality(
     return int(_clamp_float(round(score), 0, 100)), components
 
 
+_CUP_TERMINAL_REASONS = frozenset({
+    "special_filter_accepted", "missing_symbol", "insufficient_completed_history",
+    "liquidity_below_floor", "invalid_pattern_data", "invalid_current_price",
+    "pattern_unconfirmed", "breakout_close_unconfirmed", "entry_extension_rejected",
+    "breakout_volume_unconfirmed", "handle_volume_unconfirmed", "trade_plan_unconfirmed",
+    "pattern_score_below_threshold", "blended_score_below_threshold",
+    "entry_quality_rejected", "other_special_filter_rejected",
+})
+_CUP_TERMINAL_COUNT_SEMANTICS = (
+    "one_outcome_per_checked_candidate_detector_deepest_stage_not_native_plan_or_mail"
+)
+
+
 def _detect_cup_handle_breakout(
     daily_bars: List[Dict[str, Any]],
     current_price: Optional[float] = None,
+    *,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Strict daily Cup-and-Handle detector for actionable long breakouts only."""
+    # A candidate can try many window/handle splits. Observe the deepest stage
+    # reached, never count each failed split as another rejected candidate.
+    # This is diagnostic only: no ranking, math, or acceptance gate uses it.
+    deepest_stage = -1
+
+    def stage(reason: str, depth: int) -> None:
+        nonlocal deepest_stage
+        if depth > deepest_stage:
+            deepest_stage = depth
+            if isinstance(diagnostics, dict):
+                diagnostics["reason"] = reason
+
+    def rejected(reason: str) -> None:
+        if isinstance(diagnostics, dict):
+            diagnostics["reason"] = reason
+        return None
+
     if not isinstance(daily_bars, (list, tuple)) or not daily_bars:
-        return None
+        return rejected("invalid_pattern_data")
     if any(not isinstance(bar, dict) for bar in daily_bars):
-        return None
+        return rejected("invalid_pattern_data")
     # Never drop a broken confirmation bar and silently promote the prior one.
     if any(_bar_num(daily_bars[-1], field, field[0]) <= 0 for field in ("high", "low", "close")):
-        return None
+        return rejected("invalid_pattern_data")
     cleaned = [
         bar for bar in daily_bars
         if _bar_num(bar, "high", "h") > 0 and _bar_num(bar, "low", "l") > 0 and _bar_num(bar, "close", "c") > 0
     ]
     if len(cleaned) < 70:
-        return None
+        return rejected("insufficient_completed_history")
     # AUDIT N-4: NaN-/0-Bars wurden bisher still entfernt. Bei > 2% entfernten
     # Bars wird das Setup mit data_gaps=True markiert (Anzeige-Info).
     data_gaps = bool(daily_bars) and (len(daily_bars) - len(cleaned)) / len(daily_bars) > 0.02
@@ -19663,18 +19695,18 @@ def _detect_cup_handle_breakout(
     for bar in bars:
         high, low, close = (_bar_num(bar, field, field[0]) for field in ("high", "low", "close"))
         if not low <= close <= high:
-            return None
+            return rejected("invalid_pattern_data")
         if any(isinstance(bar.get(field, bar.get(field[0])), bool) for field in ("open", "high", "low", "close")):
-            return None
+            return rejected("invalid_pattern_data")
         if ("open" in bar or "o" in bar) and not low <= _bar_num(bar, "open", "o") <= high:
-            return None
+            return rejected("invalid_pattern_data")
     last = bars[-1]
     try:
         price = float(_bar_num(last, "close", "c") if current_price is None else current_price)
     except (TypeError, ValueError, OverflowError):
-        return None
+        return rejected("invalid_current_price")
     if isinstance(current_price, bool) or not math.isfinite(price) or price <= 0:
-        return None
+        return rejected("invalid_current_price")
 
     # AUDIT K-1: Anti-Fenster-Shopping — globales Referenzhoch der letzten
     # <=150 Bars VOR dem Breakout-Bar. Die Bestauswahl nahm bisher das
@@ -19695,6 +19727,7 @@ def _detect_cup_handle_breakout(
     structural_resistance = 0.0
     n = len(bars)
     max_window = min(n, 170)
+    stage("pattern_unconfirmed", 0)
 
     for window_len in range(max_window, 69, -10):
         segment = bars[-window_len:]
@@ -19768,13 +19801,16 @@ def _detect_cup_handle_breakout(
                 cup_lip, max(_bar_num(bar, "high", "h") for bar in handle[:-1]),
             )
             structural_resistance = max(structural_resistance, confirmation_level)
+            stage("breakout_close_unconfirmed", 1)
             if handle_close < confirmation_level * 1.002:
                 continue
 
+            stage("entry_extension_rejected", 2)
             extension_pct = (price - cup_lip) / cup_lip * 100
             if extension_pct < -1.5 or extension_pct > 8.0:
                 continue
 
+            stage("breakout_volume_unconfirmed", 3)
             recent_volumes = [_bar_num(bar, "volume", "v") for bar in segment[-21:-1] if _bar_num(bar, "volume", "v") > 0]
             last_volume = _bar_num(last, "volume", "v")
             avg20_volume = historical_volume_baseline(
@@ -19790,6 +19826,7 @@ def _detect_cup_handle_breakout(
             if rvol < 1.5:
                 continue
 
+            stage("handle_volume_unconfirmed", 4)
             cup_volumes = [_bar_num(bar, "volume", "v") for bar in cup if _bar_num(bar, "volume", "v") > 0]
             handle_volumes = [_bar_num(bar, "volume", "v") for bar in handle[:-1] if _bar_num(bar, "volume", "v") > 0]
             cup_min_volume_bars = max(5, int(math.ceil(len(cup) * 0.60)))
@@ -19815,6 +19852,7 @@ def _detect_cup_handle_breakout(
                 continue
             handle_volume_contracts = bool(cup_avg_volume and handle_avg_volume and handle_avg_volume < cup_avg_volume * 0.85)
 
+            stage("trade_plan_unconfirmed", 5)
             atr = _calc_recent_atr(segment, 14)
             if atr <= 0:
                 atr = max(depth_abs * 0.08, cup_lip * 0.02)
@@ -19845,6 +19883,7 @@ def _detect_cup_handle_breakout(
             if rr < 1.8 or live_rr < 1.4:
                 continue
 
+            stage("pattern_score_below_threshold", 6)
             handle_position = (handle_low - bottom) / depth_abs if depth_abs > 0 else 0.0
             score, score_components = _score_cup_handle_breakout_quality(
                 depth_pct=depth_pct,
@@ -19899,7 +19938,7 @@ def _detect_cup_handle_breakout(
 
     if best is not None:
         if _bar_num(last, "close", "c") < structural_resistance * 1.002:
-            return None
+            return rejected("breakout_close_unconfirmed")
         best["cup_confirmation_level"] = structural_resistance
         # Descriptive only: use the already-selected original split, without
         # re-ranking, rounding anchors, or changing any acceptance criterion.
@@ -19907,6 +19946,8 @@ def _detect_cup_handle_breakout(
             best_segment, cup_length=best["cup_length"], handle_length=best["handle_length"],
             session_getter=_daily_bar_date_str, number_getter=_bar_num,
         )
+        if isinstance(diagnostics, dict):
+            diagnostics["reason"] = "special_filter_accepted"
     return best
 
 
@@ -20428,11 +20469,19 @@ def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[st
     return {"claimed": len(claims), "triggered": triggered, "completed": completed}
 
 
-def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _apply_cup_handle_strategy_filter(
+    candidate: Dict[str, Any], strat: Dict[str, Any], *,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    def rejected(reason: str) -> None:
+        if isinstance(diagnostics, dict):
+            diagnostics["reason"] = reason
+        return None
+
     daily_bars = candidate.get("_daily_bars", [])
     liquidity_floor = max(int(strat.get("min_dollar_volume", 0) or 0), 2_000_000)
     if float(candidate.get("Dollar_Volume", 0) or 0) < liquidity_floor:
-        return None
+        return rejected("liquidity_below_floor")
 
     price = float(candidate.get("price", candidate.get("Preis", 0)) or 0)
     try:
@@ -20467,10 +20516,14 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         and confirmation_bar_date == previous_market_date
     )
     setup = None
+    # Keep the original two-argument detector protocol when telemetry is not
+    # requested (including legacy test adapters); no private fields enter rows.
+    detector_diagnostics = {"diagnostics": diagnostics} if isinstance(diagnostics, dict) else {}
     if next_session_candidate:
         setup = _detect_cup_handle_breakout(
             completed_pattern_bars,
             current_price=price,
+            **detector_diagnostics,
         )
     if not setup:
         next_session_candidate = False
@@ -20480,7 +20533,7 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
             if completed_pattern_bars
             else ""
         )
-        setup = _detect_cup_handle_breakout(daily_bars, current_price=price)
+        setup = _detect_cup_handle_breakout(daily_bars, current_price=price, **detector_diagnostics)
     if not setup:
         return None
 
@@ -20491,7 +20544,7 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
     # Row automatisch Elite. C&H-eigene Leiter: "S" erst ab 90, "A" fuer 80-89.
     grade = "S" if final_score >= 90 else "A"
     if final_score < 80:
-        return None
+        return rejected("blended_score_below_threshold")
 
     enriched = dict(candidate)
     ticker = _extract_alert_ticker(enriched)
@@ -20571,7 +20624,7 @@ def _apply_cup_handle_strategy_filter(candidate: Dict[str, Any], strat: Dict[str
         return enriched
     long_reasons = _long_entry_rule_reasons(enriched)
     if long_reasons:
-        return None
+        return rejected("entry_quality_rejected")
     enriched["long_entry_quality"] = _long_entry_quality(enriched)
     enriched["alertable_long"] = True
     # Today's unfinished daily candle is never actionable.  A pattern closed
@@ -20907,12 +20960,17 @@ def _apply_special_strategy_post_filter(
         cup_diagnostics.update(special_filter_input_count=len(candidates),
                                special_filter_checked_count=0,
                                special_filter_unexamined_count=len(candidates),
-                               special_filter_limit=candidate_limit)
+                               special_filter_limit=candidate_limit,
+                               cup_terminal_counts={},
+                               cup_terminal_count_semantics=_CUP_TERMINAL_COUNT_SEMANTICS)
 
-    def checked_candidate():
+    def checked_candidate(reason: str):
         # A finished special attempt includes an explicit insufficient-history
         # rejection, but never an interrupted provider/native/shape operation.
         if cup_diagnostics is not None:
+            reason = reason if reason in _CUP_TERMINAL_REASONS else "other_special_filter_rejected"
+            terminal_counts = cup_diagnostics["cup_terminal_counts"]
+            terminal_counts[reason] = terminal_counts.get(reason, 0) + 1
             cup_diagnostics["special_filter_checked_count"] += 1
             cup_diagnostics["special_filter_unexamined_count"] -= 1
 
@@ -20933,7 +20991,7 @@ def _apply_special_strategy_post_filter(
                                       total=min(len(candidates), candidate_limit))
         ticker = candidate.get("ticker") or candidate.get("Ticker")
         if not ticker:
-            checked_candidate()
+            checked_candidate("missing_symbol")
             continue
 
         # Cup's unchanged generic score selected this exact slot before native
@@ -20960,7 +21018,7 @@ def _apply_special_strategy_post_filter(
                    if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
         )
         if len(daily_bars) < min_history:
-            checked_candidate()
+            checked_candidate("insufficient_completed_history")
             continue
 
         enriched = dict(candidate)
@@ -20969,32 +21027,33 @@ def _apply_special_strategy_post_filter(
         if strat.get("needs_history"):
             enriched = _apply_pattern_strategy_filter(enriched, strat)
             if not enriched:
-                checked_candidate()
+                checked_candidate("other_special_filter_rejected")
                 continue
         if strat.get("needs_volume_profile"):
             enriched = _apply_void_strategy_filter(enriched, strat, strategy_name)
             if not enriched:
-                checked_candidate()
+                checked_candidate("other_special_filter_rejected")
                 continue
         if strat.get("needs_harmonic"):
             enriched = _apply_harmonic_strategy_filter(enriched, strat)
             if not enriched:
-                checked_candidate()
+                checked_candidate("other_special_filter_rejected")
                 continue
         if strat.get("needs_cup_handle"):
-            enriched = _apply_cup_handle_strategy_filter(enriched, strat)
+            terminal_diagnostic: Dict[str, Any] = {}
+            enriched = _apply_cup_handle_strategy_filter(enriched, strat, diagnostics=terminal_diagnostic)
             if not enriched:
-                checked_candidate()
+                checked_candidate(terminal_diagnostic.get("reason", "other_special_filter_rejected"))
                 continue
         if strat.get("needs_ma"):
             enriched = _apply_ma_strategy_filter(enriched, strat)
             if not enriched:
-                checked_candidate()
+                checked_candidate("other_special_filter_rejected")
                 continue
 
         enriched.pop("_daily_bars", None)
         filtered.append(enriched)
-        checked_candidate()
+        checked_candidate("special_filter_accepted")
 
     filtered.sort(key=lambda x: (-float(x.get("score", 0) or 0), -float(x.get("Dollar_Volume", 0) or 0), -abs(float(x.get("Change_Pct", 0) or 0))))
     print(f"[Strategy Scan] {strategy_name}: {len(filtered)}/{min(len(candidates), candidate_limit)} Kandidaten nach Spezial-Check")
@@ -21215,6 +21274,7 @@ momentum:confirmation_expired_before_publication reversal_ad_gate reversal_ad:ad
 """.split())
 _STOCK_ATTEMPT_SWEEP_COUNTS = frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed",
+    "timeout_retries_attempted", "timeout_retries_recovered",
     "current_result_count", "final_results",
     "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
 })
@@ -21268,6 +21328,9 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
         result["stage_counts"] = counts(source.get("stage_counts"), _STOCK_ATTEMPT_STAGES)
         result["rejected"] = counts(source.get("rejected"), _STOCK_ATTEMPT_REJECTIONS)
         result["plan_build_counts"] = counts(source.get("plan_build_counts"), _STOCK_PLAN_BUILD_REASONS)
+        if isinstance(source.get("cup_terminal_counts"), dict):
+            result["cup_terminal_counts"] = counts(source["cup_terminal_counts"], _CUP_TERMINAL_REASONS)
+            result["cup_terminal_count_semantics"] = _CUP_TERMINAL_COUNT_SEMANTICS
         return result
     if source.get("mail_status") in ("not_attempted", "guarded", "no_results", "error"):
         result["mail_status"] = source["mail_status"]
@@ -21285,6 +21348,9 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
             projected.update(counts(item, {"result_count", "aggregate_candidate_count"}))
         elif isinstance(item.get("error_code"), str) and item["error_code"] in _STOCK_ATTEMPT_ERRORS:
             projected["error_code"] = item["error_code"]
+        if (type(item.get("timeout_retry_count")) is int and item["timeout_retry_count"] == 1
+                and item.get("initial_error_code") == "scan_timeout"):
+            projected.update(timeout_retry_count=1, initial_error_code="scan_timeout")
         result["strategy_results"][slug] = projected
     return result
 
@@ -21470,6 +21536,16 @@ def _stock_strategy_result_attempt(strategy_name: str, scan_state: Dict[str, Any
     if ((manual_time is not None and started < manual_time)
             or (cache_complete and cache_time > updated)):
         return state, public
+    if (attempt["status"] == "complete" and cache_complete
+            and started <= cache_time <= updated
+            and manual_time is not None and started > manual_time):
+        # A later automatic leaf does not update a previous manual worker's
+        # RAM entry. Its successful attempt plus an own final cache published
+        # within that attempt proves recovery for this response only. Keep
+        # scheduler ownership/UUID/times unchanged; an attempt or cache alone,
+        # an equal/newer manual start, or unknown chronology cannot clear it.
+        state.pop("last_error", None)
+        state.pop("last_attempt_diagnostics", None)
     if attempt["status"] in ("error", "running"):
         state["last_attempt_at"] = attempt["started_at"]
         state["last_attempt_diagnostics"] = attempt["diagnostics"]
@@ -22446,6 +22522,8 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
         "strategies_attempted": 0,
         "strategies_completed": 0,
         "strategies_failed": 0,
+        "timeout_retries_attempted": 0,
+        "timeout_retries_recovered": 0,
         "current_result_count": 0,
         "final_results": None,
         "strategy_results": {},
@@ -22453,12 +22531,17 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     }
     _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
     all_rows: List[Dict[str, Any]] = []
-    for strategy_index, strategy_name in enumerate(_AUTO_STOCK_ALERT_STRATEGIES):
-        _scan_control_point()
-        stock_scan_runtime.current()["remaining_leaves"] = len(_AUTO_STOCK_ALERT_STRATEGIES) - strategy_index
+
+    def run_strategy(strategy_name: str, *, timeout_retry: bool = False) -> None:
         strategy_code = strategy_codes.get(strategy_name, "unknown_strategy")
-        print(f"[Strategy Sweep] {strategy_code}: START", flush=True)
-        diagnostics["strategies_attempted"] += 1
+        print(f"[Strategy Sweep] {strategy_code}: {'TIMEOUT RETRY' if timeout_retry else 'START'}", flush=True)
+        if timeout_retry:
+            # Only an unsuccessful first attempt is replaceable. Its rows were
+            # never contributed; successful siblings remain unchanged.
+            diagnostics["strategies_failed"] -= 1
+            diagnostics["timeout_retries_attempted"] += 1
+        else:
+            diagnostics["strategies_attempted"] += 1
         outcome: Dict[str, Any] = {"status": "error", "result_count": None}
         try:
             if strategy_name not in strategy_codes or not STRATEGIES.get(strategy_name):
@@ -22489,6 +22572,8 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
             outcome = {"status": "complete", "result_count": len(rows),
                        "aggregate_candidate_count": len(current_rows)}
             diagnostics["strategies_completed"] += 1
+            if timeout_retry:
+                diagnostics["timeout_retries_recovered"] += 1
         except Exception as exc:
             error_code = _public_scan_error_code(
                 exc.code if isinstance(exc, ScannerDataError) else exc,
@@ -22499,11 +22584,32 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
             # either the public attempt diagnostics or this operator log.
             print(f"[Strategy Sweep] {strategy_code}: {error_code}")
         finally:
+            if timeout_retry:
+                outcome.update(timeout_retry_count=1, initial_error_code="scan_timeout")
             diagnostics["strategy_results"][strategy_code] = outcome
             _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
             print(f"[Strategy Sweep] {strategy_code}: {outcome['status']} "
                   f"results={outcome['result_count']} error={outcome.get('error_code', '-')}", flush=True)
             time.sleep(1)
+
+    for strategy_index, strategy_name in enumerate(_AUTO_STOCK_ALERT_STRATEGIES):
+        _scan_control_point()
+        stock_scan_runtime.current()["remaining_leaves"] = len(_AUTO_STOCK_ALERT_STRATEGIES) - strategy_index
+        run_strategy(strategy_name)
+
+    # First give every sibling its fair opportunity. Afterwards, one genuine
+    # runtime timeout may reuse this sweep's cached histories and unused work
+    # budget. The runtime helper reserves finalization time and never extends
+    # the original sweep limit. Data/auth failures are not retry candidates.
+    stock_scan_runtime.current()["remaining_leaves"] = 0
+    _scan_control_point()
+    for strategy_name in _AUTO_STOCK_ALERT_STRATEGIES:
+        previous = diagnostics["strategy_results"].get(strategy_codes.get(strategy_name), {})
+        if previous.get("status") != "error" or previous.get("error_code") != "scan_timeout":
+            continue
+        if stock_scan_runtime.claim_sweep_timeout_retry(strategy_name):
+            run_strategy(strategy_name, timeout_retry=True)
+            break
 
     all_rows.sort(
         key=lambda x: (

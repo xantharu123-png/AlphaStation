@@ -110,6 +110,16 @@ crossed_resistance_unconfirmed crossed_support_unconfirmed no_structural_invalid
 invalid_stop_risk invalid_trade_geometry native_structure_plan
 first_opposing_barrier_before_minimum_rr direction_missing plan_unavailable
 """.split())
+CUP_TERMINAL_REASONS = frozenset("""
+special_filter_accepted missing_symbol insufficient_completed_history
+liquidity_below_floor invalid_pattern_data invalid_current_price pattern_unconfirmed
+breakout_close_unconfirmed entry_extension_rejected breakout_volume_unconfirmed
+handle_volume_unconfirmed trade_plan_unconfirmed pattern_score_below_threshold
+blended_score_below_threshold entry_quality_rejected other_special_filter_rejected
+""".split())
+CUP_TERMINAL_COUNT_SEMANTICS = (
+    "one_outcome_per_checked_candidate_detector_deepest_stage_not_native_plan_or_mail"
+)
 WYCKOFF_REASONS = frozenset("""
 confirmed event_sequence_unconfirmed minimum_completed_bars_missing
 invalid_bar_timestamp invalid_bar_payload invalid_bar_volume invalid_bar_prices
@@ -567,6 +577,7 @@ STOCK_ATTEMPT_ERROR_CODES = PUBLIC_SCAN_ERROR_CODES | frozenset({
 STOCK_ATTEMPT_COUNTS = DIAGNOSTIC_COUNTS | frozenset({
     "strategies_total", "strategies_attempted", "strategies_completed", "strategies_failed", "current_result_count",
     "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
+    "timeout_retries_attempted", "timeout_retries_recovered",
 })
 STOCK_STAGE_TIMING_LABELS = frozenset({
     "history", "structure", "execution_history", "plan", "cache_publish", "special_filter",
@@ -1252,6 +1263,10 @@ def safe_cache_summary(path):
                 counts = _count_projection(diagnostics.get(key), allowed)
                 if counts is not None:
                     result[key] = counts
+            cup_counts = _count_projection(diagnostics.get("cup_terminal_counts"), CUP_TERMINAL_REASONS)
+            if cup_counts is not None:
+                result["cup_terminal_counts"] = cup_counts
+                result["cup_terminal_count_semantics"] = CUP_TERMINAL_COUNT_SEMANTICS
             plan_counts = _count_projection(diagnostics.get("plan_build_counts"), PLAN_BUILD_CODES)
             wyckoff_counts = _count_projection(diagnostics.get("wyckoff_reasons"), WYCKOFF_REASONS)
             if wyckoff_counts is not None:
@@ -1348,6 +1363,10 @@ def safe_strategy_attempt_summary(path, expected_slug):
         if plan_counts is not None:
             result["plan_build_counts"] = plan_counts
             result["plan_build_count_semantics"] = "builder_outcomes_not_final_eligibility_or_delivery"
+        cup_counts = _count_projection(diagnostics.get("cup_terminal_counts"), CUP_TERMINAL_REASONS)
+        if cup_counts is not None:
+            result["cup_terminal_counts"] = cup_counts
+            result["cup_terminal_count_semantics"] = CUP_TERMINAL_COUNT_SEMANTICS
         if is_sweep:
             children = diagnostics.get("strategy_results")
             if not isinstance(children, dict):
@@ -1360,6 +1379,12 @@ def safe_strategy_attempt_summary(path, expected_slug):
                 if not isinstance(child, dict) or child.get("status") not in ("complete", "error"):
                     raise ValueError("Invalid sweep child outcome")
                 projected = _attempt_result(child)
+                if "timeout_retry_count" in child or "initial_error_code" in child:
+                    if (type(child.get("timeout_retry_count")) is not int
+                            or child["timeout_retry_count"] != 1
+                            or child.get("initial_error_code") != "scan_timeout"):
+                        raise ValueError("Invalid bounded timeout retry outcome")
+                    projected.update(timeout_retry_count=1, initial_error_code="scan_timeout")
                 if child["status"] == "complete" or "aggregate_candidate_count" in child:
                     count = child.get("aggregate_candidate_count")
                     if not _nonnegative_count(count) and not (child["status"] == "error" and count is None):

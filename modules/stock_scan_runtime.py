@@ -18,6 +18,8 @@ from modules import scan_control
 
 LEAF_WORK_SECONDS = 20 * 60
 SWEEP_WORK_SECONDS = 30 * 60
+TIMEOUT_RETRY_MIN_WORK_SECONDS = 60
+TIMEOUT_RETRY_FINISH_RESERVE_SECONDS = 15
 CACHE_BYTES = 32 * 1024 * 1024
 _LOCAL = threading.local()
 _PROGRESS_LOCK = threading.Lock()
@@ -78,6 +80,35 @@ class ScanWorkTimeout(RuntimeError):
 
 def current():
     return getattr(_LOCAL, "state", None)
+
+
+def claim_sweep_timeout_retry(strategy_name):
+    """Claim one fresh leaf using only this sweep's unused work budget.
+
+    The sweep must finish every initial sibling and set ``remaining_leaves``
+    to zero first. Only a real ScanWorkTimeout recorded by a child scope is
+    eligible; provider errors and pause/restart exceptions are not retries.
+    A successful claim must be followed by the normal bounded leaf for this
+    strategy. Its run-local cache is retained, not its partial result rows or
+    leaf state. No deadline or cache survives the owning sweep.
+    """
+    state = current()
+    if (state is None or not state.get("is_sweep") or state.get("parent") is not None
+            or type(state.get("remaining_leaves")) is not int or state["remaining_leaves"] != 0
+            or not isinstance(strategy_name, str) or not strategy_name.strip()):
+        return False
+    root = state["root"]
+    strategy = _key(strategy_name)
+    if (not root["running"] or root.get("timeout_retry_claimed")
+            or strategy not in root.get("timed_out_leaves", ())):
+        return False
+    usable = min(LEAF_WORK_SECONDS, root["work_deadline"] - time.monotonic()
+                 - TIMEOUT_RETRY_FINISH_RESERVE_SECONDS)
+    if usable < TIMEOUT_RETRY_MIN_WORK_SECONDS:
+        return False
+    root["timeout_retry_claimed"] = True
+    root["pending_timeout_retry"] = strategy
+    return True
 
 
 def exclude_pause(seconds):
@@ -206,12 +237,28 @@ def scope(name, *, sweep=False):
         # finishes leave their unused time available to subsequent strategies.
         share = max(0.0, root["work_deadline"] - now) / remaining_leaves
         deadline = min(deadline, now + share)
+    is_timeout_retry = bool(not sweep and previous is not None
+                            and previous.get("is_sweep")
+                            and root.get("pending_timeout_retry") == _key(name))
+    if is_timeout_retry:
+        root.pop("pending_timeout_retry")
+        deadline = min(deadline, root["work_deadline"] - TIMEOUT_RETRY_FINISH_RESERVE_SECONDS)
     state = {"root": root, "strategy": _key(name), "phase": "starting", "phase_started_at": now,
-             "started": now, "deadline": deadline, "stage_elapsed_seconds": {}, "parent": previous}
+             "started": now, "deadline": deadline, "stage_elapsed_seconds": {}, "parent": previous,
+             "is_sweep": sweep, "is_timeout_retry": is_timeout_retry}
     _LOCAL.state = state
     _publish(state, force=True)
     try:
+        if is_timeout_retry:
+            # A caller delayed after claiming must not begin work beyond the
+            # original root limit or consume the reserved finalization time.
+            checkpoint()
         yield state
+    except ScanWorkTimeout:
+        state["phase"] = "work_timeout"
+        if not sweep and previous is not None and previous.get("is_sweep"):
+            root.setdefault("timed_out_leaves", set()).add(state["strategy"])
+        raise
     except Exception:
         state["phase"] = "work_timeout" if state.get("phase") == "work_timeout" else "error"
         raise

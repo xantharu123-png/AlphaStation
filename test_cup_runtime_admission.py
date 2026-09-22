@@ -47,7 +47,7 @@ def _cup_fixture(monkeypatch, *, count=225, varied=False, rejected=()):
         kw["diagnostics"].update(status="unavailable", reason="fixture_no_structure")
         return None
 
-    def cup(row, strat):
+    def cup(row, strat, *, diagnostics=None):
         assert "_deferred_native_plan" not in row
         assert row["native_plan_reason"] == "fixture_no_structure"
         cup_calls.append(row["ticker"])
