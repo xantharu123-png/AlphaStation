@@ -460,6 +460,12 @@ class BreakReclaimEvidence:
             _coerce_datetime(self.last_completed_at) if self.last_completed_at is not None else None
         )
         last_completed_close = _safe_float(self.last_completed_close)
+        if state == "BREAK_CONFIRMED" and (
+            self.retest_required is not False or self.retest_observed is not False
+            or any(type(value) is not int for value in (
+                self.hold_bars_required, self.hold_bars_observed, self.completed_bars_used))
+        ):
+            raise ValueError("confirmed break requires explicit boolean flags and integer counts")
         required = int(self.hold_bars_required)
         observed = int(self.hold_bars_observed)
         completed = int(self.completed_bars_used)
@@ -475,7 +481,7 @@ class BreakReclaimEvidence:
                 or boundary != expected_boundary
                 or anchor != zone_confirmed_at
                 or not zone_confirmed_at < history.membership_confirmed_at <= as_of
-                or (state == "RECLAIMED" and (
+                or (state in {"RECLAIMED", "BREAK_CONFIRMED"} and (
                     last_completed_at is None or last_completed_at < history.membership_confirmed_at
                 ))
             ):
@@ -503,6 +509,14 @@ class BreakReclaimEvidence:
             raise ValueError("completed break/reclaim evidence requires its latest bar")
         if observed > max(0, completed - 1):
             raise ValueError("observed hold bars exceed completed bars after the break")
+        if state == "BREAK_CONFIRMED" and (
+            required != 0 or bool(self.retest_required) or bool(self.retest_observed)
+            or break_closed_at is None or completed < 1
+            or last_completed_close is None
+            or (direction == "LONG" and last_completed_close <= boundary)
+            or (direction == "SHORT" and last_completed_close >= boundary)
+        ):
+            raise ValueError("confirmed break requires a completed close and optional retest")
 
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "reason", str(self.reason or "").strip())
@@ -521,7 +535,11 @@ class BreakReclaimEvidence:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "model": "break_reclaim_close_hold_v2" if self.reclaim_history else "break_reclaim_close_hold_v1",
+            "model": (
+                "break_confirmed_optional_retest_v1" if self.state == "BREAK_CONFIRMED"
+                else "break_reclaim_close_hold_v2" if self.reclaim_history
+                else "break_reclaim_close_hold_v1"
+            ),
             **({"reclaim_history": self.reclaim_history.to_dict()} if self.reclaim_history else {}),
             "state": self.state,
             "reason": self.reason,
@@ -548,6 +566,7 @@ def normalize_completed_bars(
     timeframe: str,
     as_of: Any,
     timestamp_mode: str = "open",
+    _conflicting_closes: Optional[List[datetime]] = None,
 ) -> Tuple[CompletedBar, ...]:
     """Normalize and return only causally completed OHLCV bars.
 
@@ -646,6 +665,8 @@ def normalize_completed_bars(
             # or authoritative winner. Dropping that instant is fail-closed;
             # critically, two copies can never masquerade as a breakout bar
             # and its subsequent hold confirmation.
+            if _conflicting_closes is not None:
+                _conflicting_closes.append(closed_at)
             continue
         deduplicated.append(candidates[0])
     return tuple(
@@ -1129,11 +1150,13 @@ def build_structure_snapshot(
         evidence.append(item)
     completed_counts: Dict[str, int] = {}
     completed_by_timeframe: Dict[str, Tuple[CompletedBar, ...]] = {}
+    conflicting_closes: List[datetime] = []
     for raw_tf in sorted((bars_by_timeframe or {}), key=lambda value: _normalized_timeframe(value)):
         timeframe = _normalized_timeframe(raw_tf)
         bars = bars_by_timeframe[raw_tf]
         completed = normalize_completed_bars(
-            bars, timeframe=timeframe, as_of=cutoff, timestamp_mode=timestamp_mode
+            bars, timeframe=timeframe, as_of=cutoff, timestamp_mode=timestamp_mode,
+            _conflicting_closes=conflicting_closes,
         )
         completed_counts[timeframe] = len(completed)
         completed_by_timeframe[timeframe] = completed
@@ -1179,6 +1202,7 @@ def build_structure_snapshot(
     )
     evaluated_zones: List[LevelZone] = []
     crossed_pending = False
+    breakout_without_retest = False
     for zone in zones:
         transition_direction: Optional[str] = None
         transition_label: Optional[str] = None
@@ -1192,38 +1216,26 @@ def build_structure_snapshot(
             evaluated_zones.append(zone)
             continue
 
-        confirmation = _reclaim_confirmation_at(zone, transition_direction)
-        after_confirmation = [
-            candidate
-            for candidate in trigger_candidates
-            if any(bar.closed_at > confirmation for bar in candidate[2])
-        ]
-        if confirmation < zone.confirmed_at:
-            covering_membership = [
-                candidate for candidate in after_confirmation
-                if candidate[2][-1].closed_at >= zone.confirmed_at
-            ]
-            if covering_membership:
-                after_confirmation = covering_membership
-        _seconds, trigger_timeframe, trigger_bars = (
-            after_confirmation[0] if after_confirmation else trigger_candidates[0]
-        )
         zone_width = max(0.0, zone.upper - zone.lower)
-        transition = _evaluate_break_reclaim_from_completed(
+        transition = _snapshot_break_transition(
             zone,
-            trigger_bars,
+            trigger_candidates,
             cutoff=cutoff,
             side=transition_direction,
-            timeframe=trigger_timeframe,
             buffer_value=max(tick * 1.0, quoted_spread * 0.25),
-            required_holds=1,
-            require_retest=True,
             tolerance=max(tick * 2.0, quoted_spread * 0.75, zone_width * 0.20),
+            conflicting_closes=conflicting_closes,
         )
         flags = list(zone.quality_flags)
         if transition.state == "RECLAIMED":
             flags.append(f"former_{transition_label}_reclaimed")
             break_state = "reclaimed"
+        elif transition.state == "BREAK_CONFIRMED":
+            # A broken boundary can invalidate a breakout trade without
+            # asserting that a retest has proved a support/resistance flip.
+            flags.append("breakout_confirmed_without_retest")
+            break_state = "break_confirmed"
+            breakout_without_retest = True
         else:
             flags.append(f"crossed_{transition_label}_reclaim_pending")
             break_state = "intact"
@@ -1242,6 +1254,10 @@ def build_structure_snapshot(
         quality_flags.append("no_confirmed_levels")
     if crossed_pending:
         quality_flags.append("crossed_level_reclaim_pending")
+    if breakout_without_retest:
+        quality_flags.append("breakout_confirmed_without_retest")
+    if conflicting_closes:
+        quality_flags.append("conflicting_completed_bars")
     return StructureSnapshot(
         symbol=str(symbol or "").strip().upper(),
         asset_class=str(asset_class or "unknown").strip().lower(),
@@ -1253,6 +1269,94 @@ def build_structure_snapshot(
         completed_bar_counts=completed_counts,
         quality_flags=tuple(quality_flags),
     )
+
+
+def _snapshot_break_transition(
+    zone: LevelZone,
+    candidates: Sequence[Tuple[int, str, Tuple[CompletedBar, ...]]],
+    *,
+    cutoff: datetime,
+    side: str,
+    buffer_value: float,
+    tolerance: float,
+    conflicting_closes: Sequence[datetime] = (),
+) -> BreakReclaimEvidence:
+    """Preserve causal proof across truncated TFs, never across a later failure.
+
+    Retests/holds must be witnessed within one timeframe; they are not assembled
+    from overlapping bars in different timeframes. All completed closes can
+    reset that witness, including a contradictory close at the same timestamp.
+    A subsequent completed breakout may start a new, initially unretested leg.
+    """
+    confirmation = _reclaim_confirmation_at(zone, side)
+    boundary = zone.upper if side == "LONG" else zone.lower
+    failures = [
+        bar.closed_at
+        for _seconds, _timeframe, bars in candidates
+        for bar in bars
+        if bar.closed_at > confirmation
+        and (bar.close <= boundary if side == "LONG" else bar.close >= boundary)
+    ]
+    resets = failures + [time for time in conflicting_closes if time > confirmation]
+    last_failure = max(resets) if resets else None
+    proofs: List[Tuple[int, BreakReclaimEvidence]] = []
+    for seconds, timeframe, bars in candidates:
+        # Excluding the reset timestamp also fails closed on same-time feed
+        # conflicts. Incomplete/future bars were already removed by normalization.
+        active_bars = tuple(
+            bar for bar in bars if last_failure is None or bar.closed_at > last_failure
+        )
+        proof = _evaluate_break_reclaim_from_completed(
+            zone, active_bars, cutoff=cutoff, side=side, timeframe=timeframe,
+            buffer_value=buffer_value, required_holds=1, require_retest=True,
+            tolerance=tolerance,
+        )
+        if proof.state == "RECLAIM_PENDING" and proof.reason in {
+            "completed_hold_bars_missing", "completed_retest_missing",
+        }:
+            proof = replace(
+                proof, state="BREAK_CONFIRMED",
+                reason="completed_break_close_confirmed_retest_optional",
+                hold_bars_required=0, retest_required=False,
+            )
+        if proof.state in {"RECLAIMED", "BREAK_CONFIRMED"}:
+            proofs.append((seconds, proof))
+    if proofs:
+        # A genuine historical retest is stronger evidence than a shorter
+        # unretested slice, provided every newer completed close still holds.
+        return min(proofs, key=lambda item: (
+            item[1].state != "RECLAIMED", -item[1].last_completed_at.timestamp(),
+            item[0], item[1].timeframe,
+        ))[1]
+
+    # Preserve the newest failed/pending witness and its actual bar counts.
+    # Choosing a fast but stale feed here would conceal a newer invalidation.
+    _seconds, timeframe, bars = max(candidates, key=lambda item: (
+        item[2][-1].closed_at if item[2] else datetime.min.replace(tzinfo=UTC),
+        bool(last_failure and any(
+            bar.closed_at == last_failure
+            and (bar.close <= boundary if side == "LONG" else bar.close >= boundary)
+            for bar in item[2]
+        )),
+        -item[0], item[1],
+    ))
+    fallback_bars = (
+        tuple(bar for bar in bars if bar.closed_at > last_failure)
+        if last_failure and bars and bars[-1].closed_at > last_failure else bars
+    )
+    fallback = _evaluate_break_reclaim_from_completed(
+        zone, fallback_bars, cutoff=cutoff, side=side, timeframe=timeframe,
+        buffer_value=buffer_value, required_holds=1, require_retest=True,
+        tolerance=tolerance,
+    )
+    if last_failure and fallback.break_closed_at is not None and fallback.break_closed_at <= last_failure:
+        # A conflicting instant may have been removed during normalization;
+        # no older retained proof is authoritative across that unknown close.
+        fallback = replace(
+            fallback, state="INTACT", reason="conflicting_completed_bars",
+            break_closed_at=None, hold_bars_observed=0, retest_observed=False,
+        )
+    return fallback
 
 
 def _is_session_reference_only_zone(zone: LevelZone) -> bool:
@@ -1525,7 +1629,9 @@ def _evaluate_break_reclaim_from_completed(
             retested = bar.low <= boundary + tolerance and bar.close > boundary
         else:
             retested = bar.high >= boundary - tolerance and bar.close < boundary
-        retest_observed = retest_observed or retested
+        # An overlapping candle can contain a wick from before the breakout.
+        # Its close can hold the break, but cannot prove a subsequent retest.
+        retest_observed = retest_observed or (retested and bar.opened_at >= active_break)
 
     if active_break is None:
         state = "INTACT"
@@ -1591,6 +1697,11 @@ def legacy_level_adapter(
             **({"reclaim_history": history.to_dict()} if history else {}),
             "independent_sources": zone.independent_sources,
             "projection_only": zone.projection_only,
+            "break_state": zone.break_state,
+            "break_reclaim_evidence": (
+                zone.break_reclaim_evidence.to_dict() if zone.break_reclaim_evidence else None
+            ),
+            "quality_flags": list(zone.quality_flags),
         }
 
     supports = [row(zone, "SUPPORT") for zone in directional.supports]

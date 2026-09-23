@@ -41,6 +41,7 @@ from modules.vrvp_levels import (
     normalize_ohlcv_bars,
 )
 from modules.trade_levels import trade_geometry
+from modules.breakout_warnings import breakout_warning_fields, apply_breakout_warning
 from modules.volume_metrics import historical_volume_baseline
 from modules.crypto_scan_runtime import ScanRequestError, scan_http_get
 
@@ -2307,6 +2308,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     pump_data = pump_data or {}
     result = {
         "micro_trigger_ok": False,
+        "micro_breakout_confirmation": None,
         "micro_score": 0,
         "micro_reasons": [],
         "micro_warnings": [],
@@ -2480,6 +2482,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     )
     result.update({
         "micro_trigger_ok": trigger_ok,
+        "micro_breakout_confirmation": "confirmed_close" if trigger_ok and support_break else None,
         "micro_score": int(min(100, score)),
         "micro_reasons": reasons,
         "micro_warnings": warnings,
@@ -2503,6 +2506,19 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
         "micro_dropped_open_candle": bool(freshness.get("dropped_open")),
     })
     return result
+
+
+def _accepted_micro_breakout_warning(pump_data, is_tradeable, now_ts=None):
+    """Warn only for this producer's fresh support-break close, not any short."""
+    raw_closed = pump_data.get("micro_candle_closed_at")
+    known_clock = isinstance(raw_closed, (int, float)) and not isinstance(raw_closed, bool) and math.isfinite(raw_closed)
+    now = time.time() if now_ts is None else float(now_ts)
+    fresh = known_clock and raw_closed > 0 and -2 <= now - raw_closed <= 600
+    return breakout_warning_fields(
+        is_tradeable is True and pump_data.get("micro_trigger_ok") is True
+        and pump_data.get("micro_support_break") is True
+        and pump_data.get("micro_breakout_confirmation") == "confirmed_close" and fresh,
+    )
 
 
 def _causal_listing_vrvp(pump_data, entry):
@@ -2969,6 +2985,8 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "structure_decision": setup.get("structure_decision"),
     }
     is_tradeable = _is_tradeable_short_signal(tradeability_probe)
+    breakout_warning = _accepted_micro_breakout_warning(pump_data, is_tradeable)
+    apply_breakout_warning(setup, bool(breakout_warning))
     if is_tradeable:
         trade_signal = "JETZT_TRADEN"
         signal_label = "Jetzt shorten"
@@ -2987,6 +3005,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
 
     return {
         "symbol": symbol,
+        **breakout_warning,
         "direction": "SHORT",
         "entry": round(entry, 6),
         "stop_loss": round(stop, 6),

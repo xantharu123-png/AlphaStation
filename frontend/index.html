@@ -606,12 +606,19 @@ function wyckoffStates(pattern) {
     const trigger = pattern?.entry_trigger;
     const events = Array.isArray(pattern?.event_evidence) ? pattern.event_evidence : Array.isArray(pattern?.events) ? pattern.events : [];
     const eventIds = new Set(events.map(event => event?.event_id).filter(id => typeof id === 'string' && id));
+    const triggerMode = trigger?.trigger_mode;
+    const requiredTriggerRoles = triggerMode === 'confirmed_breakout'
+        ? ['origin', 'reaction', 'test', 'breakout']
+        : triggerMode === 'confirmed_retest'
+            ? ['origin', 'reaction', 'test', 'breakout', 'retest']
+            : [];
     const ready = current && ['confirmed', 'continuation'].includes(pattern.structure_state)
         && pattern.entry_state === 'ready' && pattern.trade_ready === true
         && typeof trigger?.trigger_id === 'string' && !!trigger.trigger_id
         && wyckoffDate(trigger.confirmed_at) !== 'nicht belegt'
-        && ['origin', 'reaction', 'test', 'breakout', 'retest'].every(key => eventIds.has(trigger.event_ids?.[key]));
-    return { current, structure, entry, ready };
+        && requiredTriggerRoles.length > 0
+        && requiredTriggerRoles.every(key => eventIds.has(trigger.event_ids?.[key]));
+    return { current, structure, entry, ready, triggerMode, requiredTriggerRoles };
 }
 
 function wyckoffNumber(value, digits = 2) {
@@ -2952,6 +2959,48 @@ function SwingPlanNotice({ row = {} }) {
     </div>;
 }
 
+const BREAKOUT_WITHOUT_RETEST_CODE = 'breakout_confirmed_without_retest';
+
+function breakoutRetestWarningEvidence(row = {}) {
+    if (!row || typeof row !== 'object') return null;
+    const sources = [row, row.trade_setup].filter(source => source && typeof source === 'object');
+    for (const source of sources) {
+        const warningCodes = Array.isArray(source.warning_codes) ? source.warning_codes : [];
+        const warning = typeof source.retest_warning === 'string' ? source.retest_warning.trim() : '';
+        if (
+            source.breakout_confirmation !== 'confirmed_close'
+            || source.retest_status !== 'not_confirmed'
+            || !warningCodes.includes(BREAKOUT_WITHOUT_RETEST_CODE)
+            || !warning
+        ) continue;
+        const rawDirection = String(source.direction || row.direction || row.BI_Direction || '').trim().toUpperCase();
+        const direction = rawDirection === 'SHORT' ? 'SHORT' : rawDirection === 'LONG' ? 'LONG' : '';
+        return { code: BREAKOUT_WITHOUT_RETEST_CODE, warning, direction };
+    }
+    return null;
+}
+
+function BreakoutRetestWarning({ row = {}, compact = false }) {
+    const evidence = breakoutRetestWarningEvidence(row);
+    if (!evidence) return null;
+    const heading = evidence.direction === 'SHORT'
+        ? 'SHORT-Breakdown bestaetigt, Ruecktest offen'
+        : evidence.direction === 'LONG'
+            ? 'LONG-Ausbruch bestaetigt, Ruecktest offen'
+            : 'Ausbruch bestaetigt, Ruecktest offen';
+    return (
+        <div
+            className={`${compact ? 'mt-1 px-2 py-1 text-[10px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border border-amber-300 bg-amber-50 text-amber-900 whitespace-normal`}
+            data-testid="breakout-retest-warning"
+            data-warning-code={evidence.code}
+            role="note"
+        >
+            <div className="font-semibold">{heading}</div>
+            {!compact && <div className="mt-1">{evidence.warning}</div>}
+        </div>
+    );
+}
+
 function StockIdentity({ row = {}, ticker = '', fallbackName = '', compact = false }) {
     const symbol = String(ticker || row?.ticker || row?.Ticker || '').trim();
     const companyName = stockCompanyName({...row, ticker: symbol}, fallbackName);
@@ -2967,6 +3016,7 @@ function StockIdentity({ row = {}, ticker = '', fallbackName = '', compact = fal
                 </div>
             )}
             <SwingPlanNotice row={row} />
+            <BreakoutRetestWarning row={row} compact />
         </div>
     );
 }
@@ -3123,7 +3173,8 @@ function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, dire
                 </details>}
                 {states.current && <details className="mt-2"><summary className="cursor-pointer font-semibold">Einstiegsplan und Trigger · {states.entry}</summary>
                     <p className="mt-1">{states.ready ? 'Technische Triggerkette bereit; Risiko, Kosten und Zustellung werden separat geprueft.' : 'Chartkontext ist kein Scanner-Treffer, Tracking-Einstieg oder Signal-Mail.'}</p>
-                    {pattern.entry_trigger ? <div className="mt-1"><p className="break-all">Trigger-ID: {pattern.entry_trigger.trigger_id || 'nicht belegt'}</p><p>Bestaetigt: {wyckoffDate(pattern.entry_trigger.confirmed_at)}</p>
+                    {pattern.entry_trigger ? <div className="mt-1"><p className="break-all">Trigger-ID: {pattern.entry_trigger.trigger_id || 'nicht belegt'}</p><p>Modus: {states.triggerMode === 'confirmed_breakout' ? 'bestaetigter Schlusskurs-Ausbruch; Ruecktest noch nicht bestaetigt' : states.triggerMode === 'confirmed_retest' ? 'Ausbruch mit bestaetigtem Ruecktest' : 'nicht belegt'}</p><p>Bestaetigt: {wyckoffDate(pattern.entry_trigger.confirmed_at)}</p>
+                        {states.triggerMode === 'confirmed_breakout' && <p className="mt-1 text-amber-800">Vier belegte Rollen genuegen fuer diesen expliziten Modus: Ursprung, Reaktion, Test und Ausbruch. Ein LPS/LPSY- oder Retest-Ereignis wird nicht erfunden.</p>}
                         <ul className="mt-1 space-y-1">{Object.entries(pattern.entry_trigger.event_ids || {}).map(([role, id]) => {
                             const event = evidence.events.find(row => row.event_id === id);
                             return <li key={role} className="break-all">{role}: {event ? `${event.label} · ${wyckoffDate(event.confirmed_at)}` : 'Anker in diesem Fenster nicht belegt'}<br />{id}</li>;
@@ -4099,6 +4150,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         </div>
                         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
                     </div>
+                    <BreakoutRetestWarning row={scannerData} />
                     <div style={{ width: '100%', height: '4px', backgroundColor: '#e5e7eb', borderRadius: '2px', overflow: 'hidden', marginBottom: '12px' }}>
                         <div style={{ width: '100%', height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s infinite', borderRadius: '2px' }}></div>
                     </div>
@@ -4116,6 +4168,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         confluence: {direction: cd.direction},
         bi_scanner: String(cd.scanner || '').startsWith('bi_') ? {grade_label: cd.grade_label} : null,
     } : liveDetail;
+    const retestWarningRow = breakoutRetestWarningEvidence(cd) ? cd : d;
     const sidebarCompanyName = stockCompanyName({...d, ...cd, ticker});
     const quality = cd._quality || d._quality || null;
     const tradeHealth = cd.trade_health || d.trade_health || null;
@@ -4810,6 +4863,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <div className="mt-1">Die Planlevels bleiben unverändert. Chart und Kurs zeigen die aktuelle Analyse, keine erneute Handelsfreigabe.</div>
                     </div>
                 )}
+
+                <BreakoutRetestWarning row={retestWarningRow} />
 
                 {Array.isArray(cd.bi_indicator_checks || cd.BI_IndicatorChecks) && (
                     <details className="mb-3 rounded-lg border border-gray-200 p-3 text-xs" data-testid="bi-indicator-evidence">
@@ -6908,6 +6963,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                             <span className={`grade-badge grade-${(item.grade || 'C').toLowerCase()}`}>{item.grade || 'C'}</span>
                                             {item.mdr_tag && <span style={{fontSize:10,padding:'2px 6px',borderRadius:999,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                         </div>
+                                        {marketType !== 'stocks' && <BreakoutRetestWarning row={item} compact />}
                                         <div className="text-xs text-gray-500 mt-1">Tap für Detailansicht</div>
                                     </div>
                                     <div className="text-right">
@@ -6985,6 +7041,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     {marketType === 'stocks'
                                         ? <StockIdentity row={item} ticker={item.ticker} />
                                         : item.ticker}
+                                    {marketType !== 'stocks' && <BreakoutRetestWarning row={item} compact />}
                                     {item.mdr_tag && <span style={{marginLeft:6,fontSize:10,padding:'2px 6px',borderRadius:4,background:(item.mdr_tag.includes('CRASH') || item.mdr_tag.includes('FADING')) ? '#dc2626' : (item.mdr_tag.includes('BLOWOUT') ? '#a855f7' : '#f97316'),color:'#fff',fontWeight:600}}>{item.mdr_tag}</span>}
                                 </td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
@@ -7553,7 +7610,10 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     <tbody>
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({ticker: item.symbol, isCrypto: true, isExchangeCrypto: !!item.contract, exchange: item.exchange, contract: item.contract, ...item})}>
-                                <td className="py-3 px-2 font-semibold">{item.symbol}</td>
+                                <td className="py-3 px-2 font-semibold">
+                                    {item.symbol}
+                                    <BreakoutRetestWarning row={item} compact />
+                                </td>
                                 <td className="py-3 px-2">{item.name}</td>
                                 <td className="py-3 px-2 text-right">{formatDivPrice(item.price)}</td>
                                 <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.change_1d)}</td>
@@ -7982,6 +8042,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                 <td className="py-3 px-2">
                                     <span className="font-semibold">{item.Symbol}</span>
                                     {item.source && <span className="text-xs text-gray-400 ml-1">({item.source})</span>}
+                                    <BreakoutRetestWarning row={item} compact />
                                 </td>
                                 <td className="py-3 px-2 text-right">{formatPrice(item.Price)}</td>
                                 <td className={`py-3 px-2 text-right font-semibold ${(item.Change24h||0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.Change24h ? `${item.Change24h > 0 ? '+' : ''}${item.Change24h.toFixed(1)}%` : '\u2014'}</td>
@@ -8081,7 +8142,7 @@ const SHADOW_REASON_LABELS = {
     swing_momentum_not_holding_open_wait_retest: 'Momentum hält Eröffnung nicht – Retest abwarten',
     swing_momentum_not_holding_upper_range_wait_retest: 'Momentum hält obere Range nicht – Retest abwarten',
     swing_momentum_wick_rejection_wait_retest: 'Momentum mit Docht-Ablehnung – Retest abwarten',
-    swing_momentum_breakout_quality_wait_retest: 'Breakout-Qualität noch nicht bestätigt – Retest abwarten',
+    swing_momentum_breakout_quality_wait_retest: 'Ausbruchsqualität noch unzureichend – Kerzenbild und Entry-Abstand prüfen',
     swing_4h_extended_run_wait_retest: '4h-Lauf überdehnt – Retest abwarten',
     swing_4h_rejection_wait_reclaim: '4h-Ablehnung – Reclaim abwarten',
     swing_4h_state_missing_wait_trigger: '4h-Zustand fehlt – Trigger abwarten',
@@ -9116,6 +9177,7 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                                     <td className="py-3 px-2">
                                         <div className="font-semibold">{item.Symbol || item.symbol}</div>
                                         <div className="text-xs text-gray-400">{item.strategy || item.phase_label || 'Crypto Signal'}</div>
+                                        <BreakoutRetestWarning row={item} compact />
                                     </td>
                                     <td className="py-3 px-2 text-center">
                                         <span className={`text-xs px-2 py-1 rounded font-semibold ${item.direction === 'SHORT' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>{item.direction}</span>
@@ -12805,6 +12867,10 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 In Sidebar öffnen
                             </button>
                         </div>
+                    </div>
+
+                    <div className="mt-3">
+                        <BreakoutRetestWarning row={d} />
                     </div>
 
                     {/* Timeframe + Overlay controls */}

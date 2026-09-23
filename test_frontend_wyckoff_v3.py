@@ -34,7 +34,8 @@ def fixture_v3():
                     cumulative_volume=6000, volume_per_bar=2000, degree=degree, status=status)
     pattern["swings"] = [swing(1, 0, 2, "major"), swing(2, 2, 5, "internal")]
     pattern["provisional_swing"] = swing(3, 8, 10, "internal", "unconfirmed")
-    pattern["entry_trigger"] = dict(trigger_id="trigger:retest:2026-01-09", confirmed_at=template["confirmed_at"],
+    pattern["entry_trigger"] = dict(trigger_id="trigger:retest:2026-01-09", trigger_mode="confirmed_retest",
+                                    confirmed_at=template["confirmed_at"],
                                     event_ids=dict(zip(["origin", "reaction", "test", "breakout", "retest"],
                                                        [event["event_id"] for event in pattern["event_evidence"][:5]])))
     return pattern, candles

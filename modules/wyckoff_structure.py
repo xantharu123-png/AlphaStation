@@ -1,13 +1,15 @@
 """Bounded v3 causal structure and independent entry-plan state machines.
 
 Thresholds are frozen engineering assumptions, not fitted performance claims.
-Only volume-confirmed breaks and separately confirmed retests authorize entry.
+Volume-confirmed completed breaks authorize an entry candidate; an absent
+retest is an explicit warning, never a fabricated LPS/LPSY event.
 """
 from __future__ import annotations
 
 import math
 
 from modules.trade_levels import trade_geometry
+from modules.breakout_warnings import breakout_warning_fields
 from modules.wyckoff_swings import PARAMETERS, identity, iso, swing_evidence
 
 
@@ -210,6 +212,47 @@ def _direction(bars, direction, tf, evidence):
             continue
         secondary = event("ST", st, st_confirmed, prices[st]["low"], "A")
         row.update(phase="B", score=50)
+
+        def breakout_trigger(proof):
+            # Freeze structural risk at the completed breakout candle. A
+            # future retest may nominate its own, independently checked stop.
+            index = proof["index"]
+            confirmation_atr = evidence["atr"][index]
+            trigger = {
+                "trigger_id": identity("trigger", sid, proof["event_id"], "confirmed_breakout"),
+                "trigger_mode": "confirmed_breakout", "confirmed_at": proof["confirmed_at"],
+                "event_ids": {"origin": first["event_id"], "reaction": reaction["event_id"],
+                              "test": secondary["event_id"], "breakout": proof["event_id"]},
+                "state": "ready", "reason": None, "terminal_at": None,
+                "stop_atr": {"basis": "trailing_14_true_ranges", "value": confirmation_atr,
+                             "previous_close_at": iso(bars[index - 14].closed_at),
+                             "start_at": iso(bars[index - 13].closed_at), "confirmed_at": proof["confirmed_at"]},
+                "stop": sign * (prices[index]["low"] - confirmation_atr * .25),
+            }
+            if not math.isfinite(confirmation_atr) or confirmation_atr <= 0:
+                trigger.update(state="data_missing", reason="confirmation_atr_unavailable", stop=None)
+                return trigger
+            # Neither a later recovery nor an unobserved intrabar ordering can
+            # resurrect a failed, stopped or already consumed breakout trigger.
+            for later in range(index + 1, len(bars)):
+                bar = bars[later]
+                stopped = bar.low <= trigger["stop"] if sign == 1 else bar.high >= trigger["stop"]
+                consumed = sign * (bar.high if sign == 1 else bar.low) >= upper + width * .75
+                failed_break = prices[later]["close"] <= upper
+                if stopped and consumed:
+                    trigger.update(state="ambiguous", reason="ambiguous_no_intrabar_order")
+                elif failed_break:
+                    trigger.update(state="expired", reason="breakout_failed")
+                elif stopped:
+                    trigger.update(state="stopped", reason="post_confirmation_stop_breached")
+                elif consumed:
+                    trigger.update(state="target_passed", reason="projected_target_not_beyond_entry")
+                else:
+                    continue
+                trigger["terminal_at"] = iso(bar.closed_at)
+                break
+            return trigger
+
         last_test, decisive, sos, lps = st, None, None, None
         pending_test, pending_decisive = None, None
         last_upper_test, last_spring_test = ar, None
@@ -310,6 +353,7 @@ def _direction(bars, direction, tf, evidence):
                 sos = event("SOS", index, index, p["close"], "D")
                 row.update(phase="D", structure_state="confirmed", interpretation_state="direction_confirmed",
                            score=min(80, row["score"] + 20))
+                row["entry_triggers"].append(breakout_trigger(sos))
                 continue
             if sos is None or index <= sos["index"] or breakout_failed or index + 1 >= len(bars):
                 continue
@@ -330,6 +374,7 @@ def _direction(bars, direction, tf, evidence):
                 # 14-TR support, including the preceding close, at confirmation.
                 confirmation_atr = evidence["atr"][index + 1]
                 trigger = {"trigger_id": identity("trigger", sid, sos["event_id"], lps["event_id"]),
+                           "trigger_mode": "confirmed_retest",
                            "confirmed_at": lps["confirmed_at"],
                            "event_ids": {"origin": first["event_id"], "reaction": reaction["event_id"],
                                          "test": secondary["event_id"], "breakout": sos["event_id"], "retest": lps["event_id"]},
@@ -440,5 +485,8 @@ def detect_structures(bars, timeframe):
             if p["trade_ready"]:
                 p.update(trade_ready=False, entry_state="conflict", signal_state="invalidated", trade=None,
                          signal_confirmed_at=None, invalidation_reason="conflicting_directional_patterns")
+    for row in patterns:
+        row.update(breakout_warning_fields(row["trade_ready"] is True
+            and (row.get("entry_trigger") or {}).get("trigger_mode") == "confirmed_breakout"))
     patterns.sort(key=lambda p: (p["trade_ready"], p["structure_state"] != "failed", p["range_start_time"], p["score"]), reverse=True)
     return patterns, evidence

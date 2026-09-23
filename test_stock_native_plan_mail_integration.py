@@ -241,19 +241,23 @@ def test_real_gap_scanner_native_plan_preserves_first_barrier_mail_rejection(tmp
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_real_gap_without_completed_reclaim_cannot_invent_a_mail_plan(tmp_path, direction):
+def test_real_gap_confirmed_break_has_native_plan_but_keeps_target_risk_gate(tmp_path, direction):
     result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), direction,
                              str(tmp_path), "unreclaimed"],
                             capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
     line = next(line for line in result.stdout.splitlines() if line.startswith("NATIVE_PLAN_RESULT="))
     actual = json.loads(line.split("=", 1)[1])
-    assert actual["levels"]["native"] is False, actual
-    assert actual["levels"]["estimated"] is True
+    # The completed gap close is sufficient breakout evidence; its missing
+    # retest no longer makes the structural plan estimated. Nearby target risk
+    # remains an independent blocker, so this does not authorize a mail.
+    assert actual["levels"]["native"] is True, actual
+    assert actual["levels"]["estimated"] is False
+    assert actual["levels"]["rr_tp1"] < 1.5
     assert actual["adjusted_score"] <= 45
     assert actual["alertable_now"] is False
     assert actual["final"] == {"ok": False, "reason": "swing_trade_plan_invalid"}
-    assert "estimated_trade_plan" in actual["suppression_reasons"]
+    assert "estimated_trade_plan" not in actual["suppression_reasons"]
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

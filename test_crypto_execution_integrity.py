@@ -95,7 +95,7 @@ def test_early_mover_trigger_cache_is_bound_to_trade_plan(monkeypatch):
     assert calls == [10.0, 10.2]
 
 
-def test_wait_for_retest_needs_actual_retest_hold():
+def test_wait_for_retest_accepts_actual_near_entry_breakout_without_faking_retest():
     row = _early_row("WAIT_FOR_RETEST")
     api._apply_early_mover_signal_state(row, {
         "ok": True,
@@ -107,9 +107,13 @@ def test_wait_for_retest_needs_actual_retest_hold():
         "volume_ratio": 2.4,
     })
 
-    assert row["trade_signal"] == "WARTEN"
-    assert row["entry_status"] == "WAIT_FOR_RETEST"
-    assert row["alertable_crypto"] is False
+    assert row["trade_signal"] == "JETZT_TRADEN"
+    assert row["alertable_crypto"] is True
+    assert row["retest_confirmed"] is False
+    assert row["retest_status"] == "not_confirmed"
+    assert row["warning_codes"] == ["breakout_confirmed_without_retest"]
+    assert row["breakout_entry_policy"] == "near_original_entry"
+    assert row["breakout_policy_distance_r"] < .35
     assert row["RVOL"] == 2.4
     assert row["volume_model"] == "exchange_5m_vs_median"
 

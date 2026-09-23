@@ -77,6 +77,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from modules.trade_levels import infer_trade_direction, trade_geometry
+from modules.breakout_warnings import BREAKOUT_WITHOUT_RETEST_CODE, breakout_warning_fields
 
 logger = logging.getLogger(__name__)
 
@@ -845,6 +846,13 @@ def _execution_barrier_context(row: Any) -> Dict[str, Any]:
 def _execution_confirmation_context(row: Any) -> Dict[str, Any]:
     sources = _context_sources(row)
     payload: Dict[str, Any] = {}
+    # Preserve only the fixed warning vocabulary, never free-form provider
+    # text. This is audit context, not another eligibility decision.
+    if any(source.get("breakout_confirmation") == "confirmed_close"
+           and source.get("retest_status") == "not_confirmed"
+           and isinstance(source.get("warning_codes"), (list, tuple))
+           and BREAKOUT_WITHOUT_RETEST_CODE in source["warning_codes"] for source in sources):
+        payload.update(breakout_warning_fields(True))
     for target, aliases in (
         ("execution_trigger_ok", ("execution_trigger_ok", "crypto_entry_ok")),
         ("breakout_confirmed", ("breakout_confirmed",)),
@@ -874,6 +882,14 @@ def _execution_confirmation_context(row: Any) -> Dict[str, Any]:
         entry_trigger = wyckoff.get("entry_trigger")
         if isinstance(entry_trigger, Mapping):
             _context_put_text(evidence, "trigger_id", [entry_trigger], ("trigger_id",), limit=160)
+            mode = entry_trigger.get("trigger_mode")
+            if isinstance(mode, str) and mode in {"confirmed_breakout", "confirmed_retest"}:
+                evidence["trigger_mode"] = mode
+            if (wyckoff.get("breakout_confirmation") == "confirmed_close"
+                    and wyckoff.get("retest_status") == "not_confirmed"
+                    and isinstance(wyckoff.get("warning_codes"), (list, tuple))
+                    and BREAKOUT_WITHOUT_RETEST_CODE in wyckoff["warning_codes"]):
+                evidence.update(breakout_warning_fields(True))
             refs = entry_trigger.get("event_ids")
             if isinstance(refs, Mapping):
                 event_refs: Dict[str, Any] = {}

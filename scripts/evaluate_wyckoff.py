@@ -16,11 +16,13 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.wyckoff import MODEL, PARAMETERS, analyze_wyckoff
+from modules.wyckoff_contract import ROLES, BREAKOUT_ROLES
+from modules.breakout_warnings import breakout_warning_fields
 
 
 MAX_BARS = 2000
 STRUCTURE_TYPES = {"Accumulation", "Distribution", "Reaccumulation", "Redistribution"}
-TRIGGER_ROLES = ("origin", "reaction", "test", "breakout", "retest")
+TRIGGER_ROLES = ROLES
 DISCLAIMER = (
     "Recognition replay only. Unlabelled observations are not negatives. "
     "Synthetic fixtures and recognition metrics do not prove live accuracy or profitability. "
@@ -131,7 +133,11 @@ def _signal_identity(pattern):
     if not isinstance(pattern.get("structure_id"), str) or not pattern["structure_id"]:
         raise ValueError("trade-ready pattern requires an explicit structure_id")
     anchors = trigger.get("event_ids")
-    if not isinstance(anchors, dict) or set(anchors) != set(TRIGGER_ROLES):
+    mode = trigger.get("trigger_mode", "confirmed_retest")
+    if not isinstance(mode, str) or mode not in {"confirmed_breakout", "confirmed_retest"}:
+        raise ValueError("trade-ready pattern requires a known trigger mode")
+    roles = BREAKOUT_ROLES if mode == "confirmed_breakout" else TRIGGER_ROLES
+    if not isinstance(anchors, dict) or set(anchors) != set(roles):
         raise ValueError("trade-ready pattern requires explicit trigger anchors")
     events = {}
     for event in pattern.get("events", []):
@@ -142,7 +148,7 @@ def _signal_identity(pattern):
             raise ValueError("event_id must be nonempty and unique within a structure")
         events[identity] = event
     proof = []
-    for role in TRIGGER_ROLES:
+    for role in roles:
         identity = anchors[role]
         if not isinstance(identity, str) or identity not in events:
             raise ValueError(f"trigger has missing {role} event_id evidence")
@@ -434,6 +440,8 @@ def evaluate(document):
                 directional.append(identity)
             if identity not in signals:
                 signals[identity] = {"id": identity, "direction": pattern["direction"],
+                                     "trigger_mode": validated.get("trigger_mode", "confirmed_retest"),
+                                     **breakout_warning_fields(validated.get("trigger_mode") == "confirmed_breakout"),
                                      "structure_id": pattern["structure_id"],
                                      "structure_type": pattern["structure_type"],
                                      "confirmed_at": _iso(_timestamp(pattern["entry_trigger"]["confirmed_at"], "trigger.confirmed_at")),

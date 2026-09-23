@@ -126,12 +126,14 @@ def test_later_failed_break_cannot_remain_an_entry_signal(direction):
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_unfinished_lps_confirmation_cannot_be_trade_ready(direction):
+def test_unfinished_lps_does_not_fabricate_retest_but_keeps_confirmed_breakout_candidate(direction):
     bars = textbook_bars(direction)
     result = analyze(bars[:86], direction, count=86)
     row = selected(result, direction)
-    assert row["trade_ready"] is False
-    assert row["signal_confirmed_at"] is None
+    assert row["trade_ready"] is True
+    assert row["entry_trigger"]["trigger_mode"] == "confirmed_breakout"
+    assert row["signal_confirmed_at"] == row["entry_trigger"]["confirmed_at"]
+    assert row["retest_status"] == "not_confirmed"
     assert not any(event["name"] in {"LPS", "LPSY"} for event in row["events"])
 
 

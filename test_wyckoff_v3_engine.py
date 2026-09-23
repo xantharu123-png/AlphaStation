@@ -79,7 +79,8 @@ def test_stopped_trigger_stays_stopped_but_new_distinct_retest_can_qualify(direc
     after = selected(analyze(bars, direction), direction)
     assert after["trade_ready"] and after["entry_state"] == "ready"
     assert after["entry_trigger"]["trigger_id"] != before["entry_trigger"]["trigger_id"]
-    assert after["entry_triggers"][0]["state"] == "stopped"
+    assert next(trigger for trigger in after["entry_triggers"]
+                if trigger["trigger_id"] == before["entry_trigger"]["trigger_id"])["state"] == "stopped"
     assert len([e for e in after["events"] if e["name"] in {"LPS", "LPSY"}]) >= 2
 
 
@@ -151,12 +152,13 @@ def test_every_fixed_cutoff_is_identical_and_event_confirmation_is_observable(di
                 assert swing["end_at"] <= swing["confirmed_at"] <= result["as_of"]
 
 
-def test_outside_candle_ambiguous_pivots_cannot_supply_entry_trigger():
+def test_outside_candle_ambiguous_pivots_cannot_supply_retest_trigger():
     bars = textbook_bars()
     bars[85].update(high=112., low=105.8)
     result = analyze(bars)
     row = selected(result, "LONG")
-    assert not row["trade_ready"]
+    assert row["trade_ready"] and row["entry_trigger"]["trigger_mode"] == "confirmed_breakout"
+    assert "retest" not in row["entry_trigger"]["event_ids"]
     assert (BASE + timedelta(days=86)).isoformat().replace("+00:00", "Z") in result["ambiguous_pivot_times"]
 
 

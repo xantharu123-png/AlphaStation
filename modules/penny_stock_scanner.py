@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from modules.backtests import simulate_50_50_daily_exit
+from modules.breakout_warnings import breakout_warning_fields
 from modules.trade_levels import trade_geometry
 from modules.vrvp_levels import calculate_wilder_atr
 from modules.volume_metrics import historical_volume_baseline
@@ -1198,7 +1199,13 @@ def evaluate_penny_candidate(
     if model_active and active_stop > 0:
         trade_setup["stop"] = _round_price(active_stop)
         trade_setup["stop_loss"] = _round_price(active_stop)
+    breakout_warning = breakout_warning_fields(
+        trade_action == "JETZT_KAUFEN" and intraday.get("breakout_confirmed") is True
+        and intraday.get("trigger_confirmed") is True and intraday.get("fresh") is True,
+        retest_confirmed=intraday.get("retest_confirmed") is True,
+    )
     trade_setup.update({
+        **breakout_warning,
         "direction": "LONG",
         "trade_action": trade_action,
         "action_label": action_label,
@@ -1213,12 +1220,14 @@ def evaluate_penny_candidate(
         "notes": [
             f"Trade {round(trade_score)} | Setup {round(setup_quality)} | Entry {round(entry_quality)} | Dump-Risiko {round(dump_risk)}",
             f"Trigger: {intraday.get('trigger_type', 'none')}",
+            *([breakout_warning["retest_warning"]] if breakout_warning else []),
             *([f"Exit bestaetigt: {', '.join(exit_reasons)}"] if exit_reasons else []),
         ],
     })
 
     return {
         "ticker": ticker,
+        **breakout_warning,
         "name": str(details.get("name") or snapshot.get("name") or ""),
         "asset_class": "penny_stock",
         "price": _round_price(mark_price),
@@ -1306,7 +1315,8 @@ def evaluate_penny_candidate(
         "vwap": _round_price(intraday.get("vwap")),
         "volume_acceleration": intraday.get("volume_ratio"),
         "hard_blockers": list(dict.fromkeys(hard_blockers)),
-        "warnings": list(dict.fromkeys([*(intraday.get("warnings") or []), *context_warnings, *company_warnings])),
+        "warnings": list(dict.fromkeys([*(intraday.get("warnings") or []), *context_warnings, *company_warnings,
+                                      *([breakout_warning["retest_warning"]] if breakout_warning else [])])),
         "trade_setup": trade_setup,
         "entry": trade_setup.get("entry"),
         "stop_loss": trade_setup.get("stop_loss"),

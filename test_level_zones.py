@@ -496,7 +496,7 @@ def test_reclaim_requires_completed_break_close_and_subsequent_hold_retest():
     assert json.loads(json.dumps(payload, sort_keys=True)) == payload
 
 
-def test_snapshot_does_not_flip_crossed_resistance_without_completed_reclaim():
+def test_snapshot_distinguishes_confirmed_break_from_completed_reclaim():
     resistance = LevelEvidence(
         source_family="horizontal_swing",
         source_name="confirmed_swing_high",
@@ -526,10 +526,11 @@ def test_snapshot_does_not_flip_crossed_resistance_without_completed_reclaim():
 
     pending_zone = next(zone for zone in pending.zones if zone.zone_id)
     assert pending_zone.origin_roles == ("resistance",)
-    assert pending_zone.break_state == "intact"
-    assert pending_zone.break_reclaim_evidence.state == "RECLAIM_PENDING"
-    assert "crossed_resistance_reclaim_pending" in pending_zone.quality_flags
-    assert "crossed_level_reclaim_pending" in pending.quality_flags
+    assert pending_zone.break_state == "break_confirmed"
+    assert pending_zone.break_reclaim_evidence.state == "BREAK_CONFIRMED"
+    assert "breakout_confirmed_without_retest" in pending_zone.quality_flags
+    assert "breakout_confirmed_without_retest" in pending.quality_flags
+    assert "former_resistance_reclaimed" not in pending_zone.quality_flags
 
     reclaimed = build_structure_snapshot(
         {"1D": break_only + [_bar(2, high=101.4, low=101.08, close=101.25)]},

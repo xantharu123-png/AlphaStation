@@ -38,10 +38,25 @@ def test_actual_engine_proof_crosses_api_guard_without_overwriting_native_plan(d
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-@pytest.mark.parametrize("count", [30, 70, 85, 86])
+@pytest.mark.parametrize("count", [30, 70])
 def test_unconfirmed_or_short_history_never_becomes_scanner_signal(direction, count):
     name, row = candidate(direction, count)
     assert api._apply_pattern_strategy_filter(row, api.STRATEGIES[name]) is None
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("count", [85, 86])
+def test_completed_breakout_before_retest_is_four_role_signal_with_warning(direction, count):
+    name, row = candidate(direction, count)
+    result = api._apply_pattern_strategy_filter(row, api.STRATEGIES[name])
+    assert result is not None
+    proof = result["wyckoff"]
+    assert proof["trade_ready"] and proof["entry_trigger"]["trigger_mode"] == "confirmed_breakout"
+    assert set(proof["entry_trigger"]["event_ids"]) == {"origin", "reaction", "test", "breakout"}
+    assert not any(event["name"] in {"LPS", "LPSY"} for event in proof["events"])
+    assert result["retest_status"] == "not_confirmed"
+    assert result["warning_codes"] == ["breakout_confirmed_without_retest"]
+    assert api._stock_wyckoff_row_contract_valid(result, as_of=BASE + timedelta(days=count), expected_strategy=name)
 
 
 def test_wyckoff_history_adapter_preserves_flags_invalid_prices_and_unknown_rows():

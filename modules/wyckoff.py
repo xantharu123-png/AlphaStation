@@ -1,7 +1,8 @@
 """Pure, completed-bar Wyckoff v3 structures and separately gated entry plans.
 
 Reversal and continuation evidence, A--E and local swings are chart context.
-Only a volume-confirmed breakout and fresh retest authorize an entry trigger.
+A volume-confirmed completed breakout authorizes an entry candidate; a missing
+fresh retest remains an explicit warning, not fabricated structural evidence.
 Versioned thresholds are uncalibrated assumptions, not win probabilities.
 Callers retain structural, execution, risk, cost and mail-delivery gates.
 """

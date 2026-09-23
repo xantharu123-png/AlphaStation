@@ -17,11 +17,13 @@ def dataset():
     return {"timeframe": "1D", "as_of": (BASE + timedelta(days=100)).isoformat(), "bars": bars}
 
 
-def test_repeated_confirmed_pattern_counts_once_without_inventing_accuracy():
+def test_each_confirmed_trigger_mode_counts_once_without_inventing_accuracy():
     report = replay.evaluate(dataset())
-    assert report["distinct_signal_count"] == 1
+    assert report["distinct_signal_count"] == 2
     assert sum(bool(row["active_signals"]) for row in report["observations"]) > 1
-    assert report["signals"][0]["first_seen_at"] == "2026-03-29T00:00:00.000000Z"
+    by_mode = {row["trigger_mode"]: row for row in report["signals"]}
+    assert by_mode["confirmed_breakout"]["first_seen_at"] == "2026-03-22T00:00:00.000000Z"
+    assert by_mode["confirmed_retest"]["first_seen_at"] == "2026-03-29T00:00:00.000000Z"
     assert report["label_comparison"] is None
     assert report["profitability_evaluated"] is False
     assert report["real_world_accuracy_verified"] is False

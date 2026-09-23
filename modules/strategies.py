@@ -262,18 +262,18 @@ STRATEGIES = {
     # Erkennt: SC, AR, ST, Spring, SOS (Accumulation) / BC, AR, ST, UT, SOW (Distribution)
     # =========================================================================
     "Wyckoff Accumulation ⬆": {
-        "description": " Wyckoff Long — bestaetigter Ausbruch mit Ruecktest auf 1D",
+        "description": " Wyckoff Long — bestaetigter Ausbruch auf 1D; fehlender Ruecktest als Warnung",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
-        "logic": "Abgeschlossene Tageskerzen: SC -> AR -> ST -> SOS -> LPS mit Haltebestaetigung; Spring optional. Kein Nachweis institutioneller Kaeufe.",
+        "logic": "Abgeschlossene Tageskerzen: SC -> AR -> ST -> volumenbestaetigter SOS; LPS/Ruecktest optional und separat ausgewiesen; Spring optional. Kein Nachweis institutioneller Kaeufe.",
         "needs_history": True,
         "pattern_type": "wyckoff_accumulation",
         "history_days": 180,
         "minimum_history_bars": 60
     },
     "Wyckoff Distribution ⬇": {
-        "description": " Wyckoff Short — bestaetigter Breakdown mit Ruecktest auf 1D",
+        "description": " Wyckoff Short — bestaetigter Breakdown auf 1D; fehlender Ruecktest als Warnung",
         "filters": {"Preis": (1.0, 5000.0), "Change %": (-5.0, 5.0)},
-        "logic": "Abgeschlossene Tageskerzen: BC -> AR -> ST -> SOW -> LPSY mit Haltebestaetigung; UTAD optional. Kein Nachweis institutioneller Verkaeufe.",
+        "logic": "Abgeschlossene Tageskerzen: BC -> AR -> ST -> volumenbestaetigter SOW; LPSY/Ruecktest optional und separat ausgewiesen; UTAD optional. Kein Nachweis institutioneller Verkaeufe.",
         "needs_history": True,
         "pattern_type": "wyckoff_distribution",
         "history_days": 180,

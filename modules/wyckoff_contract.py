@@ -10,6 +10,7 @@ from collections.abc import Mapping
 
 
 ROLES = ("origin", "reaction", "test", "breakout", "retest")
+BREAKOUT_ROLES = ROLES[:-1]
 
 
 def _clock(value):
@@ -70,9 +71,13 @@ def validate_entry_trigger(pattern, *, as_of, timeframe="1D", model=None):
             or trigger.get("state") != "ready" or trigger.get("reason")):
         return None
     refs = trigger.get("event_ids")
-    if not isinstance(refs, Mapping) or set(refs) != set(ROLES):
+    mode = trigger.get("trigger_mode", "confirmed_retest")
+    if not isinstance(mode, str) or mode not in {"confirmed_breakout", "confirmed_retest"}:
         return None
-    if not all(_identity(refs[role]) for role in ROLES) or len(set(refs.values())) != len(ROLES):
+    roles = BREAKOUT_ROLES if mode == "confirmed_breakout" else ROLES
+    if not isinstance(refs, Mapping) or set(refs) != set(roles):
+        return None
+    if not all(_identity(refs[role]) for role in roles) or len(set(refs.values())) != len(roles):
         return None
     cutoff, last, range_at, signal_at, trigger_at = (_clock(value) for value in (
         as_of, pattern.get("latest_completed_at"), pattern.get("range_confirmed_at"),
@@ -100,7 +105,7 @@ def validate_entry_trigger(pattern, *, as_of, timeframe="1D", model=None):
                "breakout": {"SOS" if long else "SOW"},
                "retest": {"LPS" if long else "LPSY"}}
     previous = None
-    for role in ROLES:
+    for role in roles:
         event = by_id.get(refs[role])
         if event is None or not isinstance(event.get("name"), str) or event.get("name") not in allowed[role]:
             return None
@@ -113,10 +118,15 @@ def validate_entry_trigger(pattern, *, as_of, timeframe="1D", model=None):
             return None
         if role == "reaction" and confirmed != range_at:
             return None
+        if role == "breakout" and mode == "confirmed_breakout":
+            boundary = pattern.get("range_high" if long else "range_low")
+            if (not _positive(boundary) or event["volume_ratio"] < 1.5 or observed != confirmed
+                    or (event["price"] <= boundary if long else event["price"] >= boundary)):
+                return None
         previous = confirmed
     if previous != signal_at:
         return None
     return trigger
 
 
-__all__ = ["ROLES", "validate_entry_trigger"]
+__all__ = ["ROLES", "BREAKOUT_ROLES", "validate_entry_trigger"]

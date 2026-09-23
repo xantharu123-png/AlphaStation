@@ -322,7 +322,7 @@ def test_empty_causal_snapshot_never_falls_back_to_actionable_legacy_levels():
         assert setup is None
 
 
-def test_crossed_resistance_requires_real_completed_reclaim_before_new_long_setup():
+def test_crossed_resistance_accepts_confirmed_break_and_distinguishes_later_retest():
     base = datetime(2026, 4, 1, tzinfo=timezone.utc)
     resistance = LevelEvidence(
         source_family="horizontal_swing",
@@ -365,11 +365,14 @@ def test_crossed_resistance_requires_real_completed_reclaim_before_new_long_setu
 
     break_only = [bar(1, high=101.5, low=101.15, close=101.3)]
     pending = snapshot(break_only, 1)
-    assert _build_structured_trade_setup(
+    breakout_setup = _build_structured_trade_setup(
         "LONG", 102.0, 2.0, 0, 0, 0, 0,
         structure_snapshot=pending,
         require_causal_structure=True,
-    ) is None
+    )
+    assert breakout_setup is not None
+    assert breakout_setup["retest_status"] == "not_confirmed"
+    assert breakout_setup["breakout_evidence"][0]["state"] == "BREAK_CONFIRMED"
 
     reclaimed = snapshot(
         break_only + [bar(2, high=101.4, low=101.08, close=101.25)],

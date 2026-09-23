@@ -102,6 +102,7 @@ from modules import stock_scan_runtime
 from modules import scan_control, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
+from modules.breakout_warnings import apply_breakout_warning, breakout_warning_fields
 from modules.cup_shape import validate_cup_shape
 from modules.cup_signal_contract import (
     CUP_PATTERN_CONTRACT_VERSION,
@@ -681,13 +682,13 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         ),
         "Wyckoff Accumulation": _clone_stock_strategy(
             "Wyckoff Accumulation ⬆",
-            description="Wyckoff Long auf abgeschlossenen Tageskerzen: Ausbruch und Ruecktest bestaetigt.",
+            description="Wyckoff Long auf abgeschlossenen Tageskerzen: Ausbruch bestaetigt; fehlender Ruecktest wird als Warnung ausgewiesen.",
             merged_from=["Wyckoff Accumulation ⬆"],
             display_group="Smart Money",
         ),
         "Wyckoff Distribution": _clone_stock_strategy(
             "Wyckoff Distribution ⬇",
-            description="Wyckoff Short auf abgeschlossenen Tageskerzen: Breakdown und Ruecktest bestaetigt.",
+            description="Wyckoff Short auf abgeschlossenen Tageskerzen: Breakdown bestaetigt; fehlender Ruecktest wird als Warnung ausgewiesen.",
             merged_from=["Wyckoff Distribution ⬇"],
             display_group="Smart Money",
         ),
@@ -823,7 +824,7 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 10
+STOCK_STRATEGY_CACHE_VERSION = 11
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -1409,6 +1410,17 @@ def _orb_active_excursion_volume(
         "baseline_source": baseline_source,
         "breakout_age_bars": len(post_or_bars) - launch_index,
         "launch_timestamp": launch_bar.get("t"),
+        # Only a later completed bar may prove a post-break retest. A wick
+        # belonging to the launch bar itself does not qualify.
+        "retest_confirmed": any(
+            isinstance(bar.get("t"), (int, float))
+            and isinstance(launch_bar.get("t"), (int, float))
+            and bar["t"] >= launch_bar["t"] + 300_000
+            and ((float(bar.get("l", float("inf"))) <= or_high < float(bar.get("c", 0)))
+                 if direction == "LONG" else
+                 (float(bar.get("h", 0)) >= or_low > float(bar.get("c", float("inf")))))
+            for bar in post_or_bars[launch_index + 1:]
+        ),
     }
 
 
@@ -3570,7 +3582,22 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
     # separate geometry/venue contradiction and therefore remains fail-closed.
     if not execution_trigger_ok or "no_market_entry" in risk_flags:
         reasons.append("early_mover_wait_entry_confirmation")
-    if action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
+    entry_policy = row.get("breakout_entry_policy", setup.get("breakout_entry_policy"))
+    if entry_policy == "near_original_entry":
+        # Promotion changes the action, never the original anti-chase policy.
+        # Recompute from the current observation; cached distance telemetry is
+        # not execution evidence and can belong to an older quote.
+        policy_entry = _alert_float(row.get("breakout_policy_entry", setup.get("breakout_policy_entry")))
+        policy_stop = _alert_float(row.get("breakout_policy_stop", setup.get("breakout_policy_stop")))
+        policy_price = _alert_float(row.get("current_price", row.get("execution_price", row.get("Price", row.get("price")))))
+        policy_valid = all(value is not None and math.isfinite(value) and value > 0
+                           for value in (policy_entry, policy_stop, policy_price))
+        policy_distance = (abs(policy_price - policy_entry) / (policy_entry - policy_stop)
+                           if policy_valid and policy_entry > policy_stop else None)
+        if policy_distance is None or (policy_distance > _EARLY_MOVER_RETEST_MAX_DISTANCE_R
+                and not math.isclose(policy_distance, _EARLY_MOVER_RETEST_MAX_DISTANCE_R, rel_tol=1e-12, abs_tol=1e-12)):
+            reasons.append("early_mover_retest_not_near_entry")
+    elif action == "WAIT_FOR_RETEST" and fields["distance_to_entry_r"] > _EARLY_MOVER_RETEST_MAX_DISTANCE_R:
         reasons.append("early_mover_retest_not_near_entry")
     return reasons
 
@@ -4004,6 +4031,7 @@ def _format_alert_plan_html(row: Dict[str, Any]) -> str:
         f'{source_text}'
         f'{synthetic_text}'
         f'{binary_warning_text}'
+        f'{_breakout_retest_warning_html(row)}'
         f'{_business_quality_alert_html(row)}'
     )
 
@@ -4078,8 +4106,10 @@ def _alert_trade_plan_ok(
         return False
     barrier = _extract_trade_barrier(row)
     reclaim_confirmed = bool(
-        barrier and _confirmed_break_reclaim_evidence(row, barrier)
+        barrier and _confirmed_trade_break_evidence(row, barrier)
     )
+    if barrier and _barrier_release_requires_live_evidence(barrier) and not reclaim_confirmed:
+        return False
     if not reclaim_confirmed and (
         barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
         or structure_status == "WAIT_BREAK_RECLAIM"
@@ -6147,7 +6177,26 @@ def _block_early_mover_trade_on_bad_targets(row: Dict[str, Any]) -> None:
 
 def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional[Dict[str, Any]] = None) -> None:
     """Expose a simple user-facing decision: observe, wait, no trade, or trade now."""
+    # Cached presentation is never proof that the latest execution check passed.
+    apply_breakout_warning(row, False)
+    apply_breakout_warning(row.get("trade_setup"), False)
     action = str(row.get("trade_action", "") or "").upper()
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    entry_policy = row.get("breakout_entry_policy", setup.get("breakout_entry_policy"))
+    if action == "WAIT_FOR_RETEST" and entry_policy != "near_original_entry":
+        # WAIT can originate from an extended setup, not merely a missing
+        # retest. Freeze its risk anchors before promoting/repricing the row.
+        entry_policy = "near_original_entry"
+        row["breakout_policy_entry"] = row.get("entry", setup.get("entry"))
+        row["breakout_policy_stop"] = row.get("stop_loss", row.get("stop", setup.get("stop_loss", setup.get("stop"))))
+    if entry_policy == "near_original_entry":
+        row["breakout_entry_policy"] = entry_policy
+        for key in ("breakout_policy_entry", "breakout_policy_stop"):
+            if key not in row:
+                row[key] = setup.get(key)
+        if isinstance(row.get("trade_setup"), dict):
+            setup.update({key: row.get(key) for key in (
+                "breakout_entry_policy", "breakout_policy_entry", "breakout_policy_stop")})
     trigger_ok = bool(trigger_check.get("ok")) if isinstance(trigger_check, dict) else bool(row.get("execution_trigger_ok"))
     trigger_reason = str((trigger_check or {}).get("reason", "") or "")
     trigger_block_reason = _early_mover_mail_trigger_block_reason(trigger_check) if isinstance(trigger_check, dict) else None
@@ -6213,9 +6262,31 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
     row["pre_breakout_block_reasons"] = armed_reasons
 
     matched = set((trigger_check or {}).get("matched") or []) if isinstance(trigger_check, dict) else set()
-    retest_execution_ok = action != "WAIT_FOR_RETEST" or "retest_hold" in matched
-    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason and retest_execution_ok:
-        confirmed_retest = bool(action == "WAIT_FOR_RETEST" and "retest_hold" in matched)
+    policy_distance_ok = True
+    if entry_policy == "near_original_entry":
+        policy_entry = _alert_float(row.get("breakout_policy_entry"))
+        policy_stop = _alert_float(row.get("breakout_policy_stop"))
+        policy_price = _alert_float(row.get("current_price", row.get("execution_price", row.get("Price", row.get("price")))))
+        policy_valid = all(value is not None and math.isfinite(value) and value > 0
+                           for value in (policy_entry, policy_stop, policy_price))
+        policy_distance = (abs(policy_price - policy_entry) / (policy_entry - policy_stop)
+                           if policy_valid and policy_entry > policy_stop else None)
+        policy_distance_ok = policy_distance is not None and (
+            policy_distance <= _EARLY_MOVER_RETEST_MAX_DISTANCE_R
+            or math.isclose(policy_distance, _EARLY_MOVER_RETEST_MAX_DISTANCE_R, rel_tol=1e-12, abs_tol=1e-12))
+        row["breakout_policy_distance_r"] = policy_distance
+    # A real closed breakout is a separate entry route, not an unobserved retest.
+    retest_execution_ok = (action != "WAIT_FOR_RETEST" and entry_policy != "near_original_entry") or bool({"retest_hold", "breakout"} & matched)
+    if action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and not policy_distance_ok:
+        row["trade_action"] = "WAIT_FOR_RETEST"
+        row["trade_signal"] = "WARTEN"
+        row["signal_label"] = "Warten: Breakout/Retest muss innerhalb 0,35R vom urspruenglichen Entry liegen"
+        row["signal_quality"] = "wait_retest"
+        row["entry_status"] = "WAIT_FOR_RETEST"
+        row["alertable_crypto"] = False
+        row["pre_breakout_armed"] = False
+    elif action in ("LONG_TRIGGER", "WAIT_FOR_RETEST") and trigger_ok and not trigger_block_reason and retest_execution_ok:
+        confirmed_retest = "retest_hold" in matched
         row["trade_action"] = "LONG_TRIGGER"
         row["trade_signal"] = "JETZT_TRADEN"
         score_txt = f" Score {trigger_check.get('execution_score')}/100" if isinstance(trigger_check, dict) and trigger_check.get("execution_score") is not None else ""
@@ -6226,9 +6297,12 @@ def _apply_early_mover_signal_state(row: Dict[str, Any], trigger_check: Optional
         row["retest_confirmed"] = confirmed_retest
         row["entry_confirmation_type"] = "RETEST_CONFIRMED" if confirmed_retest else "EXECUTION_TRIGGER_CONFIRMED"
         row["alertable_crypto"] = True
-    elif action == "WAIT_FOR_RETEST" and trigger_ok and not retest_execution_ok:
+        if "breakout" in matched and not confirmed_retest:
+            apply_breakout_warning(row, True)
+            apply_breakout_warning(row.get("trade_setup"), True)
+    elif (action == "WAIT_FOR_RETEST" or entry_policy == "near_original_entry") and trigger_ok and not retest_execution_ok:
         row["trade_signal"] = "WARTEN"
-        row["signal_label"] = "Warten: Breakout erkannt, aber der geplante Retest am Entry fehlt"
+        row["signal_label"] = "Warten: Am geplanten Entry ist weder Ausbruch noch Ruecktest bestaetigt"
         row["signal_quality"] = "wait_retest"
         row["entry_status"] = "WAIT_FOR_RETEST"
         row["alertable_crypto"] = False
@@ -7682,6 +7756,25 @@ def _revalidate_early_mover_mail_candidate(
     ):
         return {"ok": False, "reason": "final_retest_distance_too_far"}
 
+    if candidate.get("breakout_entry_policy") == "near_original_entry":
+        # The final ask may have moved after the confirmed candle. Keep the
+        # original risk anchors even if a previous validation repriced entry.
+        policy_entry = _alert_float(candidate.get("breakout_policy_entry"))
+        policy_stop = _alert_float(candidate.get("breakout_policy_stop"))
+        if (policy_entry is None or policy_stop is None
+                or not math.isfinite(policy_entry) or not math.isfinite(policy_stop)
+                or not (0 < policy_stop < policy_entry)):
+            return {"ok": False, "reason": "final_retest_policy_levels_missing"}
+        policy_distance = abs(current - policy_entry) / (policy_entry - policy_stop)
+        if (not math.isfinite(policy_distance)
+                or (policy_distance > _EARLY_MOVER_RETEST_MAX_DISTANCE_R
+                    and not math.isclose(policy_distance, _EARLY_MOVER_RETEST_MAX_DISTANCE_R, rel_tol=1e-12, abs_tol=1e-12))):
+            return {"ok": False, "reason": "final_retest_distance_too_far"}
+        item.update({"breakout_entry_policy": "near_original_entry",
+                     "breakout_policy_entry": policy_entry,
+                     "breakout_policy_stop": policy_stop,
+                     "breakout_policy_distance_r": policy_distance})
+
     item.update({
         "planned_entry": entry,
         "entry": current,
@@ -7826,6 +7919,13 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
             "structure_status": _final_plan_field("structure_status"),
             "structure_reason": _final_plan_field("structure_reason"),
             "structure_decision": _final_plan_field("structure_decision"),
+            "breakout_confirmation": _final_plan_field("breakout_confirmation"),
+            "retest_status": _final_plan_field("retest_status"),
+            "retest_warning": _final_plan_field("retest_warning"),
+            "warning_codes": _final_plan_field("warning_codes"),
+            "breakout_entry_policy": _final_plan_field("breakout_entry_policy"),
+            "breakout_policy_entry": _final_plan_field("breakout_policy_entry"),
+            "breakout_policy_stop": _final_plan_field("breakout_policy_stop"),
             "live_rr": row.get("live_rr_ratio", setup.get("live_rr")),
             "distance_r": row.get("distance_to_entry_r", setup.get("distance_to_entry_r")),
             "change24": row.get("Change24h"),
@@ -7924,7 +8024,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
         volume_ratio = _fmt_num(trigger.get("volume_ratio"), "x", 2)
         single_row = (
             f'<tr><td style="padding:8px;border-bottom:1px solid #eee"><b>{symbol}</b><br><span style="color:#777">{name}</span></td>'
-            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text}{"" if item.get("horizon") == "SWING" else f" ({volume_ratio}, EQ {exec_score})"}</span></td>'
+            f'<td style="padding:8px;border-bottom:1px solid #eee">{action}<br><span style="color:#777">{exchange} {exec_tf}</span><br><span style="color:#059669">{trigger_text}{"" if item.get("horizon") == "SWING" else f" ({volume_ratio}, EQ {exec_score})"}</span>{_breakout_retest_warning_html(item)}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{html.escape(str(item["grade"]))} / {html.escape(str(item["score"]))}</td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">{_format_alert_price(item["price"])}<br><span style="color:#64748b">Live {html.escape(str(item.get("price_mode") or "ask"))}</span></td>'
             f'<td style="padding:8px;border-bottom:1px solid #eee">Entry {_format_alert_price(item["entry"])}<br>Stop {_format_alert_price(item["stop"])}</td>'
@@ -10496,6 +10596,26 @@ def _quarantine_unknown_email_delivery(
     return receipt
 
 
+def _append_breakout_warning_summary(body_html, rows):
+    """Cover custom scanner mail templates using the same explicit metadata."""
+    warnings = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        warning = _breakout_retest_warning_html(row)
+        if warning and warning not in body_html:
+            label = html.escape(_extract_alert_ticker(row) or "Signal")
+            line = "<li><b>" + label + "</b>" + warning + "</li>"
+            if line not in warnings:
+                warnings.append(line)
+    if not warnings:
+        return body_html
+    section = '<div data-breakout-warnings="true"><b>Ausbruch / Ruecktest</b><ul>' + "".join(warnings) + '</ul></div>'
+    if "</body>" in body_html:
+        return body_html.replace("</body>", section + "</body>", 1)
+    return body_html + section
+
+
 def _send_email_alert(
     subject,
     body_html,
@@ -10563,6 +10683,8 @@ def _send_email_alert(
     tracking_rows_list = _filter_bi_signal_rows(
         str(tracking_scanner or "").strip().lower(), tracking_rows_list
     )
+    if str(mail_class or "").lower() == "trade":
+        body_html = _append_breakout_warning_summary(body_html, tracking_rows_list)
     if (
         str(tracking_scanner or "").strip().lower() in _BI_SIGNAL_SCANNERS
         and not tracking_rows_list
@@ -15062,9 +15184,13 @@ def _extract_trade_barrier(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _confirmed_break_reclaim_evidence(
-    item: Dict[str, Any], barrier: Dict[str, Any]
+    item: Dict[str, Any], barrier: Dict[str, Any], *, allow_breakout: bool = False
 ) -> Optional[Dict[str, Any]]:
-    """Return only completed-close/hold reclaim evidence, never spot-price inference."""
+    """Verify bound close evidence; optional breakout never claims a retest.
+
+    Legacy reclaim proofs retain their hold/retest contract. Only the new
+    explicit breakout model may release a barrier without a subsequent retest.
+    """
     setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else {}
     candidates: List[Any] = [
         barrier.get("break_reclaim"),
@@ -15097,9 +15223,19 @@ def _confirmed_break_reclaim_evidence(
         if not isinstance(raw, dict):
             continue
         evidence_model = str(raw.get("model") or "")
-        if evidence_model not in {"break_reclaim_close_hold_v1", "break_reclaim_close_hold_v2"}:
+        breakout_only = allow_breakout and evidence_model == "break_confirmed_optional_retest_v1"
+        if not breakout_only and evidence_model not in {"break_reclaim_close_hold_v1", "break_reclaim_close_hold_v2"}:
             continue
-        if str(raw.get("state") or "").upper() != "RECLAIMED":
+        if str(raw.get("state") or "").upper() != ("BREAK_CONFIRMED" if breakout_only else "RECLAIMED"):
+            continue
+        if breakout_only and (
+            raw.get("retest_required") is not False
+            or raw.get("retest_observed") is not False
+            or type(raw.get("hold_bars_required")) is not int
+            or raw["hold_bars_required"] != 0
+            or any(type(raw.get(key)) is not int or raw[key] < 0
+                   for key in ("hold_bars_observed", "completed_bars_used"))
+        ):
             continue
         if not raw.get("break_closed_at"):
             continue
@@ -15121,6 +15257,10 @@ def _confirmed_break_reclaim_evidence(
             continue
         if not expected_direction or str(raw.get("direction") or "").strip().upper() != expected_direction:
             continue
+        if breakout_only:
+            row_direction = _infer_alert_direction(item)
+            if row_direction and row_direction != expected_direction:
+                continue
         evidence_boundary = _alert_float(raw.get("boundary"), None)
         if (
             expected_boundary is None
@@ -15152,7 +15292,7 @@ def _confirmed_break_reclaim_evidence(
             or completed_used < hold_observed + 1
         ):
             continue
-        if evidence_model == "break_reclaim_close_hold_v1":
+        if evidence_model == "break_reclaim_close_hold_v1" or (breakout_only and not raw.get("reclaim_history")):
             # Legacy evidence always starts at the full zone confirmation.
             # New metadata must never weaken this existing contract.
             if not math.isclose(zone_confirmed_at, barrier_confirmed_at, abs_tol=1.0):
@@ -15225,8 +15365,50 @@ def _confirmed_break_reclaim_evidence(
             or (expected_direction == "SHORT" and last_close >= expected_boundary)
         ):
             continue
+        if breakout_only:
+            current = _alert_float(_extract_alert_price(item), None)
+            if (current is None or not math.isfinite(current)
+                    or (expected_direction == "LONG" and current <= expected_boundary)
+                    or (expected_direction == "SHORT" and current >= expected_boundary)):
+                continue
         return dict(raw)
     return None
+
+
+def _confirmed_trade_break_evidence(item, barrier):
+    """Shared scanner/chart/mail rule: a confirmed break does not require a retest."""
+    return _confirmed_break_reclaim_evidence(item, barrier, allow_breakout=True)
+
+
+def _barrier_release_requires_live_evidence(barrier):
+    """A previously crossed level is not the same as a distant accepted TP1."""
+    if not isinstance(barrier, dict):
+        return False
+    if barrier.get("breakout_confirmed") is True or barrier.get("reclaimed") is True:
+        return True
+    if "action" not in barrier or barrier.get("action"):
+        return False
+    return any(
+        isinstance(barrier.get(key), dict)
+        and str(barrier[key].get("state") or "").upper() in {"BREAK_CONFIRMED", "RECLAIMED"}
+        for key in ("break_reclaim", "break_reclaim_evidence")
+    )
+
+
+def _breakout_retest_warning_html(row):
+    """Render explicit producer-validated metadata, never infer proof from a label."""
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    for container in (row, setup):
+        if (container.get("breakout_confirmation") == "confirmed_close"
+                and container.get("retest_status") == "not_confirmed"
+                and isinstance(container.get("warning_codes"), (list, tuple))
+                and isinstance(container.get("retest_warning"), str)
+                and container.get("retest_warning").strip()
+                and "breakout_confirmed_without_retest" in (container.get("warning_codes") or [])):
+            message = breakout_warning_fields(confirmed_close=True).get("retest_warning", "")
+            identity = html.escape(_extract_alert_ticker(row) or "Signal", quote=True)
+            return '<br><span data-breakout-warning-for="' + identity + '" style="color:#b45309;font-weight:bold">' + html.escape(message) + '</span>'
+    return ""
 
 
 def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
@@ -15237,7 +15419,8 @@ def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
     # Canonical level planning persists the first barrier even when it is far
     # enough to be a valid TP1.  Only an explicit break/reclaim action is a
     # gate; mere provenance must not downgrade an accepted plan.
-    if "action" in barrier and not barrier.get("action"):
+    proof_dependent_release = _barrier_release_requires_live_evidence(barrier)
+    if "action" in barrier and not barrier.get("action") and not proof_dependent_release:
         return None
     barrier_price = _alert_float(barrier.get("price"), None)
     if barrier_price is None or barrier_price <= 0:
@@ -15253,11 +15436,13 @@ def _structural_barrier_alert_reason(item: Dict[str, Any]) -> Optional[str]:
     if direction not in {"LONG", "SHORT"}:
         return None
 
-    reclaim_evidence = _confirmed_break_reclaim_evidence(item, barrier)
-    barrier["reclaimed"] = reclaim_evidence is not None
+    reclaim_evidence = _confirmed_trade_break_evidence(item, barrier)
+    barrier["reclaimed"] = bool(reclaim_evidence and reclaim_evidence.get("state") == "RECLAIMED")
     if reclaim_evidence is not None:
         barrier["break_reclaim"] = reclaim_evidence
         return None
+    if proof_dependent_release:
+        return "near_structural_barrier_wait_trigger"
 
     current = _alert_float(_extract_alert_price(item), None)
     entry = _alert_float(levels.get("entry"), None)
@@ -15308,6 +15493,15 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
 
     setup = item.get("trade_setup") if isinstance(item.get("trade_setup"), dict) else None
 
+    def _has_independent_structure_rejection(container):
+        if not isinstance(container, dict):
+            return False
+        decision = container.get("structure_decision")
+        return str(container.get("structure_status") or "").upper() in {"REJECT", "STRUCTURE_UNAVAILABLE"} or (
+            isinstance(decision, dict)
+            and str(decision.get("status") or "").upper() in {"REJECT", "STRUCTURE_UNAVAILABLE"}
+        )
+
     def _remove_barrier_wait_state(
         container: Optional[Dict[str, Any]],
         *,
@@ -15319,6 +15513,13 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
             return
         container["barrier_gate"] = None
         container["barrier_gate_active"] = False
+        if _has_independent_structure_rejection(container):
+            # Only this barrier was released. Invalid stops, unavailable
+            # structure and other independent rejections remain authoritative.
+            decision = dict(container.get("structure_decision") or {})
+            decision["barrier_gate"] = None
+            container["structure_decision"] = decision
+            return
         container["structure_status"] = accepted_status
         container["structure_reason"] = accepted_reason
         container.pop("barrier_gate_reason", None)
@@ -15348,9 +15549,12 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
             decision["break_reclaim"] = evidence
         container["structure_decision"] = decision
 
-    reclaim_evidence = _confirmed_break_reclaim_evidence(item, barrier)
-    barrier["reclaimed"] = reclaim_evidence is not None
+    proof_dependent_release = _barrier_release_requires_live_evidence(barrier)
+    reclaim_evidence = _confirmed_trade_break_evidence(item, barrier)
+    barrier["reclaimed"] = bool(reclaim_evidence and reclaim_evidence.get("state") == "RECLAIMED")
     if reclaim_evidence is not None:
+        breakout_only = reclaim_evidence.get("state") == "BREAK_CONFIRMED"
+        barrier["breakout_confirmed"] = True
         barrier["break_reclaim"] = reclaim_evidence
         barrier["action"] = None
         item["nearest_barrier"] = barrier
@@ -15358,17 +15562,27 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
             setup["nearest_barrier"] = barrier
         _remove_barrier_wait_state(
             item,
-            accepted_status="ACCEPT_AFTER_RECLAIM",
-            accepted_reason="completed_break_close_hold_reclaim_confirmed",
+            accepted_status="ACCEPT_AFTER_BREAKOUT" if breakout_only else "ACCEPT_AFTER_RECLAIM",
+            accepted_reason="completed_break_close_retest_optional" if breakout_only else "completed_break_close_hold_reclaim_confirmed",
             evidence=reclaim_evidence,
         )
         _remove_barrier_wait_state(
             setup,
-            accepted_status="ACCEPT_AFTER_RECLAIM",
-            accepted_reason="completed_break_close_hold_reclaim_confirmed",
+            accepted_status="ACCEPT_AFTER_BREAKOUT" if breakout_only else "ACCEPT_AFTER_RECLAIM",
+            accepted_reason="completed_break_close_retest_optional" if breakout_only else "completed_break_close_hold_reclaim_confirmed",
             evidence=reclaim_evidence,
         )
+        for container in (item, setup):
+            apply_breakout_warning(container, confirmed_close=True, retest_confirmed=not breakout_only)
         return barrier
+
+    if proof_dependent_release:
+        # action=None was conditional on the old proof, not a permanent bypass.
+        # A changed quote or observation must re-arm the original barrier gate.
+        barrier["action"] = "BREAK_RECLAIM_REQUIRED" if side == "resistance" else "BREAK_SUPPORT_REQUIRED"
+        barrier["breakout_confirmed"] = False
+        for container in (item, setup):
+            apply_breakout_warning(container, confirmed_close=False)
 
     # Canonical planners persist the nearest barrier even when it has enough
     # room.  ``action=None`` is an explicit ACCEPT and must clear a stale gate
@@ -15445,14 +15659,12 @@ def _apply_trade_barrier_gate(item: Dict[str, Any], scanner_name: str) -> Option
             continue
         container["barrier_gate"] = gate_value
         container["barrier_gate_active"] = True
-        container["structure_status"] = "WAIT_BREAK_RECLAIM"
-        container["structure_reason"] = structure_reason
         nested_decision = dict(container.get("structure_decision") or {})
-        nested_decision.update({
-            "status": "WAIT_BREAK_RECLAIM",
-            "reason": structure_reason,
-            "barrier_gate": gate_value,
-        })
+        if not _has_independent_structure_rejection(container):
+            container["structure_status"] = "WAIT_BREAK_RECLAIM"
+            container["structure_reason"] = structure_reason
+            nested_decision.update(status="WAIT_BREAK_RECLAIM", reason=structure_reason)
+        nested_decision["barrier_gate"] = gate_value
         container["structure_decision"] = nested_decision
         for field in starter_fields:
             container.pop(field, None)
@@ -17553,6 +17765,7 @@ def _build_structured_trade_setup(
     buffer = max(entry * 0.003, atr_value * 0.10)
     warnings: List[str] = []
     notes: List[str] = []
+    breakout_warnings: List[Dict[str, Any]] = []
 
     support = _alert_float(support_1, 0.0) or 0.0
     resistance = _alert_float(resistance_1, 0.0) or 0.0
@@ -17568,16 +17781,25 @@ def _build_structured_trade_setup(
         }.intersection(set(structure_snapshot.quality_flags))
         if unavailable_flags or not structure_snapshot.zones:
             return _unavailable("causal_structure_unavailable")
-        # A quote or planned entry crossing a known level does not prove that
-        # the level changed role. Only completed close/hold/retest evidence may
-        # release a former resistance/support gate.
+        # A quote alone is not proof. A causally confirmed closed breakout is
+        # admissible without a retest; that separate missing proof is a warning.
         for zone in structure_snapshot.zones:
-            if side == "LONG" and "resistance" in zone.origin_roles:
-                if entry > zone.upper and zone.break_state != "reclaimed":
-                    return _unavailable("crossed_resistance_unconfirmed")
-            elif side == "SHORT" and "support" in zone.origin_roles:
-                if entry < zone.lower and zone.break_state != "reclaimed":
-                    return _unavailable("crossed_support_unconfirmed")
+            crossed = ((side == "LONG" and "resistance" in zone.origin_roles and entry > zone.upper)
+                       or (side == "SHORT" and "support" in zone.origin_roles and entry < zone.lower))
+            if not crossed or zone.break_state == "reclaimed":
+                continue
+            raw_proof = zone.break_reclaim_evidence.to_dict() if zone.break_reclaim_evidence is not None else None
+            barrier = {"zone_id": zone.zone_id, "zone_low": zone.lower, "zone_high": zone.upper,
+                       "confirmed_at": zone.confirmed_at.isoformat(),
+                       "side": "resistance" if side == "LONG" else "support",
+                       "break_reclaim": raw_proof}
+            if zone.reclaim_history:
+                barrier["reclaim_history"] = zone.reclaim_history.to_dict()
+            proof = _confirmed_trade_break_evidence(
+                {"price": entry, "scan_price_observed_at": structure_snapshot.as_of.isoformat()}, barrier)
+            if zone.break_state != "break_confirmed" or not proof or proof.get("state") != "BREAK_CONFIRMED":
+                return _unavailable("crossed_resistance_unconfirmed" if side == "LONG" else "crossed_support_unconfirmed")
+            breakout_warnings.append(proof)
         try:
             directional_structure = classify_for_trade(
                 structure_snapshot,
@@ -17953,6 +18175,10 @@ def _build_structured_trade_setup(
                 f"{prefix}_confirmed_at": zone.confirmed_at.isoformat().replace("+00:00", "Z"),
                 f"{prefix}_causal_structure_validated": True,
             })
+    if breakout_warnings:
+        apply_breakout_warning(result, True)
+        result["breakout_evidence"] = breakout_warnings
+        result["warnings"] = list(dict.fromkeys([*warnings, result["retest_warning"]]))
     result["level_quality"] = trade_level_quality(result)
     if isinstance(diagnostics, dict):
         diagnostics.update(status="built", reason=(
@@ -19278,8 +19504,10 @@ def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, A
                          "wyckoff_as_of": report["as_of"], "pattern_score": pattern["score"],
                          "setup_key": "wyckoff:" + pattern["entry_trigger"]["trigger_id"],
                          "history_days": report["bars_used"],
-                         "pattern_details": ["1D: bestaetigte Ereignisfolge", f"Phase {pattern['phase']}: Ausbruch und Ruecktest bestaetigt",
+                         "pattern_details": ["1D: bestaetigte Ereignisfolge", f"Phase {pattern['phase']}: Ausbruch bestaetigt" + ("; Ruecktest noch nicht bestaetigt" if pattern.get("retest_status") == "not_confirmed" else " und Ruecktest bestaetigt"),
                                              "Qualitaetswert, keine Gewinnwahrscheinlichkeit"]})
+        if pattern.get("breakout_confirmation") == "confirmed_close" and pattern.get("retest_status") == "not_confirmed":
+            apply_breakout_warning(enriched, True)
         return enriched
     if strat.get("canonical_name") == "Turtle Breakout":
         # The public menu used to fall through to generic consolidation because
@@ -19301,6 +19529,7 @@ def _apply_pattern_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, A
         if not geometry.get("valid"):
             return None
         return {**candidate, "pattern_type": "turtle_donchian20", "direction": "LONG", "Signal_Direction": "LONG",
+                **breakout_warning_fields(confirmed_close=True),
                 "Entry": entry, "entry": entry, "StopLoss": stop, "stop_loss": stop,
                 "TP1": tp1, "tp1": tp1, "TP2": tp2, "tp2": tp2, "Exit_Level": exit_level,
                 "DC_High_20": entry, "ATR": atr, "risk_reward": geometry["rr"],
@@ -20326,6 +20555,10 @@ def _promote_cup_handle_watch_row(
         "trade_action": "LONG_NOW",
     })
     promoted["trade_setup"] = setup
+    if trigger_state.get("confirmed") is True:
+        retested = trigger_state.get("trigger_type") == "5m_retest_held"
+        apply_breakout_warning(promoted, True, retest_confirmed=retested)
+        apply_breakout_warning(setup, True, retest_confirmed=retested)
     return promoted
 
 
@@ -20621,6 +20854,9 @@ def _apply_cup_handle_strategy_filter(
                          "daily_close_confirmation_date": confirmation_bar_date,
                          "scanner_note": "Swing-Plan: abgeschlossener 1D-Cup-Breakout; keine Live-Ausfuehrung."})
         enriched["trade_setup"] = dict(trade_setup, trade_action="LONG_TRIGGER", entry_status="SWING_PLAN")
+        if not _cup_signal_contract_reason(enriched):
+            apply_breakout_warning(enriched, True)
+            apply_breakout_warning(enriched["trade_setup"], True)
         return enriched
     long_reasons = _long_entry_rule_reasons(enriched)
     if long_reasons:
@@ -20657,6 +20893,9 @@ def _apply_cup_handle_strategy_filter(
                 enriched["next_session_trigger_type"] = trigger_state.get(
                     "trigger_type"
                 )
+                if trigger_state.get("trigger_type") == "5m_retest_held":
+                    apply_breakout_warning(enriched, True, retest_confirmed=True)
+                    apply_breakout_warning(trade_setup, True, retest_confirmed=True)
                 enriched["scan_price_observed_at"] = _stock_market_timestamp_iso(
                     observed_ts
                 )
@@ -20771,6 +21010,12 @@ def _apply_cup_handle_strategy_filter(
             "Cup-and-Handle erkannt, aber Markt-Session nicht verifizierbar — "
             "nur beobachten."
         )
+    if enriched.get("daily_close_confirmed") is True and not _cup_signal_contract_reason(enriched):
+        # A handle precedes the break; only a later completed retest can remove
+        # this warning. Never use an unfinished daily candle as close proof.
+        retested = enriched.get("next_session_trigger_type") == "5m_retest_held"
+        apply_breakout_warning(enriched, True, retest_confirmed=retested)
+        apply_breakout_warning(trade_setup, True, retest_confirmed=retested)
     return enriched
 
 
@@ -21693,6 +21938,10 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
     # later VRVP, trade-health, mail or execution gates passed.
     strategy_row["native_plan_status"] = _plan_diagnostics["status"]
     strategy_row["native_plan_reason"] = _plan_diagnostics["reason"]
+    final_setup = strategy_row.get("trade_setup") or {}
+    if (final_setup.get("breakout_confirmation") == "confirmed_close"
+            and final_setup.get("retest_status") == "not_confirmed"):
+        apply_breakout_warning(strategy_row, True)
     _plan_counts = scan_diag.setdefault("plan_build_counts", {})
     _plan_reason = _plan_diagnostics["reason"]
     _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
@@ -22407,6 +22656,11 @@ def _strategy_scan_wrapper(
                         strategy_row["Momentum_Contract_Version"] = MOMENTUM_CONTRACT_VERSION
                         strategy_row["Momentum_Execution_Confirmed"] = not swing_daily_mode
                         strategy_row["Momentum_Analysis_As_Of"] = analysis_as_of.isoformat().replace("+00:00", "Z")
+                        apply_breakout_warning(
+                            strategy_row,
+                            _confirmation_status in {"DAILY_CONFIRMED", "FRESH_CROSS", "HELD_BREAKOUT", "RETEST_HELD"},
+                            retest_confirmed=_confirmation_status == "RETEST_HELD",
+                        )
                     if swing_daily_mode:
                         strategy_row.update(stock_swing.metadata(t["swing_analysis_session"], price))
                     _ad_ok, _ad_block_reasons, _ad_info = _stock_reversal_ad_gate(
@@ -23174,6 +23428,7 @@ def _turtle_scan_wrapper() -> None:
                     "Breakout_Pct": round(breakout_pct, 2),
                     "Breakout_Close_Position": round(close_position, 3),
                     "Breakout_Level_Held": held_breakout,
+                    **breakout_warning_fields(confirmed_close=True),
                     "ATR": round(atr, 2),
                     "ATR_Pct": round(atr / current_close * 100, 2),
                     "Entry": round(entry_price, 2),
@@ -33340,7 +33595,7 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     # Zentrale Leiter statt Inline-Duplikat (S≥88/A≥80/B≥65...) — identisch im
     # erreichbaren Bereich, da explosion_score < 70 oben bereits None liefert.
     grade, _ = _score_grade_for_value(explosion_score)
-    return {
+    result = {
         **row,
         "ticker": row.get("Symbol"),
         "Price": _ce_round_price(price),
@@ -33440,6 +33695,9 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "alertable_crypto": bool(trigger_tradeable and risk_level != "HIGH" and rr >= 1.5),
         "execution_trigger_ok": bool(trigger_ok),
     }
+    apply_breakout_warning(result, trigger_tradeable)
+    apply_breakout_warning(setup, trigger_tradeable)
+    return result
 
 
 def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -33593,6 +33851,8 @@ def _downgrade_expired_crypto_triggers(rows: List[Dict[str, Any]], cache_age: Op
         candle_expired = execution_age is not None and execution_age > 600
         trigger_missing = row.get("execution_trigger_ok") is False
         if cache_expired or candle_age_missing or candle_expired or trigger_missing:
+            apply_breakout_warning(row, False)
+            apply_breakout_warning(row.get("trade_setup"), False)
             row["trade_signal"] = "WARTEN"
             row["trade_action"] = "WAIT_FOR_BREAKOUT"
             row["trade_decision"] = "WAIT_FOR_TRIGGER"
@@ -37087,7 +37347,7 @@ def _penny_buy_email(
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{row.get('dump_risk_score')}</td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb">{_format_alert_price(setup.get('entry'))}<br><span style="color:#64748b">Spread {row.get('spread_bps')}bps, Kosten ca. {cost_bps:.0f}bps</span><br><span style="color:#64748b">Modell-Limit ${max_order:,.0f}</span><br><span style="color:#dc2626">Stop {_format_alert_price(setup.get('stop_loss'))}</span></td>
           <td style="padding:9px;border-bottom:1px solid #e5e7eb;color:#059669">{_format_alert_price(setup.get('tp1'))}<br>{_format_alert_price(setup.get('tp2'))}</td>
-          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{html.escape(str(row.get('trigger_type') or ''))}<br>{setup.get('rr')}R<br>{row.get('signal_age_seconds')}s alt</td>
+          <td style="padding:9px;border-bottom:1px solid #e5e7eb">{html.escape(str(row.get('trigger_type') or ''))}<br>{setup.get('rr')}R<br>{row.get('signal_age_seconds')}s alt{_breakout_retest_warning_html(row)}</td>
         </tr>"""
     body = f"""
     <h2 style="color:#0f766e;margin-top:0">Pennystock - bestaetigter 5m Entry</h2>
@@ -39838,6 +40098,10 @@ def _orb_scanner_wrapper() -> None:
                 })
                 breakouts.append({
                     **cand,
+                    **breakout_warning_fields(
+                        confirmed_close=breakout_confirmed,
+                        retest_confirmed=volume_context.get("retest_confirmed") is True,
+                    ),
                     "or_high": round(or_high, 2), "or_low": round(or_low, 2),
                     "or_mid": round(or_mid, 2),
                     "or_size": round(or_size, 2),
