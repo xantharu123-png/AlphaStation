@@ -20933,6 +20933,8 @@ def _apply_special_strategy_post_filter(
     strat: Dict[str, Any],
     strategy_name: str,
     diagnostics: Optional[Dict[str, Any]] = None,
+    *,
+    progress_callback=None,
 ) -> List[Dict[str, Any]]:
     """Upgrade strategy scans from pure snapshot filters to setup validation."""
     if str(strat.get("pattern_type") or "").startswith("wyckoff_"):
@@ -20964,7 +20966,19 @@ def _apply_special_strategy_post_filter(
                                cup_terminal_counts={},
                                cup_terminal_count_semantics=_CUP_TERMINAL_COUNT_SEMANTICS)
 
+    filtered: List[Dict[str, Any]] = []
+    special_checked = 0
+    special_total = min(len(candidates), candidate_limit)
+
+    def publish_checked():
+        if strat.get("needs_cup_handle") and progress_callback is not None:
+            # Only completed special-filter survivors leave this stage. The
+            # consumer owns throttling, contract revalidation and display-only
+            # cache publication; it must not mutate analysis results.
+            progress_callback(filtered, special_checked, special_total)
+
     def checked_candidate(reason: str):
+        nonlocal special_checked
         # A finished special attempt includes an explicit insufficient-history
         # rejection, but never an interrupted provider/native/shape operation.
         if cup_diagnostics is not None:
@@ -20973,6 +20987,8 @@ def _apply_special_strategy_post_filter(
             terminal_counts[reason] = terminal_counts.get(reason, 0) + 1
             cup_diagnostics["special_filter_checked_count"] += 1
             cup_diagnostics["special_filter_unexamined_count"] -= 1
+        special_checked += 1
+        publish_checked()
 
     min_history = max(int(strat.get("history_days", 0) or 0), 20)
     if strat.get("needs_volume_profile"):
@@ -20984,7 +21000,7 @@ def _apply_special_strategy_post_filter(
     if strat.get("needs_ma"):
         min_history = max(min_history, _get_max_ma_period(strat) + 12)
 
-    filtered: List[Dict[str, Any]] = []
+    publish_checked()
     for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
         _scan_control_point()
         stock_scan_runtime.checkpoint("special_filter", checked=candidate_index,
@@ -21789,9 +21805,15 @@ def _strategy_scan_wrapper(
         _last_partial_publish = 0.0
         _last_attempt_publish = 0.0
 
-        def _publish_partial(checked: int, force: bool = False) -> None:
+        def _publish_partial(checked: int, force: bool = False, *, special_rows=None,
+                             special_checked: int = 0, special_total: int = 0) -> None:
             nonlocal _last_partial_publish, _last_attempt_publish
-            stock_scan_runtime.checkpoint("analyzing", checked=checked, total=len(_all_snapshot_tickers))
+            special_phase = special_rows is not None
+            stock_scan_runtime.checkpoint(
+                "special_filter" if special_phase else "analyzing",
+                checked=special_checked if special_phase else checked,
+                total=special_total if special_phase else len(_all_snapshot_tickers),
+            )
             scan_diag["checked"] = checked
             now = time.monotonic()
             if force or now - _last_attempt_publish >= 30:
@@ -21801,20 +21823,27 @@ def _strategy_scan_wrapper(
                 return
             # Cup shape validation happens only after generic top-N admission.
             # Publish progress, never pre-pattern candidates as Cup results.
-            preview = [] if strat.get("needs_cup_handle") else sorted(
-                (dict(row) for row in results if isinstance(row, dict) and _stock_momentum_row_contract_valid(row)),
-                key=lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0))),
+            source_rows = special_rows if special_phase else ([] if strat.get("needs_cup_handle") else results)
+            preview = sorted(
+                (dict(row) for row in source_rows if isinstance(row, dict) and _stock_momentum_row_contract_valid(row)),
+                key=(lambda row: (-float(row.get("score", 0) or 0), -float(row.get("Dollar_Volume", 0) or 0),
+                                  -abs(float(row.get("Change_Pct", 0) or 0)))) if special_phase
+                    else (lambda row: (-row.get("score", 0), -abs(row.get("Change_Pct", 0)))),
             )[:max_results]
             partial_diag = dict(scan_diag)
             partial_diag["checked"] = checked
             partial_diag["final_results"] = len(preview)
             partial_diag["scan_in_progress"] = True
+            detail = f"{checked}/{len(_all_snapshot_tickers)} Aktien geprueft"
+            if special_phase:
+                partial_diag["runtime_phase"] = "special_filter"
+                detail += f"; Musterpruefung {special_checked}/{special_total} ausgewaehlte Kandidaten"
             save_partial_cache_file(
                 _strat_cache,
                 preview,
                 checked=checked,
                 total=len(_all_snapshot_tickers),
-                detail=f"{checked}/{len(_all_snapshot_tickers)} Aktien geprueft",
+                detail=detail,
                 metadata={
                     "cache_version": STOCK_STRATEGY_CACHE_VERSION,
                     "diagnostics": partial_diag,
@@ -22437,8 +22466,22 @@ def _strategy_scan_wrapper(
         scan_diag["raw_matches_before_special_filter"] = len(results)
         _scan_control_point()
         stock_scan_runtime.checkpoint("special_filter")
+        special_progress = {}
+        if strat.get("needs_cup_handle"):
+            _special_preview_seen = False
+
+            def _publish_special_partial(rows, checked, total):
+                nonlocal _special_preview_seen
+                first_match = bool(rows) and not _special_preview_seen
+                _special_preview_seen = _special_preview_seen or bool(rows)
+                _publish_partial(
+                    len(_all_snapshot_tickers), force=first_match or checked in (0, total),
+                    special_rows=rows, special_checked=checked, special_total=total,
+                )
+
+            special_progress["progress_callback"] = _publish_special_partial
         with stock_scan_runtime.measure("special_filter"):
-            results = _apply_special_strategy_post_filter(results, strat, strategy_name, scan_diag)
+            results = _apply_special_strategy_post_filter(results, strat, strategy_name, scan_diag, **special_progress)
         # History/provider calls can outlive the existing 15-minute proof
         # budget. Do not publish an expired start-of-scan confirmation as new.
         _current_momentum_results = []

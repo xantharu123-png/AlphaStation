@@ -93,7 +93,12 @@ def test_cup_native_work_only_for_same_stable_top_180(monkeypatch, varied):
     assert diagnostics["special_filter_unexamined_count"] == 45
     assert diagnostics["special_filter_limit"] == 180
     assert diagnostics["plan_build_counts"] == {"fixture_no_structure": 180}
-    assert state["partials"] and all(not p[0] for p in state["partials"])
+    assert state["partials"]
+    assert all(not preview for preview, meta in state["partials"]
+               if meta["metadata"]["diagnostics"].get("runtime_phase") != "special_filter")
+    assert any(preview for preview, _ in state["partials"])
+    assert all(api._stock_momentum_row_contract_valid(row)
+               for preview, _ in state["partials"] for row in preview)
     public = json.dumps([rows, state["writes"], state["partials"], state["attempts"]], default=str)
     assert "_deferred_native_plan" not in public
     assert "fixture_index" not in public
@@ -144,7 +149,11 @@ def test_selected_native_failure_never_commits_or_refills(monkeypatch, tmp_path,
     assert diag["special_filter_checked_count"] == 2
     assert diag["special_filter_unexamined_count"] == 223
     assert diag["coverage"] == "incomplete"
-    assert all(not rows for rows, _ in state["partials"])
+    assert all(not preview for preview, meta in state["partials"]
+               if meta["metadata"]["diagnostics"].get("runtime_phase") != "special_filter")
+    assert {row["ticker"] for preview, _ in state["partials"] for row in preview} <= {"T000", "T001"}
+    assert all(api._stock_momentum_row_contract_valid(row)
+               for preview, _ in state["partials"] for row in preview)
     assert "_deferred_native_plan" not in json.dumps(state["attempts"], default=str)
 
 

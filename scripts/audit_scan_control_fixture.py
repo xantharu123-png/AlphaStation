@@ -1,7 +1,7 @@
 """Loopback-only pause/resume UI fixture; synthetic, no production API imports.
 
 Run: python scripts/audit_scan_control_fixture.py --port 8767
-Select /__qa/control?case=running|paused|weekend|nonadmin|restart_required|round.
+Select /__qa/control?case=running|paused|weekend|nonadmin|restart_required|round|unverified|timeout.
 Append &scanner=bi_long or &scanner=bi_short for a single active BI worker.
 State changes affect only this in-memory QA process. No scans, mail or orders.
 """
@@ -19,7 +19,7 @@ from audit_cup_geometry_fixture import cup_fixture
 CUP_KEY = "strat_cup_and_handle_breakout"
 OWNERS = (CUP_KEY, "strategy_scan", "bi_long", "bi_short")
 CASES = {"running", "pause_requested", "paused", "weekend", "nonadmin",
-         "restart_required", "round", "finishing"}
+         "restart_required", "round", "finishing", "unverified", "timeout"}
 RESUME = "2026-09-21T13:30:00Z"  # Fixed synthetic schedule, not a live exchange claim.
 
 
@@ -112,8 +112,8 @@ class ControlFixture:
             active = control["worker_alive"]
             return {"status": "success", "data": [row], "count": 1,
                 "cached_at": STAMP, "scan_running": active, "partial": active,
-                "scan_run_id": control["run_id"], "scan_control": control,
-                "scan_schedule": self.schedule(), "scan_error": None,
+                "scan_run_id": control["run_id"], "scan_control": None if self.case == "unverified" else control,
+                "scan_schedule": self.schedule(), "scan_error": "scan_timeout" if self.case == "timeout" else None,
                 "scan_last_attempt_at": STAMP, "scan_last_completed_at": None if active else STAMP,
                 "checked": 72 if active else 180, "total": 180,
                 "progress_detail": "Synthetische Kontroll-Fixture; kein echter Scan",
@@ -129,7 +129,7 @@ class ControlFixture:
                 control = self.read(key)
                 scans[key] = {"running": control["worker_alive"], "run_id": control["run_id"],
                     "last_run": STAMP, "last_attempt_at": STAMP, "next_run": RESUME,
-                    "cache_health": "ok", "interval_min": 180, "control": control,
+                    "cache_health": "ok", "interval_min": 180, "control": None if self.case == "unverified" else control,
                     "schedule": self.schedule(), "running_since_sec": 360,
                     "progress": {"running": control["worker_alive"], "checked": 72, "total": 180,
                         "hits": 1, "detail": "Synthetische Kontroll-Fixture", "seconds_since_progress": 2}}
