@@ -12,6 +12,11 @@ def _orb_row(
     return {
         "ticker": "AMPL",
         "direction": direction,
+        "current_price": entry,
+        "or_high": entry * (0.999 if direction == "LONG" else 1.02),
+        "or_low": entry * (0.98 if direction == "LONG" else 1.001),
+        "signal_bar_timestamp": (api.datetime.now(api.timezone.utc).timestamp() - 300) * 1000,
+        "bar_state": "completed_5m",
         "entry": entry,
         "stop": stop,
         "target1": target1,

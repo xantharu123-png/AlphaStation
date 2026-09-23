@@ -425,6 +425,10 @@ not_new_listing_dump
 not_tradeable_signal_quality
 open_equivalent_trade
 orb_breakout_volume_unconfirmed
+orb_completed_candle_stale
+orb_completed_candle_unverified
+orb_current_side_unverified
+orb_current_breakout_lost
 orb_invalid_target_geometry
 orb_no_active_breakout
 orb_not_tradeable

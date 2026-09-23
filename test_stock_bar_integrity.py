@@ -1,5 +1,6 @@
 """Deterministic producer input/time-boundary and Biotech parity regressions."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import modules.penny_stock_scanner as penny
 import modules.premarket as pm
@@ -49,12 +50,15 @@ def test_stock_four_hour_future_or_conflicting_bar_cannot_confirm_pattern():
 
 def test_biotech_live_and_offline_use_identical_distribution_scoring(monkeypatch):
     raw = []
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    session = datetime(2026, 1, 2, tzinfo=ZoneInfo("America/New_York"))
     for index in range(55):
+        while scanners.stock_swing.session_close(session.date().isoformat()) is None:
+            session += timedelta(days=1)
         price = 100 - index * 0.5
-        raw.append({"t": (start + index * 86400) * 1000, "o": price + 0.2,
+        raw.append({"t": session.timestamp() * 1000, "o": price + 0.2,
                     "h": price + 1, "l": price - 1, "c": price,
                     "v": 4_000_000 if index == 54 else 500_000})
+        session += timedelta(days=1)
     class Response:
         status_code = 200
         def json(self):

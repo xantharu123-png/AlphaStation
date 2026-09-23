@@ -17,7 +17,8 @@ def live_payload(**updates):
 
 
 @pytest.mark.parametrize("owner", ["bi_long", "bi_short", "strategy_scan",
-                                    "strat_cup_and_handle_breakout", "strat_wyckoff_accumulation"])
+                                    "strat_cup_and_handle_breakout", "strat_wyckoff_accumulation",
+                                    "crypto_strat_test"])
 def test_verified_live_timeout_is_nonterminal_but_explicitly_warned(owner):
     payload = live_payload()
     payload["scan_control"]["owner_scan_key"] = owner
@@ -38,7 +39,7 @@ def test_verified_live_timeout_is_nonterminal_but_explicitly_warned(owner):
     {"scan_control": {**live_payload()["scan_control"], "supported": False}},
     {"scan_control": {**live_payload()["scan_control"], "state": "finished"}},
     {"scan_control": {**live_payload()["scan_control"], "run_id": "different"}},
-    {"scan_control": {**live_payload()["scan_control"], "owner_scan_key": "crypto_strat_test"}},
+    {"scan_control": {**live_payload()["scan_control"], "owner_scan_key": "unsupported_test"}},
 ])
 def test_no_live_exception_without_complete_same_worker_proof(updates):
     encoded = json.dumps(live_payload(**updates))
@@ -50,6 +51,20 @@ def test_expected_run_mismatch_precedes_live_timeout_exception():
     encoded = json.dumps(live_payload())
     assert evaluate(f"scannerLivePartialTimeout({encoded}, 'other')") is False
     assert evaluate(f"scannerPollOutcome({encoded}, null, true, 'other')") == "superseded"
+
+
+@pytest.mark.parametrize("owner", [
+    "biotech", "bear", "turtle", "orb", "penny_stocks", "volume_spikes",
+    "money_flow", "early_movers", "btc_divergenz", "crypto_explosion",
+])
+def test_pause_capability_does_not_grant_live_partial_timeout_exception(owner):
+    payload = live_payload()
+    payload["scan_control"]["owner_scan_key"] = owner
+    payload["scan_control"]["resume_policy"] = "restart_fresh"
+    encoded = json.dumps(payload)
+    assert evaluate(f"scannerControlSnapshot({encoded}).supported") is True
+    assert evaluate(f"scannerLivePartialTimeout({encoded}, 'run-1')") is False
+    assert evaluate(f"scannerPollOutcome({encoded}, null, true, 'run-1')") == "error"
 
 
 BASE = """

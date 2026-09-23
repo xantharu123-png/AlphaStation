@@ -241,7 +241,7 @@ def test_open_timestamp_bar_that_has_not_closed_cannot_change_vrvp_structure():
         (
             "us_equity_regular",
             datetime(2025, 7, 15, 19, 0, tzinfo=timezone.utc),
-            "us_equity_regular_session_16_et",
+            "us_equity_exchange_session_close",
         ),
     ],
 )
@@ -249,11 +249,22 @@ def test_date_only_future_and_running_daily_bars_cannot_change_vrvp(
     date_session_context, cutoff, expected_semantics
 ):
     raw = _bars_with_nodes()
-    first_day = cutoff.date() - timedelta(days=len(raw))
+    days = []
+    cursor = cutoff.date() - timedelta(days=1)
+    while len(days) < len(raw):
+        if date_session_context == "us_equity_regular":
+            from modules.stock_swing_contract import session_close
+            is_session = session_close(cursor.isoformat()) is not None
+        else:
+            is_session = True
+        if is_session:
+            days.append(cursor)
+        cursor -= timedelta(days=1)
+    days.reverse()
     completed = [
         {
             **bar,
-            "date": (first_day + timedelta(days=index)).isoformat(),
+            "date": days[index].isoformat(),
         }
         for index, bar in enumerate(raw)
     ]

@@ -14,10 +14,10 @@ def test_uncontrolled_scanners_keep_same_buttons_without_fake_pause(running, adm
 const assert=require('node:assert/strict');
 const babel=require(""" + json.dumps(str(ROOT / "frontend/vendor/babel.min.js")) + """);
 const component=babel.transform(""" + json.dumps(component) + """,{presets:['react'],sourceType:'script'}).code;
-const React={createElement:(type,props,...children)=>({type,props:props||{},children})};
+const React={useContext:()=>false,createElement:(type,props,...children)=>({type,props:props||{},children})};
 const render=new Function('React','useState','useEffect','getScanTiming','formatCacheAge',
-""" + json.dumps(PURE) + """ + component + '\\nreturn ScanControl;')(
-React,()=>[true,()=>{}],()=>{},()=>({}),()=> 'QA');
+"const API='';const ScannerAdminContext={};const useRef=v=>({current:v});\\n" + """ + json.dumps(PURE) + """ + component + '\\nreturn ScanControl;')(
+React,initial=>[initial,()=>{}],()=>{},()=>({}),()=> 'QA');
 const started=[];
 const tree=render({onScan:()=>started.push(true),isScanning:""" + json.dumps(running) + """,
 canControl:""" + json.dumps(admin) + """,scanKey:'biotech'});
@@ -31,8 +31,8 @@ assert.equal(start.props.disabled,""" + json.dumps(running) + """);
 assert.equal(start.children[1].props.className,'scan-action-label');
 stop.props.onClick();assert.equal(started.length,0);
 if(""" + json.dumps(running) + """) {
- assert.match(text(tree),/unterstuetzt sichere Pause\\/Fortsetzung noch nicht/);
- assert.ok(!all.some(n=>n.type==='button'&&text(n)==='Status neu laden'));
+ assert.ok(text(tree).includes(""" + json.dumps("Steuerung noch nicht bestaetigt" if admin else "Administrator") + """));
+ assert.equal(all.some(n=>n.type==='button'&&text(n)==='Status neu laden'),""" + json.dumps(admin) + """);
 } else assert.match(stop.props.title,/Kein aktiver Scan/);
 """)
 

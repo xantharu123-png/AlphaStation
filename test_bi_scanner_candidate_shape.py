@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import modules.scanners as scanners
 import modules.bi_trade_plan as bi_plan
@@ -31,19 +32,22 @@ class _ContractResult(tuple):
 
 
 def _bars(days=40):
-    start = datetime(2026, 1, 1)
+    session = datetime(2026, 1, 2, tzinfo=ZoneInfo("America/New_York"))
     data = []
     price = 20.0
     for idx in range(days):
+        while scanners.stock_swing.session_close(session.date().isoformat()) is None:
+            session += timedelta(days=1)
         price += 0.05
         data.append({
-            "t": int((start + timedelta(days=idx)).timestamp() * 1000),
+            "t": int(session.timestamp() * 1000),
             "o": price,
             "h": price + 0.4,
             "l": price - 0.4,
             "c": price,
             "v": 250_000,
         })
+        session += timedelta(days=1)
     return data
 
 

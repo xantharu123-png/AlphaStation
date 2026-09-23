@@ -488,9 +488,11 @@ def test_regular_open_rejects_quote_timestamped_in_premarket(monkeypatch):
 
 def test_quote_session_respects_us_holiday_and_early_close():
     holiday = datetime(2026, 7, 3, 14, 0, tzinfo=timezone.utc).timestamp()
-    after_early_close = datetime(2026, 7, 2, 17, 30, tzinfo=timezone.utc).timestamp()
+    normal_july_session = datetime(2026, 7, 2, 17, 30, tzinfo=timezone.utc).timestamp()
+    after_early_close = datetime(2026, 11, 27, 18, 30, tzinfo=timezone.utc).timestamp()
 
     assert api._stock_quote_session_at(holiday) == "CLOSED"
+    assert api._stock_quote_session_at(normal_july_session) == "US_REGULAR"
     assert api._stock_quote_session_at(after_early_close) == "POSTMARKET"
 
 

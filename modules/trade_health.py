@@ -8,6 +8,7 @@ S-2 Audit-Fix 2026-06-10: Stop-Breach-Erkennung (current vs stop) ergaenzt.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 from modules.trade_levels import (
@@ -61,7 +62,7 @@ def _to_float(value: Any) -> Optional[float]:
                     text = text.replace(",", "")
             value = text
         number = float(value)
-        if number != number:
+        if isinstance(value, bool) or not math.isfinite(number):
             return None
         return number
     except Exception:
@@ -232,6 +233,21 @@ def _execution_cost_pct(row: Dict[str, Any], spread_pct: Optional[float]) -> Opt
     if not components:
         return None
     return round(sum(max(0.0, value) for value in components), 6)
+
+
+def _execution_cost_coverage(row, spread_pct):
+    """Describe known components without inventing absent fees/slippage."""
+    all_in = _to_float(_first(row, ["execution_cost_pct", "round_trip_cost_pct", "estimated_round_trip_cost_pct"]))
+    if all_in is not None:
+        return {"complete": True, "known_components": ["explicit_all_in"], "missing_components": []}
+    values = {
+        "spread": spread_pct if spread_pct is not None else _to_float(_first(row, ["spread_bps"])),
+        "fees": _to_float(_first(row, ["round_trip_fee_pct", "fees_pct", "fee_pct", "commission_pct"])),
+        "slippage": _to_float(_first(row, ["round_trip_slippage_pct", "slippage_pct", "slippage_bps"])),
+    }
+    known = [name for name, value in values.items() if value is not None]
+    missing = [name for name, value in values.items() if value is None]
+    return {"complete": not missing, "known_components": known, "missing_components": missing}
 
 
 def _net_live_rr(
@@ -648,10 +664,10 @@ def calculate_trade_health(
         context_penalty = 0
         if trade_mode == "PROTECT_CAPITAL" or regime == "PANIC":
             context_penalty = 22
-            warnings.append("Market Weather PANIC: Kapital schuetzen, nur absolute A+ Retests")
+            warnings.append("Market Weather PANIC: Kapital schuetzen; nur bestaetigte, risikoarme Setups. Ruecktest optional.")
         elif trade_mode == "DEFENSIVE" or regime == "RISK_OFF":
             context_penalty = 13
-            warnings.append("Market Weather Risk-Off: Longs nur defensiv/Retest, keine FOMO Entries")
+            warnings.append("Market Weather Risk-Off: Longs nur defensiv und bestaetigt, keine FOMO Entries; Ruecktest optional.")
         elif trade_mode == "CAUTIOUS" or regime == "RISK_OFF_LIGHT":
             context_penalty = 8
             warnings.append("Market Weather Risk-Off-Light: selektiv bleiben, keine News-FOMO Entries")
@@ -793,7 +809,8 @@ def calculate_trade_health(
             "live_rr_gross": live_rr_gross,
             "live_rr_net": live_rr_net,
             "execution_cost_pct": execution_cost_pct,
-            "rr_cost_basis": "net" if live_rr_net is not None else "gross_no_cost_data",
+            "rr_cost_basis": ("net" if _execution_cost_coverage(row, spread_pct)["complete"] else "after_known_costs") if live_rr_net is not None else "gross_no_cost_data",
+            "execution_cost_coverage": _execution_cost_coverage(row, spread_pct),
             "planned_rr": planned_rr,
             "min_stop_distance": round(min_stop_distance, 8) if min_stop_distance is not None else None,
             "rvol": rvol,

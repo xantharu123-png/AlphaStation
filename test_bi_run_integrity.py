@@ -130,9 +130,12 @@ def test_scan_crossing_close_has_one_analysis_clock_and_session(monkeypatch, tmp
 
     raw = _to_polygon(_flat_bars(n=51))
     eastern = ZoneInfo("America/New_York")
-    for i, bar in enumerate(raw):
-        day = datetime(2026, 9, 9, tzinfo=eastern) - timedelta(days=50 - i)
+    day = datetime(2026, 9, 9, tzinfo=eastern)
+    for bar in reversed(raw):
+        while scanners.stock_swing.session_close(day.date().isoformat()) is None:
+            day -= timedelta(days=1)
         bar["t"] = int(day.timestamp() * 1000)
+        day -= timedelta(days=1)
     scanners, tickers, final, _, _, _, _ = _lifecycle(
         monkeypatch, tmp_path, _result(17), "long", [{"results": raw}, {"results": raw}]
     )

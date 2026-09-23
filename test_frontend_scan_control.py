@@ -23,9 +23,9 @@ def test_control_state_uses_fixed_truthful_labels(state, fragment):
     assert fragment in result["text"]
 
 
-@pytest.mark.parametrize("updates", [{"supported": False}, {"owner_scan_key": "crypto_strat_test"},
+@pytest.mark.parametrize("updates", [{"supported": False}, {"owner_scan_key": "penny_positions"},
     {"owner_scan_key": "SECRET"}, {"run_id": None}, {"state": "SECRET"}, {"worker_alive": "yes"}])
-def test_unknown_and_crypto_controls_are_not_offered(updates):
+def test_unknown_and_protection_controls_are_not_offered(updates):
     assert value(control(**updates)) is None
 
 
@@ -223,7 +223,7 @@ def test_failed_poll_revokes_cached_worker_control_and_exposes_connection_error(
     """)
 
 
-def test_shipped_buttons_are_admin_stock_only_and_warn_about_scope_and_lifetime():
+def test_shipped_buttons_are_admin_only_and_warn_about_scope_and_lifetime():
     assert 'canControl={isAdmin}' in SOURCE
     assert 'controlEnabled: marketType === \'stocks\'' in SOURCE
     assert 'Pausiert die gesamte Aktienrunde' in SOURCE
@@ -231,7 +231,8 @@ def test_shipped_buttons_are_admin_stock_only_and_warn_about_scope_and_lifetime(
     assert 'Nur im laufenden Serverprozess' in SOURCE
     assert 'controlFeed?.setControl' in SOURCE
     assert 'andere schwere Aktien-Scans' in SOURCE
-    assert 'Krypto und Positionspflege werden dadurch nicht pausiert' in SOURCE
+    assert 'Unabhaengige Krypto-Scans und Positionspflege laufen weiter' in SOURCE
+    assert 'ScannerAdminContext.Provider value={user.is_admin === true}' in SOURCE
 
 
 @pytest.mark.parametrize("expanded", [False, True])

@@ -63,11 +63,11 @@ def _round_level_price(price: float) -> float:
 
 
 def _ratio_label(ratio: float) -> str:
-    """Use the integer labels of the existing directional Fib payload."""
+    """Keep the actual Fibonacci percentage in display labels."""
     conventional = {
-        0.0: "0%", 0.236: "23%", 0.382: "38%", 0.5: "50%",
-        0.618: "61%", 0.786: "78%", 1.0: "100%",
-        1.272: "127%", 1.618: "161%", 2.0: "200%",
+        0.0: "0%", 0.236: "23.6%", 0.382: "38.2%", 0.5: "50%",
+        0.618: "61.8%", 0.786: "78.6%", 1.0: "100%",
+        1.272: "127.2%", 1.618: "161.8%", 2.0: "200%",
     }
     for canonical, label in conventional.items():
         if math.isclose(float(ratio), canonical, rel_tol=0.0, abs_tol=1e-12):

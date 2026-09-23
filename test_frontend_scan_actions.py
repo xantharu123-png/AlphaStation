@@ -59,10 +59,10 @@ def test_real_component_routes_only_verified_authorized_actions(admin, verified,
 const assert=require('node:assert/strict');
 const babel=require(""" + json.dumps(str(ROOT / "frontend/vendor/babel.min.js")) + """);
 const component=babel.transform(""" + json.dumps(component) + """,{presets:['react'],sourceType:'script'}).code;
-const React={createElement:(type,props,...children)=>({type,props:props||{},children})};
+const React={useContext:()=>false,createElement:(type,props,...children)=>({type,props:props||{},children})};
 const render=new Function('React','useState','useEffect','getScanTiming','formatCacheAge',
-""" + json.dumps(PURE) + """ + component + '\\nreturn ScanControl;')(
-React,()=>[true,()=>{}],()=>{},()=>({}),()=> 'QA');
+"const API='';const ScannerAdminContext={};const useRef=v=>({current:v});\\n" + """ + json.dumps(PURE) + """ + component + '\\nreturn ScanControl;')(
+React,initial=>[initial,()=>{}],()=>{},()=>({}),()=> 'QA');
 const requests=[],refreshes=[];
 const tree=render({onScan:()=>{},isScanning:true,canControl:""" + json.dumps(admin) + """,
 controlFeed:{control:""" + json.dumps(ctl) + """,controlPending:null,

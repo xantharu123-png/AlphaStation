@@ -569,9 +569,9 @@ def build_market_context(
     if event_score >= 50:
         warnings.append("High-Impact-Event nah: Positionsgroesse reduzieren und News-Spikes meiden.")
     if regime == "RISK_OFF_LIGHT":
-        warnings.append("Risk-Off-Light: selektiv bleiben, Longs bevorzugt nur mit Retest/VWAP-Hold.")
+        warnings.append("Risk-Off-Light: selektiv bleiben, nur bestaetigte Long-Setups; fehlender Ruecktest ist eine Warnung.")
     if regime in {"RISK_OFF", "PANIC"}:
-        warnings.append("Risk-Off-Regime: Long-Breakouts nur mit Retest/VWAP-Hold, Shorts bevorzugt beobachten.")
+        warnings.append("Risk-Off-Regime: bestaetigte Long-Breakouts defensiv bewerten; Ruecktest optional, kein FOMO-Einstieg.")
 
     if isinstance(rates_data, dict) and rates_data.get("status") == "ok":
         rates_block = rates_data
@@ -589,7 +589,7 @@ def build_market_context(
         "trade_mode": trade_mode,
         "overall_risk_score": overall_risk,
         "size_multiplier": size_multiplier,
-        "long_bias": "normal" if regime == "RISK_ON" else ("retest_only" if regime in {"NEUTRAL", "RISK_OFF_LIGHT"} else "defensive"),
+        "long_bias": "normal" if regime == "RISK_ON" else ("confirmed_selective" if regime in {"NEUTRAL", "RISK_OFF_LIGHT"} else "defensive"),
         "short_bias": "normal" if regime in {"NEUTRAL", "RISK_ON"} else "favored_but_no_chase",
         "market_risk": {
             "score": int(round(market_risk)),

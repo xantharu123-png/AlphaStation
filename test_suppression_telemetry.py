@@ -1306,7 +1306,7 @@ def test_penny_position_monitor_mail_calls_are_explicitly_attributed():
         and isinstance(node.func, ast.Name)
         and node.func.id == "_call_penny_mail_helper"
     ]
-    assert len(calls) == 3
+    assert len(calls) == 1  # Entry only; TP1/exit use the durable dispatcher.
     for call in calls:
         scanner_keyword = next(
             keyword
@@ -1315,6 +1315,17 @@ def test_penny_position_monitor_mail_calls_are_explicitly_attributed():
         )
         assert isinstance(scanner_keyword.value, ast.Constant)
         assert scanner_keyword.value.value == "penny_positions"
+
+    dispatch_calls = [
+        node for node in ast.walk(monitor)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_penny_dispatch_model_management"
+    ]
+    assert dispatch_calls
+    for call in dispatch_calls:
+        keyword = next(k for k in call.keywords if k.arg == "telemetry_scanner")
+        assert isinstance(keyword.value, ast.Constant)
+        assert keyword.value.value == "penny_positions"
 
 
 def test_penny_mail_revalidation_failure_is_counted_at_owner_once(monkeypatch):

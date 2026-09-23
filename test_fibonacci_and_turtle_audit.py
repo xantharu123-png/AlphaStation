@@ -49,7 +49,8 @@ def test_directional_fibonacci_long_extensions_are_above_swing_high():
     assert meta["timeframe"] == "4H"
     assert levels["0%"] == 13
     assert levels["100%"] == 8
-    assert levels["127%"] > levels["0%"]
+    assert levels["127.2%"] == pytest.approx(14.36)
+    assert levels["61.8%"] == pytest.approx(9.91)
 
 
 def test_directional_fibonacci_short_extensions_are_below_swing_low():
@@ -68,7 +69,8 @@ def test_directional_fibonacci_short_extensions_are_below_swing_low():
     assert meta["timeframe"] == "1H"
     assert levels["0%"] == 8
     assert levels["100%"] == 13
-    assert levels["127%"] < levels["0%"]
+    assert levels["127.2%"] == pytest.approx(6.64)
+    assert levels["61.8%"] == pytest.approx(11.09)
 
 
 def test_canonical_fibonacci_uses_confirmed_chronological_long_leg():
@@ -101,7 +103,7 @@ def test_canonical_fibonacci_uses_confirmed_chronological_long_leg():
     payload = fibonacci_payload_adapter(leg, lookback_bars=len(bars))
     assert payload["levels"]["0%"] == 15
     assert payload["levels"]["100%"] == 7
-    assert payload["levels"]["127%"] > 15
+    assert payload["levels"]["127.2%"] > 15
     assert payload["meta"]["projection_only"] is True
 
 
@@ -265,7 +267,7 @@ def test_fibonacci_timeframe_ratio_labels_and_provenance_are_unambiguous():
 
     assert leg.timeframe == "1D"
     assert {level.timeframe for level in levels} == {"1D"}
-    assert {level.source_name for level in levels} == {"FIB 38.1%", "FIB 38%"}
+    assert {level.source_name for level in levels} == {"FIB 38.1%", "FIB 38.2%"}
     assert len({level.source_name for level in levels}) == 2
 
     with pytest.raises(ValueError, match="JSON-serialisable"):

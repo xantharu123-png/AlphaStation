@@ -424,6 +424,13 @@ def trade_plan_quality(
     risk = safe_float(levels.get("risk"), None)
     reward1 = safe_float(levels.get("reward1"), None)
     reward2 = safe_float(levels.get("reward2"), None)
+    # Geometry exposes rounded R values for display. Admission must instead
+    # compare the exact economic distances, including at threshold edges.
+    if risk is not None and risk > 0 and reward1 is not None and reward2 is not None:
+        rr_tp1 = safe_float(reward1 / risk, None)
+        rr_tp2 = safe_float(reward2 / risk, None)
+        rr = (0.5 * rr_tp1 + 0.5 * rr_tp2
+              if rr_tp1 is not None and rr_tp2 is not None else None)
     errors = {str(item) for item in (levels.get("errors") or [])}
     issues: List[str] = []
 
@@ -437,7 +444,16 @@ def trade_plan_quality(
             "issues": ["missing_target_rr"],
         }
 
-    if rr_tp1 < min_primary_tp_rr:
+    def below(value: float, threshold: float, *, abs_tol: float = 1e-12) -> bool:
+        # Decimal market prices can land a few ULPs below an exact R boundary
+        # after subtraction/division (e.g. 1.4999999999999973 for nominal 1.5).
+        # This is machine precision only, not display-rounding admission.
+        return value < threshold and not math.isclose(
+            value, threshold, rel_tol=1e-12, abs_tol=abs_tol
+        )
+
+    tp1_ok = not below(rr_tp1, min_primary_tp_rr)
+    if not tp1_ok:
         issues.append("tp1_rr_below_primary_threshold")
     if errors.intersection({"tp2_not_above_tp1", "tp2_not_below_tp1"}):
         issues.append("tp2_not_beyond_tp1")
@@ -446,25 +462,25 @@ def trade_plan_quality(
         min_tp_gap = max(risk * min_tp_gap_r, entry * min_tp_gap_pct)
         if reward2 <= reward1:
             issues.append("tp2_not_beyond_tp1")
-        elif (reward2 - reward1) < min_tp_gap:
+        elif below(reward2 - reward1, min_tp_gap, abs_tol=abs(entry) * 1e-12):
             issues.append("targets_too_close")
 
-    if rr_tp2 < max(2.0, rr_tp1 + min_tp_gap_r):
+    if below(rr_tp2, max(2.0, rr_tp1 + min_tp_gap_r)):
         issues.append("targets_too_close")
-    if rr_tp2 > runner_rr_cap and rr_tp1 < 2.0:
+    if below(runner_rr_cap, rr_tp2) and below(rr_tp1, 2.0):
         issues.append("runner_rr_overdominates_tp1")
-    if rr_tp1 > 0 and rr_tp2 / rr_tp1 > max_runner_to_tp1_ratio and rr_tp1 < 2.0:
+    if rr_tp1 > 0 and below(max_runner_to_tp1_ratio, rr_tp2 / rr_tp1) and below(rr_tp1, 2.0):
         issues.append("runner_rr_overdominates_tp1")
 
     capped_tp2 = min(rr_tp2, runner_rr_cap)
-    effective_rr = round((rr_tp1 + capped_tp2) / 2.0, 2)
+    effective_rr = 0.5 * rr_tp1 + 0.5 * capped_tp2
     runner_skew = rr_tp2 > runner_rr_cap and rr_tp2 >= max(rr_tp1 * 2.25, rr_tp1 + 4.0)
     return {
         "effective_rr": effective_rr,
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "runner_skew": runner_skew,
-        "tp1_ok": rr_tp1 >= min_primary_tp_rr,
+        "tp1_ok": tp1_ok,
         "issues": list(dict.fromkeys(issues)),
     }
 

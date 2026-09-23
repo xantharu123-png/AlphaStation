@@ -120,19 +120,19 @@ def test_changed_or_invalid_data_epoch_requires_fresh_restart(token, current, au
     assert control.snapshot(KEY)["state"] == "restart_required"
 
 
-def test_stale_ids_crypto_and_finished_controls_cannot_mutate_owner():
+def test_stale_ids_protected_and_finished_controls_cannot_mutate_owner():
     register()
     for request in (control.request_pause, control.request_resume):
         with pytest.raises(ValueError, match="stale_run"):
             request(KEY, "old-run")
         with pytest.raises(ValueError, match="unsupported"):
-            request("crypto_strat_cup", RUN)
+            request("new_listing", RUN)
     control.end(KEY, RUN)
     register(run="new-run")
     assert control.end(KEY, RUN) is False
     assert control.snapshot(KEY)["run_id"] == "new-run"
     with pytest.raises(ValueError, match="unsupported"):
-        register(key="crypto_explosion")
+        register(key="penny_positions")
 
 
 def test_snapshot_never_exposes_callbacks_tokens_or_arbitrary_rows():

@@ -99,7 +99,7 @@ except ImportError as _auth_err:
 import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 from modules import stock_scan_runtime
-from modules import scan_control, scan_schedule
+from modules import scan_control, scan_control_policy, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
 from modules.breakout_warnings import apply_breakout_warning, breakout_warning_fields
@@ -1718,6 +1718,9 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 # faelschlich handelbare Anzeige), nicht in den Plan-Guard.
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS) | {"btc_divergenz"}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
+_NEW_LISTING_MAX_SIGNAL_RISK_PCT = 35.0
+_NEW_LISTING_SHORT_CACHE_VERSION = 2
+_NEW_LISTING_MICRO_MAX_AGE_SECONDS = 600.0
 _NEW_LISTING_FINAL_MAX_SPREAD_BPS = 120.0
 _NEW_LISTING_FINAL_MIN_DEPTH_50BPS_USD = 10_000.0
 _NEW_LISTING_WATCH_MIN_SCORE = 70
@@ -9426,6 +9429,10 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "swing_short_multi_day_exhausted_no_chase",
         "orb_not_tradeable",
         "orb_range_break_stale",
+        "orb_completed_candle_stale",
+        "orb_completed_candle_unverified",
+        "orb_current_side_unverified",
+        "orb_current_breakout_lost",
         "orb_tp1_already_reached",
         "orb_invalid_target_geometry",
         "invalid_momentum_inputs",
@@ -9532,9 +9539,30 @@ def _orb_target_plan_metrics(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _orb_signal_gate_reasons(row: Dict[str, Any]) -> List[str]:
+def _orb_signal_gate_reasons(row: Dict[str, Any], *, as_of: Optional[datetime] = None) -> List[str]:
     """Return blockers that separate a raw range break from an ORB signal."""
     reasons: List[str] = []
+    # Candle-count age cannot detect a stopped feed. Polygon t is the candle's
+    # opening timestamp; freshness starts only after its real five-minute close.
+    now_utc = as_of or datetime.now(timezone.utc)
+    signal_ms = _alert_float(row.get("signal_bar_timestamp"), None)
+    if str(row.get("bar_state") or "") != "completed_5m" or signal_ms is None:
+        reasons.append("orb_completed_candle_unverified")
+    else:
+        close_age = now_utc.timestamp() - (signal_ms / 1000.0 + 300.0)
+        if close_age < 0:
+            reasons.append("orb_completed_candle_unverified")
+        elif close_age > _MAIL_TRIGGER_MAX_AGE_SEC:
+            reasons.append("orb_completed_candle_stale")
+    current = _alert_float(row.get("current_price"), None)
+    high = _alert_float(row.get("or_high"), None)
+    low = _alert_float(row.get("or_low"), None)
+    direction = str(row.get("direction") or "").upper()
+    if (current is None or high is None or low is None
+            or not 0 < low < high or current <= 0 or direction not in {"LONG", "SHORT"}):
+        reasons.append("orb_current_side_unverified")
+    elif (direction == "LONG" and current <= high) or (direction == "SHORT" and current >= low):
+        reasons.append("orb_current_breakout_lost")
     if not bool(row.get("vol_confirmed")):
         reasons.append("orb_breakout_volume_unconfirmed")
     if str(row.get("breakout_state") or "").strip().lower() != "active_breakout":
@@ -9677,7 +9705,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     if quality_gate_actionable and not swing_stock_mode and scanner_name in _LONG_ENTRY_ALERT_SCANNERS:
         reasons.extend(_long_entry_rule_reasons(row))
     if quality_gate_actionable and scanner_name == "orb":
-        reasons.extend(_orb_signal_gate_reasons(row))
+        reasons.extend(_orb_signal_gate_reasons(row, as_of=datetime.fromtimestamp(now, tz=timezone.utc)))
         orb_decision = str(
             row.get("trade_decision")
             or (row.get("trade_health") or {}).get("decision")
@@ -17157,10 +17185,34 @@ def get_strategies_for_market(market_type: str) -> Dict[str, Any]:
     return strategies_map.get(market_type, STRATEGIES)
 
 
+_UNSUPPORTED_SCAN_MARKETS = {"futures", "forex", "international"}
+
+
+def _unsupported_market_scan_detail(market_type: str) -> Dict[str, Any]:
+    return {
+        "code": "market_scanner_not_implemented",
+        "market_type": market_type,
+        "scan_supported": False,
+        "message": (
+            f"Der {market_type}-Scanner ist noch nicht implementiert. "
+            "Es wurde kein Aktien-Scanner als Ersatz gestartet."
+        ),
+    }
+
+
 def get_public_strategies_for_market(market_type: str, include_hidden: bool = False) -> Dict[str, Any]:
     """Return the curated strategy menu that should be visible in the UI."""
     strategies = get_strategies_for_market(market_type)
     if market_type != "stocks":
+        if market_type in _UNSUPPORTED_SCAN_MARKETS:
+            return {
+                name: {
+                    **deepcopy(config),
+                    "scan_supported": False,
+                    "unsupported_reason": "market_scanner_not_implemented",
+                }
+                for name, config in strategies.items()
+            }
         return strategies
 
     public_strategies = {
@@ -17646,15 +17698,15 @@ def _calculate_directional_fib_levels(
     levels: Dict[str, float] = {}
     if dir_norm == "short":
         for ratio in retracements:
-            levels[f"{int(ratio * 100)}%"] = _round_level_price(period_low + rng * ratio)
-        levels["127%"] = _round_level_price(period_low - rng * 0.272)
-        levels["161%"] = _round_level_price(period_low - rng * 0.618)
+            levels[f"{ratio * 100:g}%"] = _round_level_price(period_low + rng * ratio)
+        levels["127.2%"] = _round_level_price(period_low - rng * 0.272)
+        levels["161.8%"] = _round_level_price(period_low - rng * 0.618)
         levels["200%"] = _round_level_price(period_low - rng)
     else:
         for ratio in retracements:
-            levels[f"{int(ratio * 100)}%"] = _round_level_price(period_high - rng * ratio)
-        levels["127%"] = _round_level_price(period_high + rng * 0.272)
-        levels["161%"] = _round_level_price(period_high + rng * 0.618)
+            levels[f"{ratio * 100:g}%"] = _round_level_price(period_high - rng * ratio)
+        levels["127.2%"] = _round_level_price(period_high + rng * 0.272)
+        levels["161.8%"] = _round_level_price(period_high + rng * 0.618)
         levels["200%"] = _round_level_price(period_high + rng)
 
     return {
@@ -19008,9 +19060,10 @@ def _strategy_daily_history_metrics(
     rsi14 = calculate_rsi_from_bars(active_bars[-40:], 14) if len(active_bars) >= 15 else None
 
     def _change_from_completed(days_back: int) -> Optional[float]:
-        if len(completed) < days_back:
+        if len(baseline_completed) < days_back:
             return None
-        base = float(completed[-days_back]["close"] or 0)
+        # The analysis session is the numerator, including after its close.
+        base = float(baseline_completed[-days_back]["close"] or 0)
         return ((price - base) / base * 100) if base > 0 else None
 
     change_5d = _change_from_completed(5)
@@ -21023,8 +21076,7 @@ def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) 
     """Validate MA bounce setups with trend, structure and pullback quality."""
     daily_bars = candidate.get("_daily_bars", [])
     ma_profiles = _get_ma_profiles(strat)
-    max_period = _get_max_ma_period(strat)
-    if len(daily_bars) < max_period + 10:
+    if not any(len(daily_bars) >= profile["ma_period"] + 10 for profile in ma_profiles):
         return None
 
     liquidity_floor = max(int(strat.get("min_dollar_volume", 200_000) or 0), 1_000_000)
@@ -21045,6 +21097,8 @@ def _apply_ma_strategy_filter(candidate: Dict[str, Any], strat: Dict[str, Any]) 
     for profile in ma_profiles:
         ma_type = profile["ma_type"]
         ma_period = profile["ma_period"]
+        if len(daily_bars) < ma_period + 10:
+            continue
         ma_series = calculate_ema_series(closes, ma_period) if ma_type == "EMA" else _calc_sma_series(closes, ma_period)
         if not ma_series or ma_series[-1] is None:
             continue
@@ -21242,8 +21296,12 @@ def _apply_special_strategy_post_filter(
         min_history = max(min_history, 220)
     if strat.get("needs_cup_handle"):
         min_history = max(min_history, 180)
+    requested_history = min_history
     if strat.get("needs_ma"):
-        min_history = max(min_history, _get_max_ma_period(strat) + 12)
+        # Request enough for every profile, but an unavailable SMA200 must not
+        # discard a fully evidenced EMA21/SMA50 bounce.
+        requested_history = max(min_history, _get_max_ma_period(strat) + 12)
+        min_history = max(min_history, min(p["ma_period"] for p in _get_ma_profiles(strat)) + 10)
 
     publish_checked()
     for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
@@ -21274,7 +21332,7 @@ def _apply_special_strategy_post_filter(
                 raise ScannerDataError("scan_data_incomplete", native_diagnostics) from None
 
         daily_bars = _stock_completed_pattern_history(
-            _fetch_strategy_daily_history(str(ticker), min_history, history_cache, True),
+            _fetch_strategy_daily_history(str(ticker), requested_history, history_cache, True),
             as_of=(stock_swing.session_close(candidate["swing_analysis_session"])
                    if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
         )
@@ -21480,6 +21538,7 @@ def _biotech_scan_wrapper() -> None:
     previous_revision = _scan_cache_revision(BIOTECH_CACHE)
     try:
         print("[Biotech] Starting scan... (this takes 5-15 minutes)")
+        _remove_partial_cache(BIOTECH_CACHE)
         _biotech_background_scan(POLYGON_KEY)
         _require_fresh_scan_cache("biotech", previous_revision)
         print("[Biotech] Scan completed")
@@ -21488,6 +21547,9 @@ def _biotech_scan_wrapper() -> None:
             print(f"[Biotech] Added alert trade levels: {enrichment}")
         # Email Alert bei Grade S/A
         _check_and_alert("biotech", BIOTECH_CACHE)
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(BIOTECH_CACHE)
+        raise
     except Exception as e:
         print(f"Biotech background scan error: {e}")
         import traceback
@@ -23032,6 +23094,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         _publish_partial(0, force=True)
 
         for checked, coin in enumerate(coins, start=1):
+            _scan_control_point()
             _publish_partial(checked)
             try:
                 cid = str(coin.get("id", "") or "")
@@ -23183,9 +23246,13 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
 
         results.sort(key=lambda x: (-x.get("score", 0), -abs(x.get("change_pct", 0))))
         results = results[:80]
+        _scan_control_point(finishing=True)
         finalize_cache_file(_strat_cache, results)
         print(f"[Crypto Strategy] {strategy_name}: {len(results)} Treffer -> {_strat_cache}")
         _send_strategy_scan_alerts(strategy_name, results, "crypto")
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(_strat_cache)
+        raise
     except Exception as e:
         _remove_partial_cache(_strat_cache)
         print(f"[Crypto Strategy] Fehler: {e}")
@@ -23202,16 +23269,34 @@ def _turtle_scan_wrapper() -> None:
     try:
         print("[Turtle] Starte Turtle Breakout Scanner...")
         results = []
+        scan_now = datetime.now(timezone.utc)
+        analysis_session = stock_swing.completed_sessions(scan_now, 1)[0]
+        analysis_close = stock_swing.session_close(analysis_session)
+        data_diagnostics = {"scanner": "turtle", "coverage": "incomplete", "final_results": None}
 
         # Full snapshot first: Turtle breakouts can emerge from quiet bases, not only top gainers.
         _all_tickers = []
         try:
             url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
             resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY}, timeout=30)
-            if resp.status_code == 200:
-                _all_tickers.extend(resp.json().get("tickers", []))
+            if resp.status_code != 200:
+                raise ScannerDataError(_scanner_provider_error(resp.status_code), data_diagnostics)
+            payload = resp.json()
+            if _scanner_payload_error(payload):
+                raise ScannerDataError(_scanner_payload_error(payload), data_diagnostics)
+            if (not isinstance(payload, dict) or not isinstance(payload.get("tickers"), list)
+                    or any(not isinstance(row, dict) or not row.get("ticker") for row in payload["tickers"])):
+                raise ScannerDataError("scan_data_invalid", data_diagnostics)
+            if not payload["tickers"]:
+                raise ScannerDataError("scan_data_unavailable", data_diagnostics)
+            received_at = datetime.now(timezone.utc).isoformat()
+            _all_tickers.extend(dict(row, _turtle_snapshot_received_at=received_at) for row in payload["tickers"])
+        except ScannerDataError:
+            raise
+        except (TypeError, ValueError):
+            raise ScannerDataError("scan_data_invalid", data_diagnostics) from None
         except Exception:
-            pass
+            raise ScannerDataError("scan_data_unavailable", data_diagnostics) from None
 
         if len(_all_tickers) < 250:
             for endpoint in ["gainers", "losers"]:
@@ -23219,7 +23304,12 @@ def _turtle_scan_wrapper() -> None:
                     url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
                     resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 250})
                     if resp.status_code == 200:
-                        _all_tickers.extend(resp.json().get("tickers", []))
+                        supplement = resp.json()
+                        if (not _scanner_payload_error(supplement) and isinstance(supplement, dict)
+                                and isinstance(supplement.get("tickers"), list)
+                                and all(isinstance(row, dict) and row.get("ticker") for row in supplement["tickers"])):
+                            received_at = datetime.now(timezone.utc).isoformat()
+                            _all_tickers.extend(dict(row, _turtle_snapshot_received_at=received_at) for row in supplement["tickers"])
                 except Exception:
                     pass
 
@@ -23278,22 +23368,39 @@ def _turtle_scan_wrapper() -> None:
         candidates = candidates[:250]
 
         from datetime import timedelta
-        _today = datetime.now()
+        _today = scan_now
         _from = (_today - timedelta(days=45)).strftime("%Y-%m-%d")
         _to = _today.strftime("%Y-%m-%d")
 
         for ticker, snap_data, price, prev_close, change_pct, volume, priority in candidates:
+            _scan_control_point()
             try:
                 # 30 Tage Daily Bars holen (brauchen 21+ für Donchian 20)
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{_from}/{_to}"
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 35, "sort": "asc"})
                 if resp.status_code != 200:
-                    continue
+                    raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                payload = resp.json()
+                if (_scanner_payload_error(payload) or not isinstance(payload, dict)
+                        or not isinstance(payload.get("results"), list)):
+                    raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                # A corrupted required history is not a legitimate no-pattern
+                # outcome. The causal adapter may still omit valid open bars.
+                for raw in payload["results"]:
+                    if not isinstance(raw, dict):
+                        raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                    values = {key: stock_swing.number(raw.get(key)) for key in ("o", "h", "l", "c", "v", "t")}
+                    if (any(value is None for value in values.values())
+                            or min(values[key] for key in ("o", "h", "l", "c", "t")) <= 0
+                            or values["v"] < 0 or values["l"] > min(values["o"], values["c"])
+                            or values["h"] < max(values["o"], values["c"])):
+                        raise ScannerDataError("scan_data_incomplete", data_diagnostics)
                 from modules.stock_bars import completed_polygon_bars
-                bars = completed_polygon_bars(resp.json().get("results", []),
-                                              as_of=datetime.now(timezone.utc))
+                bars = completed_polygon_bars(payload["results"], as_of=analysis_close)
                 if len(bars) < 22:
                     continue  # 20 prior sessions + one completed signal session + ATR seed
+                if bars[-1]["date"] != analysis_session:
+                    raise ScannerDataError("scan_data_incomplete", data_diagnostics)
 
                 highs = [b.get("h", 0) for b in bars]
                 lows = [b.get("l", 0) for b in bars]
@@ -23326,6 +23433,7 @@ def _turtle_scan_wrapper() -> None:
                 current_close = closes[i]
                 if current_close <= dc_high_20 or atr <= 0:
                     continue  # Kein Breakout
+                signal_change_pct = (current_close - closes[i - 1]) / closes[i - 1] * 100
 
                 # ── Turtle Levels berechnen ──
                 entry_price = dc_high_20  # Theoretischer Entry am Breakout-Level
@@ -23416,13 +23524,23 @@ def _turtle_scan_wrapper() -> None:
                     score += 2
 
                 raw_score = min(100, score)
-                score, turtle_quality_flags = _turtle_score_cap(raw_score, change_pct, rvol, breakout_pct)
+                score, turtle_quality_flags = _turtle_score_cap(raw_score, signal_change_pct, rvol, breakout_pct)
                 grade = _strategy_score_to_grade(score)
 
                 results.append({
                     "Ticker": ticker,
                     "Preis": round(current_close, 2),
-                    "Change_Pct": round(change_pct, 2),
+                    **stock_swing.metadata(analysis_session, current_close),
+                    "Change_Pct": round(signal_change_pct, 2),
+                    # Snapshot receipt is not a verified trade timestamp or fill.
+                    # Keep live context separate from the completed daily plan.
+                    "snapshot_price": price,
+                    "snapshot_change_pct": round(change_pct, 2),
+                    "snapshot_volume": volume,
+                    "snapshot_received_at": snap_data["_turtle_snapshot_received_at"],
+                    "snapshot_price_source": ("polygon_snapshot_day_close" if snap_data.get("day", {}).get("c")
+                                              else "polygon_snapshot_last_trade"),
+                    "snapshot_updated_at": snap_data.get("updated"),
                     "DC_High_20": round(dc_high_20, 2),
                     "DC_Low_10": round(dc_low_10, 2),
                     "Breakout_Pct": round(breakout_pct, 2),
@@ -23447,8 +23565,8 @@ def _turtle_scan_wrapper() -> None:
                     "RVOL_Basis": "completed_signal_session",
                     "bar_state": "completed_daily_breakout",
                     "signal_bar_closed_at": bars[i].get("close_time"),
-                    "Volume": volume,
-                    "Dollar_Volume": round(volume * current_close),
+                    "Volume": volumes[i],
+                    "Dollar_Volume": round(volumes[i] * current_close),
                     "raw_score": round(raw_score, 2),
                     "score": score,
                     "grade": grade,
@@ -23479,14 +23597,17 @@ def _turtle_scan_wrapper() -> None:
                     "Trade_Setup_Source": "turtle_r_multiple",
                 })
 
-            except Exception as e:
-                continue
+            except ScannerDataError:
+                raise
+            except Exception:
+                raise ScannerDataError("scan_data_incomplete", data_diagnostics) from None
 
         # Sortieren: Score absteigend
         results.sort(key=lambda x: -x["score"])
         results = results[:50]
 
         print(f"[Turtle] {len(results)} Breakout-Signale gefunden")
+        _scan_control_point(finishing=True)
         save_cache_file(TURTLE_CACHE, results)
 
     except Exception as e:
@@ -23519,6 +23640,7 @@ def _bear_scan_wrapper() -> None:
 
         # --- Section 1: Inverse ETF performance ---
         for ticker, (desc, underlying) in INVERSE_ETFS.items():
+            _scan_control_point()
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
                 resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 40, "sort": "desc"})
@@ -23532,11 +23654,11 @@ def _bear_scan_wrapper() -> None:
                 prev_close = bars[1]["c"]
                 chg_1d = ((close - prev_close) / prev_close) * 100
 
-                chg_5d = 0
+                chg_5d = None
                 if len(bars) >= 6:
                     chg_5d = ((close - bars[5]["c"]) / bars[5]["c"]) * 100
 
-                chg_20d = 0
+                chg_20d = None
                 if len(bars) >= 21:
                     chg_20d = ((close - bars[20]["c"]) / bars[20]["c"]) * 100
 
@@ -23546,9 +23668,11 @@ def _bear_scan_wrapper() -> None:
                     lookback=20,
                     minimum_periods=10,
                 )
-                rvol = round(vol / avg_vol, 2) if avg_vol else 0
+                rvol = round(vol / avg_vol, 2) if avg_vol else None
 
-                if chg_5d > 5:
+                if chg_5d is None:
+                    signal = "UNBEKANNT"
+                elif chg_5d > 5:
                     signal = "STARK"
                 elif chg_5d > 2:
                     signal = "Steigend"
@@ -23575,7 +23699,10 @@ def _bear_scan_wrapper() -> None:
                 item = {
                     "ticker": ticker, "name": desc, "underlying": underlying,
                     "price": round(close, 2), "change_1d": round(chg_1d, 2),
-                    "change_5d": round(chg_5d, 2), "change_20d": round(chg_20d, 2),
+                    "change_5d": round(chg_5d, 2) if chg_5d is not None else None,
+                    "change_20d": round(chg_20d, 2) if chg_20d is not None else None,
+                    "history_bars": len(bars),
+                    "data_status": "ok" if chg_20d is not None and rvol is not None else "partial",
                     "volume": vol, "rvol": rvol, "signal": signal,
                 }
 
@@ -23597,10 +23724,14 @@ def _bear_scan_wrapper() -> None:
                 print(f"[Warning] Error processing inverse ETF {ticker}: {e}")
                 continue
 
-        result["inverse_etfs"].sort(key=lambda x: x.get("change_5d", 0), reverse=True)
+        result["inverse_etfs"].sort(
+            key=lambda x: (x.get("change_5d") is not None, x.get("change_5d") or 0),
+            reverse=True,
+        )
 
         # --- Section 2: Breakdown stocks V2.2 — mit Score/Grade System ---
         # V3.4 FIX: AH/PM-fähig — Full Snapshot nutzen wenn Losers-Endpoint leer (AH/PM)
+        stock_feed_valid = False
         try:
             snap_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/losers"
             snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
@@ -23611,7 +23742,11 @@ def _bear_scan_wrapper() -> None:
             _diagnostics = result.setdefault("diagnostics", {})
             _diagnostics["losers_http_status"] = snap_resp.status_code
             if snap_resp.status_code == 200:
-                _raw_tickers = snap_resp.json().get("tickers", [])
+                payload = snap_resp.json()
+                rows = payload.get("tickers") if isinstance(payload, dict) else None
+                if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) and not payload.get("error") and str(payload.get("status", "")).upper() != "ERROR":
+                    _raw_tickers = rows
+                    stock_feed_valid = True
                 _diagnostics["losers_endpoint_count"] = len(_raw_tickers)
 
             # V3.4: Wenn Losers-Endpoint wenig/keine Ergebnisse → Extended Hours
@@ -23626,7 +23761,11 @@ def _bear_scan_wrapper() -> None:
                     _full_resp = rate_limited_get(_full_snap_url, params={"apiKey": POLYGON_KEY}, timeout=30)
                     _diagnostics["full_snapshot_http_status"] = _full_resp.status_code
                     if _full_resp.status_code == 200:
-                        _all = _full_resp.json().get("tickers", [])
+                        payload = _full_resp.json()
+                        _all = payload.get("tickers") if isinstance(payload, dict) else None
+                        if not isinstance(_all, list) or not all(isinstance(row, dict) for row in _all) or payload.get("error") or str(payload.get("status", "")).upper() == "ERROR":
+                            raise ScannerDataError("scan_data_invalid")
+                        stock_feed_valid = True
                         # Finde AH/PM Losers: lastTrade.p vs day.c (Regular Close)
                         _ah_losers = []
                         for _t in _all:
@@ -23667,6 +23806,7 @@ def _bear_scan_wrapper() -> None:
                 _excluded_non_stock = 0
                 _diagnostics["common_stock_source"] = _common_stock_source
                 for t in tickers:
+                    _scan_control_point()
                     try:
                         day = t.get("day", {})
                         prev = t.get("prevDay", {})
@@ -23940,7 +24080,17 @@ def _bear_scan_wrapper() -> None:
         if not result.get("breakdown_stocks"):
             result["diagnostics"]["no_stock_reason"] = _bear_empty_warning_from_results([result])
         has_stock_data = len(result.get("breakdown_stocks", [])) > 0 or len(result.get("inverse_etfs", [])) > 0
+        diagnostics = result["diagnostics"]
+        source_available = stock_feed_valid
+        if not has_stock_data and not source_available:
+            raise ScannerDataError("scan_data_unavailable", diagnostics)
+        result["data_status"] = "ok" if source_available else "partial"
+        if not source_available:
+            result["data_warning"] = "Breakdown-Quelle nicht verfügbar; nur ETF-Kontext."
+        # A valid, fully checked empty source is a result; total outage is not.
+        has_stock_data = has_stock_data or source_available
         if has_stock_data:
+            _scan_control_point(finishing=True)
             save_cache_file(BEAR_CACHE, [result])
             print(f"[Bear] Saved {len(result.get('inverse_etfs',[]))} ETFs, {len(result.get('breakdown_stocks',[]))} breakdowns")
             # V2.2: Bear Alert — vollständige Infos pro Signal
@@ -24907,7 +25057,7 @@ _scan_resume_restarts: Dict[str, Dict[str, Any]] = {}
 
 
 def _scan_control_supported(name):
-    return name in {"bi_long", "bi_short"} or _is_stock_strategy_worker(name)
+    return scan_control_policy.capability(name)["supported"]
 
 
 def _is_heavy_stock_worker(name):
@@ -24917,9 +25067,13 @@ def _is_heavy_stock_worker(name):
 def _scan_control_data_token(name):
     """Same-process daily evidence only; a live snapshot must restart fresh."""
     from zoneinfo import ZoneInfo
+    if scan_control_policy.capability(name)["resume_policy"] == "restart_fresh":
+        # Live quotes/news/fanout snapshots cannot be reused after any park.
+        # A clock tick can repeat on Windows during an immediate resume.
+        return ("live_requires_restart", uuid.uuid4().hex)
     now = datetime.now(timezone.utc)
     if not stock_swing.enabled():
-        return ("live_requires_restart", time.monotonic())
+        return ("live_requires_restart", uuid.uuid4().hex)
     try:
         session = stock_swing.completed_sessions(now, 1)[0]
         settings = STRATEGIES
@@ -24959,7 +25113,7 @@ def _scan_resume_at(name, status, now=None):
         due = float(status.get("_started_at") or now) + interval
     if due <= now:
         due += (math.floor((now - due) / interval) + 1) * interval
-    return scan_schedule.next_allowed_at(due)
+    return scan_schedule.next_allowed_at(due) if scan_schedule.is_stock_scan(name) else due
 
 
 def _scan_control_snapshot(name, status=None):
@@ -24978,7 +25132,7 @@ def _scan_control_snapshot(name, status=None):
         except (TypeError, ValueError, OverflowError, OSError):
             return None
     return {
-        "supported": _scan_control_supported(name), "owner_scan_key": name,
+        **scan_control_policy.capability(name), "owner_scan_key": name,
         "run_id": status.get("last_run_id"), "state": state,
         "worker_alive": bool(status.get("running") or (
             name in _scan_threads and _scan_threads[name].is_alive())),
@@ -25559,10 +25713,16 @@ def _run_scan_safe(name, func, timeout_min=None, *, expected_previous_run_id=Non
                 ):
                     print(f"[Scheduler] {name} skip: stock strategy engine owned by {other}", flush=True)
                     return False
-        sibling = {"crypto_explosion": "crypto_trade_signals", "crypto_trade_signals": "crypto_explosion"}.get(name)
-        if sibling and _scan_status.get(sibling, {}).get("running"):
-            print(f"[Scheduler] {name} skip: shared crypto engine owned by {sibling}")
-            return False
+        siblings = {
+            "crypto_explosion": {"crypto_trade_signals"},
+            "crypto_trade_signals": {"crypto_explosion", "new_listing"},
+            "new_listing": {"crypto_trade_signals"},
+        }.get(name, ())
+        for sibling in siblings:
+            if (_scan_status.get(sibling, {}).get("running")
+                    or (sibling in _scan_threads and _scan_threads[sibling].is_alive())):
+                print(f"[Scheduler] {name} skip: shared crypto engine owned by {sibling}")
+                return False
         if (active_thread is not None and active_thread.is_alive()) or _scan_status[name].get("running"):
             runtime = _scan_runtime_state(name, _scan_status[name], timeout_minutes=timeout_min)
             if runtime["timeout_exceeded"]:
@@ -30237,7 +30397,8 @@ def list_strategies(market_type: str = Query("stocks", description="Market type:
     _safe_keys = {"stocks_only", "needs_history", "needs_harmonic",
                   "needs_volume_profile", "needs_ma", "needs_cup_handle", "ma_type", "ma_period",
                   "best_time", "best_pairs", "harmonic_direction",
-                  "display_group", "merged_from", "canonical_name"}
+                  "display_group", "merged_from", "canonical_name",
+                  "scan_supported", "unsupported_reason"}
     safe_strategies = {}
     for name, config in strategies.items():
         safe_strategies[name] = {k: v for k, v in config.items() if k in _safe_keys}
@@ -30269,6 +30430,13 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     Run main scanner with specified strategy and market type.
     Routes to correct scanner based on strategy parameter.
     """
+    market_type = str(request.market_type or "stocks").strip().lower()
+    if market_type in _UNSUPPORTED_SCAN_MARKETS:
+        raise HTTPException(status_code=501, detail=_unsupported_market_scan_detail(market_type))
+    if market_type not in {"stocks", "crypto"}:
+        raise HTTPException(status_code=400, detail=f"Unknown market type '{request.market_type}'")
+    request.market_type = market_type
+
     if request.market_type != "crypto" and not POLYGON_KEY:
         raise HTTPException(status_code=400, detail="POLYGON_KEY not configured")
 
@@ -30301,78 +30469,38 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         accepted = _run_scan_safe("bi_short", lambda: _bi_background_scan_wrapper("short"))
         return _manual_scan_ack("bi_short", accepted, message="BI Scanner (Short) started", strategy=resolved_strategy)
     elif "biotech" in strategy_lower:
-        _run_scan_safe("biotech", _biotech_scan_wrapper)
-        return {
-            "status": "started",
-            "message": "Biotech Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("biotech", _biotech_scan_wrapper)
+        return _manual_scan_ack("biotech", accepted, message="Biotech Scanner started", strategy=resolved_strategy)
     elif "early" in strategy_lower or "movers" in strategy_lower:
-        _run_scan_safe("early_movers", _early_movers_wrapper)
-        return {
-            "status": "started",
-            "message": "Early Movers Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("early_movers", _early_movers_wrapper)
+        return _manual_scan_ack("early_movers", accepted, message="Early Movers Scanner started", strategy=resolved_strategy)
     elif "volume" in strategy_lower or "spike" in strategy_lower:
-        _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
-        return {
-            "status": "started",
-            "message": "Volume Spikes Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
+        return _manual_scan_ack("volume_spikes", accepted, message="Volume Spikes Scanner started", strategy=resolved_strategy)
     elif "penny" in strategy_lower:
-        _run_scan_safe("penny_stocks", _penny_stock_scanner_wrapper)
-        return {
-            "status": "started",
-            "message": "Pennystock Lifecycle Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("penny_stocks", _penny_stock_scanner_wrapper)
+        return _manual_scan_ack("penny_stocks", accepted, message="Pennystock Lifecycle Scanner started", strategy=resolved_strategy)
     elif strategy_lower in ("bear", "bear scanner", "bear scan"):
         # V2.6b: Nur explizit "bear" — nicht mehr jedes "short" abfangen
         # "Breakout Short", "Breakdown Short" etc. sind generische Strategien
-        _run_scan_safe("bear", _bear_scan_wrapper)
-        return {
-            "status": "started",
-            "message": "Bear Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("bear", _bear_scan_wrapper)
+        return _manual_scan_ack("bear", accepted, message="Bear Scanner started", strategy=resolved_strategy)
     elif "crash" in strategy_lower:
-        _run_scan_safe("crash_monitor", _crash_monitor_wrapper)
-        return {
-            "status": "started",
-            "message": "Crash Monitor started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("crash_monitor", _crash_monitor_wrapper)
+        return _manual_scan_ack("crash_monitor", accepted, message="Crash Monitor started", strategy=resolved_strategy)
     elif "btc" in strategy_lower or "divergenz" in strategy_lower:
-        _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
-        return {
-            "status": "started",
-            "message": "BTC Divergenz Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("btc_divergenz", _btc_divergenz_wrapper)
+        return _manual_scan_ack("btc_divergenz", accepted, message="BTC Divergenz Scanner started", strategy=resolved_strategy)
     elif "money" in strategy_lower or "flow" in strategy_lower:
-        _run_scan_safe("money_flow", _money_flow_wrapper)
-        return {
-            "status": "started",
-            "message": "Money Flow Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("money_flow", _money_flow_wrapper)
+        return _manual_scan_ack("money_flow", accepted, message="Money Flow Scanner started", strategy=resolved_strategy)
     elif "turtle" in strategy_lower:
-        _run_scan_safe("turtle", _turtle_scan_wrapper)
-        return {
-            "status": "started",
-            "message": "Turtle Breakout Scanner started",
-            "strategy": resolved_strategy,
-        }
+        accepted = _run_scan_safe("turtle", _turtle_scan_wrapper)
+        return _manual_scan_ack("turtle", accepted, message="Turtle Breakout Scanner started", strategy=resolved_strategy)
     elif "listing" in strategy_lower:
         if HAS_NEW_LISTING_SCANNER:
-            _run_scan_safe("new_listing", _new_listing_wrapper)
-            return {
-                "status": "started",
-                "message": "New Listing Scanner started",
-                "strategy": resolved_strategy,
-            }
+            accepted = _run_scan_safe("new_listing", _new_listing_wrapper)
+            return _manual_scan_ack("new_listing", accepted, message="New Listing Scanner started", strategy=resolved_strategy)
         else:
             raise HTTPException(status_code=400, detail="New Listing Scanner not available")
     else:
@@ -30407,6 +30535,11 @@ def get_scan_results(
     strategy = strategy if isinstance(strategy, str) and strategy.strip() else None
     direction = direction if isinstance(direction, str) and direction.strip() else None
     market_type = market_type if isinstance(market_type, str) and market_type.strip() else "stocks"
+    market_type = market_type.strip().lower()
+    if market_type in _UNSUPPORTED_SCAN_MARKETS:
+        raise HTTPException(status_code=501, detail=_unsupported_market_scan_detail(market_type))
+    if market_type not in {"stocks", "crypto"}:
+        raise HTTPException(status_code=400, detail=f"Unknown market type '{market_type}'")
 
     # Determine cache file based on strategy parameter
     cache_file = None
@@ -31920,6 +32053,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
     excluded_assets = 0
 
     for coin in all_coins:
+        _scan_control_point()
         try:
             price = coin.get("current_price") or 0
             if price <= 0:
@@ -32740,6 +32874,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
 
     _publish_early_progress(0, "Kandidaten bewertet; Exchange-Trigger werden geprueft", force=True)
     for trigger_index, item in enumerate(trigger_pool, start=1):
+        _scan_control_point()
         contract = item.get("PerpChartSymbol") or item.get("PerpMatchSymbol")
         exchange = _normalize_crypto_exchange(item.get("PerpChartExchange") or item.get("BestExchange"))
         if not contract or not exchange:
@@ -32851,6 +32986,7 @@ def _early_movers_wrapper() -> None:
 
         # Fetch multi-exchange perp data once
         perp_data = fetch_multi_exchange_perps()
+        _scan_control_point()
 
         # Run full analysis
         def _save_progress(payload, checked, total, detail):
@@ -32868,6 +33004,7 @@ def _early_movers_wrapper() -> None:
         )
 
         # Save results
+        _scan_control_point(finishing=True)
         finalize_cache_file(EARLY_MOVERS_CACHE, [result])
         s = result.get("stats", {})
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
@@ -32892,6 +33029,9 @@ def _early_movers_wrapper() -> None:
         except Exception as age_exc:
             print(f"[Early Movers] mail freshness prep skipped: {age_exc}")
         _send_early_mover_long_alerts(result)
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(EARLY_MOVERS_CACHE)
+        raise
     except Exception as e:
         _remove_partial_cache(EARLY_MOVERS_CACHE)
         print(f"[Early Movers] Error: {e}")
@@ -33405,6 +33545,7 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     funding_meta = _funding_measurement(row.get("funding_rate"), source=row.get("funding_source"), unit=row.get("funding_rate_unit") or "percent", interval_hours=row.get("funding_interval_hours"))
     funding_available = row.get("funding_available") is not False and funding_meta["funding_rate_pct_8h_equivalent"] is not None
     funding_pct = funding_meta["funding_rate_pct_8h_equivalent"] or 0.0
+    funding_crowded = bool(funding_available and funding_pct >= 0.08)
     turnover = _ce_float(row.get("turnover_24h_usd"))
     spread_pct = _alert_float(row.get("spread_pct"))
     spread_available = not isinstance(row.get("spread_pct"), bool) and spread_pct is not None and spread_pct >= 0
@@ -33423,7 +33564,7 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         too_late_reasons.append("5m vertical move is fading")
     if breakout_reclaim_pct > 5.5:
         too_late_reasons.append("price already far above breakout level")
-    if funding_pct >= 0.08 and change24 >= 12:
+    if funding_crowded and change24 >= 12:
         too_late_reasons.append("crowded funding after pump")
 
     liquidity_score = 20 if turnover >= 50_000_000 else 16 if turnover >= 15_000_000 else 11 if turnover >= 5_000_000 else 6
@@ -33555,7 +33696,14 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         and not target_quality.startswith("WEAK_")
         and rr_tp1 + 1e-12 >= 1.35
     )
-    trigger_tradeable = bool(trigger_ok and target_tradeable and not barrier_gate_active and funding_available and spread_execution_ok)
+    trigger_tradeable = bool(
+        trigger_ok
+        and target_tradeable
+        and not barrier_gate_active
+        and funding_available
+        and not funding_crowded
+        and spread_execution_ok
+    )
     trade_signal = "JETZT_TRADEN" if trigger_tradeable else "EXPLOSION_ARMED"
     risk_level = "LOW"
     risk_reasons = []
@@ -33577,7 +33725,7 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     if not btc_context.get("known"):
         risk_level = "HIGH"
         risk_reasons.append("BTC context missing; execution is fail-closed")
-    if funding_pct >= 0.08:
+    if funding_crowded:
         risk_level = "HIGH"
         risk_reasons.append("funding crowded")
     if not funding_available or not spread_execution_ok:
@@ -33701,12 +33849,17 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
 
 
 def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    from threading import Event
+    control_owner = scan_control.bound_owner()
+    pause_drained = Event()
+    _scan_control_point()
     _ce_progress_update(running=True, status="universe", checked=0, total=0,
                         hits=0, errors=0, by_exchange={}, started_at=time.time(),
                         detail="Crypto Long Engine: Handelsplaetze werden abgefragt",
                         hits_label="Setups vor Endpruefung")
     with paced_scan_requests():
         universe, stats = _fetch_crypto_explosion_universe()
+    _scan_control_point()
     max_checks = max(50, min(CRYPTO_EXPLOSION_MAX_CHART_CHECKS, 1600))
     groups = {}
     for index, row in enumerate(universe[:max_checks]):
@@ -33724,6 +33877,11 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         # Exactly one worker per venue; <=4 workers/futures, no 1000-item queue.
         with paced_scan_requests():
             for index, row in batch:
+                # Children never park with sibling provider jobs still active.
+                # Stop scheduling, finish this venue, then join on the owner.
+                if scan_control.pause_pending(control_owner):
+                    pause_drained.set()
+                    break
                 scored = None
                 error = False
                 try:
@@ -33772,6 +33930,11 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
                 reason_counts.update({f"{venue}_{key}": value for key, value in reasons.items()})
                 if aborted:
                     aborted_venues.append(venue)
+    _scan_control_point()  # All venue workers have exited, including failures.
+    if pause_drained.is_set():
+        # Resume may race the join and cancel pause_requested before parking.
+        # A drained, incomplete candidate set must still never be published.
+        raise scan_control.ScanRestartRequired(reason="pause_drained")
     # Completion order must never become a hidden ranking/tie-break criterion.
     results = [row for _, row in sorted(indexed, key=lambda item: item[0])]
     fresh_results = []
@@ -33817,9 +33980,13 @@ def _crypto_explosion_wrapper() -> None:
         rows, stats = _run_crypto_explosion_scan()
         if stats.get("incomplete"):
             raise RuntimeError("Crypto Explosion partial cache prevented: venue unavailable/rate-limited; previous cache retained")
+        _scan_control_point(finishing=True)
         save_cache_file(CRYPTO_EXPLOSION_CACHE, rows, metadata={"scan_stats": stats})
         _ce_progress_update(running=False, status="done")
         print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks", flush=True)
+    except scan_control.ScanRestartRequired:
+        _ce_progress_update(running=False, status="restart_required")
+        raise
     except Exception as exc:
         _ce_progress_update(running=False, status="error")
         print(f"[Crypto Explosion] Error: {_sanitized_exception_text(exc)}")
@@ -33964,6 +34131,11 @@ BTC_DIVERGENZ_CACHE = "/tmp/btc_divergenz_cache.json"
 def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
     """Build crypto-only BTC divergence watch rows; no equities/ETFs belong here."""
     coins = _fetch_coingecko_markets(pages=4)
+    source_status = {
+        "source": str(_CG_MARKETS_STATUS.get("source") or "unknown"),
+        "partial": bool(_CG_MARKETS_STATUS.get("partial")),
+        "warning": _CG_MARKETS_STATUS.get("warning"),
+    }
     if not coins:
         return []
 
@@ -33990,6 +34162,7 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
 
     rows: List[Dict[str, Any]] = []
     for coin in coins:
+        _scan_control_point()
         try:
             cid = str(coin.get("id") or "")
             symbol = str(coin.get("symbol") or "").upper().strip()
@@ -34119,6 +34292,10 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "execution_trigger_ok": False,
                 "risk_flags": risk_flags,
                 "scanner_note": "BTC-Divergenz ist ein Watch-/Bias-Scanner: kein Trade ohne 5m Trigger, Retest oder Rejection.",
+                "data_source": source_status["source"],
+                "partial_data": source_status["partial"],
+                "data_warning": source_status["warning"],
+                "source_status": dict(source_status),
                 "isCrypto": True,
             })
         except Exception as e:
@@ -34141,7 +34318,22 @@ def _btc_divergenz_wrapper() -> None:
         # Berechnung hinter einem unbedingten fruehen return, seit dem
         # sqrt(5)-Fix dokumentiert unreachable) wurde komplett entfernt.
         # Live-Pfad ist ausschliesslich _build_crypto_btc_divergence_results().
-        save_cache_file(BTC_DIVERGENZ_CACHE, _build_crypto_btc_divergence_results())
+        rows = _build_crypto_btc_divergence_results()
+        source_status = (
+            dict(rows[0].get("source_status") or {})
+            if rows
+            else {
+                "source": str(_CG_MARKETS_STATUS.get("source") or "unknown"),
+                "partial": bool(_CG_MARKETS_STATUS.get("partial")),
+                "warning": _CG_MARKETS_STATUS.get("warning"),
+            }
+        )
+        _scan_control_point(finishing=True)
+        save_cache_file(
+            BTC_DIVERGENZ_CACHE,
+            rows,
+            metadata={"source_status": source_status},
+        )
     except Exception as e:
         print(f"BTC divergenz error: {_sanitized_exception_text(e)}")
         _print_sanitized_traceback()
@@ -34157,6 +34349,7 @@ def trigger_btc_divergenz():
 @app.get("/api/btc-divergenz-results")
 def get_btc_divergenz():
     results, cached_at = load_cache_file(BTC_DIVERGENZ_CACHE)
+    cache_payload = _scan_cache_payload(BTC_DIVERGENZ_CACHE) or {}
     cache_age = None
     if cached_at:
         try:
@@ -34166,7 +34359,23 @@ def get_btc_divergenz():
     decorated = _decorate_scan_results(results, "btc_divergenz", cache_age)
     decorated = _apply_signal_only_policy("btc_divergenz", decorated)
     quality = _scan_quality_payload("btc_divergenz", cache_age, decorated)
-    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
+    source_status = cache_payload.get("source_status")
+    if not isinstance(source_status, dict):
+        source_status = next(
+            (
+                dict(row.get("source_status") or {})
+                for row in (results or [])
+                if isinstance(row, dict) and isinstance(row.get("source_status"), dict)
+            ),
+            {},
+        )
+    source_warning = source_status.get("warning")
+    if source_status.get("partial") is True:
+        warning = source_warning or "BTC-Divergenz basiert auf unvollstaendigen CoinGecko-Daten."
+        if warning not in quality["warnings"]:
+            quality["warnings"].append(warning)
+    quality["source_status"] = source_status
+    return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "source_status": source_status, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
 
 # ── Money Flow (Sector Performance) ──
@@ -34302,7 +34511,11 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30, now_utc: Optional[date
 
     cmf = _calculate_cmf(closes, highs, lows, volumes, period=20) if len(closes) >= 20 else None
     source_session = ordered_sessions[0]
-    in_progress = source_session == now_et.date() and now_et.hour < 16
+    from modules.stock_swing_contract import session_close
+    source_closed_at = session_close(source_session.isoformat())
+    if source_closed_at is None:
+        return None
+    in_progress = source_session == now_et.date() and current < source_closed_at
     fraction = _us_equity_expected_volume_fraction(current) if in_progress else 1.0
     rvol = project_partial_rvol(vol / avg_vol, fraction) if avg_vol else None
     rvol_basis = (
@@ -34326,7 +34539,13 @@ def _fetch_daily_proxy_perf(ticker: str, limit: int = 30, now_utc: Optional[date
     }
 
 
-def _narrative_score(row: Dict[str, Any]) -> float:
+def _narrative_score(row: Dict[str, Any]) -> Optional[float]:
+    # The fixed-weight return model requires all three observed horizons.
+    # Missing is not a measured 0% return and weights are not renormalized.
+    for field in ("change_1d", "change_5d", "change_20d"):
+        value = _alert_float(row.get(field))
+        if value is None or not math.isfinite(value) or isinstance(row.get(field), bool):
+            return None
     score = (
         float(row.get("change_5d", 0) or 0) * 0.55
         + float(row.get("change_20d", 0) or 0) * 0.25
@@ -34348,7 +34567,9 @@ def _narrative_score(row: Dict[str, Any]) -> float:
     return round(score, 2)
 
 
-def _narrative_bias(score: float) -> str:
+def _narrative_bias(score: Optional[float]) -> str:
+    if score is None:
+        return "UNBEKANNT"
     if score >= 4:
         return "BULLISCH"
     if score <= -4:
@@ -34385,10 +34606,15 @@ def _build_narrative_pulse(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         score = _narrative_score(item)
         item["narrative_score"] = score
         item["bias"] = _narrative_bias(score)
+        item["missing_metrics"] = [field for field in
+            ("change_1d", "change_5d", "change_20d", "rvol", "cmf", "obv_change")
+            if isinstance(item.get(field), bool) or _alert_float(item.get(field)) is None]
+        item["data_status"] = "partial" if item["missing_metrics"] else "ok"
         enriched.append(item)
 
-    bullish = sorted(enriched, key=lambda x: x.get("narrative_score", 0), reverse=True)[:5]
-    bearish = sorted(enriched, key=lambda x: x.get("narrative_score", 0))[:5]
+    scored = [item for item in enriched if item["narrative_score"] is not None]
+    bullish = sorted(scored, key=lambda x: x["narrative_score"], reverse=True)[:5]
+    bearish = sorted(scored, key=lambda x: x["narrative_score"])[:5]
 
     for item in bullish[:3]:
         examples = item.get("examples") or []
@@ -34398,29 +34624,30 @@ def _build_narrative_pulse(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         item["representatives"] = _narrative_representatives(examples, "bear") if examples else []
 
     return {
-        "status": "success",
+        "status": "unavailable" if not enriched else "partial" if any(item["data_status"] != "ok" for item in enriched) else "success",
         "generated_at": datetime.now().isoformat(),
         "bullish": bullish,
         "bearish": bearish,
-        "all": sorted(enriched, key=lambda x: x.get("narrative_score", 0), reverse=True),
+        "all": sorted(enriched, key=lambda x: (x["narrative_score"] is not None, x["narrative_score"] or 0), reverse=True),
     }
 
 
 def _format_narrative_row(item: Dict[str, Any]) -> str:
     def _metric(value, suffix="", precision=1):
-        number = _alert_float(value)
+        number = None if isinstance(value, bool) else _alert_float(value)
         return "—" if number is None else f"{number:.{precision}f}{suffix}"
     reps = item.get("representatives") or []
     rep_text = ", ".join(
         f"{html.escape(str(rep.get('ticker', '')))} {_metric(rep.get('change_5d'), '%')}"
         for rep in reps
     ) or html.escape(", ".join(item.get("examples", [])[:3]) or "-")
-    color = "#059669" if float(item.get("narrative_score", 0) or 0) >= 0 else "#dc2626"
+    score = _alert_float(item.get("narrative_score"))
+    color = "#64748b" if score is None else "#059669" if score >= 0 else "#dc2626"
     return (
         "<tr>"
         f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(item.get('sector', item.get('narrative', ''))))}</b><br>"
         f"<span style='color:#64748b'>{html.escape(str(item.get('ticker', '')))} Proxy</span></td>"
-        f"<td style='padding:8px;border-bottom:1px solid #eee;color:{color};font-weight:bold'>{float(item.get('narrative_score', 0) or 0):+.1f}</td>"
+        f"<td style='padding:8px;border-bottom:1px solid #eee;color:{color};font-weight:bold'>{_metric(item.get('narrative_score'))}</td>"
         f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_1d'), '%')}</td>"
         f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_5d'), '%')}</td>"
         f"<td style='padding:8px;border-bottom:1px solid #eee'>{_metric(item.get('change_20d'), '%')}</td>"
@@ -34660,15 +34887,18 @@ def _money_flow_wrapper() -> None:
     """Fetch sector ETF performance for money flow analysis."""
     try:
         sectors = []
+        unavailable_proxies = 0
         proxy_universe = {
             **{ticker: {"name": name, "type": "sector", "examples": []} for ticker, name in SECTOR_ETFS.items()},
             **{ticker: {"name": cfg["name"], "type": "theme", "examples": cfg.get("examples", [])} for ticker, cfg in NARRATIVE_PROXIES.items()},
         }
         for ticker, cfg in proxy_universe.items():
+            _scan_control_point()
             name = cfg["name"]
             try:
                 perf = _fetch_daily_proxy_perf(ticker, limit=30)
                 if not perf:
+                    unavailable_proxies += 1
                     continue
                 close = perf["price"]
                 chg_1d = perf["change_1d"]
@@ -34733,14 +34963,23 @@ def _money_flow_wrapper() -> None:
                     "cmf_signal": cmf_signal,
                 })
             except Exception as e:
+                unavailable_proxies += 1
                 print(f"[Warning] Error processing sector {name} ticker {ticker}: {e}")
                 continue
 
+        if unavailable_proxies:
+            raise ScannerDataError("scan_data_incomplete" if sectors else "scan_data_unavailable",
+                                   diagnostics={"expected": len(proxy_universe), "available": len(sectors)})
         sectors.sort(key=lambda x: (x.get("change_5d") is not None, float(x.get("change_5d") or 0)), reverse=True)
-        save_cache_file(MONEY_FLOW_CACHE, sectors)
         narrative_payload = _build_narrative_pulse(sectors)
+        # Preserve the same missing-data/bias contract in the sector table and
+        # narrative cards. Both are contextual, never immediate trade entries.
+        by_ticker = {row["ticker"]: row for row in narrative_payload["all"]}
+        _scan_control_point(finishing=True)
+        save_cache_file(MONEY_FLOW_CACHE, [by_ticker[row["ticker"]] for row in sectors])
         save_cache_file(NARRATIVE_PULSE_CACHE, narrative_payload)
-        _send_narrative_pulse_email(narrative_payload)
+        if narrative_payload.get("status") == "success":
+            _send_narrative_pulse_email(narrative_payload)
     except Exception as e:
         print(f"Money flow error: {e}")
         _print_sanitized_traceback()
@@ -34801,6 +35040,133 @@ def get_narrative_email_status():
 # ── New Listing Scanner ──
 NEW_LISTING_CACHE = "/tmp/new_listing_scanner.json"
 
+
+def _new_listing_short_safety_contract(row: Dict[str, Any]) -> bool:
+    """Mirror the safety-critical producer predicate at the cache boundary."""
+    if not isinstance(row, dict):
+        return False
+    try:
+        timing_quality = float(row.get("timing_quality", 0) or 0)
+        rr_effective = float(row.get("rr_effective", 0) or 0)
+        risk_pct = float(row.get("risk_pct", 999) or 999)
+    except (TypeError, ValueError):
+        return False
+    grade = str(row.get("grade") or row.get("Grade") or "").upper()
+    micro_required = row.get("micro_required", True) is not False
+    return bool(
+        str(row.get("direction") or "").upper() == "SHORT"
+        and timing_quality >= 4
+        and grade in {"S", "A", "A+"}
+        and row.get("safety_ok") is True
+        and row.get("confirmation_ok") is True
+        and row.get("btc_context_ok", True) is True
+        and (not micro_required or row.get("micro_trigger_ok") is True)
+        and not row.get("continuation_risk")
+        and not row.get("tp1_missed")
+        and not row.get("tp2_missed")
+        and rr_effective >= _NEW_LISTING_MIN_ALERT_RR
+        and risk_pct <= _NEW_LISTING_MAX_SIGNAL_RISK_PCT
+        and row.get("listing_trade_ok") is True
+        and _crypto_structure_block_reason(row) is None
+    )
+
+
+def _new_listing_cached_short_contract_valid(row: Dict[str, Any]) -> bool:
+    """Only this explicit cache version may promote a short to trade-now."""
+    return bool(
+        isinstance(row, dict)
+        and row.get("new_listing_short_cache_version") == _NEW_LISTING_SHORT_CACHE_VERSION
+        and row.get("source_trade_contract_validated") is True
+        and _new_listing_short_safety_contract(row)
+    )
+
+
+def _new_listing_effective_micro_age(
+    row: Dict[str, Any], cache_age_seconds: Optional[int]
+) -> Optional[float]:
+    closed_at = row.get("micro_candle_closed_at")
+    closed_age: Optional[float] = None
+    if closed_at is not None and closed_at != "":
+        # The closed candle timestamp is the causal trigger observation.  When
+        # present it is more precise than adding two rounded cache ages.  Keep
+        # the conservative maximum when both clocks are available so stale
+        # cache metadata can never be hidden by an inconsistent row timestamp.
+        # Invalid/future close timestamps fail closed.
+        closed_age = _new_listing_observed_age_seconds(closed_at)
+        if closed_age is None:
+            return None
+    source_age = _alert_float(row.get("micro_data_age_seconds"))
+    cache_age = _alert_float(cache_age_seconds)
+    derived_age = (
+        float(source_age) + float(cache_age)
+        if source_age is not None
+        and source_age >= 0
+        and cache_age is not None
+        and cache_age >= 0
+        else None
+    )
+    if closed_age is not None:
+        return max(closed_age, derived_age) if derived_age is not None else closed_age
+    return derived_age
+
+
+def _new_listing_observed_age_seconds(observed_at: Any) -> Optional[float]:
+    """Return the real age of an ISO observation, preserving timezone offsets."""
+    if observed_at is None or observed_at == "":
+        return None
+    try:
+        observed = datetime.fromisoformat(str(observed_at).strip().replace("Z", "+00:00"))
+        now = datetime.now(observed.tzinfo) if observed.tzinfo is not None else datetime.now()
+        age = (now - observed).total_seconds()
+        if not math.isfinite(age) or age < 0:
+            return None
+        return float(age)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _downgrade_expired_new_listing_triggers(
+    rows: List[Dict[str, Any]], cache_age_seconds: Optional[int]
+) -> List[Dict[str, Any]]:
+    """Apply one versioned/fresh short contract to direct and combined APIs."""
+    downgraded_rows: List[Dict[str, Any]] = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        action = str(row.get("trade_action") or row.get("trade_signal") or "").upper()
+        requested_now = action in {"SHORT_NOW", "JETZT_SHORT", "TRADE_NOW", "JETZT_TRADEN"}
+        effective_age = _new_listing_effective_micro_age(row, cache_age_seconds)
+        contract_valid = _new_listing_cached_short_contract_valid(row)
+        trigger_fresh = bool(
+            effective_age is not None
+            and effective_age <= _NEW_LISTING_MICRO_MAX_AGE_SECONDS
+        )
+        row["effective_micro_data_age_seconds"] = effective_age
+        row["short_contract_validated"] = contract_valid
+        if requested_now and (not contract_valid or not trigger_fresh):
+            reasons = list(row.get("risk_flags") or [])
+            reason = (
+                "new_listing_short_cache_contract_invalid"
+                if not contract_valid
+                else "new_listing_micro_trigger_expired"
+            )
+            if reason not in reasons:
+                reasons.append(reason)
+            row.update({
+                "trade_action": "SHORT_WATCH",
+                "trade_signal": "WARTEN",
+                "signal": "BEOBACHTEN",
+                "signal_label": "Short vorbereitet: frischen bestaetigten 5m-Crack abwarten",
+                "alertable_crypto": False,
+                "risk_flags": reasons,
+                "trigger_expiry_reason": reason,
+            })
+        elif requested_now:
+            row["micro_data_age_seconds"] = effective_age
+        downgraded_rows.append(row)
+    return downgraded_rows
+
 def _display_crypto_contract_symbol(symbol: str) -> str:
     """Clean exchange contract suffixes without eating real ticker letters."""
     display = str(symbol or "").strip().upper()
@@ -34848,6 +35214,8 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
         sig = entry.get("signal", {}) or {}
         pump = sig.get("pump_data", {}) or {}
         setup = sig.get("trade_setup") if isinstance(sig.get("trade_setup"), dict) else {}
+        source_contract_valid = _new_listing_short_safety_contract(sig)
+        is_tradeable = bool(bucket == "signals" and source_contract_valid)
 
         def _signal_field(key: str, default: Any = None) -> Any:
             if key in sig:
@@ -34883,7 +35251,7 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "from_ath_pct": pump.get("from_ath_pct", 0),
             "exhaustion_score": sig.get("exh_score", 0),
             "exhaustion_details": sig.get("exh_details", []),
-            "signal": signal_label,
+            "signal": signal_label if bucket != "signals" or is_tradeable else "BEOBACHTEN",
             "entry": sig.get("entry", 0),
             "stop": sig.get("stop_loss", sig.get("stop", 0)),
             "tp1": sig.get("tp1", 0),
@@ -34914,9 +35282,12 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "listing_source": sig.get("listing_source", pump.get("listing_source", entry.get("listing_source", ""))),
             "listing_trade_ok": sig.get("listing_trade_ok", entry.get("listing_trade_ok", False)),
             "trade_category": sig.get("trade_category", entry.get("trade_category", "")),
-            "trade_action": "SHORT_NOW" if bucket == "signals" and sig.get("listing_trade_ok") else "BEOBACHTEN",
-            "trade_signal": "JETZT_TRADEN" if bucket == "signals" and sig.get("listing_trade_ok") else "BEOBACHTEN",
-            "signal_label": "Jetzt shorten" if bucket == "signals" and sig.get("listing_trade_ok") else "Achtung beobachten",
+            "direction": sig.get("direction"),
+            "new_listing_short_cache_version": _NEW_LISTING_SHORT_CACHE_VERSION,
+            "source_trade_contract_validated": source_contract_valid,
+            "trade_action": "SHORT_NOW" if is_tradeable else "BEOBACHTEN",
+            "trade_signal": "JETZT_TRADEN" if is_tradeable else "BEOBACHTEN",
+            "signal_label": "Jetzt shorten" if is_tradeable else "Achtung beobachten",
             "vol_ratio": pump.get("vol_ratio", 0),
             "funding_rate": pump.get("funding_rate", 0),
             "funding_rate_pct": pump.get("funding_rate_pct", pump.get("funding_rate", 0)),
@@ -34947,6 +35318,10 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "stop_model": sig.get("stop_model", ""),
             "setup_type": sig.get("setup_type", ""),
             "micro_trigger_ok": pump.get("micro_trigger_ok", False),
+            "micro_required": sig.get("micro_required", True),
+            "micro_data_age_seconds": sig.get("micro_data_age_seconds", pump.get("micro_data_age_seconds")),
+            "micro_candle_closed_at": sig.get("micro_candle_closed_at", pump.get("micro_candle_closed_at")),
+            "micro_dropped_open_candle": bool(sig.get("micro_dropped_open_candle", pump.get("micro_dropped_open_candle", False))),
             "micro_score": pump.get("micro_score", 0),
             "micro_reasons": pump.get("micro_reasons", []),
             "micro_warnings": pump.get("micro_warnings", []),
@@ -35272,13 +35647,10 @@ def trigger_new_listing_scan():
 def get_new_listing_results():
     """Get cached new listing scan results."""
     results, cached_at = load_cache_file(NEW_LISTING_CACHE)
-    cache_age = None
-    if cached_at:
-        try:
-            cache_age = int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-        except Exception as e:
-            print(f"[Warning] {e}")
+    parsed_cache_age = _new_listing_observed_age_seconds(cached_at)
+    cache_age = math.floor(parsed_cache_age) if parsed_cache_age is not None else None
     raw_count = len(results) if results else 0
+    results = _downgrade_expired_new_listing_triggers(results or [], cache_age)
     decorated, display_stats = _decorate_new_listing_display_results(results, cache_age)
     stats = {
         "raw_rows": raw_count,
@@ -35306,7 +35678,8 @@ def get_new_listing_results():
 
 # ── Volume Spikes Scanner ──
 def _crypto_trade_to_float(value: Any, default: float = 0.0) -> float:
-    return _alert_float(value, default) or default
+    parsed = _alert_float(value)
+    return float(default) if parsed is None else float(parsed)
 
 
 def _crypto_trade_grade(score: float) -> str:
@@ -35322,12 +35695,8 @@ def _crypto_trade_grade(score: float) -> str:
 
 
 def _crypto_trade_cache_age(cached_at: Optional[str]) -> Optional[int]:
-    if not cached_at:
-        return None
-    try:
-        return int((datetime.now() - datetime.fromisoformat(cached_at)).total_seconds())
-    except Exception:
-        return None
+    parsed = _new_listing_observed_age_seconds(cached_at)
+    return math.floor(parsed) if parsed is not None else None
 
 
 def _crypto_trade_max_cached_at(*values: Optional[str]) -> Optional[str]:
@@ -35445,9 +35814,24 @@ def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any
     entry_score = _crypto_trade_to_float(row.get("entry_score"), score)
     execution_age = _crypto_trade_to_float(row.get("execution_data_age_seconds"), -1)
     structure_block_reason = _crypto_structure_block_reason(row)
+    funding = _funding_measurement(
+        row.get("funding_rate"),
+        source=row.get("funding_source"),
+        unit=row.get("funding_rate_unit") or "percent",
+        interval_hours=row.get("funding_interval_hours"),
+    )
+    funding_pct = funding.get("funding_rate_pct_8h_equivalent")
+    execution_allowed = bool(
+        row.get("alertable_crypto") is True
+        and str(row.get("risk_level") or "").upper() != "HIGH"
+        and row.get("spread_execution_ok") is True
+        and funding_pct is not None
+        and funding_pct < 0.08
+    )
     live_trigger_ok = bool(
         signal == "JETZT_TRADEN"
         and row.get("execution_trigger_ok") is True
+        and execution_allowed
         and 0 <= execution_age <= 600
         and structure_block_reason is None
     )
@@ -35537,6 +35921,7 @@ def _normalize_crypto_short_signal(row: Dict[str, Any]) -> Optional[Dict[str, An
     structure_block_reason = _crypto_structure_block_reason(row)
     is_short_now = bool(
         requested_short_now
+        and _new_listing_cached_short_contract_valid(row)
         and row.get("micro_trigger_ok") is True
         and row.get("safety_ok") is True
         and row.get("listing_trade_ok") is True
@@ -35603,7 +35988,71 @@ def _crypto_trade_action_rank(row: Dict[str, Any]) -> int:
     return 2
 
 
+def _crypto_trade_execution_risk_rank(row: Dict[str, Any]) -> int:
+    """Rank complete venue plans without borrowing fields from another venue."""
+    if _crypto_structure_block_reason(row):
+        return 4
+    risk_level = str(row.get("risk_level") or "").upper()
+    # Unknown risk is not LOW.  A watch-only row with no classified risk must
+    # never displace a fully validated MEDIUM-risk trade-now venue.
+    rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 3}.get(risk_level, 2)
+    direction = str(row.get("direction") or "").upper()
+    if direction == "SHORT" and (
+        row.get("safety_ok") is False
+        or row.get("confirmation_ok") is False
+        or row.get("listing_trade_ok") is False
+        or row.get("continuation_risk") is True
+    ):
+        # Explicit producer safety failures override a stale/malformed LOW
+        # label.  This is ranking only; it does not create a new R:R gate.
+        rank = max(rank, 3)
+    action = str(row.get("trade_action") or row.get("decision") or "").upper()
+    if action in {"JETZT_LONG", "JETZT_SHORT"} and row.get("alertable_crypto") is False:
+        rank = max(rank, 3)
+    if row.get("spread_execution_ok") is False:
+        rank = max(rank, 3)
+    if direction == "LONG":
+        funding = _funding_measurement(
+            row.get("funding_rate"),
+            source=row.get("funding_source"),
+            unit=row.get("funding_rate_unit") or "percent",
+            interval_hours=row.get("funding_interval_hours"),
+        )
+        funding_pct = funding.get("funding_rate_pct_8h_equivalent")
+        if funding_pct is not None and funding_pct >= 0.08:
+            rank = max(rank, 3)
+    return rank
+
+
+def _crypto_trade_venue_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose a self-contained alternative plan; never merge its levels."""
+    return {
+        "exchange": row.get("exchange") or row.get("venue") or row.get("best_chart_exchange"),
+        "contract": row.get("contract") or row.get("best_contract_symbol"),
+        "direction": row.get("direction"),
+        "trade_action": row.get("trade_action"),
+        "risk_rank": _crypto_trade_execution_risk_rank(row),
+        "risk_level": row.get("risk_level"),
+        "spread_pct": row.get("spread_pct"),
+        "spread_execution_ok": row.get("spread_execution_ok"),
+        "funding_rate_pct": row.get("funding_rate_pct"),
+        "funding_rate_unit": row.get("funding_rate_unit"),
+        "entry": row.get("entry"),
+        "stop": row.get("stop", row.get("stop_loss")),
+        "tp1": row.get("tp1"),
+        "tp2": row.get("tp2"),
+        "risk_reward": row.get("risk_reward"),
+        "entry_score": row.get("entry_score"),
+        "trade_score": row.get("trade_score"),
+        "scanner_source": row.get("scanner_source"),
+    }
+
+
 def _crypto_trade_prefer_candidate(candidate: Dict[str, Any], current: Dict[str, Any]) -> bool:
+    cand_risk = _crypto_trade_execution_risk_rank(candidate)
+    cur_risk = _crypto_trade_execution_risk_rank(current)
+    if cand_risk != cur_risk:
+        return cand_risk < cur_risk
     cand_rank = _crypto_trade_action_rank(candidate)
     cur_rank = _crypto_trade_action_rank(current)
     if cand_rank != cur_rank:
@@ -35645,11 +36094,13 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
         if normalized:
             candidates.append(_enforce_crypto_structure_wait(normalized))
     selected: Dict[str, Dict[str, Any]] = {}
+    candidates_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     suppressed_by_symbol: Dict[str, List[str]] = {}
     for candidate in candidates:
         symbol = str(candidate.get("Symbol") or candidate.get("symbol") or "").upper()
         if not symbol:
             continue
+        candidates_by_symbol.setdefault(symbol, []).append(candidate)
         existing = selected.get(symbol)
         if not existing:
             selected[symbol] = candidate
@@ -35666,6 +36117,24 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
     rows = list(selected.values())
     for row in rows:
         symbol = str(row.get("Symbol") or row.get("symbol") or "").upper()
+        selected_exchange = str(row.get("exchange") or row.get("venue") or "").lower()
+        selected_contract = str(row.get("contract") or row.get("best_contract_symbol") or "").upper()
+        venue_alternatives = []
+        for alternative in candidates_by_symbol.get(symbol, []):
+            if alternative is row:
+                continue
+            alternative_exchange = str(alternative.get("exchange") or alternative.get("venue") or "").lower()
+            alternative_contract = str(alternative.get("contract") or alternative.get("best_contract_symbol") or "").upper()
+            if (alternative_exchange, alternative_contract) == (selected_exchange, selected_contract):
+                continue
+            venue_alternatives.append(_crypto_trade_venue_summary(alternative))
+        row["venue_selection"] = {
+            "policy": "risk_then_action_then_score_rr",
+            "selected_exchange": row.get("exchange") or row.get("venue"),
+            "selected_contract": row.get("contract") or row.get("best_contract_symbol"),
+            "selected_risk_rank": _crypto_trade_execution_risk_rank(row),
+        }
+        row["venue_alternatives"] = venue_alternatives
         if suppressed_by_symbol.get(symbol):
             row["conflict_note"] = "; ".join(suppressed_by_symbol[symbol][:2])
             warnings = list(row.get("warnings") or row.get("risk_flags") or [])
@@ -35673,6 +36142,7 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
             row["warnings"] = warnings
             row["risk_flags"] = warnings
     rows.sort(key=lambda row: (
+        _crypto_trade_execution_risk_rank(row),
         _crypto_trade_action_rank(row),
         0 if row.get("direction") == "LONG" else 1,
         -_crypto_trade_to_float(row.get("entry_score"), 0),
@@ -35693,7 +36163,8 @@ def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dic
     # crypto-explosion-GET — die Merge-Engine darf keine abgelaufenen
     # LONG_NOW-Trigger als handelbar weiterreichen.
     long_rows = _downgrade_expired_crypto_triggers(long_rows, long_age)
-    short_rows, short_stats = _decorate_new_listing_display_results(short_raw or [], short_age)
+    short_raw = _downgrade_expired_new_listing_triggers(short_raw or [], short_age)
+    short_rows, short_stats = _decorate_new_listing_display_results(short_raw, short_age)
     merged = _merge_crypto_trade_signals(long_rows, short_rows)
     cached_at = _crypto_trade_max_cached_at(long_cached_at, short_cached_at)
     cache_age = _crypto_trade_cache_age(cached_at)
@@ -35959,7 +36430,16 @@ def _penny_merge_state_tickers(
             existing_active = bool(existing.get("active"))
             incoming_active = bool(raw_update.get("active"))
             existing_position_id = _penny_event_token(existing.get("position_event_id"))
+            existing_exit_id = (
+                _penny_event_token(existing.get("last_exit_event_id"))
+                or existing_position_id
+            )
             incoming_position_id = _penny_event_token(raw_update.get("position_event_id"))
+            # A detached HOLD may be evaluated after another worker has closed
+            # and reopened this ticker. Observation time cannot transfer an
+            # active position's identity; only claim/finalize may open it.
+            if existing_active and existing_position_id and incoming_position_id != existing_position_id:
+                continue
             incoming_action = str(raw_update.get("last_action") or "").upper()
             incoming_model_entry = (
                 incoming_active
@@ -35968,7 +36448,8 @@ def _penny_merge_state_tickers(
             )
             explicit_exit = (
                 not incoming_active
-                and raw_update.get("exit_email_sent") is True
+                and (raw_update.get("exit_email_sent") is True
+                     or raw_update.get("model_exit_confirmed") is True)
                 and incoming_action == "JETZT_VERKAUFEN"
                 and (
                     not existing_position_id
@@ -35981,24 +36462,55 @@ def _penny_merge_state_tickers(
                 and incoming_action == "JETZT_KAUFEN"
                 and (
                     not existing_position_id
-                    or incoming_position_id != existing_position_id
-                    or not existing.get("exit_email_sent")
+                    or incoming_position_id != existing_exit_id
+                    or not (existing.get("exit_email_sent") or existing.get("model_exit_confirmed"))
                 )
             )
 
             # Discovery may finish after the five-minute monitor. A validated
-            # scanner-model entry may open the model position; exit still
-            # requires the explicit exit mail lifecycle.
+            # Model entry/exit is independent of delivery. A new observation
+            # cannot reopen an already closed position with the same identity.
             if existing_active and not incoming_active and not explicit_exit:
                 continue
             if (
                 not existing_active
-                and existing.get("exit_email_sent") is True
+                and (existing.get("exit_email_sent") or existing.get("model_exit_confirmed"))
                 and incoming_active
                 and not explicit_entry
             ):
                 continue
-            merged[symbol] = {**existing, **raw_update}
+            updated = {**existing, **raw_update}
+            # Entry ownership is changed only by the atomic claim/finalize
+            # helpers, never by a detached discovery or monitor snapshot.
+            for claim_field in ("model_entry_claim", "model_entry_claimed_at"):
+                if claim_field in existing:
+                    updated[claim_field] = existing[claim_field]
+                else:
+                    updated.pop(claim_field, None)
+            # Delivery acknowledgements must survive an older detached model
+            # snapshot; sending/unknown outcomes are never automatically retried.
+            events = deepcopy(existing.get("model_management_events") or {})
+            for event_id, event in (raw_update.get("model_management_events") or {}).items():
+                if event_id not in events:
+                    events[event_id] = deepcopy(event)
+            if events:
+                updated["model_management_events"] = events
+            if existing_position_id == incoming_position_id and existing.get("tp1_realized"):
+                updated["tp1_realized"] = True
+                updated["remaining_fraction"] = min(
+                    float(existing.get("remaining_fraction", 0.5)),
+                    float(updated.get("remaining_fraction", 0.5)),
+                )
+                updated["active_stop"] = max(
+                    _alert_float(existing.get("active_stop"), 0.0) or 0.0,
+                    _alert_float(updated.get("active_stop"), 0.0) or 0.0,
+                )
+                updated["stop_loss"] = updated["active_stop"]
+                if isinstance(updated.get("trade_setup"), dict):
+                    updated["trade_setup"] = {**updated["trade_setup"],
+                                             "stop": updated["active_stop"],
+                                             "stop_loss": updated["active_stop"]}
+            merged[symbol] = updated
 
         merged = {
             symbol: state
@@ -37077,10 +37589,209 @@ def _penny_activate_model_entry_state(
         "buy_email_sent": bool(notification_sent),
         "entry_notification_sent": bool(notification_sent),
         "tp1_realized": False,
+        "model_exit_confirmed": False,
         "remaining_fraction": 1.0,
     })
     state.pop("pending_buy_notification", None)
     return state
+
+
+def _penny_claim_model_entry(row, *, now_ts):
+    """Reserve one validated entry without holding the state lock across SMTP."""
+    symbol = str(row.get("ticker") or "").upper().strip()
+    if not symbol:
+        return None
+    position_id = _penny_position_event_id(row)
+    with _penny_state_lock:
+        document = _penny_load_dict(PENNY_STOCKS_STATE)
+        states = document.setdefault("tickers", {})
+        state = deepcopy(states.get(symbol, {}))
+        if state.get("active"):
+            return None
+        closed_id = _penny_event_token(state.get("last_exit_event_id"))
+        if not closed_id and state.get("last_action") == "JETZT_VERKAUFEN":
+            closed_id = _penny_event_token(state.get("position_event_id"))
+        if closed_id == position_id:
+            return None
+        claim_at = _alert_float(state.get("model_entry_claimed_at"), 0.0) or 0.0
+        if state.get("model_entry_claim") and now_ts - claim_at < 900:
+            return None
+        token = uuid.uuid4().hex
+        state.update(model_entry_claim=token, model_entry_claimed_at=now_ts)
+        states[symbol] = state
+        document["updated_at"] = now_ts
+        _penny_save_dict(PENNY_STOCKS_STATE, document)
+        return token
+
+
+def _penny_finish_model_entry(row, token, *, notification_sent, now_ts):
+    """Finalize only our reservation; an existing model position always wins."""
+    symbol = str(row.get("ticker") or "").upper().strip()
+    with _penny_state_lock:
+        document = _penny_load_dict(PENNY_STOCKS_STATE)
+        states = document.setdefault("tickers", {})
+        state = deepcopy(states.get(symbol, {}))
+        if not token or state.get("model_entry_claim") != token or state.get("active"):
+            return False
+        state["model_entry_claim"] = None
+        state["model_entry_claimed_at"] = None
+        _penny_activate_model_entry_state(state, row,
+            notification_sent=notification_sent, now_ts=now_ts)
+        state.update(exit_email_sent=False, management_email_sent=False,
+                     pending_exit_notification=False, pending_management_notification=False)
+        if notification_sent:
+            state.pop("entry_notification_error", None)
+        else:
+            state["entry_notification_error"] = "buy_mail_failed"
+        states[symbol] = state
+        document["updated_at"] = now_ts
+        _penny_save_dict(PENNY_STOCKS_STATE, document)
+        return True
+
+
+def _penny_latch_model_management(state, row, *, now_ts):
+    """Atomically persist each observation before any later symbol or I/O.
+
+    Wrapper snapshots are detached and discovery runs independently. Rebase on
+    the current position under the same lock used by dispatch acknowledgements;
+    never apply an old position's event to a newer position in the same ticker.
+    """
+    action = str(row.get("trade_action") or "").upper()
+    if action != "JETZT_VERKAUFEN" and row.get("management_event") != "TP1_PARTIAL":
+        return
+    symbol = str(row.get("ticker") or "").upper().strip()
+    if not symbol:
+        return
+    observed_position_id = _penny_position_event_id(row, state)
+    with _penny_state_lock:
+        current = _penny_load_state_tickers().get(symbol)
+        latest = deepcopy(current if current is not None else state)
+        current_position_id = _penny_event_token(latest.get("position_event_id"))
+        if current_position_id and current_position_id != observed_position_id:
+            state.clear()
+            state.update(latest)
+            return
+        current_seen = _alert_float(latest.get("last_seen"), 0.0) or 0.0
+        if now_ts >= current_seen:
+            for field in ("last_trigger", "last_snapshot", "setup_quality_score",
+                          "pump_potential_score", "entry_quality_score",
+                          "dump_risk_score", "trade_score"):
+                if field in state:
+                    latest[field] = deepcopy(state[field])
+        _penny_apply_model_management(latest, row, now_ts=now_ts)
+        latest["last_seen"] = max(current_seen, now_ts)
+        persisted = _penny_merge_state_tickers({symbol: latest}, now_ts=now_ts)
+        state.clear()
+        state.update(deepcopy(persisted[symbol]))
+
+
+def _penny_apply_model_management(state, row, *, now_ts):
+    """Apply only the model transition; the latch owns durable persistence."""
+    if not state.get("active"):
+        return
+    action = str(row.get("trade_action") or "").upper()
+    kind = "EXIT" if action == "JETZT_VERKAUFEN" else (
+        "TP1" if row.get("management_event") == "TP1_PARTIAL" and not state.get("tp1_realized") else None
+    )
+    if kind is None:
+        return
+    position_id = _penny_position_event_id(row, state)
+    row["position_event_id"] = position_id
+    event_id = f"{position_id}:{kind}"
+    events = deepcopy(state.get("model_management_events") or {})
+    if event_id in events:
+        return
+    symbol = str(row.get("ticker") or "").upper()
+    payload = deepcopy(row)
+    payload["_dedupe_key"] = f"penny_{'exit' if kind == 'EXIT' else 'tp1'}:{symbol}:{position_id}"
+    payload["model_event_observed_at"] = now_ts
+    events[event_id] = {"kind": kind, "observed_at": now_ts, "status": "pending", "row": payload}
+    state.update(model_management_events=events, position_event_id=position_id,
+                 position_state_source="scanner_model_not_broker", last_seen=now_ts)
+    if kind == "EXIT":
+        state.update(active=False, model_exit_confirmed=True, remaining_fraction=0.0,
+                     exit_at=now_ts, last_exit_event_id=position_id,
+                     last_action="JETZT_VERKAUFEN", pending_exit_notification=True,
+                     exit_email_sent=False)
+    else:
+        setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        active_stop = row.get("active_stop") or state.get("buy_entry") or setup.get("entry")
+        state.update(tp1_realized=True, remaining_fraction=0.5, active_stop=active_stop,
+                     stop_loss=active_stop, last_management_event_id=position_id,
+                     last_action="HALTEN", pending_management_notification=True,
+                     management_email_sent=False)
+        if isinstance(state.get("trade_setup"), dict):
+            state["trade_setup"] = {**state["trade_setup"], "stop": active_stop, "stop_loss": active_stop}
+
+
+def _penny_dispatch_model_management(*, telemetry_scanner):
+    """Deliver durable model observations separately; never replay unknown SMTP."""
+    snapshot = _penny_load_state_tickers()
+    sent_count = 0
+    for symbol, old_state in snapshot.items():
+        for event_id, old_event in (old_state.get("model_management_events") or {}).items():
+            if old_event.get("status") != "pending":
+                continue
+            now = time.time()
+            if now < float(old_event.get("next_attempt_at", 0)):
+                continue
+            # Delayed intraday instructions expire instead of being replayed
+            # tomorrow. The model event remains durable for audit regardless.
+            expired = not 0 <= now - float(old_event.get("observed_at", 0)) <= 900
+            if not expired and sent_count >= 10:
+                continue
+            row = deepcopy(old_event.get("row") or {})
+            key = str(row.get("_dedupe_key") or "")
+            if not expired and not _email_dedupe_claim(key, 24 * 3600, now=now):
+                continue
+            with _penny_state_lock:
+                document = _penny_load_dict(PENNY_STOCKS_STATE)
+                state = (document.get("tickers") or {}).get(symbol, {})
+                event = (state.get("model_management_events") or {}).get(event_id, {})
+                if event.get("status") != "pending":
+                    if not expired:
+                        _email_dedupe_release(key, claimed_at=now)
+                    continue
+                event["status"] = "expired" if expired else "delivering"
+                event["attempted_at"] = now
+                if expired:
+                    prefix = "exit" if event.get("kind") == "EXIT" else "management"
+                    if state.get("position_event_id") == row.get("position_event_id"):
+                        state[f"pending_{prefix}_notification"] = False
+                        state[f"{prefix}_notification_error"] = "expired"
+                _penny_save_dict(PENNY_STOCKS_STATE, document)
+            if expired:
+                continue
+            _set_last_delivery_outcome("not_attempted")
+            try:
+                sender = _penny_exit_email if old_event.get("kind") == "EXIT" else _penny_management_email
+                accepted = _call_penny_mail_helper(sender, [row], telemetry_scanner=telemetry_scanner)
+            except Exception as exc:
+                print(f"[Penny management] {_sanitized_exception_text(exc)}")
+                accepted = False
+            unknown = _last_delivery_outcome() in {
+                "unknown", "partial_unknown", "accepted_unjournaled", "partial_unknown_unjournaled"
+            }
+            if accepted:
+                _email_dedupe_mark(key, now=time.time())
+            elif not unknown:
+                _email_dedupe_release_after_send(key, claimed_at=now)
+            with _penny_state_lock:
+                document = _penny_load_dict(PENNY_STOCKS_STATE)
+                state = (document.get("tickers") or {}).get(symbol, {})
+                event = (state.get("model_management_events") or {}).get(event_id, {})
+                if event.get("status") == "delivering":
+                    event.update(status="sent" if accepted else "unknown" if unknown else "pending",
+                                 outcome=_last_delivery_outcome(), completed_at=time.time(),
+                                 next_attempt_at=time.time() + 60)
+                    # Acknowledgement changes notification fields only, never
+                    # the current model position/stop or observation timestamp.
+                    if state.get("position_event_id") == row.get("position_event_id"):
+                        prefix = "exit" if old_event.get("kind") == "EXIT" else "management"
+                        state[f"{prefix}_email_sent"] = bool(accepted)
+                        state[f"pending_{prefix}_notification"] = not bool(accepted)
+                    _penny_save_dict(PENNY_STOCKS_STATE, document)
+            sent_count += 1
 
 
 def _penny_active_trade_rows(
@@ -37418,12 +38129,13 @@ def _penny_management_email(
         f"<li>{_format_stock_identity_html(row.get('ticker'), row)}: TP1 "
         f"{_format_alert_price((row.get('trade_setup') or {}).get('tp1'))} erreicht. "
         f"Modell: 50% Teilgewinn; Rest-Stop auf "
-        f"{_format_alert_price(row.get('active_stop') or row.get('entry'))}.</li>"
+        f"{_format_alert_price(row.get('active_stop') or row.get('entry'))}. "
+        f"Beobachtet: {html.escape(datetime.fromtimestamp(float(row.get('model_event_observed_at') or time.time()), timezone.utc).isoformat())}.</li>"
         for row in rows[:5]
     )
     body = f"""
     <h2 style="color:#0f766e;margin-top:0">Pennystock TP1 erreicht</h2>
-    <p>Das ist <b>kein neuer Kauf</b>, sondern Management eines zuvor per Kaufmail aktivierten Modelltrades.</p>
+    <p>Das ist <b>kein neuer Kauf</b>, sondern eine datierte Beobachtung eines Scanner-Modelltrades. Keine bestaetigte Broker-Ausfuehrung.</p>
     <ul>{items}</ul>
     <p style="font-size:12px;color:#64748b">Der Scanner modelliert 50% Teilverkauf an TP1. Fuer den Rest gilt der angezeigte aktive Stop bis TP2 oder Exit-Signal.</p>
     """
@@ -37480,11 +38192,12 @@ def _penny_exit_email(
         items += (
             f"<li>{_format_stock_identity_html(row.get('ticker'), row)} bei {_format_alert_price(row.get('price'))}: "
             f"{html.escape(', '.join(reasons) or 'bestaetigte Invalidation')}. "
-            f"Aktiver Stop {_format_alert_price(row.get('active_stop') or setup.get('stop_loss'))}.</li>"
+            f"Aktiver Stop {_format_alert_price(row.get('active_stop') or setup.get('stop_loss'))}. "
+            f"Beobachtet: {html.escape(datetime.fromtimestamp(float(row.get('model_event_observed_at') or time.time()), timezone.utc).isoformat())}.</li>"
         )
     body = f"""
     <h2 style="color:#dc2626;margin-top:0">Pennystock Exit-Signal</h2>
-    <p>Ein zuvor per Kaufmail aktivierter Modelltrade hat jetzt einen konkreten Schutz-Stop, TP2 oder einen bestaetigten 5m-Strukturbruch erreicht. Einzelne Warnmerkmale loesen diese Mail nicht aus.</p>
+    <p>Ein Scanner-Modelltrade hat zum genannten Beobachtungszeitpunkt einen Schutz-Stop, TP2 oder bestaetigten 5m-Strukturbruch erreicht. Keine bestaetigte Broker-Ausfuehrung. Einzelne Warnmerkmale loesen diese Mail nicht aus.</p>
     <ul>{items}</ul>
     <p style="font-size:12px;color:#64748b">Exit-Signale sind risikobasierte Invalidationen, keine Garantie fuer den naechsten Kurs.</p>
     """
@@ -37721,6 +38434,7 @@ def _penny_stock_scanner_wrapper() -> None:
         _publish_penny_progress(0, "Pennystock-Universum vorbereitet", force=True)
 
         for index, (_, snapshot, broad) in enumerate(selected, start=1):
+            _scan_control_point()
             candidate_now_ts = time.time()
             symbol = snapshot["ticker"]
             processed_symbols.add(symbol)
@@ -37976,6 +38690,7 @@ def _penny_stock_scanner_wrapper() -> None:
                 rows.append(row)
             else:
                 diagnostics["suppressed_non_actionable"] += 1
+            _penny_latch_model_management(state_update, row, now_ts=candidate_now_ts)
             ticker_state[symbol] = state_update
             with _scan_lock:
                 _scan_status["penny_stocks"]["progress"] = {
@@ -37996,6 +38711,7 @@ def _penny_stock_scanner_wrapper() -> None:
         revalidated_buy_candidates: List[Dict[str, Any]] = []
         revalidation_blocked: Dict[str, int] = {}
         for candidate in buy_candidates:
+            _scan_control_point()
             validated, reason = _penny_revalidate_buy_candidate(candidate, now_ts=time.time())
             symbol = str(candidate.get("ticker") or "").upper()
             state = ticker_state.get(symbol) if isinstance(ticker_state.get(symbol), dict) else {}
@@ -38125,6 +38841,7 @@ def _penny_stock_scanner_wrapper() -> None:
             if isinstance(row, dict) else row
             for row in cache_rows
         ]
+        _scan_control_point(finishing=True)
         finalize_cache_file(PENNY_STOCKS_CACHE, cache_rows, metadata={"diagnostics": diagnostics})
         _penny_save_trigger_pool(trigger_pool_candidates, now_ts=now_ts)
         ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=now_ts)
@@ -38153,7 +38870,6 @@ def _penny_stock_scanner_wrapper() -> None:
             _penny_batch_suppressed["penny_non_actionable"] = int(
                 diagnostics["suppressed_non_actionable"]
             )
-        state_changed_after_mail = False
         side_effect_now = time.time()
         mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
             "penny_stocks", buy_candidates
@@ -38176,132 +38892,25 @@ def _penny_stock_scanner_wrapper() -> None:
                 + _buy_unclaimed
             )
         for row in claimed_buy_candidates:
+            entry_claim = _penny_claim_model_entry(row, now_ts=time.time())
+            if not entry_claim:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
+                _penny_batch_suppressed["model_position_already_owned"] = (
+                    _penny_batch_suppressed.get("model_position_already_owned", 0) + 1
+                )
+                continue
             try:
                 buy_mail_sent = _penny_buy_email([row])
             except Exception as exc:
                 print(f"[Penny] buy email error: {_sanitized_exception_text(exc)}")
                 buy_mail_sent = False
             if buy_mail_sent:
-                symbol = str(row.get("ticker") or "").upper()
-                state = ticker_state.setdefault(symbol, {})
-                _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
-                state_changed_after_mail = True
             else:
                 _email_dedupe_release_after_send(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-                symbol = str(row.get("ticker") or "").upper()
-                state = ticker_state.setdefault(symbol, {})
-                _penny_activate_model_entry_state(state, row, notification_sent=False)
-                state["entry_notification_error"] = "buy_mail_failed"
-                state_changed_after_mail = True
-
-        side_effect_now = time.time()
-        management_claim_candidates = management_candidates[:5]
-        claimed_management_candidates = [
-            row for row in management_claim_candidates
-            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=side_effect_now)
-        ]
-        _management_unclaimed = (
-            len(management_claim_candidates) - len(claimed_management_candidates)
-        )
-        if _management_unclaimed:
-            _penny_batch_suppressed["dedupe_claim_not_owned"] = (
-                _penny_batch_suppressed.get("dedupe_claim_not_owned", 0)
-                + _management_unclaimed
-            )
-        try:
-            management_mail_sent = _penny_management_email(claimed_management_candidates)
-        except Exception as exc:
-            print(f"[Penny] management email error: {_sanitized_exception_text(exc)}")
-            management_mail_sent = False
-            for row in claimed_management_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-        if management_mail_sent:
-            for row in claimed_management_candidates:
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                trigger_id = _penny_trigger_event_id(row)
-                position_event_id = _penny_position_event_id(row, state)
-                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
-                active_stop = row.get("active_stop") or state.get("buy_entry") or setup.get("entry")
-                state.update({
-                    "active": True,
-                    "tp1_realized": True,
-                    "remaining_fraction": 0.5,
-                    "active_stop": active_stop,
-                    "stop_loss": active_stop,
-                    "last_management_trigger": trigger_id,
-                    "last_management_event_id": position_event_id,
-                    "management_email_sent": True,
-                    "last_action": "HALTEN",
-                    "last_seen": time.time(),
-                })
-                if isinstance(state.get("trade_setup"), dict):
-                    state["trade_setup"]["stop_loss"] = active_stop
-                    state["trade_setup"]["stop"] = active_stop
-                _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
-                state_changed_after_mail = True
-        else:
-            for row in claimed_management_candidates:
-                _email_dedupe_release_after_send(
-                    str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now
-                )
-
-        side_effect_now = time.time()
-        exit_claim_candidates = exit_candidates[:5]
-        claimed_exit_candidates = [
-            row for row in exit_claim_candidates
-            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=side_effect_now)
-        ]
-        _exit_unclaimed = len(exit_claim_candidates) - len(claimed_exit_candidates)
-        if _exit_unclaimed:
-            _penny_batch_suppressed["dedupe_claim_not_owned"] = (
-                _penny_batch_suppressed.get("dedupe_claim_not_owned", 0)
-                + _exit_unclaimed
-            )
-        try:
-            exit_mail_sent = _penny_exit_email(claimed_exit_candidates)
-        except Exception as exc:
-            print(f"[Penny] exit email error: {_sanitized_exception_text(exc)}")
-            exit_mail_sent = False
-            for row in claimed_exit_candidates:
-                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now)
-        if exit_mail_sent:
-            for row in claimed_exit_candidates:
-                symbol = row["ticker"]
-                state = ticker_state.setdefault(symbol, {})
-                trigger_id = _penny_trigger_event_id(row)
-                position_event_id = _penny_position_event_id(row, state)
-                state.update({
-                    "active": False,
-                    "remaining_fraction": 0.0,
-                    "exit_at": time.time(),
-                    "exit_trigger": trigger_id,
-                    "last_exit_trigger": trigger_id,
-                    "last_exit_event_id": position_event_id,
-                    "exit_email_sent": True,
-                    "last_action": "JETZT_VERKAUFEN",
-                    "last_seen": time.time(),
-                })
-                state.pop("pending_exit_notification", None)
-                _email_dedupe_mark(str(row.get("_dedupe_key")), now=time.time())
-                state_changed_after_mail = True
-        else:
-            for row in claimed_exit_candidates:
-                _email_dedupe_release_after_send(
-                    str(row.get("_dedupe_key") or ""), claimed_at=side_effect_now
-                )
-                state = ticker_state.setdefault(str(row.get("ticker") or ""), {})
-                state.pop("pending_exit_notification", None)
-                state.update({
-                    "active": True,
-                    "last_action": "EXIT_BESTAETIGT_MAIL_FEHLER",
-                    "exit_email_sent": False,
-                })
-                state_changed_after_mail = True
-
-        if state_changed_after_mail:
-            ticker_state = _penny_merge_state_tickers(ticker_state, now_ts=time.time())
+            _penny_finish_model_entry(row, entry_claim,
+                notification_sent=buy_mail_sent, now_ts=time.time())
+        _penny_dispatch_model_management(telemetry_scanner="penny_stocks")
         _record_suppression_counts("penny_stocks", _penny_batch_suppressed)
         with _scan_lock:
             _scan_status.get("penny_stocks", {}).pop("last_error", None)
@@ -38309,6 +38918,9 @@ def _penny_stock_scanner_wrapper() -> None:
             f"[Penny] {diagnostics['common_penny_universe']} Pennystocks, {len(selected)} deep, "
             f"{len(active_rows)} active, {len(optional_rows)} optional, {diagnostics['buy_now']} buy"
         )
+    except scan_control.ScanRestartRequired:
+        _remove_partial_cache(PENNY_STOCKS_CACHE)
+        raise
     except Exception as exc:
         _record_suppression_counts(
             "penny_stocks", {"scanner_failed": 1}
@@ -38533,6 +39145,7 @@ def _penny_position_monitor_wrapper() -> None:
         "model": "penny_position_monitor_5m_v1",
     }
     try:
+        _penny_dispatch_model_management(telemetry_scanner="penny_positions")
         ticker_state = _penny_load_state_tickers()
         active_states = {
             symbol: state
@@ -38745,6 +39358,7 @@ def _penny_position_monitor_wrapper() -> None:
                     management_candidates.append(row)
 
             rows.append(row)
+            _penny_latch_model_management(state_update, row, now_ts=candidate_now_ts)
             state_updates[symbol] = state_update
             with _scan_lock:
                 _scan_status["penny_positions"]["progress"] = {
@@ -38922,7 +39536,6 @@ def _penny_position_monitor_wrapper() -> None:
             ).items()
             if int(count or 0) > 0
         }
-        state_changed_after_mail = False
         claim_time = time.time()
         mail_buy_candidates, equivalent_count = _filter_open_equivalent_trade_rows(
             "penny_stocks", buy_candidates
@@ -38949,6 +39562,13 @@ def _penny_position_monitor_wrapper() -> None:
                 + _buy_unclaimed
             )
         for row in claimed_buys:
+            entry_claim = _penny_claim_model_entry(row, now_ts=time.time())
+            if not entry_claim:
+                _email_dedupe_release(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
+                _penny_monitor_suppressed["model_position_already_owned"] = (
+                    _penny_monitor_suppressed.get("model_position_already_owned", 0) + 1
+                )
+                continue
             try:
                 buy_mail_sent = _call_penny_mail_helper(
                     _penny_buy_email,
@@ -38959,131 +39579,12 @@ def _penny_position_monitor_wrapper() -> None:
                 print(f"[Penny monitor] buy email error: {_sanitized_exception_text(exc)}")
                 buy_mail_sent = False
             if buy_mail_sent:
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                _penny_activate_model_entry_state(state, row, notification_sent=True)
                 _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
-                state_changed_after_mail = True
             else:
                 _email_dedupe_release_after_send(str(row.get("_dedupe_key") or ""), claimed_at=claim_time)
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                _penny_activate_model_entry_state(state, row, notification_sent=False)
-                state["entry_notification_error"] = "buy_mail_failed"
-                state_changed_after_mail = True
-
-        claim_time = time.time()
-        management_claim_candidates = management_candidates[:5]
-        claimed_management = [
-            row for row in management_claim_candidates
-            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 24 * 3600, now=claim_time)
-        ]
-        _management_unclaimed = (
-            len(management_claim_candidates) - len(claimed_management)
-        )
-        if _management_unclaimed:
-            _penny_monitor_suppressed["dedupe_claim_not_owned"] = (
-                _penny_monitor_suppressed.get("dedupe_claim_not_owned", 0)
-                + _management_unclaimed
-            )
-        try:
-            management_mail_sent = _call_penny_mail_helper(
-                _penny_management_email,
-                claimed_management,
-                telemetry_scanner="penny_positions",
-            )
-        except Exception as exc:
-            print(f"[Penny monitor] management email error: {exc}")
-            management_mail_sent = False
-        if management_mail_sent:
-            for row in claimed_management:
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                position_event_id = _penny_position_event_id(row, state)
-                setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
-                active_stop = row.get("active_stop") or state.get("buy_entry") or setup.get("entry")
-                state.update({
-                    "active": True,
-                    "tp1_realized": True,
-                    "remaining_fraction": 0.5,
-                    "active_stop": active_stop,
-                    "stop_loss": active_stop,
-                    "last_management_trigger": _penny_trigger_event_id(row),
-                    "last_management_event_id": position_event_id,
-                    "management_email_sent": True,
-                    "last_action": "HALTEN",
-                    "last_seen": time.time(),
-                })
-                if isinstance(state.get("trade_setup"), dict):
-                    state["trade_setup"]["stop_loss"] = active_stop
-                    state["trade_setup"]["stop"] = active_stop
-                _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
-                state_changed_after_mail = True
-        else:
-            for row in claimed_management:
-                _email_dedupe_release_after_send(
-                    str(row.get("_dedupe_key") or ""), claimed_at=claim_time
-                )
-
-        claim_time = time.time()
-        exit_claim_candidates = exit_candidates[:5]
-        claimed_exits = [
-            row for row in exit_claim_candidates
-            if _email_dedupe_claim(str(row.get("_dedupe_key") or ""), 6 * 3600, now=claim_time)
-        ]
-        _exit_unclaimed = len(exit_claim_candidates) - len(claimed_exits)
-        if _exit_unclaimed:
-            _penny_monitor_suppressed["dedupe_claim_not_owned"] = (
-                _penny_monitor_suppressed.get("dedupe_claim_not_owned", 0)
-                + _exit_unclaimed
-            )
-        try:
-            exit_mail_sent = _call_penny_mail_helper(
-                _penny_exit_email,
-                claimed_exits,
-                telemetry_scanner="penny_positions",
-            )
-        except Exception as exc:
-            print(f"[Penny monitor] exit email error: {_sanitized_exception_text(exc)}")
-            exit_mail_sent = False
-        if exit_mail_sent:
-            for row in claimed_exits:
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                trigger_id = _penny_trigger_event_id(row)
-                position_event_id = _penny_position_event_id(row, state)
-                state.update({
-                    "active": False,
-                    "remaining_fraction": 0.0,
-                    "exit_at": time.time(),
-                    "exit_trigger": trigger_id,
-                    "last_exit_trigger": trigger_id,
-                    "last_exit_event_id": position_event_id,
-                    "exit_email_sent": True,
-                    "last_action": "JETZT_VERKAUFEN",
-                    "last_seen": time.time(),
-                })
-                state.pop("pending_exit_notification", None)
-                _email_dedupe_mark(str(row.get("_dedupe_key") or ""), now=time.time())
-                state_changed_after_mail = True
-        else:
-            for row in claimed_exits:
-                _email_dedupe_release_after_send(
-                    str(row.get("_dedupe_key") or ""), claimed_at=claim_time
-                )
-                symbol = str(row.get("ticker") or "")
-                state = ticker_state.setdefault(symbol, {})
-                state.pop("pending_exit_notification", None)
-                state.update({
-                    "active": True,
-                    "last_action": "EXIT_BESTAETIGT_MAIL_FEHLER",
-                    "exit_email_sent": False,
-                    "last_seen": time.time(),
-                })
-                state_changed_after_mail = True
-
-        if state_changed_after_mail:
-            _penny_merge_state_tickers(ticker_state, now_ts=time.time())
+            _penny_finish_model_entry(row, entry_claim,
+                notification_sent=buy_mail_sent, now_ts=time.time())
+        _penny_dispatch_model_management(telemetry_scanner="penny_positions")
         _record_suppression_counts(
             "penny_positions", _penny_monitor_suppressed
         )
@@ -39339,6 +39840,7 @@ def _volume_spikes_wrapper() -> None:
     try:
         spikes = []
         tickers = []
+        data_diagnostics = {"scanner": "volume_spikes", "coverage": "incomplete", "final_results": None}
 
         try:
             snap_resp = rate_limited_get(
@@ -39346,26 +39848,44 @@ def _volume_spikes_wrapper() -> None:
                 params={"apiKey": POLYGON_KEY},
                 timeout=30,
             )
-            if snap_resp.status_code == 200:
-                tickers.extend(snap_resp.json().get("tickers", []))
+            if snap_resp.status_code != 200:
+                raise ScannerDataError(_scanner_provider_error(snap_resp.status_code), data_diagnostics)
+            payload = snap_resp.json()
+            if _scanner_payload_error(payload):
+                raise ScannerDataError(_scanner_payload_error(payload), data_diagnostics)
+            if (not isinstance(payload, dict) or not isinstance(payload.get("tickers"), list)
+                    or any(not isinstance(row, dict) or not row.get("ticker") for row in payload["tickers"])):
+                raise ScannerDataError("scan_data_invalid", data_diagnostics)
+            if not payload["tickers"]:
+                raise ScannerDataError("scan_data_unavailable", data_diagnostics)
+            tickers.extend(payload["tickers"])
+        except ScannerDataError:
+            raise
+        except (TypeError, ValueError):
+            raise ScannerDataError("scan_data_invalid", data_diagnostics) from None
         except Exception:
-            pass
+            raise ScannerDataError("scan_data_unavailable", data_diagnostics) from None
 
         if len(tickers) < 250:
             for endpoint in ["gainers", "losers"]:
-                snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
-
-                if snap_resp.status_code != 200:
-                    if snap_resp.status_code == 403:
-                        print(f"[Warning] 403 Forbidden on {endpoint} endpoint - check API plan")
-                    continue
-                tickers.extend(snap_resp.json().get("tickers", []))
+                try:
+                    snap_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
+                    snap_resp = rate_limited_get(snap_url, params={"apiKey": POLYGON_KEY, "limit": 250})
+                    if snap_resp.status_code != 200:
+                        continue
+                    supplement = snap_resp.json()
+                    if (not _scanner_payload_error(supplement) and isinstance(supplement, dict)
+                            and isinstance(supplement.get("tickers"), list)
+                            and all(isinstance(row, dict) and row.get("ticker") for row in supplement["tickers"])):
+                        tickers.extend(supplement["tickers"])
+                except Exception:
+                    continue  # Optional supplement; the full universe succeeded.
 
         common_stock_universe, common_stock_source = _load_common_stock_universe()
         volume_fraction = _us_equity_expected_volume_fraction(datetime.now(timezone.utc))
         seen_symbols = set()
         for t in tickers:
+                _scan_control_point()
                 try:
                     symbol = str(t.get("ticker", "") or "").upper().strip()
                     if not symbol or symbol in seen_symbols:
@@ -39440,6 +39960,7 @@ def _volume_spikes_wrapper() -> None:
 
         # Sort by RVOL descending
         spikes.sort(key=lambda x: x.get("rvol", 0), reverse=True)
+        _scan_control_point(finishing=True)
         save_cache_file(VOLUME_SPIKES_CACHE, spikes[:50])  # Keep top 50
     except Exception as e:
         print(f"Volume spikes error: {e}")
@@ -39544,6 +40065,7 @@ def _orb_scanner_wrapper() -> None:
                 else "early_close_expired" if _orb_scan_end_minute < ORB_SCAN_END_MINUTE
                 else "expired"
             )
+            _scan_control_point(finishing=True)
             save_cache_file(ORB_CACHE, [{"breakouts": [], "failed_breakouts": [], "candidates": [],
                 "stats": {"scanned": 0, "candidates": 0, "breakouts": 0, "failed": 0},
                 "or_phase": _phase, "market_time": now_et.strftime("%H:%M ET")}])
@@ -39560,6 +40082,7 @@ def _orb_scanner_wrapper() -> None:
         prev_data = None
         prev_trade_date = None
         for lookback in range(1, 9):
+            _scan_control_point()
             candidate_day = now_et - timedelta(days=lookback)
             if candidate_day.weekday() >= 5:
                 continue
@@ -39696,6 +40219,7 @@ def _orb_scanner_wrapper() -> None:
         _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0, "non_stock": len(non_stock_excluded)}
 
         for cand in candidates:
+            _scan_control_point()
             t = cand["ticker"]
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{t}/range/5/minute/{today_str}/{today_str}"
@@ -40201,6 +40725,7 @@ def _orb_scanner_wrapper() -> None:
             for row in decorated_result.get("actionable_breakouts", [])
             if isinstance(row, dict)
         ]
+        _scan_control_point(finishing=True)
         save_cache_file(ORB_CACHE, [decorated_result])
         _orb_counts = decorated_result.get("breakout_decision_counts", {})
         print(
@@ -40957,7 +41482,6 @@ EXCHANGE_CALENDARS_2026 = [
             "2027-12-24": "Christmas Day observed",
         },
         "early_closes": {
-            "2026-07-02": {"name": "Early close before Independence Day", "close": "13:00"},
             "2026-11-27": {"name": "Early close after Thanksgiving", "close": "13:00"},
             "2026-12-24": {"name": "Christmas Eve early close", "close": "13:00"},
             # AUDIT M-Kalender-2027: 2027 gibt es laut offizieller NYSE-
@@ -41611,7 +42135,11 @@ def _cache_age_seconds(cached_at: Optional[str]) -> Optional[int]:
     if not cached_at:
         return None
     try:
-        return int(max(0, (datetime.now() - datetime.fromisoformat(cached_at)).total_seconds()))
+        observed = datetime.fromisoformat(str(cached_at).replace("Z", "+00:00"))
+        # Naive legacy caches use local wall time; offset-aware caches preserve
+        # their actual instant. Future timestamps must not masquerade as age0.
+        now = datetime.now(observed.tzinfo) if observed.tzinfo is not None else datetime.now()
+        return math.floor((now - observed).total_seconds())
     except Exception:
         return None
 
@@ -41630,10 +42158,14 @@ def _calendar_event_risk_snapshot() -> Dict[str, Any]:
 
 def _load_crash_context_snapshot() -> Dict[str, Any]:
     try:
-        crash_results, _ = load_cache_file(CRASH_MONITOR_CACHE)
+        crash_results, cached_at = load_cache_file(CRASH_MONITOR_CACHE)
+        age = _cache_age_seconds(cached_at)
+        if age is None or not 0 <= age <= MARKET_CONTEXT_MAX_AGE_SECONDS:
+            return {"data_status": "stale", "fear_score": None,
+                    "source_cached_at": cached_at, "source_age_seconds": age}
         if crash_results and isinstance(crash_results[0], dict):
             if crash_results[0].get("status") != "error":
-                return crash_results[0]
+                return {**crash_results[0], "source_cached_at": cached_at, "source_age_seconds": age}
     except Exception:
         pass
     return {}
@@ -41716,6 +42248,8 @@ def _market_context_wrapper() -> None:
     context = build_market_context(crash_data, headline_risk, event_risk, rates_data=rates_block)
     context["source"] = {
         "market_internals": "crash_monitor_cache",
+        "market_internals_observed_at": crash_data.get("source_cached_at"),
+        "market_internals_age_seconds": crash_data.get("source_age_seconds"),
         "headlines": "Polygon news",
         "events": "Alpha Station economic calendar",
         "treasury_rates": "FRED DGS2/10/30 (fredgraph.csv)",
@@ -41732,7 +42266,9 @@ def _get_market_context_snapshot() -> Dict[str, Any]:
         if cached and isinstance(cached[0], dict):
             context = dict(cached[0])
             cache_age = _cache_age_seconds(cached_at)
-            if cache_age is not None and cache_age <= MARKET_CONTEXT_MAX_AGE_SECONDS:
+            source_age = _cache_age_seconds((context.get("source") or {}).get("market_internals_observed_at"))
+            if (cache_age is not None and cache_age <= MARKET_CONTEXT_MAX_AGE_SECONDS
+                    and source_age is not None and 0 <= source_age <= MARKET_CONTEXT_MAX_AGE_SECONDS):
                 context["cache_age_seconds"] = cache_age
                 context["cache_status"] = "fresh"
                 return context

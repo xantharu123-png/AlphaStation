@@ -1,5 +1,5 @@
 """Causal Polygon aggregate adapter for stock pattern producers (no I/O)."""
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from modules.level_zones import normalize_completed_bars
@@ -9,8 +9,7 @@ def completed_polygon_bars(raw_bars, *, span="day", multiplier=1, as_of):
     """Only valid, uniquely determined, completed source bars.
 
     Daily stock aggregates are session-dated at midnight ET, not UTC dates.
-    Without an exchange holiday/early-close calendar, 16:00 ET is conservative:
-    an early-close day is withheld until 16:00, never admitted before its close.
+    The shared exchange calendar defines holidays, early closes and DST.
     Intraday source intervals retain their actual opening timestamp and duration.
     Returned aliases support legacy pattern code and canonical level engines.
     """
@@ -26,8 +25,12 @@ def completed_polygon_bars(raw_bars, *, span="day", multiplier=1, as_of):
             candidate = dict(raw)
             candidate["open_time"] = opened
             if span == "day":
+                from modules.stock_swing_contract import session_close
                 session_date = opened.astimezone(eastern).date()
-                candidate["close_time"] = datetime.combine(session_date, time(16), eastern)
+                closed = session_close(session_date.isoformat())
+                if closed is None:
+                    continue
+                candidate["close_time"] = closed
             prepared.append(candidate)
         except (TypeError, ValueError, KeyError, OverflowError, OSError):
             continue

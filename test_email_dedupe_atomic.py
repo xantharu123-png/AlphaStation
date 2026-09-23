@@ -158,10 +158,15 @@ def test_orb_and_penny_mailers_claim_only_rows_they_send():
     assert "_email_dedupe_claim(" in orb
     assert "_email_dedupe_release(_ck, claimed_at=_alert_now)" in orb
     assert "buy_candidates[:5]" in penny
-    assert "exit_candidates[:5]" in penny
     assert "claimed_buy_candidates" in penny
-    assert "claimed_exit_candidates" in penny
     assert "claimed_at=side_effect_now" in penny
+    import inspect
+    import api
+    dispatch = inspect.getsource(api._penny_dispatch_model_management)
+    assert "_email_dedupe_claim(key" in dispatch
+    assert "_call_penny_mail_helper(sender, [row]" in dispatch
+    assert dispatch.index("_email_dedupe_claim(key") < dispatch.index("_call_penny_mail_helper(sender, [row]")
+    assert '_penny_dispatch_model_management(telemetry_scanner="penny_stocks")' in penny
 
 
 def test_new_listing_invalidation_mail_uses_atomic_claim_and_rollback():

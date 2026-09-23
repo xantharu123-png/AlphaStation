@@ -530,6 +530,7 @@
 
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const ScannerAdminContext = React.createContext(false);
 const API_PARAMS = new URLSearchParams(window.location.search);
 const EXPLICIT_API_PORT = API_PARAMS.get('api_port');
 const EXPLICIT_API_BASE = String(window.ALPHA_API_BASE || '').trim().replace(/\/+$/, '');
@@ -2795,25 +2796,43 @@ function SchedulerStatus({ status }) {
 
 // ScanControl Component
 function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null, progressOverride = null,
-    controlFeed = null, canControl = false }) {
+    controlFeed = null, canControl = null }) {
+    const inheritedAdmin = React.useContext(ScannerAdminContext);
+    canControl = canControl === null ? inheritedAdmin === true : canControl === true;
+    const dedicatedControl = !controlFeed;
+    const standalone = useDedicatedScanControl({ scanKey, enabled: !controlFeed, isAdmin: canControl,
+        statusUrl: `${API}/api/scan-status`, controlUrl: `${API}/api/scan-control` });
+    controlFeed = controlFeed || standalone;
+    const [starting, setStarting] = useState(false);
+    const startScan = async () => {
+        if (starting) return;
+        setStarting(true);
+        try { await onScan(); } finally { await controlFeed.refresh?.(); setStarting(false); }
+    };
     // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
     const timing = scanKey ? getScanTiming(schedulerStatus, scanKey) : { lastScan, nextScan };
     const displayLast = timing.lastScan || lastScan;
     const displayNext = timing.nextScan || nextScan;
 
     // Check if scheduler is currently running this scan in the background
-    const schedulerRunning = scanKey && schedulerStatus?.scans?.[scanKey]?.running;
-    const runningSinceSec = schedulerRunning ? (schedulerStatus.scans[scanKey].running_since_sec || 0) : 0;
+    const dedicatedVerified = dedicatedControl && standalone.statusVerified === true;
+    const schedulerRunning = dedicatedVerified ? standalone.observedRunning : (scanKey && schedulerStatus?.scans?.[scanKey]?.running);
+    const runningSinceSec = schedulerRunning ? (dedicatedVerified ? standalone.runningSinceSec : schedulerStatus?.scans?.[scanKey]?.running_since_sec || 0) : 0;
     const scanHealth = scanKey ? schedulerStatus?.scans?.[scanKey] : null;
     const control = controlFeed?.control || null;
     const controlView = scannerControlPresentation(control);
     const paused = control?.state === 'paused' && control.worker_alive;
-    const anyScanning = isScanning || schedulerRunning || progressOverride?.running || control?.worker_alive;
+    const anyScanning = starting || (dedicatedVerified ? standalone.observedRunning || control?.worker_alive
+        : isScanning || schedulerRunning || progressOverride?.running || control?.worker_alive);
     const controlAction = (controlFeed ? scannerControlAction(control, {
         running: !!anyScanning, canControl, pending: controlFeed.controlPending,
     }) : null) || { action: 'pause', label: 'Stop / Pause', enabled: false,
         reason: anyScanning && !controlFeed
             ? 'Dieser Scanner unterstuetzt sichere Pause/Fortsetzung noch nicht. Der laufende Scan wird nicht unterbrochen.' : '' };
+    if (standalone.protectedReason) {
+        controlAction.enabled = false;
+        controlAction.reason = scannerProtectionNotice(standalone.protectedReason);
+    }
     const [autoResume, setAutoResume] = useState(true);
     useEffect(() => {
         setAutoResume(control?.state === 'paused' ? control.auto_resume : true);
@@ -2824,9 +2843,9 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
         <div className="card border border-gray-200 p-4 rounded-lg scan-control-card">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-                    <button onClick={onScan} disabled={!!anyScanning} className="button scan-action-button w-full sm:w-auto" aria-busy={!!anyScanning && !paused}>
+                    <button onClick={startScan} disabled={!!anyScanning} className="button scan-action-button w-full sm:w-auto" aria-busy={!!anyScanning && !paused}>
                         <span aria-hidden="true">{anyScanning && !paused && <span className="loading-spinner"></span>}</span>
-                        <span className="scan-action-label">{anyScanning
+                        <span className="scan-action-label">{starting ? 'Start wird bestaetigt...' : anyScanning
                             ? control && !['running', 'finished'].includes(control.state) ? controlView.label : schedulerRunning && !isScanning ? 'Auto-Scan läuft...' : 'Scannt...'
                             : 'Scan starten'}</span>
                         <span aria-hidden="true"></span>
@@ -2852,7 +2871,8 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                 <div className="font-semibold">{controlView.text}</div>
                 {canControl && controlView.canPause && <div className="mt-1 text-xs">Stop / Pause unterbricht den Scan am naechsten sicheren Punkt. Danach kannst du fortsetzen.</div>}
                 {control.scope === 'strategy_round' && <div className="mt-1 text-xs">Pausiert die gesamte Aktienrunde, nicht nur die ausgewaehlte Strategie.</div>}
-                {['paused', 'pause_requested'].includes(control.state) && <div className="mt-1 text-xs">Waehrend der Pause warten andere schwere Aktien-Scans. Krypto und Positionspflege werden dadurch nicht pausiert.</div>}
+                {['paused', 'pause_requested'].includes(control.state) && <div className="mt-1 text-xs">{scannerPauseScopeNotice(control)}</div>}
+                {control.resume_policy === 'restart_fresh' && <div className="mt-1 text-xs">Beim Fortsetzen werden veraltete Live-Daten verworfen und ein frischer Lauf gestartet. Kein paralleler Ersatzlauf.</div>}
                 {canControl && controlView.canPause && <label className="mt-2 flex items-center gap-2 text-xs">
                     <input type="checkbox" checked={autoResume} disabled={!!controlFeed.controlPending} onChange={event => setAutoResume(event.target.checked)} />
                     Automatisch beim naechsten Lauf fortsetzen
@@ -2866,7 +2886,7 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
             {controlFeed?.controlError && <div className="mt-2 text-xs text-red-700" role="alert">{controlFeed.controlError}</div>}
             {anyScanning && (() => {
                 const rawProgress = progressOverride?.selected || progressOverride?.running ? progressOverride
-                    : schedulerRunning ? schedulerStatus?.scans?.[scanKey]?.progress : null;
+                    : schedulerRunning ? dedicatedVerified ? standalone.progress : schedulerStatus?.scans?.[scanKey]?.progress : null;
                 const prog = scannerProgressValue(rawProgress?.running === false
                     || ['done', 'stopped', 'error'].includes(rawProgress?.status) ? null : rawProgress);
                 const hasProgress = prog.hasProgress;
@@ -3943,14 +3963,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 const isShort = chartData.fib_direction === 'short';
                 const fibLabel = chartData.fib_meta ? `${String(chartData.fib_meta.direction || '').toUpperCase()} ${chartData.fib_meta.timeframe || timeframe}` : '';
                 const fibColors = {
-                    '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
-                    '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
+                    '0%': '#ef4444', '23.6%': '#f97316', '38.2%': '#eab308', '50%': '#22c55e',
+                    '61.8%': '#3b82f6', '78.6%': '#8b5cf6', '100%': '#a855f7',
                     // Extension-Targets
-                    '127%': isShort ? '#f43f5e' : '#06b6d4',
-                    '161%': isShort ? '#e11d48' : '#14b8a6',
+                    '127.2%': isShort ? '#f43f5e' : '#06b6d4',
+                    '161.8%': isShort ? '#e11d48' : '#14b8a6',
                     '200%': isShort ? '#be123c' : '#10b981',
                 };
-                const extendedKeys = ['127%', '161%', '200%'];
+                const extendedKeys = ['127.2%', '161.8%', '200%'];
                 Object.entries(chartData.fib).forEach(([level, price]) => {
                     const isExtended = extendedKeys.includes(level);
                     candleSeries.current.createPriceLine({
@@ -5275,8 +5295,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <h4 className="font-semibold text-sm mb-2">Preis</h4>
                     <div className="grid grid-cols-3 gap-2">
                         <div><span className="text-gray-500">1D</span> <span className={change >= 0 ? 'color-positive' : 'color-negative'}>{change}%</span></div>
-                        <div><span className="text-gray-500">5D</span> <span className={(d.change_5d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d}%</span></div>
-                        <div><span className="text-gray-500">20D</span> <span className={(d.change_20d ?? 0) >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d}%</span></div>
+                        <div><span className="text-gray-500">5D</span> <span className={d.change_5d == null ? 'text-gray-500' : d.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d == null ? '—' : `${d.change_5d}%`}</span></div>
+                        <div><span className="text-gray-500">20D</span> <span className={d.change_20d == null ? 'text-gray-500' : d.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d == null ? '—' : `${d.change_20d}%`}</span></div>
                         <div><span className="text-gray-500">Open</span> ${d.open}</div>
                         <div><span className="text-gray-500">High</span> ${d.high}</div>
                         <div><span className="text-gray-500">Low</span> ${d.low}</div>
@@ -5825,6 +5845,7 @@ function App() {
     const userBtnText = darkMode ? '#f1f5f9' : '#1a1a2e';
 
     return (
+        <ScannerAdminContext.Provider value={user.is_admin === true}>
         <div className={darkMode ? 'dark' : ''} style={{ position: 'relative', minHeight: '100vh' }}>
             {/* ═══ Watermark Overlay — user email on screenshots ═══ */}
             <div style={{
@@ -6102,14 +6123,17 @@ function App() {
             <ToastContainer />
             <TradeReminderPoller />
         </div>
+        </ScannerAdminContext.Provider>
     );
 }
 
 // Scanner lifecycle helpers. HTTP availability, scan completion and an empty
 // signal set are separate facts; never turn one into evidence for another.
 function scannerPublicFailure(status = 0, payload = null, retryHeader = null) {
-    const code = String(payload?.scan_error || payload?.code || '');
-    const retry = Number(payload?.retry_after_seconds ?? retryHeader);
+    const detail = payload?.detail && typeof payload.detail === 'object' ? payload.detail : payload;
+    const code = String(detail?.scan_error || detail?.code || '');
+    const retry = Number(detail?.retry_after_seconds ?? retryHeader);
+    if (code === 'market_scanner_not_implemented') return 'Dieser Markt-Scanner ist noch nicht verfügbar. Es wurde kein Ersatzscan gestartet.';
     if (status === 429 || code === 'scan_provider_rate_limited') {
         const suffix = Number.isFinite(retry) && retry > 0 && retry <= 86400
             ? ` Erneut versuchen in ${Math.ceil(retry)} Sekunden.` : ' Bitte spaeter erneut versuchen.';
@@ -6135,13 +6159,14 @@ function scannerControlValue(raw) {
     if (!raw || typeof raw !== 'object' || raw.supported !== true
         || !['running', 'pause_requested', 'paused', 'finishing', 'finished', 'restart_required'].includes(raw.state)
         || typeof raw.worker_alive !== 'boolean' || typeof raw.owner_scan_key !== 'string'
-        || !/^(bi_long|bi_short|strategy_scan|strat_[a-z0-9_]{1,90})$/.test(raw.owner_scan_key)
+        || !/^(bi_long|bi_short|strategy_scan|biotech|bear|turtle|orb|penny_stocks|volume_spikes|money_flow|early_movers|btc_divergenz|crypto_explosion|(?:crypto_)?strat_[a-z0-9_]{1,83})$/.test(raw.owner_scan_key)
         || typeof raw.run_id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(raw.run_id)
         || !['strategy_round', 'scanner'].includes(raw.scope)) return null;
     const utc = value => typeof value === 'string' && value.length <= 40
         && /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|\+00:00)$/.test(value) && Number.isFinite(Date.parse(value)) ? value : null;
     return { supported: true, owner_scan_key: raw.owner_scan_key, run_id: raw.run_id, state: raw.state,
         worker_alive: raw.worker_alive, scope: raw.owner_scan_key === 'strategy_scan' ? 'strategy_round' : raw.scope,
+        resume_policy: raw.resume_policy === 'restart_fresh' ? 'restart_fresh' : 'continue_if_valid',
         auto_resume: raw.auto_resume === true, resume_at: utc(raw.resume_at), paused_at: utc(raw.paused_at),
         paused_seconds: typeof raw.paused_seconds === 'number' && Number.isFinite(raw.paused_seconds)
             && raw.paused_seconds >= 0 && raw.paused_seconds <= 315360000 ? Math.floor(raw.paused_seconds) : null };
@@ -6188,6 +6213,139 @@ function scannerControlAction(raw, { running = false, canControl = false, pendin
         reason: 'Steuerung noch nicht bestaetigt. Status neu laden; es wird kein unbekannter Scan gestoppt.' };
     return { action, label, enabled: !pending && (view.canPause || view.canResume),
         reason: view.canPause || view.canResume || pending ? '' : view.text };
+}
+
+function scannerProtectionNotice(reason) {
+    if (reason === 'mixed_position_management') return 'Dieser Lauf verwaltet auch Stops und bestehende Positionen. Deshalb nicht pausierbar; der Positionsschutz laeuft weiter.';
+    if (reason === 'protection_monitor') return 'Schutz- und Positionsueberwachung bleibt aktiv und wird nicht durch Scan-Pause angehalten.';
+    return 'Dieser Worker unterstuetzt keine sichere Pause. Es wird kein unbekannter Lauf angehalten.';
+}
+
+function scannerDedicatedOwner(strategy, marketType) {
+    if (marketType !== 'stocks') return null;
+    const name = String(strategy || '').toLowerCase();
+    if (name.includes('bi_long') || name.includes('bi_short')) return null;
+    if (name.includes('biotech')) return 'biotech';
+    if (name.includes('early') || name.includes('movers')) return 'early_movers';
+    if (name.includes('volume') || name.includes('spike')) return 'volume_spikes';
+    if (name.includes('penny')) return 'penny_stocks';
+    if (['bear', 'bear scanner', 'bear scan'].includes(name)) return 'bear';
+    if (name.includes('crash')) return 'crash_monitor';
+    if (name.includes('btc') || name.includes('divergenz')) return 'btc_divergenz';
+    if (name.includes('money') || name.includes('flow')) return 'money_flow';
+    if (name.includes('turtle')) return 'turtle';
+    if (name.includes('listing')) return 'new_listing';
+    return null;
+}
+
+function scannerPauseScopeNotice(control) {
+    const heavy = control?.owner_scan_key === 'biotech' || /^(bi_long|bi_short|strategy_scan|strat_)/.test(control?.owner_scan_key || '');
+    return heavy ? 'Waehrend der Pause warten andere schwere Aktien-Scans. Unabhaengige Krypto-Scans und Positionspflege laufen weiter.'
+        : 'Nur dieser Scanlauf pausiert. Unabhaengige Scanner und Positionspflege laufen weiter.';
+}
+
+// Dedicated tabs keep their result loaders; control has a separately verified
+// scheduler owner. Never infer a controllable worker from rows or a cached flag.
+function useDedicatedScanControl({ scanKey, enabled, isAdmin, statusUrl, controlUrl }) {
+    const [state, setState] = useState({ scope: scanKey, control: null });
+    const [pending, setPending] = useState(null);
+    const [notice, setNotice] = useState(null);
+    const [error, setError] = useState(null);
+    const live = useRef(null);
+    const scope = useRef(scanKey);
+    const permission = useRef(isAdmin);
+    scope.current = scanKey; permission.current = isAdmin;
+    useEffect(() => {
+        const session = { active: true, request: null, unconfirmedRequest: null, reading: null, timer: null, control: null, observedAt: 0 };
+        live.current = session;
+        setState({ scope: scanKey, control: null }); setPending(null); setNotice(null); setError(null);
+        const current = () => session.active && scope.current === scanKey && live.current === session;
+        const refresh = async () => {
+            if (!current() || !enabled || !scanKey || session.reading) return;
+            clearTimeout(session.timer);
+            const controller = new AbortController(); session.reading = controller;
+            const deadline = setTimeout(() => controller.abort(), 8000);
+            try {
+                const response = await fetch(statusUrl, { signal: controller.signal, cache: 'no-store' });
+                const data = response.ok ? await response.json() : null;
+                if (!current()) return;
+                if (!response.ok || !data?.scans || typeof data.scans !== 'object') throw new Error('status');
+                const worker = data.scans[scanKey];
+                if (!worker || typeof worker !== 'object' || Array.isArray(worker) || typeof worker.running !== 'boolean') throw new Error('worker_unconfirmed');
+                const control = scannerControlValue(worker?.control);
+                if (control && (control.owner_scan_key !== scanKey || control.run_id !== worker.run_id)) throw new Error('owner');
+                session.control = control; session.observedAt = Date.now();
+                setError(previous => previous?.startsWith('Workerstatus nicht bestaetigt') || previous?.startsWith('Steuerung nicht bestaetigt;') ? null : previous);
+                const unconfirmed = session.unconfirmedRequest;
+                if (unconfirmed && control && (control.run_id !== unconfirmed.run_id
+                    || (unconfirmed.action === 'pause' ? control.state !== 'running' : control.state !== 'paused'))) {
+                    session.unconfirmedRequest = null;
+                    setError(previous => previous?.startsWith('Steuerung noch nicht durch den Worker bestaetigt.') ? null : previous);
+                }
+                const raw = worker?.control;
+                const protectedReason = raw?.supported === false && ['protection_monitor', 'mixed_position_management'].includes(raw.unsupported_reason)
+                    ? raw.unsupported_reason : null;
+                const runningSinceSec = Number.isSafeInteger(worker?.running_since_sec) && worker.running_since_sec >= 0 ? worker.running_since_sec : 0;
+                setState({ scope: scanKey, control, statusVerified: true, observedRunning: worker?.running === true,
+                    runningSinceSec, progress: worker?.progress || null, protectedReason, schedule: worker?.schedule || null });
+                const request = session.request;
+                if (request && (!control || control.run_id !== request.run_id
+                    || (request.action === 'pause' ? control.state !== 'running' : control.state !== 'paused'))) {
+                    session.request = null; setPending(null); setNotice(null);
+                } else if (request && Date.now() - request.at > 15000) {
+                    session.unconfirmedRequest = request;
+                    session.request = null; setPending(null); setError('Steuerung noch nicht durch den Worker bestaetigt. Status erneut pruefen.');
+                }
+            } catch (_) {
+                if (current()) {
+                    session.control = null; session.observedAt = 0; session.request = null;
+                    setState({ scope: scanKey, control: null }); setPending(null); setNotice(null);
+                    setError('Workerstatus nicht bestaetigt. Status neu laden; keine Steuerung aus alten Daten.');
+                }
+            } finally {
+                clearTimeout(deadline); session.reading = null;
+                if (current() && enabled) session.timer = setTimeout(refresh, session.control?.worker_alive || session.request ? 2000 : 5000);
+            }
+        };
+        session.refresh = refresh;
+        if (enabled && scanKey) refresh();
+        return () => { session.active = false; clearTimeout(session.timer); session.reading?.abort(); session.post?.abort(); };
+    }, [scanKey, enabled, statusUrl]);
+    const setControl = async (action, autoResume = true) => {
+        const session = live.current;
+        if (!enabled || !permission.current || !session?.active || session.post || session.request || scope.current !== scanKey) return;
+        const target = session.control;
+        const view = scannerControlPresentation(target);
+        if (!target || Date.now() - session.observedAt > 10000) { session.refresh?.(); return; }
+        if (action === 'pause' ? !view.canPause : action === 'resume' ? !view.canResume : true) return;
+        const controller = new AbortController(); session.post = controller;
+        const request = { action, run_id: target.run_id, at: Date.now() }; session.request = request;
+        session.unconfirmedRequest = null;
+        setPending(action); setError(null); setNotice(null);
+        const same = () => session.active && scope.current === scanKey && live.current === session && session.request === request;
+        const deadline = setTimeout(() => controller.abort(), 8000);
+        try {
+            const response = await fetch(controlUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ scanner: target.owner_scan_key, run_id: target.run_id, action, auto_resume: autoResume === true }), signal: controller.signal });
+            const ack = await response.json();
+            if (!same()) return;
+            const confirmed = scannerControlValue(ack?.control);
+            if (!response.ok || ack?.status !== (action === 'pause' ? 'pause_requested' : 'resume_requested')
+                || !confirmed || confirmed.run_id !== target.run_id || confirmed.owner_scan_key !== target.owner_scan_key) {
+                session.request = null; setPending(null);
+                setError(response.status === 403 ? 'Keine Berechtigung zur Scan-Steuerung.'
+                    : response.status === 409 ? 'Scanlauf oder Zustand hat sich geaendert. Status erneut laden.' : 'Steuerungsantwort nicht bestaetigt. Status erneut pruefen.');
+            } else setNotice(action === 'pause' ? 'Pause angefordert. Warte auf bestaetigten Workerstatus.' : 'Fortsetzung angefordert. Warte auf bestaetigten Workerstatus.');
+        } catch (_) {
+            if (same()) { session.request = null; setPending(null); setError('Steuerung nicht bestaetigt; der Server kann den Auftrag erhalten haben. Status wird erneut geprueft.'); }
+        } finally {
+            clearTimeout(deadline); session.post = null;
+            if (session.active && live.current === session) session.refresh?.();
+        }
+    };
+    const visible = state.scope === scanKey ? state : { control: null };
+    return { ...visible, controlPending: pending, controlNotice: notice, controlError: error,
+        setControl, refresh: () => live.current?.refresh?.() };
 }
 
 function scannerPatternProgress(info, count = 0, running = false) {
@@ -6314,8 +6472,12 @@ function scannerTimestamp(value) {
 
 function scannerLivePartialTimeout(data, expectedRunId = null) {
     const control = scannerControlSnapshot(data);
+    // Pause capability alone is not a live-partial-result contract. Only the
+    // BI and generic stock/crypto strategy producers provide this exception.
+    const partialOwner = control && (['bi_long', 'bi_short', 'strategy_scan'].includes(control.owner_scan_key)
+        || control.owner_scan_key.startsWith('strat_') || control.owner_scan_key.startsWith('crypto_strat_'));
     return data?.partial === true && data?.scan_running === true && data?.scan_error === 'scan_timeout'
-        && !!control && control.worker_alive === true && control.state === 'running'
+        && !!partialOwner && control.worker_alive === true && control.state === 'running'
         && typeof data.scan_run_id === 'string' && data.scan_run_id === control.run_id
         && (!expectedRunId || expectedRunId === control.run_id);
 }
@@ -6848,8 +7010,9 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     };
     const stratLower = String(strategy || '').toLowerCase();
     const isBI = stratLower.includes('bi_long') || stratLower.includes('bi_short');
-    const manualKey = isBI ? (stratLower.includes('short') ? 'bi_short' : 'bi_long')
-        : `${marketType === 'crypto' ? 'crypto_strat' : 'strat'}_${stratLower.replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'strategy'}`;
+    const specialKey = scannerDedicatedOwner(strategy, marketType);
+    const manualKey = specialKey || (isBI ? (stratLower.includes('short') ? 'bi_short' : 'bi_long')
+        : `${marketType === 'crypto' ? 'crypto_strat' : 'strat'}_${stratLower.replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'strategy'}`);
     const autoStrategies = ['Momentum Breakout Long', 'Gap Momentum Long', 'Gap Momentum Short', 'Cup and Handle Breakout'];
     const scanKeys = marketType === 'stocks' && autoStrategies.includes(strategy) ? [manualKey, 'strategy_scan'] : [manualKey];
     const scannerKey = scanKeys.find(key => schedulerStatus?.scans?.[key]?.running) || scanKeys.reduce((latest, key) => {
@@ -6864,7 +7027,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         scopeKey: `${marketType}:${strategy}`, resultsUrl,
         startUrl: `${API}/api/scan`, startBody: { strategy, market_type: marketType },
         cachePrefix: 'scanner', scanCache, updateScanCache, schedulerState,
-        controlEnabled: marketType === 'stocks', isAdmin: canControl, controlUrl: `${API}/api/scan-control`,
+        controlEnabled: marketType === 'stocks' && !specialKey, isAdmin: canControl, controlUrl: `${API}/api/scan-control`,
     });
     const { results, isScanning, info: scanInfo } = feed;
     const selectedProgress = scannerSelectedProgress({ info: scanInfo, schedulerState, scanKey: scannerKey,
@@ -6924,15 +7087,15 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                         <select value={marketType} onChange={(e) => setMarketType(e.target.value)} className="w-full">
                             <option value="stocks">Aktien</option>
                             <option value="crypto">Crypto</option>
-                            <option value="futures">Futures</option>
-                            <option value="forex">Forex</option>
+                            <option value="futures" disabled>Futures — noch nicht verfügbar</option>
+                            <option value="forex" disabled>Forex — noch nicht verfügbar</option>
                         </select>
                     </div>
                 </div>
             </div>
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey}
-                controlFeed={marketType === 'stocks' ? feed : null} canControl={canControl} progressOverride={selectedProgress} />
+                controlFeed={marketType === 'stocks' && !specialKey ? feed : null} canControl={canControl} progressOverride={selectedProgress} />
 
             <LiveScanStatus
                 active={isScanning || scanInfo?.scan_running || !!schedulerState?.running}
@@ -7616,7 +7779,7 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 </td>
                                 <td className="py-3 px-2">{item.name}</td>
                                 <td className="py-3 px-2 text-right">{formatDivPrice(item.price)}</td>
-                                <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.change_1d)}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_1d == null ? 'text-gray-500' : item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.change_1d)}</td>
                                 <td className={`py-3 px-2 text-right ${(item.change_7d ?? item.change_5d) >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.change_7d ?? item.change_5d)}</td>
                                 <td className={`py-3 px-2 text-right ${(item.alpha_24h ?? item.div_1d) >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.alpha_24h ?? item.div_1d)}</td>
                                 <td className={`py-3 px-2 text-right ${(item.alpha_7d ?? item.div_5d) >= 0 ? 'color-positive' : 'color-negative'}`}>{fmtPct(item.alpha_7d ?? item.div_5d)}</td>
@@ -9020,6 +9183,9 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
     const pollTimeoutRef = useRef(null);
     const lastLoadedCachedAtRef = useRef(scanCache.crypto_trade_signals_cached_at || null);
 
+    const knownNumber = value => value != null && value !== '' && typeof value !== 'boolean' && Number.isFinite(Number(value));
+    const metric = value => knownNumber(value) ? String(Number(value)) : '—';
+
     const formatPrice = (price) => {
         if (price == null || price === '' || typeof price === 'boolean') return '-';
         const p = Number(price);
@@ -9031,6 +9197,7 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
         return `$${p.toPrecision(6)}`;
     };
     const formatPct = (v) => {
+        if (!knownNumber(v)) return '—';
         const n = Number(v);
         if (!Number.isFinite(n)) return '-';
         return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
@@ -9048,7 +9215,8 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
         if (item.vrvp_applied) parts.push(`VRVP ${item.vrvp_timeframe || ''}`.trim());
         if (item.tp1_source) parts.push(String(item.tp1_source).replaceAll('_', ' '));
         if (item.tp2_source && item.tp2_source !== item.tp1_source) parts.push(String(item.tp2_source).replaceAll('_', ' '));
-        return parts.length ? parts.join(' | ') : 'Struktur/Measured Move';
+        if (item.scanner_source) parts.push(`Scanner: ${item.scanner_source}`);
+        return parts.length ? parts.join(' | ') : 'Quelle nicht belegt';
     };
 
     const applyResults = (data) => {
@@ -9182,15 +9350,36 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                                     <td className="py-3 px-2 text-center">
                                         <span className={`text-xs px-2 py-1 rounded font-semibold ${item.direction === 'SHORT' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>{item.direction}</span>
                                     </td>
-                                    <td className="py-3 px-2"><span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-800">{item.BestExchange || item.exchange}</span></td>
+                                    <td className="py-3 px-2">
+                                        <span className="text-xs px-2 py-1 rounded bg-blue-100 text-blue-800">{item.BestExchange || item.exchange}</span>
+                                        {item.venue_selection && <div className="text-[11px] text-gray-500 mt-1">Auswahl: Risiko → Aktion → Score/R:R</div>}
+                                        {Array.isArray(item.venue_alternatives) && item.venue_alternatives.length > 0 && (
+                                            <details className="text-xs mt-2 max-w-[260px]" onClick={event => event.stopPropagation()}>
+                                                <summary className="cursor-pointer">{item.venue_alternatives.length} weitere Börsenpläne</summary>
+                                                {item.venue_alternatives.map((plan, number) => (
+                                                    <div className="border-t border-gray-200 mt-2 pt-2" key={`${plan.exchange}-${plan.contract}-${number}`}>
+                                                        <b>{plan.exchange} · {plan.contract}</b><br />
+                                                        {plan.direction} · {plan.trade_action} · Risiko {plan.risk_level || 'unbekannt'}<br />
+                                                        Entry {formatPrice(plan.entry)} · Stop {formatPrice(plan.stop)}<br />
+                                                        TP1 {formatPrice(plan.tp1)} · TP2 {formatPrice(plan.tp2)}<br />
+                                                        R:R {metric(plan.risk_reward)} · Risikorang {metric(plan.risk_rank)}<br />
+                                                        Setup-Score {metric(plan.trade_score)} · Entry-Score {metric(plan.entry_score)}<br />
+                                                        Quelle: {plan.scanner_source || 'nicht belegt'}<br />
+                                                        Spread {plan.spread_pct == null ? '—' : `${plan.spread_pct}%`} · Funding {plan.funding_rate_pct == null ? '—' : `${plan.funding_rate_pct}% ${plan.funding_rate_unit || ''}`}
+                                                    </div>
+                                                ))}
+                                                <div className="text-gray-500 mt-1">Eigenständige Pläne; keine Mischung von Börsenpreisen.</div>
+                                            </details>
+                                        )}
+                                    </td>
                                     <td className="py-3 px-2 text-right font-semibold">{formatPrice(item.Price)}</td>
                                     <td className={`py-3 px-2 text-right font-semibold ${(item.move_pct ?? item.Change24h ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.move_pct ?? item.Change24h)}</td>
                                     <td className="py-3 px-2 text-center">
                                         <div className="flex gap-1 justify-center">
-                                            <span className={`signal-badge ${(item.trade_score || item.score || 0) >= 88 ? 'signal-bullish' : (item.trade_score || item.score || 0) >= 80 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.Grade || item.grade} {item.trade_score || item.score}</span>
-                                            <span className="signal-badge signal-abwarten">Entry {item.entry_score || 0}</span>
+                                            <span className={`signal-badge ${(item.trade_score ?? item.score) >= 88 ? 'signal-bullish' : (item.trade_score ?? item.score) >= 80 ? 'signal-lightdiv' : 'signal-neutral'}`}>{item.Grade || item.grade || '—'} {metric(item.trade_score ?? item.score)}</span>
+                                            <span className="signal-badge signal-abwarten">Entry {metric(item.entry_score)}</span>
                                         </div>
-                                        <div className="text-[11px] text-gray-500 mt-1">{item.risk_level || 'LOW'} Risk</div>
+                                        <div className="text-[11px] text-gray-500 mt-1">{item.risk_level || 'UNBEKANNT'} Risk · Rang {metric(item.venue_selection?.selected_risk_rank)}</div>
                                     </td>
                                     <td className="py-3 px-2">
                                         <span className={`px-2 py-1 rounded font-semibold ${view.cls}`}>{view.label}</span>
@@ -9204,7 +9393,7 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                                     <td className="py-3 px-2 text-right text-xs">
                                         <div className="text-emerald-700">TP1 {formatPrice(item.tp1)}</div>
                                         <div className="text-emerald-700">TP2 {formatPrice(item.tp2)}</div>
-                                        <div className="text-gray-500">R:R {item.risk_reward || item.live_rr_ratio}</div>
+                                        <div className="text-gray-500">R:R {metric(item.risk_reward ?? item.live_rr_ratio)}</div>
                                     </td>
                                     <td className="py-3 px-2 text-xs max-w-[250px]">
                                         <div className="truncate" title={targetSource(item)}>{targetSource(item)}</div>
@@ -9522,12 +9711,12 @@ function MoneyFlowTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                                 <td className="py-3 px-2 font-semibold">{item.sector}</td>
                                 <td className="py-3 px-2">{item.etf}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
-                                <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
-                                <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
+                                <td className={`py-3 px-2 text-right ${item.change_1d == null ? 'text-gray-500' : item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d == null ? '—' : `${Number(item.change_1d).toFixed(2)}%`}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_5d == null ? 'text-gray-500' : item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d == null ? '—' : `${Number(item.change_5d).toFixed(2)}%`}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_20d == null ? 'text-gray-500' : item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d == null ? '—' : `${Number(item.change_20d).toFixed(2)}%`}</td>
                                 <td className="py-3 px-2 text-right">{item.rvol != null ? `${item.rvol.toFixed(2)}x` : '–'}</td>
                                 <td className={`py-3 px-2 text-right ${(item.cmf ?? 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? item.cmf.toFixed(3) : '–'}</td>
-                                <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
+                                <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : item.obv_signal ? 'Neutral' : 'Unbekannt'}</span></td>
                                 <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '–'}</span></td>
                             </tr>
                         ))}
@@ -9710,19 +9899,19 @@ function SectorNarrativeTab({ onSelectTicker, scanCache = {}, updateScanCache = 
                                     <div className="font-bold text-gray-900">{item.sector || item.narrative}</div>
                                     <div className="text-xs text-gray-500">{item.ticker} Proxy | {item.bias || 'NEUTRAL'}</div>
                                 </div>
-                                <div className={`font-extrabold ${Number(item.narrative_score || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>
+                                <div className={`font-extrabold ${item.narrative_score == null ? 'text-gray-500' : Number(item.narrative_score) >= 0 ? 'color-positive' : 'color-negative'}`}>
                                     {formatScore(item.narrative_score)}
                                 </div>
                             </div>
                             <div className="grid grid-cols-4 gap-2 text-xs mt-3">
-                                <div><span className="text-gray-500">1D</span><div className={item.change_1d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_1d)}</div></div>
-                                <div><span className="text-gray-500">5D</span><div className={item.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_5d)}</div></div>
-                                <div><span className="text-gray-500">20D</span><div className={item.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_20d)}</div></div>
+                                <div><span className="text-gray-500">1D</span><div className={item.change_1d == null ? 'text-gray-500' : item.change_1d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_1d)}</div></div>
+                                <div><span className="text-gray-500">5D</span><div className={item.change_5d == null ? 'text-gray-500' : item.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_5d)}</div></div>
+                                <div><span className="text-gray-500">20D</span><div className={item.change_20d == null ? 'text-gray-500' : item.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{formatPct(item.change_20d)}</div></div>
                                 <div><span className="text-gray-500">RVOL</span><div>{item.rvol != null ? `${Number(item.rvol).toFixed(2)}x` : '-'}</div></div>
                             </div>
                             {reps.length > 0 && (
                                 <div className="mt-3 text-xs text-gray-600">
-                                    Beispiele: {reps.map(rep => `${rep.ticker} ${Number(rep.change_5d || 0).toFixed(1)}%`).join(', ')}
+                                    Beispiele: {reps.map(rep => `${rep.ticker} ${formatPct(rep.change_5d)}`).join(', ')}
                                 </div>
                             )}
                         </div>
@@ -9794,16 +9983,19 @@ function SectorNarrativeTab({ onSelectTicker, scanCache = {}, updateScanCache = 
                             const ticker = item.ticker || item.etf;
                             return (
                                 <tr key={idx} className="table-row border-b border-gray-200" onClick={() => ticker && onSelectTicker(ticker)}>
-                                    <td className="py-3 px-2 font-semibold">{item.sector || item.narrative}</td>
+                                    <td className="py-3 px-2 font-semibold">
+                                        {item.sector || item.narrative}
+                                        {item.data_status === 'partial' && <div className="text-xs font-normal text-amber-700">Daten unvollständig{item.narrative_score == null ? ' · Bewertung unbekannt' : ''}</div>}
+                                    </td>
                                     <td className="py-3 px-2">{ticker || '-'}</td>
-                                    <td className={`py-3 px-2 text-right font-bold ${Number(item.narrative_score || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatScore(item.narrative_score)}</td>
+                                    <td className={`py-3 px-2 text-right font-bold ${item.narrative_score == null ? 'text-gray-500' : Number(item.narrative_score) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatScore(item.narrative_score)}</td>
                                     <td className="py-3 px-2 text-right">{item.price != null ? `$${Number(item.price).toFixed(2)}` : '-'}</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_1d)}</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_5d)}</td>
-                                    <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_20d)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_1d == null ? 'text-gray-500' : item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_1d)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_5d == null ? 'text-gray-500' : item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_5d)}</td>
+                                    <td className={`py-3 px-2 text-right ${item.change_20d == null ? 'text-gray-500' : item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{formatPct(item.change_20d)}</td>
                                     <td className="py-3 px-2 text-right">{item.rvol != null ? `${Number(item.rvol).toFixed(2)}x` : '-'}</td>
                                     <td className={`py-3 px-2 text-right ${Number(item.cmf || 0) >= 0 ? 'color-positive' : 'color-negative'}`}>{item.cmf != null ? Number(item.cmf).toFixed(3) : '-'}</td>
-                                    <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : 'Neutral'}</span></td>
+                                    <td className="py-3 px-2"><span className={`signal-badge ${item.obv_signal === 'ACCUMULATION' ? 'signal-bullish' : item.obv_signal === 'DISTRIBUTION' ? 'signal-bearish' : 'signal-neutral'}`}>{item.obv_signal === 'ACCUMULATION' ? 'Akkum.' : item.obv_signal === 'DISTRIBUTION' ? 'Distrib.' : item.obv_signal ? 'Neutral' : 'Unbekannt'}</span></td>
                                     <td className="py-3 px-2"><span className={`signal-badge ${getFlowSignalClass(item.flow_signal || '')}`}>{item.flow_signal || '-'}</span></td>
                                 </tr>
                             );
@@ -10167,9 +10359,9 @@ function CrashMonitorTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker(item.symbol)}>
                                 <td className="py-3 px-2 font-semibold">{item.name}</td>
                                 <td className="py-3 px-2 text-right">${item.price?.toFixed(2)}</td>
-                                <td className={`py-3 px-2 text-right ${item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d?.toFixed(2)}%</td>
-                                <td className={`py-3 px-2 text-right ${item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d?.toFixed(2)}%</td>
-                                <td className={`py-3 px-2 text-right ${item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d?.toFixed(2)}%</td>
+                                <td className={`py-3 px-2 text-right ${item.change_1d == null ? 'text-gray-500' : item.change_1d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_1d == null ? '—' : `${Number(item.change_1d).toFixed(2)}%`}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_5d == null ? 'text-gray-500' : item.change_5d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_5d == null ? '—' : `${Number(item.change_5d).toFixed(2)}%`}</td>
+                                <td className={`py-3 px-2 text-right ${item.change_20d == null ? 'text-gray-500' : item.change_20d >= 0 ? 'color-positive' : 'color-negative'}`}>{item.change_20d == null ? '—' : `${Number(item.change_20d).toFixed(2)}%`}</td>
                             </tr>
                         ))}
                     </tbody>
@@ -10896,15 +11088,15 @@ function StrategieGuideTab() {
 
     // User-freundliche Guide-Texte — erklären WAS die Strategie macht & WANN nützlich
     const guideTexts = {
-        'Momentum Breakout Long': 'Sucht bestätigte Ausbrüche über ein vorheriges 10- oder 20-Tages-Hoch. Aktueller Kurs und abgeschlossene 5-Minuten-Kerze müssen den Ausbruch halten; Volumen und weitere Entry-Gates werden zusätzlich geprüft. Reine Range-Stärke oder die Rückeroberung einer Durchschnittslinie reichen nicht als Signal.',
+        'Momentum Breakout Long': 'Sucht bestätigte Ausbrüche über ein vorheriges 10- oder 20-Tages-Hoch. Im Swing-Modus bestätigt die abgeschlossene Tageskerze den Ausbruch; im Intraday-Modus müssen aktueller Kurs und abgeschlossene 5-Minuten-Kerze ihn halten; Volumen und weitere Entry-Gates werden zusätzlich geprüft. Reine Range-Stärke oder die Rückeroberung einer Durchschnittslinie reichen nicht als Signal.',
         'Gap Momentum Long': 'Fokussiert auf starke Gap-Ups nach News, Earnings oder anderen Katalysatoren. Das Setup ist nur dann interessant, wenn der Gap nicht sofort abverkauft wird, sondern der Preis über dem Open stabil bleibt.',
         'Gap Momentum Short': 'Das Short-Pendant für negative Gaps. Der Scanner priorisiert Aktien, die schwach eröffnen, keinen echten Bounce schaffen und mit Volumen weiter unter Druck bleiben.',
         'Compression Breakout': 'Findet Aktien, die sich über mehrere Tage komprimiert haben und jetzt aus enger Struktur ausbrechen. Das ist kein reiner Tagesfilter mehr, sondern ein strukturorientiertes Aufbau-Setup.',
         'Trend Reversal': 'Sucht kontrollierte Bodenbildung nach einem mehrtägigen Abverkauf. Interessant ist nicht jeder grüne Tag, sondern nur Reversals mit Struktur, Volumen und klarer Veränderung im Verhalten.',
         'MA Bounce Long': 'Fasst Pullbacks an EMA 21, SMA 50 und SMA 200 zusammen. Ein gutes Long-Setup liegt vor, wenn der Trend intakt ist, der Preis kontrolliert zurücksetzt und genau an einer starken Durchschnittslinie wieder Käufer findet.',
         'MA Bounce Short': 'Scant Rejections an fallenden SMA-Zonen. Das Setup ist besonders nützlich, wenn eine schwache Aktie zurück an einen Widerstands-MA läuft und dort wieder abgewiesen wird.',
-        'Wyckoff Accumulation': 'Long-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Reakkumulationsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Ausbruch, gehaltenen Ruecktest und eigenen Trigger. Bis zu 180 Kerzen angefordert; fehlende Pflichtanker bleiben unvollstaendig. Phasen und intakte Struktur allein sind kein Einstieg. Score bedeutet Musterqualitaet, nicht Gewinnwahrscheinlichkeit.',
-        'Wyckoff Distribution': 'Short-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Redistributionsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Breakdown, gehaltenen Ruecktest und eigenen Trigger. Phase D innerhalb der Range oder Phase E allein ersetzt dieses Gate nicht. Struktur, Einstiegsplan, Risiko und Mailfreigabe bleiben getrennt.',
+        'Wyckoff Accumulation': 'Long-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Reakkumulationsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Schlusskursausbruch und eigenen Trigger. Ein fehlender spaeterer Ruecktest erscheint als Warnung, nicht als automatische Sperre. Bis zu 180 Kerzen angefordert; fehlende Pflichtanker bleiben unvollstaendig. Phasen und intakte Struktur allein sind kein Einstieg. Score bedeutet Musterqualitaet, nicht Gewinnwahrscheinlichkeit.',
+        'Wyckoff Distribution': 'Short-Erkennung auf abgeschlossenen Tageskerzen (1D): getrennte Umkehr-/Redistributionsstruktur, kausale Swings und Tests. Ein Signal braucht weiterhin volumenbestaetigten Schlusskurs-Breakdown und eigenen Trigger. Ein fehlender spaeterer Ruecktest erscheint als Warnung, nicht als automatische Sperre. Phase D innerhalb der Range oder Phase E allein ersetzt dieses Gate nicht. Struktur, Einstiegsplan, Risiko und Mailfreigabe bleiben getrennt.',
         // === AKTIEN ===
         'Volume Surge': 'Erkennt Aktien, bei denen plötzlich viel mehr gehandelt wird als üblich UND sich der Preis gleichzeitig bewegt. Wenn beides zusammenkommt, steckt oft echtes Interesse dahinter — nicht nur zufälliges Rauschen. Besonders nützlich um früh in einen Move einzusteigen.',
         'Bull Flag': 'Klassisches Fortsetzungs-Pattern: Eine Aktie hatte einen starken Anstieg (die "Fahnenstange") und pausiert jetzt in einer engen Range. Dieses Verschnaufen bei sinkendem Volumen deutet darauf hin, dass der Trend weitergehen könnte. Der Scanner analysiert mehrere Wochen Kurshistorie um echte Flaggen zu finden.',
@@ -10937,8 +11129,8 @@ function StrategieGuideTab() {
         'Harmonic Bullish ⬆': 'Scannt nach bullischen Harmonic Patterns wie Gartley, Bat, Butterfly und Crab. Diese Fibonacci-basierten Umkehr-Patterns werden seit Jahrzehnten von professionellen Tradern genutzt. Der Entry erfolgt am Punkt D des XABCD-Patterns.',
         'Harmonic Bearish ⬇': 'Bärische Harmonic Patterns für Short-Setups. Gleiche Methodik wie die bullische Variante, nur in die andere Richtung.',
         'Harmonic All Patterns ': 'Zeigt alle erkannten Harmonic Patterns unabhängig von der Richtung. Nützlich wenn du alle Fibonacci-Setups auf einen Blick sehen willst.',
-        'Wyckoff Accumulation ⬆': 'Wyckoff Long auf 1D: zeitlich bestaetigte Ereignisfolge mit echtem Volumen, Ausbruch und gehaltenem Ruecktest. Spring optional. Keine Aussage ueber tatsaechliche institutionelle Kaeufe und keine garantierte Trefferquote.',
-        'Wyckoff Distribution ⬇': 'Wyckoff Short auf 1D: zeitlich bestaetigte Ereignisfolge mit echtem Volumen, Breakdown und gehaltenem Ruecktest. UTAD optional. Keine Aussage ueber tatsaechliche institutionelle Verkaeufe und keine garantierte Trefferquote.',
+        'Wyckoff Accumulation ⬆': 'Wyckoff Long auf 1D: zeitlich bestaetigte Ereignisfolge mit echtem Volumen, bestaetigtem Schlusskursausbruch. Ein fehlender spaeterer Ruecktest ist eine Warnung. Spring optional. Keine Aussage ueber tatsaechliche institutionelle Kaeufe und keine garantierte Trefferquote.',
+        'Wyckoff Distribution ⬇': 'Wyckoff Short auf 1D: zeitlich bestaetigte Ereignisfolge mit echtem Volumen, bestaetigtem Schlusskurs-Breakdown. Ein fehlender spaeterer Ruecktest ist eine Warnung. UTAD optional. Keine Aussage ueber tatsaechliche institutionelle Verkaeufe und keine garantierte Trefferquote.',
         'SMA 50 Bounce Long ': 'Der 50-Tage-Durchschnitt (SMA 50) ist eine der wichtigsten Support-Zonen. Wenn der Preis von oben an den SMA 50 herankommt und der MA nach oben zeigt, bietet das oft eine Kaufgelegenheit. Swing-Trader nutzen dieses Setup regelmäßig.',
         'SMA 50 Bounce Short ': 'Wenn eine Aktie im Abwärtstrend den SMA 50 von unten erreicht, wirkt er als Widerstand. Der Preis prallt oft nach unten ab — ein Short-Setup.',
         'SMA 200 Bounce Long ': 'Der 200-Tage-Durchschnitt ist DER wichtigste langfristige Moving Average. Legendäre Trader wie Paul Tudor Jones nutzen ihn als ultimativen Support. Wenn eine Aktie den SMA 200 testet und hält, ist das oft ein starkes Kaufsignal.',
@@ -11043,7 +11235,9 @@ function StrategieGuideTab() {
                     filtered.map((name, idx) => {
                         const strat = strategies[name] || {};
                         const dir = getDirectionBadge(name, strat);
-                        const guide = guideTexts[name] || guideTexts[name.trim()] || null;
+                        const guide = strat.scan_supported === false
+                            ? 'Geplantes Strategiekonzept: Für diesen Markt ist noch kein Scanner implementiert. Kein Scanstart, keine passenden Marktdaten und keine Signalproduktion verfügbar.'
+                            : guideTexts[name] || guideTexts[name.trim()] || null;
                         const isExpanded = expandedStrategy === idx;
                         return (
                         <div key={idx} className="card border border-gray-200 rounded-lg overflow-hidden">
@@ -11054,6 +11248,7 @@ function StrategieGuideTab() {
                                             <h3 className="font-semibold text-sm">{name}</h3>
                                             <span className="text-xs font-bold px-2 py-0.5 rounded" style={{background: dir.color + '20', color: dir.color}}>{dir.label}</span>
                                             {strat.display_group && <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{strat.display_group}</span>}
+                                            {strat.scan_supported === false && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-800">Scanner noch nicht verfügbar</span>}
                                             {strat.stocks_only && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">Nur Aktien</span>}
                                             {strat.needs_history && <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">Multi-Day</span>}
                                             {strat.needs_harmonic && <span className="text-xs px-1.5 py-0.5 rounded bg-orange-50 text-orange-600">Harmonic</span>}
@@ -11284,6 +11479,20 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
     );
 }
 
+// Preserve missing observations in presentation; never coerce them to measured zero.
+function observedMetricNumber(value) {
+    if (typeof value !== 'number' && typeof value !== 'string') return null;
+    if (typeof value === 'string' && value.trim() === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function formatObservedMetric(value, digits = 2, suffix = '', signed = false) {
+    const number = observedMetricNumber(value);
+    if (number == null) return '—';
+    return `${signed && number >= 0 ? '+' : ''}${digits == null ? String(number) : number.toFixed(digits)}${suffix}`;
+}
+
 // Penny Stock active trade signals
 function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}, schedulerStatus = null }) {
     const [isScanning, setIsScanning] = useState(scanCache.penny_scanning || false);
@@ -11505,9 +11714,9 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             <div><span className="text-gray-500">Entry</span><div className="font-bold">{item.entry_quality_score}</div></div>
                             <div><span className="text-gray-500">Risiko</span><div className="font-bold">{item.dump_risk_score}</div></div>
                             <div><span className="text-gray-500">Preis</span><div>{price(item.price)}</div></div>
-                            <div><span className="text-gray-500">RVOL</span><div>{Number(item.rvol || 0).toFixed(1)}x</div></div>
+                            <div><span className="text-gray-500">RVOL</span><div>{formatObservedMetric(item.rvol, 1, 'x')}</div></div>
                             <div><span className="text-gray-500">$Vol</span><div>{compactMoney(item.dollar_volume)}</div></div>
-                            <div><span className="text-gray-500">Kosten</span><div>{Number(item.execution_cost_bps || 0).toFixed(0)} bps</div></div>
+                            <div><span className="text-gray-500">Kosten</span><div>{formatObservedMetric(item.execution_cost_bps, 0, ' bps')}</div></div>
                         </div>
                         <div className="mt-2 text-[11px] text-gray-500">Float: {Number(item.float_m || 0) > 0 ? `${Number(item.float_m).toFixed(1)}M gemeldet` : 'nicht gemeldet'} | Modell-Max-Order: {compactMoney(item.max_order_notional)}</div>
                         <div className="mt-2 text-[11px] font-semibold text-gray-500">Signal vor {formatCacheAge(item.signal_age_seconds)}</div>
@@ -11542,9 +11751,9 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                                     <td className="py-3 px-2"><StockIdentity row={item} ticker={item.ticker} /><div className="text-[11px] text-gray-500">{Number(item.float_m || 0) > 0 ? `${Number(item.float_m).toFixed(1)}M Float gemeldet` : 'Float nicht gemeldet'}</div></td>
                                     <td className="py-3 px-2 text-center"><span className="rounded bg-violet-100 px-2 py-1 text-xs font-bold text-violet-800">{item.grade} {item.trade_score ?? item.score}</span></td>
                                     <td className="py-3 px-2 text-right">{price(item.price)}</td>
-                                    <td className={`py-3 px-2 text-right font-semibold ${Number(item.change_pct) >= 0 ? 'color-positive' : 'color-negative'}`}>{Number(item.change_pct || 0).toFixed(1)}%</td>
-                                    <td className="py-3 px-2 text-right">{Number(item.rvol || 0).toFixed(1)}x<div className="text-[10px] text-gray-400">{item.rvol_source === 'projected_rth_volume_vs_20d_median' ? 'RTH vs 20T' : 'Vortag-Fallback'}</div></td>
-                                    <td className="py-3 px-2 text-right">{compactMoney(item.dollar_volume)}<div className="text-[10px] text-gray-400">Kosten {Number(item.execution_cost_bps || 0).toFixed(0)} bps | max. {compactMoney(item.max_order_notional)}</div></td>
+                                    <td className={`py-3 px-2 text-right font-semibold ${observedMetricNumber(item.change_pct) == null ? 'text-gray-500' : Number(item.change_pct) >= 0 ? 'color-positive' : 'color-negative'}`}>{formatObservedMetric(item.change_pct, 1, '%')}</td>
+                                    <td className="py-3 px-2 text-right">{formatObservedMetric(item.rvol, 1, 'x')}<div className="text-[10px] text-gray-400">{item.rvol_source === 'projected_rth_volume_vs_20d_median' ? 'RTH vs 20T' : 'Vortag-Fallback'}</div></td>
+                                    <td className="py-3 px-2 text-right">{compactMoney(item.dollar_volume)}<div className="text-[10px] text-gray-400">Kosten {formatObservedMetric(item.execution_cost_bps, 0, ' bps')} | max. {compactMoney(item.max_order_notional)}</div></td>
                                     <td title="Setup-Qualitaet, keine Gewinnwahrscheinlichkeit" className="py-3 px-2 text-center font-bold">{item.setup_quality_score}</td>
                                     <td className="py-3 px-2 text-center font-bold text-blue-700">{item.entry_quality_score}</td>
                                     <td className={`py-3 px-2 text-center font-bold ${Number(item.dump_risk_score || 0) > 45 ? 'text-red-600' : 'text-green-700'}`}>{item.dump_risk_score}</td>
@@ -11884,11 +12093,11 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             <div className="mt-2 grid grid-cols-2 md:grid-cols-7 gap-2 text-xs text-gray-600">
                                 <div>Gap: <span className={b.gap_pct > 0 ? 'text-green-600' : 'text-red-500'}>{b.gap_pct > 0 ? '+' : ''}{b.gap_pct}%</span></div>
                                 <div>Tages-RVOL: <span className={b.rvol >= 2 ? 'text-green-600 font-medium' : ''}>{b.rvol}x</span></div>
-                                <div>Ausbruch-Vol: <span className={Number(b.volume_ratio || 0) >= 1.15 ? 'text-green-600 font-medium' : 'text-red-500'}>{Number(b.volume_ratio || 0).toFixed(2)}x</span></div>
+                                <div>Ausbruch-Vol: <span className={observedMetricNumber(b.volume_ratio) == null ? 'text-gray-500' : Number(b.volume_ratio) >= 1.15 ? 'text-green-600 font-medium' : 'text-red-500'}>{formatObservedMetric(b.volume_ratio, 2, 'x')}</span></div>
                                 <div>OR: {b.or_size_pct}%</div>
                                 <div>ATR: {b.atr_pct || b.prev_atr_pct}%</div>
                                 <div>Live R:R: <span className={(b.live_rr_ratio || 0) >= 2 ? 'text-green-600 font-medium' : (b.live_rr_ratio || 0) < 1.5 ? 'text-red-500' : ''}>{b.live_rr_ratio != null ? b.live_rr_ratio : b.rr_ratio}</span></div>
-                                <div>Dist: {b.distance_to_entry_r != null ? `${b.distance_to_entry_r}R` : '0R'}</div>
+                                <div>Dist: {formatObservedMetric(b.distance_to_entry_r, null, 'R')}</div>
                             </div>
                             <div className="mt-1 flex flex-wrap gap-3 text-xs">
                                 <span className="text-green-700">Entry: ${b.entry}</span>
@@ -11927,7 +12136,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                             || b?.trade_health?.decision_label
                             || b?.trade_health?.summary
                             || 'Risiko-Check nicht bestanden';
-                        const volumeRatio = Number(b?.volume_ratio || 0);
+                        const volumeRatio = observedMetricNumber(b?.volume_ratio);
                         return (
                             <div key={i} className="card orb-result-card p-3 border-l-4 border-gray-400 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: b.ticker, ...b})}>
                                 <div className="flex justify-between items-start gap-3">
@@ -11941,7 +12150,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
                                     <span>RVOL: {b.rvol}x</span>
                                     <span>Range: {b.or_size_pct}%</span>
-                                    <span>Volumen am Bruch: {volumeRatio > 0 ? `${volumeRatio.toFixed(2)}x Basis` : 'nicht messbar'}</span>
+                                    <span>Volumen am Bruch: {formatObservedMetric(volumeRatio, 2, 'x Basis')}</span>
                                     <span>Live R:R: {b.live_rr_ratio || b.rr_ratio || 'â€“'}</span>
                                 </div>
                                 <div className="mt-1 text-xs text-red-600">{decisionReason}</div>
@@ -12577,13 +12786,13 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 const isShort = chartData.fib_direction === 'short';
                 const fibLabel = chartData.fib_meta ? `${String(chartData.fib_meta.direction || '').toUpperCase()} ${chartData.fib_meta.timeframe || timeframe}` : '';
                 const fibColors = {
-                    '0%': '#ef4444', '23%': '#f97316', '38%': '#eab308', '50%': '#22c55e',
-                    '61%': '#3b82f6', '78%': '#8b5cf6', '100%': '#a855f7',
-                    '127%': isShort ? '#f43f5e' : '#06b6d4',
-                    '161%': isShort ? '#e11d48' : '#14b8a6',
+                    '0%': '#ef4444', '23.6%': '#f97316', '38.2%': '#eab308', '50%': '#22c55e',
+                    '61.8%': '#3b82f6', '78.6%': '#8b5cf6', '100%': '#a855f7',
+                    '127.2%': isShort ? '#f43f5e' : '#06b6d4',
+                    '161.8%': isShort ? '#e11d48' : '#14b8a6',
                     '200%': isShort ? '#be123c' : '#10b981',
                 };
-                const extendedKeys = ['127%', '161%', '200%'];
+                const extendedKeys = ['127.2%', '161.8%', '200%'];
                 Object.entries(chartData.fib).forEach(([level, price]) => {
                     const isExtended = extendedKeys.includes(level);
                     candleSeriesRef.current.createPriceLine({
@@ -12760,8 +12969,9 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     };
 
     const d = tickerData || {};
-    const price = Number(d.price) || 0;
-    const change = Number(d.change_1d) || 0;
+    const price = observedMetricNumber(d.price);
+    const change = observedMetricNumber(d.change_1d);
+    const signalScore = observedMetricNumber(d.signal_score);
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
 
     return (
@@ -12844,13 +13054,13 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                             <div>
                                 <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0 }}>{activeTicker}</h2>
                                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
-                                    <span style={{ fontSize: 22, fontWeight: 700 }}>${price < 0.01 ? price.toPrecision(4) : price.toFixed(2)}</span>
-                                    <span style={{ fontSize: 16, fontWeight: 600, color: change >= 0 ? '#10b981' : '#ef4444' }}>({change >= 0 ? '+' : ''}{change.toFixed(2)}%)</span>
+                                    <span style={{ fontSize: 22, fontWeight: 700 }}>{price == null ? '—' : `$${price > 0 && price < 0.01 ? price.toPrecision(4) : price.toFixed(2)}`}</span>
+                                    <span style={{ fontSize: 16, fontWeight: 600, color: change == null ? '#6b7280' : change >= 0 ? '#10b981' : '#ef4444' }}>({formatObservedMetric(change, 2, '%', true)})</span>
                                 </div>
                             </div>
                             {d.signal_grade && (
                                 <span className={`grade-badge grade-${d.signal_grade.toLowerCase()}`} style={{ fontSize: 14 }}>
-                                    Grade {d.signal_grade} ({d.signal_score != null ? Math.round(d.signal_score) : 0}P)
+                                    Grade {d.signal_grade} ({signalScore == null ? '—' : `${Math.round(signalScore)}P`})
                                 </span>
                             )}
                             {d.confluence && (
@@ -13057,8 +13267,8 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Preis & Volumen</h4>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, fontSize: 13 }}>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>1D</span><div style={{ fontWeight: 700, color: change >= 0 ? '#10b981' : '#ef4444' }}>{change}%</div></div>
-                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>5D</span><div style={{ fontWeight: 700, color: (d.change_5d ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{d.change_5d || '-'}%</div></div>
-                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D</span><div style={{ fontWeight: 700, color: (d.change_20d ?? 0) >= 0 ? '#10b981' : '#ef4444' }}>{d.change_20d || '-'}%</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>5D</span><div style={{ fontWeight: 700, color: d.change_5d == null ? 'var(--text-muted)' : d.change_5d >= 0 ? '#10b981' : '#ef4444' }}>{d.change_5d == null ? '—' : `${d.change_5d}%`}</div></div>
+                                    <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>20D</span><div style={{ fontWeight: 700, color: d.change_20d == null ? 'var(--text-muted)' : d.change_20d >= 0 ? '#10b981' : '#ef4444' }}>{d.change_20d == null ? '—' : `${d.change_20d}%`}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Open</span><div style={{ fontWeight: 700 }}>${d.open || '-'}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>High</span><div style={{ fontWeight: 700 }}>${d.high || '-'}</div></div>
                                     <div><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Low</span><div style={{ fontWeight: 700 }}>${d.low || '-'}</div></div>

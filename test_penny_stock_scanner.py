@@ -1046,7 +1046,7 @@ def test_reentry_gets_new_position_event_id_after_exit():
     assert new_position_id != previous["position_event_id"]
 
 
-def test_position_monitor_keeps_position_active_when_exit_mail_fails(monkeypatch, tmp_path):
+def test_position_monitor_preserves_model_exit_when_notification_fails(monkeypatch, tmp_path):
     import api
 
     now_ts = _market_now()
@@ -1119,9 +1119,11 @@ def test_position_monitor_keeps_position_active_when_exit_mail_fails(monkeypatch
     api._penny_position_monitor_wrapper()
 
     state = api._penny_load_state_tickers()["OPEN"]
-    assert state["active"] is True
-    assert state["last_action"] == "EXIT_BESTAETIGT_MAIL_FEHLER"
+    assert state["active"] is False
+    assert state["model_exit_confirmed"] is True
+    assert state["last_action"] == "JETZT_VERKAUFEN"
     assert state["exit_email_sent"] is False
+    assert next(iter(state["model_management_events"].values()))["status"] == "pending"
 
 
 def test_spread_and_atr_define_real_breakout_clearance():

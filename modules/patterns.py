@@ -4162,11 +4162,12 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                     slope_24 = (p4["price"] - p2["price"]) / (p4["idx"] - p2["idx"]) if p4["idx"] != p2["idx"] else 0
                     
                     # Beide Slopes müssen negativ sein (fallend) UND konvergieren
-                    # Untere Linie (1→3) fällt stärker als obere Linie (2→4) → konvergiert
+                    # Width = upper - lower. Its derivative must be negative:
+                    # the upper boundary falls faster, while width stays positive.
                     if slope_13 >= 0 or slope_24 >= 0:
                         continue  # Nicht fallend
-                    if slope_13 >= slope_24:
-                        continue  # Nicht konvergierend (untere muss steiler fallen)
+                    if slope_24 >= slope_13:
+                        continue  # Parallel or widening, not converging.
                     
                     # Punkt 5: Aktueller Preis oder letzter Swing Low UNTER der Linie 1→3
                     # Suche Punkt 5 NACH Punkt 4
@@ -4197,7 +4198,7 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                         
                         # Überschuss darf nicht zu groß sein
                         # Max 150% der Kanal-Höhe bei Punkt 5
-                        channel_height = abs(line_y_at(p2["idx"], p2["price"], p4["idx"], p4["price"], p5["idx"]) - line_13_at_5)
+                        channel_height = line_y_at(p2["idx"], p2["price"], p4["idx"], p4["price"], p5["idx"]) - line_13_at_5
                         if channel_height <= 0:
                             continue
                         
@@ -4230,7 +4231,7 @@ def detect_wolfe_waves(ohlcv_data, lookback=80, min_wave_bars=5, max_wave_bars=4
                             score += 8
                         
                         # Konvergenz-Qualität: Je stärker die Konvergenz, desto besser
-                        convergence_ratio = abs(slope_13) / abs(slope_24) if slope_24 != 0 else 0
+                        convergence_ratio = abs(slope_24) / abs(slope_13) if slope_13 != 0 else 0
                         if 1.2 <= convergence_ratio <= 3.0:
                             score += 10  # Gute Konvergenz
                         
@@ -4530,10 +4531,21 @@ def find_harmonic_for_chart(ohlcv_data):
     if not ohlcv_data or len(ohlcv_data) < 20:
         return []
     try:
+        # Chart bars use epoch `time`; canonical completed scanner bars use
+        # `open_time`/`opened_at`. Normalize only the rendering coordinate,
+        # without changing their OHLCV or inventing completion evidence.
+        from modules.level_zones import _coerce_datetime
+        chart_times = []
+        for bar in ohlcv_data:
+            value = next((bar[key] for key in ("time", "open_time", "opened_at", "date")
+                          if bar.get(key) not in (None, "")), None)
+            if value is None:
+                return []
+            chart_times.append(int(_coerce_datetime(value).timestamp()))
         prices = []
-        for d in ohlcv_data:
+        for d, chart_time in zip(ohlcv_data, chart_times):
             prices.append({
-                "date": str(d.get("time", "")),
+                "date": str(chart_time),
                 "high": d["high"],
                 "low": d["low"],
                 "close": d["close"],
@@ -4554,7 +4566,7 @@ def find_harmonic_for_chart(ohlcv_data):
             for idx, label in zip(pivot_indices, point_labels):
                 if idx < len(ohlcv_data):
                     points.append({
-                        "time": ohlcv_data[idx]["time"],
+                        "time": chart_times[idx],
                         "price": pat["points"][label],
                         "label": label
                     })
@@ -5345,7 +5357,8 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                         "bars_ago": ww["bars_ago"],
                         "points": ww["points"],
                         "description": desc,
-                        "draw_points": [{"index": pts['p1']['index'], "price": pts['p1']['price']}, {"index": pts['p2']['index'], "price": pts['p2']['price']}, {"index": pts['p3']['index'], "price": pts['p3']['price']}, {"index": pts['p4']['index'], "price": pts['p4']['price']}, {"index": pts['p5']['index'], "price": pts['p5']['price']}]
+                        "draw_points": [{"index": pts[key]["idx"], "price": pts[key]["price"]}
+                                        for key in ("p1", "p2", "p3", "p4", "p5")]
                     })
             except Exception:
                 pass

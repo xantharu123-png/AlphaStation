@@ -206,7 +206,7 @@ def test_parked_stock_does_not_block_crypto_or_light_position_jobs(isolated_api,
     assert api._run_scan_safe(other, completed.set)
     assert completed.wait(3)
     isolated_api.workers[-1].join(3)
-    assert control.snapshot(other) == {}
+    assert (control.snapshot(other).get("state") == "finished") if api._scan_control_supported(other) else not control.snapshot(other)
     assert parked.worker.is_alive() and parked.steps == ["before"]
     _resume_finish(parked)
 
@@ -326,7 +326,7 @@ def test_control_route_requires_real_admin_before_mutation(isolated_api, authori
 
 
 @pytest.mark.parametrize("scanner,action", [
-    ("crypto_explosion", "pause"), ("crypto_strat_long", "pause"),
+    ("new_listing", "pause"), ("penny_positions", "pause"),
     ("not_a_scanner", "pause"), ("strat_../private", "pause"),
     (KEY, "cancel"), ("strat_" + "x" * 100, "pause"),
 ])

@@ -82,13 +82,16 @@ def _to_polygon(bars):
 
 
 def _attach_ts(bars, end_day=None):
-    """Timestamps (12:00 lokal) — letzter Bar endet bei end_day (date)."""
+    """Actual exchange sessions, ending no later than end_day (date)."""
     if end_day is None:
         end_day = (_real_datetime.now() - timedelta(days=3)).date()
-    n = len(bars)
-    for i, b in enumerate(bars):
-        d = end_day - timedelta(days=(n - 1 - i))
-        b["t"] = int(_real_datetime(d.year, d.month, d.day, 12, 0).timestamp() * 1000)
+    from zoneinfo import ZoneInfo
+    d = end_day
+    for b in reversed(bars):
+        while scanners.stock_swing.session_close(d.isoformat()) is None:
+            d -= timedelta(days=1)
+        b["t"] = int(_real_datetime(d.year, d.month, d.day, tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
+        d -= timedelta(days=1)
     return bars
 
 
@@ -120,8 +123,8 @@ def _spike_then_flat(n_spike=5, n_flat=10, spike_high=107.0, price=100.0, vol=25
 
 def _patch_scan_io(monkeypatch, bars_by_ticker, analyze_result=None, analyze_log=None):
     """Faked HTTP/Cache/Progress; optional analyze_breakout_imminent-Stub."""
-    # These legacy fixtures include weekend bars and live extension checks.
-    # The dated Starter contract has separate real-session integration tests.
+    # Exercise live extension checks with real exchange-session observations.
+    # The dated Starter contract has separate integration tests.
     monkeypatch.setenv("STOCK_SWING_DATA_MODE", "realtime")
     saved = {}
 
@@ -445,7 +448,7 @@ def test_m1_helper_session_logic(monkeypatch):
     _FakeDatetime._now = _real_datetime(2026, 6, 10, 10, 30)
     monkeypatch.setattr(scanners, "datetime", _FakeDatetime)
     for b in bars:
-        b.setdefault("date", "2026-01-01")
+        b.setdefault("date", "2026-01-02")
     assert scanners._bi_strip_partial_bar(bars) == bars
 
     # Heutiger Bar, 10:30 ET (Markt offen) → strippen

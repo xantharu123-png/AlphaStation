@@ -91,8 +91,8 @@ def _date_temporal_adapter(
     Daily ``date`` fields do not state whether they represent a candle open or
     close.  The default therefore treats the named UTC calendar day as an
     interval that completes at the next UTC midnight.  Callers which know the
-    source is a US regular-session equity feed may opt into the exact 16:00 ET
-    close through ``date_session_context='us_equity_regular'``.
+    source is a US regular-session equity feed may opt into the shared exchange
+    calendar (including holidays/early closes) through ``us_equity_regular``.
     """
     raw_date = bar.get(_VRVP_DATE_KEY)
     if raw_date is None or not str(raw_date).strip():
@@ -124,6 +124,7 @@ def _date_temporal_adapter(
     if date_only and normalized_timeframe == "1D" and context == "us_equity_regular":
         try:
             from zoneinfo import ZoneInfo
+            from modules.stock_swing_contract import session_close
 
             session_day = parsed.date()
             eastern = ZoneInfo("America/New_York")
@@ -135,14 +136,10 @@ def _date_temporal_adapter(
                 30,
                 tzinfo=eastern,
             ).astimezone(UTC)
-            closed_at = datetime(
-                session_day.year,
-                session_day.month,
-                session_day.day,
-                16,
-                0,
-                tzinfo=eastern,
-            ).astimezone(UTC)
+            close = session_close(session_day.isoformat())
+            if close is None:
+                return None  # A holiday/weekend cannot supply a daily session.
+            closed_at = close.astimezone(UTC)
         except (ImportError, OSError, ValueError):
             return None
     elif normalized_timeframe == "1D":
@@ -399,7 +396,7 @@ def _normalize_ohlcv_bars_with_provenance(
             date_temporal_count and requested_date_context != effective_date_context
         ),
         "date_completion_semantics": (
-            "us_equity_regular_session_16_et"
+            "us_equity_exchange_session_close"
             if date_temporal_count
             and effective_date_context == "us_equity_regular"
             else "calendar_interval_closes_next_utc_boundary"

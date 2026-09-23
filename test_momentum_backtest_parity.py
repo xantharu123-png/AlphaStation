@@ -61,6 +61,24 @@ def test_completed_daily_adapter_metrics_match_live_on_identical_input_prefix():
     assert selected["rvol"] == live["rvol20"]
 
 
+@pytest.mark.parametrize("signal_idx", [20, 30, 50])
+def test_daily_adapter_measures_five_complete_close_intervals(signal_idx):
+    rows = _daily_bars()
+    for row in rows:
+        row.update(open=100.0, high=101.0, low=98.0, close=100.0, volume=1_000_000.0)
+    rows[signal_idx - 5]["close"] = 98.5
+    rows[signal_idx - 4]["close"] = 99.0
+    rows[signal_idx].update(high=106.0, close=105.0, volume=2_000_000.0)
+    original = deepcopy(rows)
+    selected = evaluate_daily_momentum(rows, signal_idx)
+    assert selected is not None
+    assert selected["momentum_selection"]["eligible"] is True
+    assert selected["history_metrics"]["change_5d"] == pytest.approx((105.0 / 98.5 - 1) * 100)
+    assert selected["history_metrics"]["change_5d"] != pytest.approx((105.0 / 99.0 - 1) * 100)
+    assert selected == evaluate_daily_momentum(rows[:signal_idx + 1], signal_idx)
+    assert rows == original
+
+
 def test_incomplete_holding_bar_cannot_manufacture_daily_exit():
     rows = _daily_bars()
     rows[33]["is_closed"] = False

@@ -1153,37 +1153,20 @@ def _bi_strip_partial_bar(all_bars, *, as_of=None):
     Handelstag. Der Partial-Bar floss bisher als vollwertige Kerze in die
     Kontraktions-Signale (ATR-Squeeze meldete morgens in 96% "stark", 8/25
     marginale Setups flippten invalid->valid nur durch die Tagesuhr).
-    Nach US-Close (>= 16:00 ET) ist der heutige Bar komplett und bleibt drin —
-    gleiche Session-/Datums-Logik wie der RVOL-Pfad (letzter KOMPLETTER Tag).
+    Gemeinsamer NYSE-Kalender: regulaerer oder verkuerzter Session-Schluss,
+    Feiertage und DST. Eine feste Uhr gilt fuer alle Bars eines Analyselaufs.
     """
     if not all_bars:
         return all_bars
-    if as_of is not None:
-        # One immutable analysis clock per BI run. A scan crossing 16:00 ET
-        # must not use yesterday for early symbols and today for late ones.
-        # Without an early-close calendar, 16:00 ET is conservative (same as
-        # stock_bars.completed_polygon_bars); never admit a future session.
-        if as_of.tzinfo is None or as_of.utcoffset() is None:
-            raise ValueError("BI analysis clock must be timezone-aware")
-        eastern = ZoneInfo("America/New_York")
-        cutoff = as_of.astimezone(eastern)
-        return [bar for bar in all_bars if dt.datetime.combine(
-            dt.date.fromisoformat(bar["date"]), dt.time(16), eastern
-        ) <= cutoff]
-    try:
-        import pytz
-        _et = pytz.timezone("US/Eastern")
-        _now_et = datetime.now(_et)
-        if all_bars[-1].get("date", "") != _now_et.strftime("%Y-%m-%d"):
-            return all_bars  # Letzter Bar ist nicht von heute → komplett
-        if _now_et.hour >= 16:
-            return all_bars  # Nach US-Close → heutiger Bar ist komplett
-        return all_bars[:-1]
-    except Exception:
-        # Fallback: reine Datums-Logik (wie der bestehende RVOL-Pfad)
-        if all_bars[-1].get("date", "") == datetime.now().strftime("%Y-%m-%d"):
-            return all_bars[:-1]
-        return all_bars
+    cutoff = as_of if as_of is not None else datetime.now(dt.timezone.utc)
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("BI analysis clock must be timezone-aware")
+    completed = []
+    for bar in all_bars:
+        closed = stock_swing.session_close(bar["date"])
+        if closed is not None and closed <= cutoff:
+            completed.append(bar)
+    return completed
 
 
 def _bi_background_scan(poly_key, direction="long", candidates=None):
@@ -2131,9 +2114,15 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         }, timeout=5)
 
         if resp.status_code != 200:
-            return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": []}
+            raise ScannerDataError(_scanner_provider_error(resp.status_code))
 
-        articles = resp.json().get("results", [])
+        payload = resp.json()
+        error = _scanner_payload_error(payload)
+        if error:
+            raise ScannerDataError(error)
+        articles = payload.get("results")
+        if not isinstance(articles, list) or any(not isinstance(item, dict) for item in articles):
+            raise ScannerDataError("scan_data_invalid")
         catalyst_score = 0
         catalysts = []
         negative_flags = []
@@ -2326,9 +2315,10 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
             "had_catalyst_keywords": _had_catalyst_keywords,  # Vor Decay Keywords gefunden?
             "forward_catalyst": forward_catalyst,  # H-4: angekuendigtes Event (Watch-Kontext, kein Score)
         }
+    except ScannerDataError:
+        raise
     except Exception:
-        return {"catalyst_score": 0, "catalysts": [], "news": [], "negative_flags": [],
-                "forward_catalyst": False}
+        raise ScannerDataError("scan_data_unavailable") from None
 
 
 def _check_clinical_trials(company_name, ticker):
@@ -2525,11 +2515,26 @@ def _biotech_technical_score(poly_key, ticker):
 
         if resp.status_code != 200:
             print(f"[BIOTECH] Technical API failed for {ticker}: HTTP {resp.status_code}")
-            return {"technical_score": 0, "details": {}}
+            raise ScannerDataError(_scanner_provider_error(resp.status_code))
 
-        bars = resp.json().get("results", [])
+        payload = resp.json()
+        error = _scanner_payload_error(payload)
+        if error:
+            raise ScannerDataError(error)
+        bars = payload.get("results")
+        if not isinstance(bars, list):
+            raise ScannerDataError("scan_data_invalid")
         normalized_bars = []
-        for raw_bar in bars if isinstance(bars, list) else []:
+        for raw_bar in bars:
+            if not isinstance(raw_bar, dict):
+                raise ScannerDataError("scan_data_invalid")
+            values = {key: float(raw_bar[key]) for key in ("o", "h", "l", "c", "v", "t")}
+            if (any(isinstance(raw_bar[key], bool) for key in values)
+                    or not all(math.isfinite(value) for value in values.values())
+                    or min(values[key] for key in ("o", "h", "l", "c", "t")) <= 0
+                    or values["v"] < 0 or values["h"] < max(values["o"], values["c"], values["l"])
+                    or values["l"] > min(values["o"], values["c"], values["h"])):
+                raise ScannerDataError("scan_data_invalid")
             bar = dict(raw_bar)
             try:
                 timestamp_ms = float(bar.get("t") or 0)
@@ -2547,9 +2552,16 @@ def _biotech_technical_score(poly_key, ticker):
         if not bars or len(bars) < 21:
             return {"technical_score": 0, "details": {}}
 
-        return _compute_biotech_technical_from_bars(bars)
+        result = _compute_biotech_technical_from_bars(bars)
+        if result.get("data_status") == "invalid_ohlcv":
+            raise ScannerDataError("scan_data_invalid")
+        return result
+    except ScannerDataError:
+        raise
+    except (TypeError, ValueError, KeyError, OverflowError):
+        raise ScannerDataError("scan_data_invalid") from None
     except Exception:
-        return {"technical_score": 0, "details": {}}
+        raise ScannerDataError("scan_data_unavailable") from None
 
 
 def _biotech_risk_score(market_cap_m, shares_m, negative_flags, price, catalyst_score=0):
@@ -2963,8 +2975,10 @@ def _biotech_background_scan(poly_key):
         checked = 0
         analysis_attempts = 0
         analysis_errors = 0
+        analysis_data_errors = 0
 
         for stock in universe:
+            scan_control.safe_point()
             # Stop-Signal prüfen
             if _biotech_should_stop():
                 _biotech_progress_write("stopped", checked=checked, total=total,
@@ -3462,15 +3476,21 @@ def _biotech_background_scan(poly_key):
 
             except Exception as _bio_err:
                 analysis_errors += 1
+                analysis_data_errors += int(isinstance(_bio_err, ScannerDataError))
                 import traceback
                 print(f"[BIOTECH] Fehler bei {ticker}: {_bio_err}\n{traceback.format_exc()}")
                 continue
 
         # Finale Sortierung + Speichern
+        if analysis_data_errors:
+            raise ScannerDataError("scan_data_incomplete", diagnostics={
+                "checked": checked, "total": total, "data_errors": analysis_data_errors,
+            })
         _raise_on_systemic_analysis_failures(
             "Biotech Full", analysis_attempts, analysis_errors
         )
         results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
+        scan_control.seal()
         _biotech_cache_save(results)
 
         top_score = results[0]["Score"] if results else 0
@@ -3549,6 +3569,7 @@ def _biotech_quick_scan(poly_key):
         checked = 0
         analysis_attempts = 0
         analysis_errors = 0
+        analysis_data_errors = 0
 
         _biotech_clear_stop()  # Altes Stop-Signal löschen
         for ticker in all_tickers:
@@ -3726,9 +3747,14 @@ def _biotech_quick_scan(poly_key):
                         })
             except Exception as _bio_q_err:
                 analysis_errors += 1
+                analysis_data_errors += int(isinstance(_bio_q_err, ScannerDataError))
                 print(f"[BIOTECH-QUICK] Fehler bei {ticker}: {_bio_q_err}")
                 continue
 
+        if analysis_data_errors:
+            raise ScannerDataError("scan_data_incomplete", diagnostics={
+                "checked": checked, "total": total, "data_errors": analysis_data_errors,
+            })
         _raise_on_systemic_analysis_failures(
             "Biotech Quick", analysis_attempts, analysis_errors
         )

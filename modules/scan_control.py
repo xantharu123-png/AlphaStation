@@ -9,6 +9,8 @@ import re
 import threading
 import time
 
+from modules import scan_control_policy
+
 
 _CONDITION = threading.Condition(threading.RLock())
 _CONTROLS = {}
@@ -27,9 +29,7 @@ class ScanRestartRequired(BaseException):
 
 
 def _supported(key):
-    return (isinstance(key, str) and len(key) <= 96
-            and bool(re.fullmatch(r"[a-z0-9_]+", key))
-            and (key in {"strategy_scan", "bi_long", "bi_short"} or key.startswith("strat_")))
+    return scan_control_policy.capability(key)["supported"]
 
 
 def _epoch(value):
@@ -116,6 +116,23 @@ def bind(key, run_id):
         yield
     finally:
         _LOCAL.owner = previous
+
+
+def bound_owner():
+    """Return this thread's immutable owner identity, without binding children."""
+    return getattr(_LOCAL, "owner", None)
+
+
+def pause_pending(owner):
+    """Observe an exact live owner's pause request without parking or mutation."""
+    if not isinstance(owner, tuple) or len(owner) != 2 or not _supported(owner[0]):
+        return False
+    key, run_id = owner
+    with _CONDITION:
+        entry = _CONTROLS.get(key)
+        return bool(entry is not None and entry["run_id"] == run_id
+                    and not entry["ended"]
+                    and entry["state"] in {"pause_requested", "paused"})
 
 
 def snapshot(key):

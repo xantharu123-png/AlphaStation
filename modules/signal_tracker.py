@@ -4248,16 +4248,17 @@ def _is_us_equity_session(day: date) -> bool:
 def _us_equity_early_closes(year: int) -> frozenset[date]:
     """Official known NYSE 13:00 ET closes used by the tracker calendar.
 
-    Early-close dates do not follow a safe year-agnostic rule (2026 closes on
-    July 2, while 2027 has no July half-day).  Keep the same explicit official
-    ICE/NYSE 2025-2027 schedule as the app exchange calendar. Unknown years
-    deliberately fall back to 16:00, which delays evidence instead of treating
+    Early-close dates do not follow a safe year-agnostic rule: July 2, 2026
+    and July 2, 2027 are full sessions. Explicit NYSE published dates:
+    https://www.nyse.com/trade/hours-calendars (verified 2026-09-23).
+    Unknown years deliberately fall back to 16:00, which delays evidence instead of treating
     a still-running session as complete.
     """
     known = {
         2025: ((7, 3), (11, 28), (12, 24)),
-        2026: ((7, 2), (11, 27), (12, 24)),
+        2026: ((11, 27), (12, 24)),
         2027: ((11, 26),),
+        2028: ((7, 3), (11, 24)),
     }
     return frozenset(
         date(year, month, day)

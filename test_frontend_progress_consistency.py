@@ -177,9 +177,9 @@ RENDER = """
 const assert=require('node:assert/strict');
 const babel=require(BABEL);
 const compiled=babel.transform(COMPONENT,{presets:['react'],sourceType:'script'}).code;
-const React={createElement:(type,props,...children)=>({type,props:props||{},children})};
+const React={useContext:()=>false,createElement:(type,props,...children)=>({type,props:props||{},children})};
 const components=new Function('React','useState','useEffect','getScanTiming','formatCacheAge',
-PURE+compiled+'\\nreturn {ScanControl,LiveScanStatus};')(React,()=>[true,()=>{}],()=>{},()=>({}),()=> 'QA');
+"const API='';const ScannerAdminContext={};const useRef=v=>({current:v});\\n"+PURE+compiled+'\\nreturn {ScanControl,LiveScanStatus};')(React,initial=>[initial,()=>{}],()=>{},()=>({}),()=> 'QA');
 function text(n){return Array.isArray(n)?n.map(text).join(''):n==null||typeof n==='boolean'?'':typeof n==='object'?text(n.children):String(n);}
 function nodes(n){return Array.isArray(n)?n.flatMap(nodes):!n||typeof n!=='object'?[]:[n,...nodes(n.children)];}
 """

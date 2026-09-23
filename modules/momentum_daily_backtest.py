@@ -70,9 +70,9 @@ def evaluate_daily_momentum(bars, signal_idx):
         "high_20d": max(float(row["high"]) for row in prior[-20:]),
         "ema20": ema(20), "ema50": ema(50),
         "rsi14": calculate_rsi_from_bars(prefix[-40:], 14),
-        # At a completed daily close, the live metric's completed array already
-        # includes today; it must not append a duplicate active bar.
-        "change_5d": (price / float(prefix[-5]["close"]) - 1) * 100,
+        # Five close-to-close intervals exclude today's numerator from the
+        # baseline, exactly like the live completed-daily history adapter.
+        "change_5d": (price / float(prior[-5]["close"]) - 1) * 100,
     }
     selected = evaluate_momentum_breakout(history, price=price, change_pct=change,
                                          rvol=rvol, close_pos=close_pos)

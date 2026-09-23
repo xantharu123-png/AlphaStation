@@ -566,6 +566,9 @@ def enqueue(
                     "ALTER TABLE mail_outbox ADD COLUMN "
                     "delivery_dedupe_keys_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            # Serialize the lookup and insert across API/background producers.
+            # A deferred SELECT alone does not acquire SQLite's write lock.
+            conn.execute("BEGIN IMMEDIATE")
             dup = conn.execute(
                 "SELECT id FROM mail_outbox "
                 "WHERE status IN "
@@ -658,6 +661,7 @@ def quarantine(
                     "ALTER TABLE mail_outbox ADD COLUMN "
                     "delivery_dedupe_keys_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT id FROM mail_outbox WHERE dedupe_key=? "
                 "AND status IN ('pending','sending','delivering','uncertain') "
@@ -760,7 +764,7 @@ def _expire_overdue(conn: sqlite3.Connection, now: float) -> int:
     """Pendente, abgelaufene Eintraege auf 'expired' setzen. Anzahl zurueck."""
     cur = conn.execute(
         "UPDATE mail_outbox SET status='expired' "
-        "WHERE status='pending' AND expires_at < ?",
+        "WHERE status='pending' AND expires_at <= ?",
         (now,),
     )
     return int(cur.rowcount or 0)
@@ -882,8 +886,9 @@ def mark_delivering(
             conn.executescript(_SCHEMA)
             cur = conn.execute(
                 "UPDATE mail_outbox SET status='delivering', "
-                "next_attempt_at=? WHERE id=? AND status='sending'",
-                (now + CLAIM_LEASE_SECONDS, int(item_id)),
+                "next_attempt_at=? WHERE id=? AND status='sending' "
+                "AND expires_at > ?",
+                (now + CLAIM_LEASE_SECONDS, int(item_id), now),
             )
         return bool(cur.rowcount)
     except Exception:
@@ -1008,6 +1013,20 @@ def mark_uncertain(
         return False
 
 
+def _expire_claimed_item(item_id: int, now: float, db_path: Optional[str]) -> bool:
+    """Expire only a pre-DATA claimed row, never an uncertain SMTP attempt."""
+    try:
+        with _connect(db_path) as conn:
+            cur = conn.execute(
+                "UPDATE mail_outbox SET status='expired' "
+                "WHERE id=? AND status='sending' AND expires_at <= ?",
+                (int(item_id), now),
+            )
+        return bool(cur.rowcount)
+    except Exception:
+        return False
+
+
 def process_outbox(
     send_fn: Callable[[Dict[str, Any]], None],
     *,
@@ -1035,11 +1054,23 @@ def process_outbox(
     }
     if not outbox_enabled():
         return result
-    now = float(now if now is not None else time.time())
-    items, expired = _claim_due_items(now=now, limit=limit, db_path=db_path)
+    # An explicit `now` remains a deterministic clock override for callers/tests.
+    # Production uses a fresh wall-clock reading at every pre-send and receipt
+    # boundary, rather than giving the entire batch its initial timestamp.
+    def current_time() -> float:
+        return float(now if now is not None else time.time())
+
+    items, expired = _claim_due_items(now=current_time(), limit=limit, db_path=db_path)
     result["expired"] = expired
     for item in items:
-        if not mark_delivering(item["id"], now=now, db_path=db_path):
+        delivery_now = current_time()
+        if float(item["expires_at"]) <= delivery_now:
+            if _expire_claimed_item(item["id"], delivery_now, db_path):
+                result["expired"] += 1
+            else:
+                result["failed"] += 1
+            continue
+        if not mark_delivering(item["id"], now=delivery_now, db_path=db_path):
             # SMTP must not start before the durable delivery phase exists.
             # The still-``sending`` lease can be safely recovered later.
             result["failed"] += 1
@@ -1049,7 +1080,7 @@ def process_outbox(
         except Exception as exc:
             if bool(getattr(exc, "suppress_retry", False)):
                 if mark_uncertain(
-                    item["id"], str(exc), now=now, db_path=db_path
+                    item["id"], str(exc), now=current_time(), db_path=db_path
                 ):
                     result["uncertain"] += 1
                 result["failed"] += 1
@@ -1063,14 +1094,14 @@ def process_outbox(
                     if isinstance(pending_recipients, (list, tuple, set))
                     else None
                 ),
-                now=now,
+                now=current_time(),
                 db_path=db_path,
             )
             result["failed"] += 1
             if new_status == "dead":
                 result["dead"] += 1
             continue
-        if mark_sent(item["id"], now=now, db_path=db_path):
+        if mark_sent(item["id"], now=current_time(), db_path=db_path):
             result["sent"] += 1
             result["sent_rows"].append(
                 {
@@ -1089,7 +1120,7 @@ def process_outbox(
             if mark_uncertain(
                 item["id"],
                 "SMTP succeeded but sent acknowledgement failed",
-                now=now,
+                now=current_time(),
                 db_path=db_path,
             ):
                 result["uncertain"] += 1

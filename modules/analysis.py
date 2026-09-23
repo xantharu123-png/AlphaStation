@@ -491,6 +491,49 @@ def calculate_rvol_at_time(current_vol, prev_day_vol, session="Regular"):
         return round(current_vol / prev_day_vol, 2) if prev_day_vol > 0 else 0.0
 
 
+def _flag_formation(bars, direction):
+    """A 2-7 bar impulse followed by a tight, lower-volume shallow flag.
+
+    This recognizes the formation, not a post-breakout retest. The scanner's
+    separate trigger/plan gates still own admission to an actionable alert.
+    """
+    for flag_length in range(2, len(bars) - 1):
+        pole_end = len(bars) - flag_length - 1
+        flag = bars[pole_end + 1:]
+        for pole_length in range(2, min(7, pole_end + 1) + 1):
+            pole = bars[pole_end - pole_length + 1:pole_end + 1]
+            origin, tip = pole[0]["close"], pole[-1]["close"]
+            move = direction * (tip - origin)
+            if move / origin < 0.05:
+                continue
+            # An earlier impulse followed by an already-failed retracement
+            # cannot be renamed as a new pole ending on a quiet plateau.
+            if direction * tip < max(direction * bar["close"] for bar in pole):
+                continue
+            extreme = (min(bar["low"] for bar in flag) if direction == 1
+                       else max(bar["high"] for bar in flag))
+            retracement = direction * (tip - extreme) / move
+            flag_width = max(bar["high"] for bar in flag) - min(bar["low"] for bar in flag)
+            if not 0 <= retracement < 0.5 or flag_width / tip >= 0.04:
+                continue
+            # No zero/missing volume may masquerade as contraction.
+            pole_vol = [bar.get("volume") for bar in pole]
+            flag_vol = [bar.get("volume") for bar in flag]
+            if any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+                   for v in pole_vol + flag_vol):
+                continue
+            volume_ratio = (sum(flag_vol) / len(flag_vol)) / (sum(pole_vol) / len(pole_vol))
+            if volume_ratio >= 1.0:
+                continue
+            return True, 55, [
+                f"Fahnenstange: {direction * move / origin * 100:+.1f}% in {pole_length} Tageskerzen",
+                f"Enge Flagge: {flag_width / tip * 100:.1f}% Range, {flag_length} Tageskerzen",
+                f"Retracement: {retracement * 100:.1f}% (<50%)",
+                f"Flaggenvolumen sinkt: {volume_ratio:.2f}x der Fahnenstange",
+            ]
+    return False, 0, ["Keine gueltige Flagge: Impuls, enge Range, Retracement <50% und sinkendes Volumen erforderlich"]
+
+
 def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None, timeframe=None):
     """
     Analysiert Multi-Day Patterns basierend auf historischen Daten.
@@ -527,6 +570,30 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None,
             "Ereignisse: " + ", ".join(str(event.get("name")) for event in best.get("events", [])),
         ]
         return ready, best.get("score", 0), details
+
+    if pattern_type in {"bull_flag", "bear_flag", "consolidation_breakout"}:
+        # Timestamped callers must use completed, valid bars only. Bare OHLCV
+        # remains the legacy pure-math contract; production stock callers pass
+        # the canonical completed prefix before entering this function.
+        temporal_keys = ("open_time", "close_time", "time", "timestamp", "t")
+        if as_of is not None or any(any(bar.get(key) is not None for key in temporal_keys) for bar in bars):
+            from modules.level_zones import normalize_completed_bars
+            bars = [bar.to_dict() for bar in normalize_completed_bars(
+                bars, timeframe=timeframe or "1D", as_of=as_of or datetime.now(timezone.utc))]
+        else:
+            bars = [bar for bar in bars if bar.get("complete") is not False
+                    and bar.get("is_closed") is not False and bar.get("closed") is not False]
+        try:
+            if any(any(not math.isfinite(float(bar[key])) or float(bar[key]) <= 0
+                       for key in ("open", "high", "low", "close"))
+                   or bar["low"] > min(bar["open"], bar["close"])
+                   or bar["high"] < max(bar["open"], bar["close"])
+                   for bar in bars):
+                return False, 0, ["Ungueltige OHLC-Preise"]
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False, 0, ["Ungueltige OHLC-Preise"]
+        if pattern_type in {"bull_flag", "bear_flag"}:
+            return _flag_formation(bars, 1 if pattern_type == "bull_flag" else -1)
 
     if len(bars) < 3:
         return False, 0, ["Nicht genug Daten (min. 3 Tage)"]
@@ -611,38 +678,6 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None,
             score += 10
             details.append(f"Volumen stabil: {vol_trend:.2f}x")
 
-    elif pattern_type == "bull_flag":
-        if len(bars) >= 4:
-            pole_move = ((bars[-3]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100
-            if pole_move >= 5:
-                score += 30
-                details.append(f"Fahnenstange: {pole_move:+.1f}%")
-            elif pole_move >= 3:
-                score += 15
-                details.append(f"Schwache Fahnenstange: {pole_move:+.1f}%")
-
-            recent_range = abs(daily_changes[-1]) + abs(daily_changes[-2]) if len(daily_changes) >= 2 else 0
-            if recent_range < 4:
-                score += 25
-                details.append(f"Konsolidierung: {recent_range:.1f}% Bewegung")
-
-    elif pattern_type == "bear_flag":
-        if len(bars) >= 4:
-            # Flagpole: Starker Abwaertsimpuls in den ersten Tagen
-            pole_move = ((bars[-3]["close"] - bars[0]["close"]) / bars[0]["close"]) * 100
-            if pole_move <= -5:
-                score += 30
-                details.append(f"Fahnenstange (Short): {pole_move:+.1f}%")
-            elif pole_move <= -3:
-                score += 15
-                details.append(f"Schwache Fahnenstange: {pole_move:+.1f}%")
-
-            # Konsolidierung: Letzte 2 Tage sollten eng sein
-            recent_range = abs(daily_changes[-1]) + abs(daily_changes[-2]) if len(daily_changes) >= 2 else 0
-            if recent_range < 4:
-                score += 25
-                details.append(f"Konsolidierung: {recent_range:.1f}% Bewegung")
-
     elif pattern_type == "consolidation_breakout":
         # V67.5: Fixe Baseline + bessere Volatilitaets-Berechnung
         if len(bars) >= 5:
@@ -651,6 +686,11 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None,
             pre_highs = [b["high"] for b in pre_bars]
             pre_lows = [b["low"] for b in pre_bars]
             pre_range_pct = ((max(pre_highs) - min(pre_lows)) / pre_price) * 100 if pre_price > 0 else 99
+            if current_price <= max(pre_highs):
+                return False, 0, ["Kein bestaetigter Schlusskurs ueber der vorherigen Kompressionsrange"]
+            if pre_range_pct >= 12:
+                return False, 0, ["Keine Kompression: vorherige Range >=12%"]
+            details.append("Ausbruch per Schlusskurs bestaetigt; Retest optional")
 
             # Kriterium 1: Enge Range VOR Breakout (max 30 Punkte)
             if pre_range_pct < 5:
@@ -684,6 +724,8 @@ def analyze_multi_day_pattern(bars, pattern_type="consolidation", *, as_of=None,
             )
             breakout_vol = volumes[-1]
             vol_ratio = breakout_vol / pre_vol_avg if pre_vol_avg and breakout_vol > 0 else None
+            if vol_ratio is None or vol_ratio <= 1.3:
+                return False, 0, ["Breakout-Volumen nicht bestaetigt (>1.3x historische Basis erforderlich)"]
 
             if vol_ratio is None:
                 details.append("Keine valide Volumenbasis fuer den Breakout")

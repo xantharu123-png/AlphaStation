@@ -1119,6 +1119,11 @@ def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch
             "score": 88,
             "rvol": 1.4,
             "price": 20.25,
+            "current_price": 20.25,
+            "or_high": 20.2,
+            "or_low": 19.5,
+            "bar_state": "completed_5m",
+            "signal_bar_timestamp": int((time.time() - 600) * 1000),
             "direction": "LONG",
             "entry": 20.5,
             "stop": 19.5,
@@ -1586,6 +1591,8 @@ def test_alert_classifier_respects_cooldown():
     now = 1_000_000.0
     row = {
         "ticker": "ORB1", "grade": "A", "score": 80, "price": 12, "direction": "LONG",
+        "current_price": 12, "or_high": 11.99, "or_low": 11.4,
+        "bar_state": "completed_5m", "signal_bar_timestamp": int((now - 600) * 1000),
         "Entry": 12.0, "StopLoss": 11.4, "TP1": 12.9, "TP2": 13.5,
         "DayHigh": 12.4, "DayLow": 11.4,
         "vol_confirmed": True,

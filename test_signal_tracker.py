@@ -1262,7 +1262,7 @@ def test_alert_day_backfill_uses_exchange_calendar_early_close(
     assert tracker._us_equity_session_close(
         alert_at.astimezone(tracker.ZoneInfo("America/New_York")).date()
     ).hour == 13
-    assert tracker._us_equity_session_close(datetime(2026, 7, 2).date()).hour == 13
+    assert tracker._us_equity_session_close(datetime(2026, 7, 2).date()).hour == 16
     assert tracker._us_equity_session_close(datetime(2027, 7, 2).date()).hour == 16
     assert tracker.record_alert_signals(
         "stock_strategy",

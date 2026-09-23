@@ -540,7 +540,8 @@ def test_penny_scanner_publishes_final_state_before_trade_mails():
     publish_index = source.index("finalize_cache_file(PENNY_STOCKS_CACHE")
 
     assert publish_index < source.index("_penny_buy_email(")
-    assert publish_index < source.index("_penny_exit_email(")
+    assert publish_index < source.index("_penny_dispatch_model_management(")
+    assert source.index("_penny_merge_state_tickers(") < source.index("_penny_dispatch_model_management(")
 
 
 def test_partial_cache_is_visible_only_while_scan_is_running(tmp_path):
