@@ -19,7 +19,7 @@ from audit_cup_geometry_fixture import cup_fixture
 CUP_KEY = "strat_cup_and_handle_breakout"
 OWNERS = (CUP_KEY, "strategy_scan", "bi_long", "bi_short")
 CASES = {"running", "pause_requested", "paused", "weekend", "nonadmin",
-         "restart_required", "round", "finishing", "unverified", "timeout"}
+         "restart_required", "round", "finishing", "unverified", "timeout", "momentum_missing_hits", "unsupported"}
 RESUME = "2026-09-21T13:30:00Z"  # Fixed synthetic schedule, not a live exchange claim.
 
 
@@ -36,10 +36,10 @@ class ControlFixture:
             self.case = case
             if owner not in {None, CUP_KEY, "bi_long", "bi_short"}:
                 return {"detail": "Unknown synthetic scanner"}, 400
-            self.active_owner = "strategy_scan" if case == "round" else (owner or CUP_KEY)
+            self.active_owner = "strategy_scan" if case in {"round", "momentum_missing_hits"} else (owner or CUP_KEY)
             self.generation += 1
             state = case if case in {"paused", "pause_requested", "restart_required", "finishing"} else "running"
-            if case == "weekend":
+            if case in {"weekend", "unsupported"}:
                 state = "finished"
             self.controls = {key: {
                 "supported": True, "owner_scan_key": key,
@@ -57,7 +57,7 @@ class ControlFixture:
             return {"synthetic_only": True, "case": case}, 200
 
     def stock_owner(self):
-        return "strategy_scan" if self.case == "round" else CUP_KEY
+        return "strategy_scan" if self.case in {"round", "momentum_missing_hits"} else CUP_KEY
 
     def schedule(self):
         return {"automatic_paused": self.case == "weekend", "reason": "weekend" if self.case == "weekend" else None,
@@ -110,7 +110,7 @@ class ControlFixture:
             control = self.read(owner)
             row = bi_row("SHORT" if owner == "bi_short" else "LONG") if owner.startswith("bi_") else cup_fixture()[1]
             active = control["worker_alive"]
-            return {"status": "success", "data": [row], "count": 1,
+            payload = {"status": "success", "data": [row], "count": 1,
                 "cached_at": STAMP, "scan_running": active, "partial": active,
                 "scan_run_id": control["run_id"], "scan_control": None if self.case == "unverified" else control,
                 "scan_schedule": self.schedule(), "scan_error": "scan_timeout" if self.case == "timeout" else None,
@@ -120,6 +120,11 @@ class ControlFixture:
                 "diagnostics": {"coverage": "incomplete" if active else "complete", "checked": 72 if active else 180,
                     "total": 180, "universe_count": 180, "raw_cache_rows": 1,
                     "validated_scanner_signals": 1, "visible_scanner_signals": 1, "final_results": 1}}
+            if self.case == "momentum_missing_hits":
+                payload.update(data=[], count=0, partial=False, checked=12590, total=12590,
+                    progress_detail="", diagnostics={"coverage": "complete", "universe_count": 12590,
+                    "checked": 12590, "final_results": 0})
+            return payload
 
     def status(self):
         with self.lock:
@@ -133,8 +138,17 @@ class ControlFixture:
                     "schedule": self.schedule(), "running_since_sec": 360,
                     "progress": {"running": control["worker_alive"], "checked": 72, "total": 180,
                         "hits": 1, "detail": "Synthetische Kontroll-Fixture", "seconds_since_progress": 2}}
+                if key in {CUP_KEY, "strategy_scan"}:
+                    scans[key]["progress"]["strategy"] = "Cup and Handle Breakout"
             scans["crypto_explosion"] = {"running": False, "last_run": STAMP, "next_run": RESUME,
                                           "cache_health": "ok", "interval_min": 15}
+            if self.case == "momentum_missing_hits":
+                scans[selected]["progress"] = {"running": True, "checked": 7306, "total": 12590,
+                    "strategy": "Momentum Breakout Long", "seconds_since_progress": 1}
+            if self.case == "unsupported":
+                scans["orb"] = {"running": True, "run_id": "qa-orb-unsupported", "last_run": STAMP,
+                    "next_run": RESUME, "cache_health": "ok", "interval_min": 15,
+                    "progress": {"running": True, "checked": 17, "total": 60}}
             return {"scheduler_running": True, "scans": scans}
 
 
@@ -152,6 +166,8 @@ class ControlHandler(Handler):
             return self.send_json({"user": {"name": "QA – synthetisch", "email": "qa@example.invalid", "plan": "elite",
                 "is_admin": FIXTURE.case != "nonadmin"}, "limits": {"plan_name": "QA", "allowed_tabs": None, "max_scans_per_day": 999}})
         if parsed.path == "/api/strategies":
+            if FIXTURE.case == "momentum_missing_hits":
+                return self.send_json({"strategies": {"Momentum Breakout Long": {"display_group": "Momentum"}}, "categories": {}})
             return self.send_json({"strategies": {"Cup and Handle Breakout": {"display_group": "Structure"}}, "categories": {}})
         if parsed.path == "/api/scan-status":
             return self.send_json(FIXTURE.status())

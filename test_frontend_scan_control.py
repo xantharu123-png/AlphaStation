@@ -229,7 +229,7 @@ def test_shipped_buttons_are_admin_stock_only_and_warn_about_scope_and_lifetime(
     assert 'Pausiert die gesamte Aktienrunde' in SOURCE
     assert 'Automatisch beim naechsten Lauf fortsetzen' in SOURCE
     assert 'Nur im laufenden Serverprozess' in SOURCE
-    assert 'controlFeed.setControl' in SOURCE
+    assert 'controlFeed?.setControl' in SOURCE
     assert 'andere schwere Aktien-Scans' in SOURCE
     assert 'Krypto und Positionspflege werden dadurch nicht pausiert' in SOURCE
 
