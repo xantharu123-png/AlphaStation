@@ -136,7 +136,8 @@ def test_verified_saved_long_keeps_supported_conditions(reminder_env, monkeypatc
     api.create_trade_reminder(api.TradeReminderRequest(ticker="TEST", condition=condition))
     saved = api._load_trade_reminders()[0]
     monkeypatch.setattr(api, "_find_early_mover_row", lambda _: None)
-    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda *args: None)
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, _: row.update(
+        execution_trigger_ok=True, alertable_crypto=True, trade_signal="JETZT_TRADEN"))
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda _: {
         "ok": True, "reason": "5m_trigger", "matched": matched,
         "last_candle_timestamp": 1000,

@@ -43,6 +43,7 @@ analysis_errors final_results universe_count common_stock_universe_count
 raw_matches_before_special_filter max_results quarantined_symbols
 special_filter_input_count special_filter_checked_count special_filter_unexamined_count special_filter_limit
 transport_requests transport_retries transport_recovered_incidents transport_retry_budget_exhausted
+excluded_uncompleted_bars
 """.split())
 STAGE_COUNTS = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -98,6 +99,14 @@ CACHE_MAX_BYTES = 8 * 1024 * 1024
 CRYPTO_SCAN_COUNTS = frozenset("""
 universe_count chart_checked max_chart_checks venue_workers result_count trade_now_count armed_count
 """.split())
+DATA_ERROR_VALUE_CLASSES = frozenset("""
+missing null boolean non_numeric non_finite zero_price negative_price negative_volume
+nonpositive_timestamp nonascending_timestamp timestamp_out_of_range future_timestamp invalid_geometry unknown
+""".split())
+DATA_ERROR_POSITIONS = frozenset({"only", "first", "interior", "last", "unknown"})
+SCAN_MAIL_EVENTS = frozenset(f"{kind}_{event}" for kind in ("trade", "other")
+                            for event in ("sender_called", "accepted", "partial", "partial_unknown", "unknown", "failed", "queued"))
+SCAN_MAIL_SEMANTICS = "overlapping_reason_occurrences_and_message_events_not_inbox_delivery"
 CRYPTO_VENUES = frozenset({"bybit", "binance", "mexc", "bitget"})
 CRYPTO_CACHE_NAMES = frozenset({"crypto_explosion_cache.json", "crypto_trade_signals_cache.json"})
 CRYPTO_ROW_STATES = {
@@ -619,6 +628,20 @@ def _count_projection(value, allowed):
     if omitted:
         # Keep evidence of unsupported schema without leaking free-form keys.
         result["_omitted_categories"] = omitted
+    return result
+
+
+def _scan_mail_audit_projection(value):
+    # Mirrored protocol only: this root-invoked script never imports app code.
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        return None
+    result = {"schema_version": 1, "semantics": SCAN_MAIL_SEMANTICS}
+    if type(value.get("candidate_rows")) is int and 0 <= value["candidate_rows"] <= 10**9:
+        result["candidate_rows"] = value["candidate_rows"]
+    for name, allowed in (("reason_occurrences", SUPPRESSION_REASONS), ("transport_events", SCAN_MAIL_EVENTS)):
+        raw = value.get(name)
+        result[name] = {key: raw[key] for key in sorted(allowed)
+                        if isinstance(raw, dict) and type(raw.get(key)) is int and 0 <= raw[key] <= 10**9}
     return result
 
 
@@ -1236,6 +1259,8 @@ def safe_cache_summary(path):
                 result["transport_error_reason"] = transport_reason
             for name, allowed in (("data_error_counts", DATA_ERROR_REASONS),
                                   ("transport_error_counts", TRANSPORT_ERROR_REASONS),
+                                  ("data_error_value_classes", DATA_ERROR_VALUE_CLASSES),
+                                  ("data_error_positions", DATA_ERROR_POSITIONS),
                                   ("data_error_fields", frozenset({"t", "o", "h", "l", "c", "v", "bar", "unknown"}))):
                 counts = _count_projection(diagnostics.get(name), allowed)
                 if counts is not None:
@@ -1353,6 +1378,9 @@ def safe_strategy_attempt_summary(path, expected_slug):
         }
         if diagnostics.get("coverage") in ("complete", "incomplete"):
             result["coverage"] = diagnostics["coverage"]
+        mail_audit = _scan_mail_audit_projection(diagnostics.get("mail_audit"))
+        if mail_audit is not None:
+            result["mail_audit"] = mail_audit
         if diagnostics.get("runtime_phase") in (
             "starting", "universe", "history", "analyzing", "special_filter", "enrichment",
             "publish", "mail_guard", "work_timeout", "error", "complete",

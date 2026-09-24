@@ -3333,7 +3333,8 @@ def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypat
         "last_close": 1.31,
         "volume_ratio": 1.7,
     })
-    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: row.update(
+        execution_trigger_ok=True, alertable_crypto=True, trade_signal="JETZT_TRADEN"))
 
     result = api._evaluate_trade_reminder({
         "ticker": "SAVED",
@@ -3356,7 +3357,8 @@ def test_crypto_retest_reminder_requires_retest_hold(monkeypatch):
         "reason": "5m_breakout_volume_confirmed",
         "matched": ["breakout"],
     })
-    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: row.update(
+        execution_trigger_ok=True, alertable_crypto=True, trade_signal="JETZT_TRADEN"))
 
     result = api._evaluate_trade_reminder({
         "ticker": "RETEST",
@@ -3378,7 +3380,8 @@ def test_crypto_trade_reminder_waits_for_candle_closed_after_activation(monkeypa
         "matched": ["breakout"],
         "last_candle_timestamp": 1_700_000_000.0,
     })
-    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: None)
+    monkeypatch.setattr(api, "_apply_early_mover_signal_state", lambda row, trigger: row.update(
+        execution_trigger_ok=True, alertable_crypto=True, trade_signal="JETZT_TRADEN"))
 
     result = api._evaluate_trade_reminder({
         "ticker": "FRESH",

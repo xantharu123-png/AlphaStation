@@ -47,6 +47,7 @@ from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
 from modules.bi_transport import BITransport, BITransportError, BITransportStopped
 from modules.bi_market_data import (
     BI_DATA_ERROR_REASONS, BI_DATA_ERROR_FIELDS, BI_ISOLATABLE_BAR_ERRORS,
+    BI_DATA_ERROR_VALUE_CLASSES, BI_DATA_ERROR_POSITIONS,
     BIAggregateDataError, parse_bi_daily_aggregates,
 )
 try:
@@ -1189,6 +1190,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         "rejected": {}, "final_results": None,
         "run_as_of": run_as_of.isoformat(), "quarantined_symbols": 0,
         "data_error_counts": {}, "data_error_fields": {}, "analysis_session_dates": {},
+        "data_error_value_classes": {}, "data_error_positions": {},
+        "excluded_uncompleted_bars": 0,
     }
     # Independent observation ID, not the API scheduler's run ID. Revision is
     # the existing immutable process stamp, never a per-ticker Git lookup.
@@ -1219,7 +1222,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         counts = funnel["rejected"]
         counts[reason] = counts.get(reason, 0) + 1
 
-    def _record_data_error(reason=None, field="unknown"):
+    def _record_data_error(reason=None, field="unknown", value_class="unknown", position="unknown"):
         funnel["data_failures"] += 1
         if isinstance(reason, str) and reason in BI_DATA_ERROR_REASONS:
             funnel["data_error_reason"] = reason
@@ -1228,16 +1231,23 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         field = field if isinstance(field, str) and field in BI_DATA_ERROR_FIELDS else "unknown"
         fields = funnel["data_error_fields"]
         fields[field] = fields.get(field, 0) + 1
+        for name, value, allowed in (
+            ("data_error_value_classes", value_class, BI_DATA_ERROR_VALUE_CLASSES),
+            ("data_error_positions", position, BI_DATA_ERROR_POSITIONS),
+        ):
+            key = value if isinstance(value, str) and value in allowed else "unknown"
+            counts = funnel[name]
+            counts[key] = counts.get(key, 0) + 1
 
     def _data_error(code, reason=None):
         _record_data_error(reason)
         raise ScannerDataError(code, funnel) from None
 
-    def _quarantine(reason, field="unknown"):
+    def _quarantine(reason, field="unknown", value_class="unknown", position="unknown"):
         # Discard the entire affected series, never patch prices or skip bars
         # inside it. Other symbols can still be diagnosed. Any such gap keeps
         # this run incomplete: no new final cache or automatic BI mail.
-        _record_data_error(reason, field)
+        _record_data_error(reason, field, value_class, position)
         funnel["quarantined_symbols"] += 1
 
     transport = BITransport(rate_limited_get, lambda: _bi_should_stop(direction), time.sleep, funnel)
@@ -1250,6 +1260,10 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
     try:
         # ── Fallback: Full stock universe from Polygon ──
+        # One data contract and available session for this run, including a
+        # pause across the close. Do not re-walk the calendar for every ticker.
+        swing_mode = stock_swing.enabled()
+        latest_session = stock_swing.completed_sessions(run_as_of, 1)[0] if swing_mode else None
         # Reset only the prior run's stop flag, before any network work. Never
         # erase a fresh stop requested while the universe is being fetched.
         _bi_clear_stop(direction)
@@ -1439,10 +1453,19 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if provider_error:
                     _data_error(provider_error, "provider_status" if isinstance(api_data, dict) else "invalid_payload")
                 try:
-                    raw_bars = parse_bi_daily_aggregates(api_data)
+                    if swing_mode:
+                        # Do not validate prices that this completed-session
+                        # contract explicitly never consumes. Timestamp and
+                        # response integrity still fail closed for all bars.
+                        raw_bars = parse_bi_daily_aggregates(
+                            api_data, completed_through=latest_session, as_of=run_as_of,
+                        )
+                        funnel["excluded_uncompleted_bars"] += len(api_data.get("results", [])) - len(raw_bars)
+                    else:
+                        raw_bars = parse_bi_daily_aggregates(api_data)
                 except BIAggregateDataError as e:
                     if e.reason in BI_ISOLATABLE_BAR_ERRORS:
-                        _quarantine(e.reason, e.field)
+                        _quarantine(e.reason, e.field, e.value_class, e.position)
                         continue
                     _data_error("scan_data_invalid", e.reason)
                 if not raw_bars:
@@ -1479,9 +1502,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 # Partial-Bar verfaelschte die Kontraktions-Signale. Live-Preis-Checks
                 # (Already-Broke-Out, Extension-Gates, Preis-Feld) nutzen weiter all_bars.
                 _session_bars = _bi_strip_partial_bar(all_bars, as_of=run_as_of)
-                if stock_swing.enabled():
+                if swing_mode:
                     # Starter observations require close + provider delay.
-                    latest_session = stock_swing.completed_sessions(run_as_of, 1)[0]
                     _session_bars = [b for b in all_bars if b["date"] <= latest_session
                                      and stock_swing.session_close(b["date"]) is not None]
                     all_bars = _session_bars
@@ -1543,7 +1565,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             except (ScannerDataError, BITransportStopped):
                 raise
             except BIAggregateDataError as e:
-                _quarantine(e.reason, e.field)
+                _quarantine(e.reason, e.field, e.value_class, e.position)
                 continue
             except RequestException:
                 _data_error("scan_data_unavailable")
@@ -1700,7 +1722,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0
                 candidate["RVOL_Basis"] = "completed_signal_vs_prior_20_sessions"
                 candidate["signal_bar_date"] = _session_bars[-1].get("date")
-                if stock_swing.enabled():
+                if swing_mode:
                     candidate.update(stock_swing.metadata(_session_bars[-1]["date"], _session_bars[-1]["close"]))
                 candidate["Preis"] = round(all_bars[-1]["close"], 2) if all_bars else 0
                 candidate["Change%"] = round((all_bars[-1]["close"] - all_bars[-2]["close"]) / all_bars[-2]["close"] * 100, 2) if len(all_bars) >= 2 and all_bars[-2]["close"] > 0 else 0

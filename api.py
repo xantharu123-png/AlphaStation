@@ -301,6 +301,8 @@ except ImportError as _shadow_summary_err:
 # Additive, privacy-safe suppression counters.  Telemetry is deliberately
 # independent from the signal tracker: rejected candidates are not trades and
 # must never contaminate performance KPIs.
+from modules import scan_mail_audit
+
 try:
     from modules.suppression_telemetry import (
         ALLOWED_SUPPRESSION_REASONS,
@@ -2473,8 +2475,6 @@ def _record_suppression_counts(scanner: str, reasons: Any) -> int:
     additional failure boundary so observability can never alter scan, dedupe
     or delivery behavior.
     """
-    if not record_suppressions:
-        return 0
     try:
         scanner_token = str(scanner or "").strip().lower()
         if scanner_token not in ALLOWED_SUPPRESSION_SCANNERS:
@@ -2502,6 +2502,9 @@ def _record_suppression_counts(scanner: str, reasons: Any) -> int:
                 stable_counts.get(reason_token, 0) + count
             )
         if not stable_counts:
+            return 0
+        scan_mail_audit.suppressions(stable_counts, ALLOWED_SUPPRESSION_REASONS)
+        if not record_suppressions:
             return 0
         return int(
             record_suppressions(
@@ -6585,6 +6588,12 @@ def _crypto_reminder_delivery_reason(
         reason = _crypto_reminder_capability_reason(reminder, candidate, check_plan=False)
         if reason:
             return reason
+        if (candidate.get("execution_trigger_ok") is False
+                or candidate.get("alertable_crypto") is False
+                or str(candidate.get("trade_signal") or "").upper() in {
+                    "WARTEN", "NICHT_TRADEN", "BEOBACHTEN", "EXPLOSION_ARMED",
+                }):
+            return "crypto_reminder_execution_not_ready"
         if any(candidate.get(key) for key in ("data_invalid", "partial_data", "data_partial")):
             return "crypto_reminder_data_invalid"
     row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
@@ -7108,7 +7117,15 @@ def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
         condition = str(reminder.get("condition") or "trigger_or_retest").lower()
         matched = set(trigger_check.get("matched") or []) if isinstance(trigger_check, dict) else set()
         reason = str(trigger_check.get("reason") or "").lower() if isinstance(trigger_check, dict) else ""
-        condition_ready = bool(trigger_check.get("ok"))
+        # Raw candle scoring is not the final execution decision. Retest
+        # policy, entry distance and target checks can still leave this row
+        # explicitly waiting; the personal reminder must consume that result.
+        condition_ready = (
+            bool(trigger_check.get("ok"))
+            and row.get("execution_trigger_ok") is True
+            and row.get("alertable_crypto") is True
+            and row.get("trade_signal") == "JETZT_TRADEN"
+        )
         if condition == "retest":
             condition_ready = condition_ready and ("retest_hold" in matched or "retest" in reason)
         if condition_ready:
@@ -7199,6 +7216,10 @@ def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> 
     """
 
 
+class _TradeReminderPersistenceError(OSError):
+    """Unknown durable reminder state must abort the entire delivery tick."""
+
+
 def _deliver_trade_reminder_email(
     reminder: Dict[str, Any],
     result: Dict[str, Any],
@@ -7211,6 +7232,7 @@ def _deliver_trade_reminder_email(
     durable reminder record until an operator reconciles them manually.
     """
     now = float(now if now is not None else _reminder_now())
+    delivery_status = str(reminder.get("email_delivery_status") or "").strip().lower()
     channel = str(reminder.get("channel", "email_browser") or "email_browser").lower()
     if "email" not in channel:
         reminder["email_delivery_status"] = "not_requested"
@@ -7218,7 +7240,7 @@ def _deliver_trade_reminder_email(
     if reminder.get("email_sent_at"):
         reminder["email_delivery_status"] = "sent"
         return True
-    if str(reminder.get("email_delivery_status") or "").lower() in {
+    if delivery_status in {
         "uncertain",
         "uncertain_manual_reconciliation",
         "attempt_in_flight",
@@ -7227,7 +7249,9 @@ def _deliver_trade_reminder_email(
         reminder["email_delivery_manual_reconciliation_required"] = True
         reminder.pop("next_email_attempt_at", None)
         return False
-    if reminder.get("email_delivery_status") == "outbox_owned":
+    if delivery_status in {"sent", "outbox_owned", "failed"}:
+        # A terminal status is not permission to resend when legacy metadata
+        # lacks a timestamp. Preserve it; do not invent acceptance evidence.
         return False
 
     if str(reminder.get("asset_type") or "crypto").strip().lower() == "crypto":
@@ -7290,14 +7314,18 @@ def _deliver_trade_reminder_email(
             ).encode("utf-8")
         ).hexdigest()
     reminder.setdefault("id", reminder_dedupe_key)
-    persisted = _load_trade_reminders()
+    try:
+        persisted = _load_trade_reminders()
+    except Exception as exc:
+        raise _TradeReminderPersistenceError("reminder_delivery_store_read_failed") from exc
     existing = next((r for r in persisted if r.get("id") == reminder["id"]), None)
-    if existing is not None and existing.get("email_delivery_status") in {
-        "sent", "outbox_owned", "attempt_in_flight", "uncertain_manual_reconciliation",
+    existing_delivery_status = str((existing or {}).get("email_delivery_status") or "").strip().lower()
+    if existing is not None and existing_delivery_status in {
+        "sent", "outbox_owned", "failed", "attempt_in_flight", "uncertain", "uncertain_manual_reconciliation",
     }:
         reminder.update({key: value for key, value in existing.items()
                          if key.startswith("email_") or key in {"next_email_attempt_at", "last_email_attempt_at"}})
-        return existing.get("email_delivery_status") == "sent"
+        return existing_delivery_status == "sent" and bool(existing.get("email_sent_at"))
     # Claim the attempt durably before SMTP. If the process dies after DATA,
     # restart sees in-flight and requires reconciliation, never an auto resend.
     reminder["email_delivery_status"] = "attempt_in_flight"
@@ -7307,7 +7335,10 @@ def _deliver_trade_reminder_email(
         persisted.append(dict(reminder))
     else:
         existing.update(reminder)
-    _save_trade_reminders(persisted)
+    try:
+        _save_trade_reminders(persisted)
+    except Exception as exc:
+        raise _TradeReminderPersistenceError("reminder_delivery_store_write_failed") from exc
     sent = _send_email_alert(
         f"Reminder: {reminder.get('ticker', '').upper()} {reason_label}",
         _format_reminder_email(reminder, result),
@@ -7374,6 +7405,51 @@ def _deliver_trade_reminder_email(
     return False
 
 
+def _attempt_trade_reminder_delivery(reminder: Dict[str, Any], result: Dict[str, Any], now: float) -> bool:
+    """Isolate one owner's malformed/preflight failure, never durable failures."""
+    from modules.scanner_reminders import number
+    before = deepcopy(reminder)
+    delivery_status = str(reminder.get("email_delivery_status") or "").strip().lower()
+    if delivery_status == "disabled" and not str(reminder.get("owner_email") or "").strip():
+        return False  # Retain known orphan evidence without reactivation.
+    terminal = bool(reminder.get("email_sent_at")) or delivery_status in {
+        "uncertain", "uncertain_manual_reconciliation", "attempt_in_flight", "outbox_owned", "failed", "sent",
+    }
+    attempts = number(reminder.get("email_attempts", 0))
+    next_attempt = number(reminder.get("next_email_attempt_at", 0))
+    if not terminal and (attempts is None or attempts < 0 or not attempts.is_integer() or next_attempt is None):
+        reminder["email_delivery_status"] = "failed"
+        reminder["email_delivery_reason"] = "reminder_delivery_metadata_invalid"
+        reminder.pop("next_email_attempt_at", None)
+        return reminder != before
+    if not terminal and next_attempt > now:
+        return False
+    try:
+        _deliver_trade_reminder_email(reminder, result, now)
+    except _TradeReminderPersistenceError:
+        raise
+    except Exception as exc:
+        # The delivery helper claims attempt_in_flight durably before it can
+        # enter SMTP. After that boundary any uncaught outcome is uncertain.
+        if reminder.get("email_delivery_status") == "attempt_in_flight":
+            reminder["email_delivery_status"] = "uncertain_manual_reconciliation"
+            reminder["email_delivery_manual_reconciliation_required"] = True
+            reminder["email_delivery_reason"] = "reminder_delivery_outcome_unknown"
+            reminder.pop("next_email_attempt_at", None)
+        else:
+            attempt_count = int(attempts) + 1
+            reminder["email_attempts"] = attempt_count
+            reminder["last_email_attempt_at"] = now
+            reminder["email_delivery_reason"] = "reminder_delivery_preflight_error"
+            reminder["email_delivery_status"] = "failed" if attempt_count >= 5 else "retry_pending"
+            if attempt_count >= 5:
+                reminder.pop("next_email_attempt_at", None)
+            else:
+                reminder["next_email_attempt_at"] = now + min(300, 60 * (2 ** (attempt_count - 1)))
+        print(f"[Reminder] delivery error: {type(exc).__name__}")
+    return reminder != before
+
+
 def _process_trade_reminders_once() -> None:
     now = _reminder_now()
     changed = False
@@ -7382,24 +7458,12 @@ def _process_trade_reminders_once() -> None:
         for reminder in reminders:
             reminder_status = str(reminder.get("status") or "").lower()
             if reminder_status == "triggered":
-                before_delivery = (
-                    reminder.get("email_delivery_status"),
-                    reminder.get("email_attempts"),
-                    reminder.get("next_email_attempt_at"),
-                    reminder.get("email_sent_at"),
-                )
-                _deliver_trade_reminder_email(
+                delivery_changed = _attempt_trade_reminder_delivery(
                     reminder,
                     reminder.get("trigger_result") if isinstance(reminder.get("trigger_result"), dict) else {},
                     now,
                 )
-                after_delivery = (
-                    reminder.get("email_delivery_status"),
-                    reminder.get("email_attempts"),
-                    reminder.get("next_email_attempt_at"),
-                    reminder.get("email_sent_at"),
-                )
-                changed = changed or before_delivery != after_delivery
+                changed = changed or delivery_changed
                 continue
             if reminder_status != "active":
                 continue
@@ -7412,12 +7476,20 @@ def _process_trade_reminders_once() -> None:
                 reminder["cancellation_reason"] = "missing_owner_email"
                 changed = True
                 continue
-            if now >= float(reminder.get("expires_at", 0) or 0):
+            from modules.scanner_reminders import number
+            expires_at = number(reminder.get("expires_at", 0))
+            last_checked = number(reminder.get("last_checked_at", 0))
+            if expires_at is None or last_checked is None:
+                reminder["status"] = "invalidated"
+                reminder["invalidation_reason"] = "reminder_metadata_invalid"
+                reminder["updated_at"] = _reminder_iso(now)
+                changed = True
+                continue
+            if now >= expires_at:
                 reminder["status"] = "expired"
                 reminder["updated_at"] = _reminder_iso(now)
                 changed = True
                 continue
-            last_checked = float(reminder.get("last_checked_at", 0) or 0)
             if now - last_checked < _TRADE_REMINDER_CHECK_SEC:
                 continue
             reminder["last_checked_at"] = now
@@ -7436,7 +7508,7 @@ def _process_trade_reminders_once() -> None:
                 # Persist terminal event before transport; durable transport
                 # dedupe handles a crash after SMTP acceptance.
                 _save_trade_reminders(reminders)
-                _deliver_trade_reminder_email(reminder, result, now)
+                _attempt_trade_reminder_delivery(reminder, result, now)
             elif result.get("invalidated"):
                 reminder["status"] = "invalidated"
                 reminder["invalidation_reason"] = result.get("reason")
@@ -10035,6 +10107,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         if scanner_name == "early_movers"
         else _alert_signal_identity_key(scanner_name, row, ticker)
     )
+    if (cooldown_key and scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS
+            and stock_swing.validate(row, datetime.fromtimestamp(now, timezone.utc))):
+        # Resolve the delivery namespace BEFORE both cooldown lookups. Adding
+        # it only in the sender inherited the unrelated regular-session key's
+        # rejection, despite claiming an independent daily-close identity.
+        cooldown_key += "_dailyclose"
     cooldown_ttl = _alert_dedupe_ttl_seconds(scanner_name)
     cooldown_last = _EMAIL_COOLDOWN.get(cooldown_key) if cooldown_key else None
     cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
@@ -10900,6 +10978,7 @@ def _send_email_alert(
     rendered_at: Optional[datetime] = None,
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
+    scan_mail_audit.transport(mail_class, "sender_called")
     rendered_at = _normalize_mail_rendered_at(rendered_at)
     _set_last_delivery_recipients(())
     _set_last_delivery_outcome("not_attempted")
@@ -11271,6 +11350,7 @@ def _send_email_alert(
             else "accepted"
         )
         _set_last_delivery_outcome(outcome)
+        scan_mail_audit.transport(mail_class, outcome)
         _record_email_event(subject, "sent" if not unresolved_count else "partial")
         if intent_key:
             accepted_keys = [
@@ -11376,6 +11456,7 @@ def _send_email_alert(
         return True
 
     error_kind = type(last_error).__name__ if last_error is not None else "SMTPDeliveryFailed"
+    scan_mail_audit.transport(mail_class, "unknown" if delivery_outcome_unknown else "failed")
     _set_last_delivery_outcome(
         "unknown" if delivery_outcome_unknown else "refused" if refused else "failed"
     )
@@ -11443,6 +11524,7 @@ def _send_email_alert(
                 for dedupe_key in queued_delivery_keys:
                     _email_dedupe_mark(dedupe_key, now=queued_at)
                 _set_last_delivery_outcome("outbox_queued")
+                scan_mail_audit.transport(mail_class, "queued")
                 _record_email_event(subject, "outbox_queued", f"id={_ob_id}")
         except Exception as _ob_exc:
             try:
@@ -11558,18 +11640,35 @@ def _check_and_alert(scanner_name, cache_file):
         if scanner_name in _BI_SIGNAL_SCANNERS and not results:
             return
         if scanner_name in _STOCK_ALERT_SCANNERS:
-            allowed, _reason = _stock_trade_email_allowed(scanner_name)
-            if scanner_name in _STOCK_SWING_ALERT_SCANNERS and all(stock_swing.validate(r) for r in results):
-                allowed = True  # A dated plan, not an after-hours market entry.
+            as_of = datetime.fromtimestamp(now, timezone.utc)
+            invalid_daily = [r for r in results if stock_swing.is_swing(r)
+                             and not stock_swing.validate(r, as_of)]
+            if invalid_daily:
+                _record_suppression_counts(scanner_name, {"swing_daily_reference_invalid_or_stale": len(invalid_daily)})
+                results = [r for r in results if not stock_swing.is_swing(r)
+                           or stock_swing.validate(r, as_of)]
+            has_daily_plan = scanner_name in _STOCK_SWING_ALERT_SCANNERS and any(
+                stock_swing.validate(r, as_of) for r in results
+            )
+            if has_daily_plan:
+                # Query without the legacy helper's whole-batch SKIP event:
+                # off-session daily plans may still proceed independently.
+                allowed = bool(_stock_trade_email_status().get("allowed"))
+            else:
+                allowed, _reason = _stock_trade_email_allowed(scanner_name)
             if not allowed:
-                candidate_count = sum(
-                    1 for row in results if isinstance(row, dict)
-                )
+                daily_rows = [r for r in results if scanner_name in _STOCK_SWING_ALERT_SCANNERS
+                              and stock_swing.validate(r, as_of)]
+                candidate_count = sum(isinstance(row, dict) for row in results) - len(daily_rows)
                 if candidate_count:
                     _record_suppression_counts(
                         scanner_name,
                         {"stock_session_not_executable": candidate_count},
                     )
+                # A dated daily plan is independent of an unrelated live row.
+                # Non-swing scanners never obtain the after-hours exception.
+                results = daily_rows
+            if not results:
                 return
             _load_common_stock_universe(require_names=True)
         print(f"[Alert] {scanner_name}: {len(results)} Ergebnisse gefunden, prüfe Grades...")
@@ -13537,15 +13636,29 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if not results:
             return
     scanner_key = "crypto_strategy" if market_type == "crypto" else "stock_strategy"
-    daily_close_confirmed_mode = False
-    starter_swing_mode = market_type == "stocks" and all(stock_swing.validate(row) for row in results)
-    if starter_swing_mode:
-        daily_close_confirmed_mode = True
+    send_time_utc = datetime.now(timezone.utc)
+    # Timeframe admission belongs to each row. A stale or legacy sibling in
+    # an auto-sweep must neither silence a valid daily plan nor downgrade an
+    # invalid daily reference into the legacy live/premarket contract.
+    if market_type == "stocks":
+        invalid_daily = sum(
+            stock_swing.is_swing(row) and not stock_swing.validate(row, send_time_utc)
+            for row in results
+        )
+        if invalid_daily:
+            _record_suppression_counts(scanner_key, {"swing_daily_reference_invalid_or_stale": invalid_daily})
+            results = [row for row in results if not stock_swing.is_swing(row)
+                       or stock_swing.validate(row, send_time_utc)]
+        if not results:
+            return
+    starter_swing_mode = market_type == "stocks" and any(
+        stock_swing.validate(row, send_time_utc) for row in results
+    )
+    daily_close_confirmed_mode = starter_swing_mode
     # AUDIT 2026-07-29 (Punkt C / RITM+NVST): Pre-Market-Radar-Modus — eigene
     # Fruehwarn-Mail im PM-Fenster, bewusst einfachere Gates (siehe
     # _classify_premarket_candidate), eigener Kanal + Cooldown-Namespace.
     premarket_mail_mode = False
-    send_time_utc = datetime.now(timezone.utc)
     market_status: Dict[str, Any] = {}
     if market_type == "stocks":
         _load_common_stock_universe(require_names=True)
@@ -13610,7 +13723,20 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     for row in results[:50]:
         if not isinstance(row, dict):
             continue
-        if premarket_mail_mode and _strategy_row_previous_close_watch_only(row):
+        row_daily_close_mode = market_type == "stocks" and stock_swing.validate(row, send_time_utc)
+        row_premarket_mode = premarket_mail_mode and not row_daily_close_mode
+        if market_type == "stocks" and not market_status.get("allowed") and not row_daily_close_mode:
+            if _strategy_row_previous_close_watch_only(row):
+                reason = "daily_close_confirmed_watch_only_no_afterhours_entry"
+                suppressed[reason] = suppressed.get(reason, 0) + 1
+                continue
+            if _premarket_window_active(send_time_utc):
+                row_premarket_mode = True
+            else:
+                reason = "stock_session_not_executable"
+                suppressed[reason] = suppressed.get(reason, 0) + 1
+                continue
+        if row_premarket_mode and _strategy_row_previous_close_watch_only(row):
             reason = "daily_close_confirmed_watch_only_no_afterhours_entry"
             suppressed[reason] = suppressed.get(reason, 0) + 1
             continue
@@ -13622,9 +13748,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             )
         grade_for_counts = _extract_alert_grade(row) or "UNKNOWN"
         grade_counts[grade_for_counts] = grade_counts.get(grade_for_counts, 0) + 1
-        if scanner_key in _STOCK_ALERT_SCANNERS and not premarket_mail_mode:
+        if scanner_key in _STOCK_ALERT_SCANNERS and not row_premarket_mode:
             row = _enrich_stock_alert_5m_state(scanner_key, row, strategy_name)
-        if scanner_key == "stock_strategy" and not premarket_mail_mode:
+        if scanner_key == "stock_strategy" and not row_premarket_mode:
             score_for_business = _alert_float(row.get("score", row.get("Score")), 0) or 0
             if (
                 not row.get("Business_Data_Status")
@@ -13638,11 +13764,11 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             if "momentum breakout long" in row_strategy:
                 row = _stock_breakout_freshness_state(
                     row,
-                    daily_close_confirmed_mode=daily_close_confirmed_mode,
+                    daily_close_confirmed_mode=row_daily_close_mode,
                 )
             mail_quality_ok, mail_quality_reason = _stock_strategy_mail_quality_state(
                 row,
-                daily_close_confirmed_mode=daily_close_confirmed_mode,
+                daily_close_confirmed_mode=row_daily_close_mode,
                 market_status=market_status,
                 now_utc=send_time_utc,
             )
@@ -13650,26 +13776,15 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 reason_key = mail_quality_reason or "stock_strategy_mail_quality_gate"
                 suppressed[reason_key] = suppressed.get(reason_key, 0) + 1
                 continue
-        if premarket_mail_mode:
+        if row_premarket_mode:
             state = _classify_premarket_candidate(scanner_key, row, now)
         else:
             state = _classify_alert_candidate(scanner_key, row, now)
-        if daily_close_confirmed_mode and state.get("cooldown_key"):
-            # AUDIT K-2b: eigener Dedupe-Namespace fuer die Daily-Close-Mail
-            # (Suffix _dailyclose), damit pro Ticker und Tag genau eine
-            # Bestaetigungs-Mail rausgeht — unabhaengig vom Intraday-Cooldown.
-            _dc_key = f"{state['cooldown_key']}_dailyclose"
-            state["cooldown_key"] = _dc_key
-            _dc_ttl = _alert_dedupe_ttl_seconds(scanner_key)
-            _dc_last = _EMAIL_COOLDOWN.get(_dc_key)
-            if (_dc_last and (now - _dc_last) < _dc_ttl) or _email_dedupe_remaining(_dc_key, _dc_ttl, now) > 0:
-                state["alertable_now"] = False
-                state["suppression_reasons"] = list(state.get("suppression_reasons") or []) + ["dailyclose_dedupe_active"]
         if not state["alertable_now"]:
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             shadow_reasons = _shadow_trackable_reasons(
-                scanner_key, state, market_type, premarket_mail_mode
+                scanner_key, state, market_type, row_premarket_mode
             )
             if shadow_reasons:
                 shadow_rows.append(
@@ -13687,7 +13802,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "score": state["score"],
             "price": state["price"],
             "rvol": _alert_float(state["rvol"], 0) or 0,
-            "premarket": premarket_mail_mode,
+            "premarket": row_premarket_mode,
             "pm_dollar_vol": _alert_float(state.get("pm_dollar_vol"), 0) or 0,
             "change_pct": _alert_float(_alert_get_any(row, "change_pct", "Change_Pct", "Change%", "Change %", "Änderung%", default=0), 0) or 0,
             "entry_quality": row.get("entry_quality") or row.get("long_entry_quality") or ("SWING_SETUP" if scanner_key in _SWING_STOCK_STRATEGY_ALERT_SCANNERS else ""),
@@ -13781,7 +13896,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         _alert["_regime_decision"] = _regime_mail_decision(
             scanner_key,
             market_type,
-            premarket_mail_mode,
+            bool(_alert.get("premarket")),
             send_time_utc,
             calibration_row=dict(_alert.get("source_row") or {}),
         )
@@ -13916,7 +14031,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     trade_horizon="swing",
                     mail_class="watch",
                     mail_channel=(
-                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                        "stocks_premarket" if all(a.get("premarket") for a in _market_watch_alerts) else "stocks_swing"
                     ),
                     delivery_dedupe_keys=[
                         alert["cooldown_key"] for alert in _market_watch_alerts
@@ -14075,7 +14190,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     trade_horizon="swing",
                     mail_class="watch",
                     mail_channel=(
-                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                        "stocks_premarket" if all(a.get("premarket") for a in _watch_alerts) else "stocks_swing"
                     ),
                     delivery_dedupe_keys=[
                         alert["cooldown_key"] for alert in _watch_alerts
@@ -14197,20 +14312,6 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         # It is informational and contains no mutable quote, so it can be
         # copied into every row's mail without reopening the TOCTOU window.
         batch_cluster_hint = _cluster_warning_html(_cluster_context_alerts)
-        label = "Aktien Pre-Market Radar" if premarket_mail_mode else "Aktien Strategie Swing"
-        score_floor = _PREMARKET_MIN_SCORE if premarket_mail_mode else (
-            _regime_score_floor or _ALERT_MIN_SCORE
-        )
-        horizon_note = (
-            "PRE-MARKET-FRUEHWARNUNG: duenne Liquiditaet, weite Spreads. "
-            "KEIN Market-Einstieg; nur Limit-Orders und kleine Positionsgroesse."
-            if premarket_mail_mode
-            else "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind "
-            "Struktur-Level; nicht als Intraday-Scalp interpretieren. "
-            "Nach TP1: Teilgewinn nach Plan pruefen; ein Stop Richtung Entry senkt nur "
-            "das geplante Preisrisiko. Gap-, Slippage- und Ausfuehrungsrisiken bleiben "
-            "bestehen; weder Exit noch Gewinn sind garantiert."
-        )
         sent_any = False
         pending_claims = {
             str(alert.get("cooldown_key") or "")
@@ -14219,13 +14320,28 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         }
         for pending_alert in list(email_alerts):
             source_row = dict(pending_alert.get("source_row") or {})
+            row_premarket_mode = bool(pending_alert.get("premarket"))
+            label = "Aktien Pre-Market Radar" if row_premarket_mode else "Aktien Strategie Swing"
+            score_floor = _PREMARKET_MIN_SCORE if row_premarket_mode else (
+                _regime_score_floor or _ALERT_MIN_SCORE
+            )
+            horizon_note = (
+                "PRE-MARKET-FRUEHWARNUNG: duenne Liquiditaet, weite Spreads. "
+                "KEIN Market-Einstieg; nur Limit-Orders und kleine Positionsgroesse."
+                if row_premarket_mode
+                else "Swing-Setup: mehrtaegiger Plan. Entry/Stop/TP sind "
+                "Struktur-Level; nicht als Intraday-Scalp interpretieren. "
+                "Nach TP1: Teilgewinn nach Plan pruefen; ein Stop Richtung Entry senkt nur "
+                "das geplante Preisrisiko. Gap-, Slippage- und Ausfuehrungsrisiken bleiben "
+                "bestehen; weder Exit noch Gewinn sind garantiert."
+            )
             try:
                 validation = _revalidate_stock_strategy_mail_candidate(
                     source_row,
                     now_ts=time.time(),
                     price_session=(
                         "PREMARKET"
-                        if premarket_mail_mode
+                        if row_premarket_mode
                         else str(market_status.get("session") or "UNKNOWN")
                     ),
                 )
@@ -14320,7 +14436,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     mail_class=("watch" if _regime_shadow_tag else "swing_trade"),
                     telegram_text=_safe_format_telegram_rows([signal_row]),
                     mail_channel=(
-                        "stocks_premarket" if premarket_mail_mode else "stocks_swing"
+                        "stocks_premarket" if row_premarket_mode else "stocks_swing"
                     ),
                     tracking_scanner=("" if _regime_shadow_tag else scanner_key),
                     tracking_rows=(None if _regime_shadow_tag else [signal_row]),
@@ -21992,6 +22108,9 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
         result["final_results"] = None
     if source.get("coverage") in ("complete", "incomplete"):
         result["coverage"] = source["coverage"]
+    mail_audit = scan_mail_audit.project(source.get("mail_audit"), ALLOWED_SUPPRESSION_REASONS)
+    if mail_audit:
+        result["mail_audit"] = mail_audit
     if not sweep:
         result["stage_counts"] = counts(source.get("stage_counts"), _STOCK_ATTEMPT_STAGES)
         result["rejected"] = counts(source.get("rejected"), _STOCK_ATTEMPT_REJECTIONS)
@@ -23189,7 +23308,11 @@ def _strategy_scan_wrapper(
             # Never inject a work timeout into SMTP/dedupe ownership handling.
             stock_scan_runtime.current()["deadline"] = None
             stock_scan_runtime.checkpoint("mail_guard")
-            _send_strategy_scan_alerts(strategy_name, results, "stocks")
+            with scan_mail_audit.capture(len(results)) as mail_audit:
+                try:
+                    _send_strategy_scan_alerts(strategy_name, results, "stocks")
+                finally:
+                    scan_diag["mail_audit"] = scan_mail_audit.project(mail_audit, ALLOWED_SUPPRESSION_REASONS)
         _publish_stock_strategy_attempt(_attempt, "complete", diagnostics=scan_diag, result_count=len(results))
         return results
 
@@ -23331,7 +23454,11 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     if all_rows:
         try:
             stock_scan_runtime.checkpoint("mail_guard")
-            _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows[:75]), "stocks")
+            with scan_mail_audit.capture(len(all_rows[:75])) as mail_audit:
+                try:
+                    _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows[:75]), "stocks")
+                finally:
+                    diagnostics["mail_audit"] = scan_mail_audit.project(mail_audit, ALLOWED_SUPPRESSION_REASONS)
             diagnostics["mail_status"] = "guarded"
         except Exception as exc:
             diagnostics["mail_status"] = "error"
