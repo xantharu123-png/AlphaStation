@@ -31594,8 +31594,9 @@ def _bi_data_exclusion_warning(diagnostics):
     excluded = diagnostics.get("excluded_data_symbols")
     if type(excluded) is not int or not 0 < excluded <= 10**9:
         return None
-    return (f"BI Scan beendet mit Datenausschluessen: {excluded} Aktien wegen ungueltiger Kursdaten "
-            "nicht ausgewertet. Nur separat gueltige 17/20-Signale werden angezeigt; "
+    return (f"BI Scan mit Datenausschluessen abgeschlossen: {excluded} Aktie(n) in diesem Lauf "
+            "wegen ungueltiger Kursdaten ausgeschlossen. Keine dauerhafte Sperre; "
+            "im naechsten Scan erneut geprueft. Nur separat gueltige 17/20-Signale werden angezeigt; "
             "keine vollstaendige Datenabdeckung.")
 
 

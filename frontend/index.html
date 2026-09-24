@@ -6776,7 +6776,7 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
         const funnel = diag.attempt_diagnostics || diag.funnel || diag;
         const excluded = funnel.excluded_data_symbols ?? funnel.quarantined_symbols;
         const amount = typeof excluded === 'number' && Number.isSafeInteger(excluded) && excluded > 0 ? `${excluded} Aktie(n)` : 'Einzelne Aktien';
-        return { tone: 'warning', text: `Scan mit Datenausschlüssen abgeschlossen: ${amount} wegen fehlerhafter Kursdaten ausgeschlossen. ${count} sichtbare Treffer aus den übrigen geprüften Aktien. Keine Aussage über ausgeschlossene Werte; Handelsplan und Mailfreigabe bleiben separat.` };
+        return { tone: 'warning', text: `Scan mit Datenausschlüssen abgeschlossen: ${amount} in diesem Lauf wegen ungültiger Kursdaten ausgeschlossen. Keine dauerhafte Sperre; im nächsten Scan erneut geprüft. ${count} sichtbare Treffer aus den übrigen geprüften Aktien. Handelsplan und Mailfreigabe bleiben separat.` };
     }
     if (!count && coverage !== 'complete') return { tone: 'warning', text: 'Gespeicherter Stand: null sichtbare Signale. Vollstaendige Pruefdetails fehlen; ein erfolgreicher Scan ohne passende Setups ist damit nicht belegt.' };
     if (!count) return { tone: 'empty', text: kind === 'bi'

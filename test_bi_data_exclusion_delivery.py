@@ -60,7 +60,11 @@ def test_api_preserves_exclusion_scope_and_warns_without_resurrecting_sub17_rows
     assert response.count == 1 and response.partial is False
     diagnostics = response.diagnostics["funnel"] if endpoint == "dedicated" else response.diagnostics
     assert diagnostics["coverage"] == "complete_with_exclusions" and diagnostics["excluded_data_symbols"] == 1
-    assert any("1 Aktien" in text and "keine vollstaendige Datenabdeckung" in text for text in response.warnings)
+    assert any("1 Aktie(n) in diesem Lauf" in text
+               and "Keine dauerhafte Sperre" in text
+               and "im naechsten Scan erneut geprueft" in text
+               and "keine vollstaendige Datenabdeckung" in text
+               for text in response.warnings)
 
 
 @pytest.mark.parametrize("value", [None, {}, {"coverage": "incomplete", "excluded_data_symbols": 1},

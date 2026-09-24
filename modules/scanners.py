@@ -1959,14 +1959,16 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             partial=False,
             checked=checked,
             total=total,
-            detail=(f"BI Scan beendet; {funnel['excluded_data_symbols']} Aktien wegen ungueltiger Kursdaten ausgeschlossen"
+            detail=(f"BI Scan mit Datenausschluessen abgeschlossen: {funnel['excluded_data_symbols']} Aktie(n) "
+                    "in diesem Lauf wegen ungueltiger Kursdaten ausgeschlossen. Keine dauerhafte Sperre; "
+                    "im naechsten Scan erneut geprueft."
                     if funnel["excluded_data_symbols"] else "Finaler BI Scan abgeschlossen"),
             diagnostics=funnel,
         )
 
         avg_sc = round(score_sum / max(1, score_count))
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
-        pipeline = (f"{total} Kandidaten → {funnel['excluded_data_symbols']} Kursdaten-Ausschluesse → "
+        pipeline = (f"{total} Kandidaten → {funnel['excluded_data_symbols']} Kursdaten-Ausschluesse in diesem Lauf → "
                     f"{no_data_count} History-/Liquiditaetsfilter → "
                     f"{cum_pump_fail} 2d-Pump → "
                     f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "

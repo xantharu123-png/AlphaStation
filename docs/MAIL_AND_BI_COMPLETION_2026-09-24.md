@@ -28,6 +28,12 @@ whole-run malformed-OHLCV policy documented in `MAIL_CHAIN_REPAIR_2026-09-24.md`
   data counters. The worker is done, but complete market-data coverage is not
   claimed. API, frontend and private collector preserve this distinction.
 - Only independently validated rows pass to the existing trade-plan/mail gates.
+- Exclusion is scoped to this run, not a permanent ticker blacklist or a claim
+  about company quality. The next scan reevaluates the same symbol if it remains
+  in that scan's universe; exclusion and retry counters start afresh. The UI,
+  API and cache wording explicitly say "in diesem Lauf" and "keine dauerhafte
+  Sperre". A data retry is attempted only while the shared retry budget remains;
+  exhaustion must not be described as a proven failure of a second request.
 - Provider authentication, rate-limit, envelope, timestamp, incomplete-traversal,
   analysis and cancellation failures remain whole-run failures. Paused/stopped
   scans do not publish a final result or mail an unfinished result; explicitly
@@ -81,7 +87,7 @@ The 17/20 rule, native trade geometry, R:R, daily freshness, retest-independent
 confirmed-breakout policy and valid-input quality thresholds are unchanged.
 Candidate visibility does not subscribe the user to candidate email.
 
-## Verification
+## Verification of the original repair (`5835794`)
 
 Focused and adversarial tests cover selection reserves, regime quotas, ownership
 renewal, failed/uncertain delivery, idempotent display, exact quality arithmetic,
@@ -100,7 +106,18 @@ deployment file passed separately; 64 Bash behavior cases were not run here.
 Ten additional collector regressions added after broad-suite collection passed
 separately. The final combined mail/visibility/collector subset passed 112 tests
 (overlapping the counts above, not an additional unique total).
-The shipped frontend source fingerprint is `4f7e38dbe0b4`.
+That repair's frontend source fingerprint was `4f7e38dbe0b4`.
+
+## Follow-up: exclusion is per scan, not permanent
+
+Status messages now explicitly describe an exclusion in the current run and
+reevaluation in the next scan, without changing scanner or mail eligibility.
+Six new regression cases execute consecutive real worker calls in the same
+process with the same cache and universe: Long/Short, recovered 17/20 admission,
+continued 16/20 rejection, and a fresh retry budget after prior exhaustion.
+The targeted offline BI/API/frontend/collector suite passed **826 tests**.
+The frontend was rebuilt with source fingerprint `68073d422b21`. The original
+8,002-test run above was not repeated for this wording/test-only follow-up.
 
 Deployment needs the new commit on Hetzner followed by completed normal scans
 and the existing per-run/journal evidence. No actual mail, server update,

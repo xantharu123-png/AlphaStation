@@ -110,6 +110,66 @@ def test_data_retries_share_budget_with_transport_recovery(monkeypatch, tmp_path
     assert d["data_retry_budget_exhausted"] == 1 and d["excluded_data_symbols"] == 11
 
 
+@pytest.mark.parametrize("direction", ["long", "short"])
+@pytest.mark.parametrize("green,expected", [(16, 0), (17, 1)])
+def test_next_real_run_rechecks_same_excluded_symbol_with_unchanged_17_of_20(monkeypatch, tmp_path, direction, green, expected):
+    # Set up once: both real worker calls share process, universe and cache.
+    # There is no reset/reinitialization helper between the two scan runs.
+    tickers, final, calls, _, _ = setup(monkeypatch, tmp_path, [bad(), bad(), valid()], direction=direction)
+    universe = tuple(tickers)
+    analyzed = []
+    monkeypatch.setattr(scanners, "analyze_breakout_imminent",
+                        lambda bars, **kwargs: analyzed.append(bars) or _result(green))
+
+    scanners._bi_background_scan("fixture", direction, tickers)
+    first_bytes = final.read_bytes()
+    first = json.loads(first_bytes)
+    assert first["results"] == [] and analyzed == []
+    assert first["diagnostics"]["coverage"] == "complete_with_exclusions"
+    assert first["diagnostics"]["excluded_data_symbols"] == 1
+    assert first["diagnostics"]["valid_data_symbols"] == 0
+    assert first["diagnostics"]["data_retry_attempts"] == first["diagnostics"]["data_retry_failed"] == 1
+
+    scanners._bi_background_scan("fixture", direction, tickers)
+    second = json.loads(final.read_text())
+    d = second["diagnostics"]
+    assert tuple(tickers) == universe
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+    assert len(analyzed) == 1 and len(analyzed[0]) == 50
+    assert final.read_bytes() != first_bytes and second["partial"] is False
+    assert first["diagnostics"]["confluence"]["run_id"] != d["confluence"]["run_id"]
+    assert d["coverage"] == "complete"
+    assert d["checked"] == d["total"] == d["valid_data_symbols"] == d["analyzed"] == 1
+    assert d["excluded_data_symbols"] == d["quarantined_symbols"] == d["data_failures"] == 0
+    assert d["data_retry_attempts"] == d["data_retry_failed"] == d["data_retry_budget_exhausted"] == 0
+    assert d["transport_retries"] == 0
+    assert d["confluence"]["green_count_histogram"][str(green)] == 1
+    assert second["count"] == d["final_results"] == expected
+    assert [row["Ticker"] for row in second["results"]] == ([universe[0]] if expected else [])
+    assert progress(tmp_path, direction)["status"] == "done"
+    assert not final.with_name(final.name + ".partial").exists()
+
+
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_next_real_run_has_fresh_retry_budget_after_previous_run_exhausted_it(monkeypatch, tmp_path, direction):
+    replies = [bad() for _ in range(41)] + [bad(), valid()] + [valid() for _ in range(20)]
+    tickers, final, calls, _, _ = setup(monkeypatch, tmp_path, replies, count=21, direction=direction)
+    scanners._bi_background_scan("fixture", direction, tickers)
+    first = json.loads(final.read_text())["diagnostics"]
+    assert first["excluded_data_symbols"] == 21 and first["valid_data_symbols"] == 0
+    assert first["transport_retries"] == first["data_retry_attempts"] == 20
+    assert first["data_retry_budget_exhausted"] == 1 and len(calls) == 41
+
+    scanners._bi_background_scan("fixture", direction, tickers)
+    second = json.loads(final.read_text())["diagnostics"]
+    assert len(calls) == 63 and calls[0] == calls[41] == calls[42]
+    assert second["coverage"] == "complete"
+    assert second["checked"] == second["total"] == second["valid_data_symbols"] == second["analyzed"] == 21
+    assert second["transport_retries"] == second["data_retry_attempts"] == second["data_retry_recovered"] == 1
+    assert second["data_retry_failed"] == second["data_retry_budget_exhausted"] == second["excluded_data_symbols"] == 0
+    assert second["final_results"] == 0  # Still only 16/20; no threshold relaxation.
+
+
 @pytest.mark.parametrize("history_size", [50, 90, 220, 230])
 def test_old_first_bar_is_not_silently_truncated_at_any_consumer_boundary(monkeypatch, tmp_path, history_size):
     bars = _to_polygon(_flat_bars(n=history_size))

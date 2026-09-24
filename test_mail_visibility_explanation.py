@@ -90,6 +90,8 @@ def test_finished_scan_with_exclusions_is_not_error_or_full_coverage(count):
     view = evaluate(f"scannerEvidenceState({json.dumps(info)})")
     assert view["tone"] == "warning"
     assert "1 Aktie(n)" in view["text"] and "Datenausschlüssen" in view["text"]
+    assert "in diesem Lauf wegen ungültiger Kursdaten ausgeschlossen" in view["text"]
+    assert "Keine dauerhafte Sperre; im nächsten Scan erneut geprüft" in view["text"]
     assert "kein erfolgreich" not in view["text"]
 
 
