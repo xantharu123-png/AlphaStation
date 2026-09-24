@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import math
 import os
 import threading
 import time
@@ -264,6 +265,32 @@ def email_delivery_mark(path: str, key: str, now: Optional[float] = None) -> flo
         dedupe.pop(_delivery_claim_key(sent_key), None)
         _write_unlocked(path, dedupe)
     return timestamp
+
+
+def email_delivery_renew(
+    path: str, key: str, *, claimed_at: float, now: Optional[float] = None,
+) -> bool:
+    """Renew only the exact caller-owned lease, atomically and without a gap.
+
+    Expiry alone does not transfer ownership. A newer worker's lease, a
+    completed delivery or a missing/corrupt claim can never be renewed by an
+    older worker. The new timestamp becomes the caller's cleanup identity.
+    """
+    expected, timestamp = float(claimed_at), _timestamp(now)
+    if not math.isfinite(expected) or not math.isfinite(timestamp) or timestamp < expected:
+        return False
+    sent_key = str(key)
+    claim_key = _delivery_claim_key(sent_key)
+    with _locked_store(path):
+        dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
+        if dedupe.get(claim_key) != expected:
+            return False
+        sent_at = dedupe.get(sent_key)
+        if sent_at is not None and sent_at >= expected:
+            return False
+        dedupe[claim_key] = timestamp
+        _write_unlocked(path, dedupe)
+    return True
 
 
 def email_delivery_release(

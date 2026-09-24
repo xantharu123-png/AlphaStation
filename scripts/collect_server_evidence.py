@@ -43,7 +43,9 @@ analysis_errors final_results universe_count common_stock_universe_count
 raw_matches_before_special_filter max_results quarantined_symbols
 special_filter_input_count special_filter_checked_count special_filter_unexamined_count special_filter_limit
 transport_requests transport_retries transport_recovered_incidents transport_retry_budget_exhausted
-excluded_uncompleted_bars
+excluded_uncompleted_bars excluded_data_symbols valid_data_symbols
+data_retry_attempts data_retry_recovered data_retry_failed data_retry_budget_exhausted
+data_retry_observation_mismatches
 """.split())
 STAGE_COUNTS = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -393,6 +395,11 @@ missing_recipient
 missing_symbol
 missing_ticker
 momentum_mail_blocked_breakout_continuation_watch
+momentum_mail_blocked_daily_quality_below_threshold
+momentum_mail_blocked_daily_quality_unavailable
+momentum_mail_blocked_daily_quality_unconfirmed
+momentum_mail_blocked_daily_move_extended
+momentum_mail_blocked_daily_target_previously_touched
 momentum_mail_blocked_breakout_quality_low
 momentum_mail_blocked_fakeout_risk
 momentum_mail_blocked_late_intraday_chase
@@ -1247,7 +1254,7 @@ def safe_cache_summary(path):
                 key: value for key, value in diagnostics.items()
                 if key in DIAGNOSTIC_COUNTS and _nonnegative_count(value)
             }
-            if diagnostics.get("coverage") in ("complete", "incomplete"):
+            if diagnostics.get("coverage") in ("complete", "complete_with_exclusions", "incomplete"):
                 result["coverage"] = diagnostics["coverage"]
             if type(diagnostics.get("scan_in_progress")) is bool:
                 result["scan_in_progress"] = diagnostics["scan_in_progress"]
@@ -1376,7 +1383,7 @@ def safe_strategy_attempt_summary(path, expected_slug):
             key: value for key, value in diagnostics.items()
             if key in STOCK_ATTEMPT_COUNTS and _nonnegative_count(value)
         }
-        if diagnostics.get("coverage") in ("complete", "incomplete"):
+        if diagnostics.get("coverage") in ("complete", "complete_with_exclusions", "incomplete"):
             result["coverage"] = diagnostics["coverage"]
         mail_audit = _scan_mail_audit_projection(diagnostics.get("mail_audit"))
         if mail_audit is not None:

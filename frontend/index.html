@@ -3016,6 +3016,43 @@ function scannerCandidatePresentation(row = {}) {
     };
 }
 
+function scannerMailPresentation(row = {}) {
+    const source = row?.mail_check;
+    if (!source || typeof source !== 'object' || source.schema_version !== 1
+        || source.semantics !== 'read_only_precheck_not_delivery_or_send_permission') return null;
+    const numeric = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
+    const score = numeric(source.trade_score);
+    const minimum = numeric(source.minimum_trade_score);
+    const reasons = (Array.isArray(source.reasons) ? source.reasons : []).filter(reason =>
+        reason && typeof reason.code === 'string' && typeof reason.label === 'string' && reason.label.trim()
+    ).slice(0, 24).map(reason => ({ code: reason.code.slice(0, 100), label: reason.label.trim().slice(0, 350) }));
+    const valid = score !== null && minimum !== null;
+    const status = valid && source.status === 'blocked' ? 'blocked'
+        : valid && source.status === 'checks_passed' && !reasons.length && score >= minimum ? 'checks_passed' : 'unavailable';
+    return { status, score, minimum, setupScore: numeric(source.setup_score), reasons,
+        label: status === 'blocked' ? 'Signal-Mail gesperrt' : status === 'checks_passed'
+            ? 'Mail-Vorprüfung erfüllt; Versand separat' : 'Mail-Vorprüfung nicht vollständig verfügbar' };
+}
+
+function scannerMomentumQualityPresentation(row = {}) {
+    const source = row?.momentum_quality;
+    if (!source || typeof source !== 'object' || source.schema_version !== 1 || source.timeframe !== '1D'
+        || source.semantics !== 'daily_bar_quality_not_future_continuation_or_retest'
+        || !['completed_daily', 'current_session'].includes(source.evidence)) return null;
+    const numeric = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+    const score = numeric(source.score), maximum = numeric(source.maximum_score), minimum = numeric(source.mail_min_score);
+    if (score === null || maximum !== 96 || minimum !== 78 || score > maximum) return null;
+    const parts = (Array.isArray(source.components) ? source.components : []).filter(part =>
+        part && typeof part.label === 'string' && numeric(part.points) !== null && numeric(part.max_points) !== null
+        && part.points <= part.max_points && part.max_points <= 100
+    ).slice(0, 12).map(part => `${part.label.slice(0, 150)}: ${part.points}/${part.max_points}`);
+    const deductions = (Array.isArray(source.deductions) ? source.deductions : []).filter(part =>
+        part && typeof part.label === 'string' && numeric(part.points) !== null && part.points <= 100
+    ).slice(0, 12).map(part => `${part.label.slice(0, 150)}: −${part.points}`);
+    return { score, minimum, maximum, parts, deductions, deficit: Math.max(0, minimum - score),
+        label: source.evidence === 'completed_daily' ? 'Qualität der abgeschlossenen Tageskerze' : 'Tageskerzen-Qualität (laufende Sitzung)' };
+}
+
 function stockStructureReminderSource(row = {}) {
     if (!row || typeof row !== 'object' || row.isCrypto === true) return null;
     const setup = row.trade_setup && typeof row.trade_setup === 'object' ? row.trade_setup : {};
@@ -3085,14 +3122,32 @@ function ScannerVisibilitySummary({ rows }) {
 function ScannerCandidateStatus({ row = {}, compact = false }) {
     const view = scannerCandidatePresentation(row);
     if (!view) return null;
+    const mail = scannerMailPresentation(row);
+    const momentum = scannerMomentumQualityPresentation(row);
     const tone = view.status === 'released' ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
         : view.status === 'context' ? 'border-gray-300 bg-gray-50 text-gray-700' : 'border-amber-300 bg-amber-50 text-amber-950';
-    return <div className={`${compact ? 'mt-1 px-2 py-1 text-[11px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border ${tone} whitespace-normal`}
+    return <div className={`${compact ? 'mt-1 px-2 py-1 text-[11px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border ${tone} whitespace-normal font-normal`}
         data-testid="scanner-candidate-status" data-visibility-status={view.status} role="note">
         <div className="font-semibold">{view.label}</div>
         {view.warnings.map((warning, index) => <div key={`${warning.code}-${index}`} className="mt-1" data-warning-code={warning.code}>
             {warning.label}{warning.detail && <span> · {warning.detail}</span>}
         </div>)}
+        {mail && <div className="mt-2 border-t border-current/15 pt-2" data-testid="scanner-mail-check">
+            <div className="font-semibold">{mail.label}</div>
+            {mail.score !== null && mail.minimum !== null && <div>Mail-/Handelsplan-Score {mail.score} · benötigt {mail.minimum}
+                {mail.setupScore !== null && <span> · Setup-Score {mail.setupScore}</span>}</div>}
+            {mail.reasons.length > 0 && <details className="mt-1" onClick={event => event.stopPropagation()}>
+                <summary className="cursor-pointer">{mail.reasons[0].label}{mail.reasons.length > 1 ? ` · ${mail.reasons.length - 1} weitere Gründe` : ''}</summary>
+                <ul className="list-disc pl-4 mt-1">{mail.reasons.map((reason, index) => <li key={`${reason.code}-${index}`}>{reason.label}</li>)}</ul>
+            </details>}
+            <div className="mt-1 text-[11px]">Vorprüfung dieses Ergebnisstands. Empfänger, aktuelle Daten und Doppelschutz werden beim Versand erneut geprüft; kein Zustellnachweis.</div>
+        </div>}
+        {momentum && <details className="mt-2" data-testid="momentum-quality-details" onClick={event => event.stopPropagation()}>
+            <summary className="cursor-pointer">{momentum.label}: {momentum.score}/{momentum.maximum} · Mail-Minimum {momentum.minimum}
+                {momentum.deficit > 0 ? ` · ${momentum.deficit} Punkte fehlen` : ' · Qualitätsschwelle erfüllt'}</summary>
+            <ul className="list-disc pl-4 mt-1">{[...momentum.parts, ...momentum.deductions].map((part, index) => <li key={index}>{part}</li>)}</ul>
+            <div>Kerzenbild, Volumen und Ausbruchsabstand – kein Nachweis eines späteren Rücktests. Weitere Mailprüfungen bleiben separat.</div>
+        </details>}
         {view.status !== 'released' && <div className="mt-1">Setup-Score und Grade sind keine Handelsfreigabe. Keine automatische Signal-Mail.</div>}
     </div>;
 }
@@ -6651,7 +6706,7 @@ function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = nul
     const stamp = scannerTimestamp(data?.cached_at);
     const previous = scannerTimestamp(previousStamp);
     if (stamp !== null && (previousStamp === null || (previous !== null && stamp > previous))) {
-        return coverage === 'complete' || data?.data?.length > 0 ? 'complete' : 'unverified_final';
+        return ['complete', 'complete_with_exclusions'].includes(coverage) || data?.data?.length > 0 ? 'complete' : 'unverified_final';
     }
     // A worker stopping without publishing a new final cache is not success.
     return sawRunning ? 'missing_final' : 'pending';
@@ -6717,6 +6772,12 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
     if (kind === 'bi' && valid > 0 && decorated === 0) return { tone: 'warning', text: 'BI-Signale vorhanden, aber die Auslieferungspruefung hat alle ausgeschlossen. Details unten; kein Nachweis fuer zu wenige gruene Indikatoren.' };
     const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
     if (coverage === 'incomplete') return { tone: 'warning', text: 'Der letzte Scan war unvollstaendig. Angezeigte Daten sind kein vollstaendig geprueftes neues Ergebnis.' };
+    if (coverage === 'complete_with_exclusions') {
+        const funnel = diag.attempt_diagnostics || diag.funnel || diag;
+        const excluded = funnel.excluded_data_symbols ?? funnel.quarantined_symbols;
+        const amount = typeof excluded === 'number' && Number.isSafeInteger(excluded) && excluded > 0 ? `${excluded} Aktie(n)` : 'Einzelne Aktien';
+        return { tone: 'warning', text: `Scan mit Datenausschlüssen abgeschlossen: ${amount} wegen fehlerhafter Kursdaten ausgeschlossen. ${count} sichtbare Treffer aus den übrigen geprüften Aktien. Keine Aussage über ausgeschlossene Werte; Handelsplan und Mailfreigabe bleiben separat.` };
+    }
     if (!count && coverage !== 'complete') return { tone: 'warning', text: 'Gespeicherter Stand: null sichtbare Signale. Vollstaendige Pruefdetails fehlen; ein erfolgreicher Scan ohne passende Setups ist damit nicht belegt.' };
     if (!count) return { tone: 'empty', text: kind === 'bi'
         ? 'Abgeschlossener BI-Scan: keine gueltigen Signale mit mindestens 17/20 und den zusaetzlichen Struktur-/Risikopruefungen.'

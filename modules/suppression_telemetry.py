@@ -322,6 +322,11 @@ ALLOWED_SUPPRESSION_REASONS = frozenset({
     # Stock strategy mail-quality return codes.
     "momentum_mail_blocked_breakout_continuation_watch",
     "momentum_mail_blocked_breakout_quality_low",
+    "momentum_mail_blocked_daily_quality_below_threshold",
+    "momentum_mail_blocked_daily_quality_unavailable",
+    "momentum_mail_blocked_daily_quality_unconfirmed",
+    "momentum_mail_blocked_daily_move_extended",
+    "momentum_mail_blocked_daily_target_previously_touched",
     "momentum_mail_blocked_fakeout_risk",
     "momentum_mail_blocked_late_intraday_chase",
     "momentum_mail_blocked_late_session_without_daily_close",

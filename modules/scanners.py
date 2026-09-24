@@ -48,7 +48,7 @@ from modules.bi_transport import BITransport, BITransportError, BITransportStopp
 from modules.bi_market_data import (
     BI_DATA_ERROR_REASONS, BI_DATA_ERROR_FIELDS, BI_ISOLATABLE_BAR_ERRORS,
     BI_DATA_ERROR_VALUE_CLASSES, BI_DATA_ERROR_POSITIONS,
-    BIAggregateDataError, parse_bi_daily_aggregates,
+    BIAggregateDataError, parse_bi_daily_aggregates, bi_symbol_local_price_error,
 )
 try:
     from modules.signal_tracker import _detect_code_revision
@@ -1192,6 +1192,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         "data_error_counts": {}, "data_error_fields": {}, "analysis_session_dates": {},
         "data_error_value_classes": {}, "data_error_positions": {},
         "excluded_uncompleted_bars": 0,
+        "excluded_data_symbols": 0, "valid_data_symbols": 0,
+        "data_retry_attempts": 0, "data_retry_recovered": 0, "data_retry_failed": 0,
+        "data_retry_budget_exhausted": 0, "data_retry_observation_mismatches": 0,
     }
     # Independent observation ID, not the API scheduler's run ID. Revision is
     # the existing immutable process stamp, never a per-ticker Git lookup.
@@ -1245,10 +1248,13 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
     def _quarantine(reason, field="unknown", value_class="unknown", position="unknown"):
         # Discard the entire affected series, never patch prices or skip bars
-        # inside it. Other symbols can still be diagnosed. Any such gap keeps
-        # this run incomplete: no new final cache or automatic BI mail.
+        # inside it. Approved 2026-09-24: independent valid symbols may finish
+        # with explicit OHLCV exclusions, never with a complete-data claim.
+        # Unknown/timestamp failures retain the whole-run incomplete guard.
         _record_data_error(reason, field, value_class, position)
         funnel["quarantined_symbols"] += 1
+        if bi_symbol_local_price_error(BIAggregateDataError(reason, field=field)):
+            funnel["excluded_data_symbols"] += 1
 
     transport = BITransport(rate_limited_get, lambda: _bi_should_stop(direction), time.sleep, funnel)
 
@@ -1257,6 +1263,55 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             return transport.json(url, params=params, timeout=15)
         except BITransportError as error:
             _data_error(error.code, "invalid_json" if error.reason == "malformed_json" else None)
+
+    def _parse_daily_response(payload):
+        provider_error = _scanner_payload_error(payload)
+        if provider_error:
+            _data_error(provider_error, "provider_status" if isinstance(payload, dict) else "invalid_payload")
+        return parse_bi_daily_aggregates(
+            payload, completed_through=latest_session, as_of=run_as_of,
+        ) if swing_mode else parse_bi_daily_aggregates(payload)
+
+    def _validated_daily_response(payload, url, params):
+        try:
+            return _parse_daily_response(payload), payload
+        except BIAggregateDataError as original:
+            if not bi_symbol_local_price_error(original):
+                raise
+            # One identical-query re-fetch, sharing the existing run-wide
+            # transport retry budget and rate limiter. Never drop a bad bar,
+            # shorten the query or replace its price to make a scan succeed.
+            if funnel["transport_retries"] >= 20:
+                funnel["data_retry_budget_exhausted"] += 1
+                raise
+            scan_control.safe_point()
+            if _bi_should_stop(direction):
+                raise BITransportStopped() from None
+            funnel["data_retry_attempts"] += 1
+            funnel["transport_retries"] += 1
+            recovered = False
+            try:
+                retried = _required_json(url, params)
+                bars = _parse_daily_response(retried)
+                # A missing/shortened/re-timestamped retry is not evidence
+                # that the original malformed observation was corrected.
+                old_timestamps = [bar.get("t") if isinstance(bar, dict) else None
+                                  for bar in payload["results"]]
+                new_timestamps = [bar["t"] for bar in retried.get("results", [])]
+                if old_timestamps != new_timestamps:
+                    funnel["data_retry_observation_mismatches"] += 1
+                    raise original from None
+                recovered = True
+                funnel["data_retry_recovered"] += 1
+                return bars, retried
+            except ScannerDataError as terminal:
+                # ScannerDataError snapshots scalar counters on creation;
+                # include the failed re-fetch before its terminal projection.
+                terminal.diagnostics["data_retry_failed"] = funnel["data_retry_failed"] + 1
+                raise
+            finally:
+                if not recovered:
+                    funnel["data_retry_failed"] += 1
 
     try:
         # ── Fallback: Full stock universe from Polygon ──
@@ -1449,26 +1504,22 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                                            top_score=top_score, avg_score=avg_sc,
                                            detail=f"{checked}/{total} analysiert")
 
-                provider_error = _scanner_payload_error(api_data)
-                if provider_error:
-                    _data_error(provider_error, "provider_status" if isinstance(api_data, dict) else "invalid_payload")
                 try:
+                    raw_bars, api_data = _validated_daily_response(api_data, url, params)
                     if swing_mode:
                         # Do not validate prices that this completed-session
                         # contract explicitly never consumes. Timestamp and
                         # response integrity still fail closed for all bars.
-                        raw_bars = parse_bi_daily_aggregates(
-                            api_data, completed_through=latest_session, as_of=run_as_of,
-                        )
                         funnel["excluded_uncompleted_bars"] += len(api_data.get("results", [])) - len(raw_bars)
-                    else:
-                        raw_bars = parse_bi_daily_aggregates(api_data)
                 except BIAggregateDataError as e:
                     if e.reason in BI_ISOLATABLE_BAR_ERRORS:
                         _quarantine(e.reason, e.field, e.value_class, e.position)
                         continue
                     _data_error("scan_data_invalid", e.reason)
                 if not raw_bars:
+                    # A positively confirmed empty response is valid data,
+                    # but remains a separate insufficient-history rejection.
+                    funnel["valid_data_symbols"] += 1
                     no_data_count += 1
                     _reject("insufficient_daily_history")
                     continue
@@ -1493,6 +1544,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         "close": bar["c"],
                         "volume": bar["v"]
                     })
+                # Count only after timestamp conversion/future validation,
+                # never both a usable history and a conversion quarantine.
+                funnel["valid_data_symbols"] += 1
                 if len(all_bars) < 10:
                     no_data_count += 1
                     _reject("insufficient_daily_history")
@@ -1893,10 +1947,11 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         scan_control.seal()
         if _bi_should_stop(direction):
             raise BITransportStopped()
-        if analysis_errors or funnel["data_failures"] or checked != total:
+        if (analysis_errors or checked != total
+                or funnel["data_failures"] != funnel["excluded_data_symbols"]):
             raise ScannerDataError("scan_data_incomplete", funnel)
         results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
-        funnel["coverage"] = "complete"
+        funnel["coverage"] = "complete_with_exclusions" if funnel["excluded_data_symbols"] else "complete"
         funnel["final_results"] = len(results)
         _bi_cache_save(
             results,
@@ -1904,13 +1959,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
             partial=False,
             checked=checked,
             total=total,
-            detail="Finaler BI Scan abgeschlossen",
+            detail=(f"BI Scan beendet; {funnel['excluded_data_symbols']} Aktien wegen ungueltiger Kursdaten ausgeschlossen"
+                    if funnel["excluded_data_symbols"] else "Finaler BI Scan abgeschlossen"),
             diagnostics=funnel,
         )
 
         avg_sc = round(score_sum / max(1, score_count))
         _buckets_str = " | ".join(f"{k}:{v}" for k, v in _score_buckets.items() if v > 0)
-        pipeline = (f"{total} Kandidaten → {no_data_count} History-/Liquiditaetsfilter → "
+        pipeline = (f"{total} Kandidaten → {funnel['excluded_data_symbols']} Kursdaten-Ausschluesse → "
+                    f"{no_data_count} History-/Liquiditaetsfilter → "
                     f"{cum_pump_fail} 2d-Pump → "
                     f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "
                     f"{contract_reject_count} unter {BI_STOCK_REQUIRED_GREEN}/{BI_STOCK_INDICATOR_COUNT} "

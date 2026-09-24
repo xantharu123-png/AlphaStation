@@ -210,13 +210,24 @@ def test_bi_history_provider_failure_preserves_final(monkeypatch, tmp_path, stat
 @pytest.mark.parametrize("payload,code", [
     (None, "scan_data_invalid"), ({}, "scan_data_invalid"), ({"results": "bad"}, "scan_data_invalid"),
     ({"results": [None]}, "scan_data_incomplete"),
-    ({"results": [{"t": 1, "o": 2, "h": 1, "l": 1, "c": 2, "v": 1}]}, "scan_data_incomplete"),
 ])
 def test_bi_invalid_feed_not_technical_rejection(monkeypatch, tmp_path, payload, code):
     final, before = bi_io(monkeypatch, tmp_path, Reply(payload=payload))
     with pytest.raises(scanners.ScannerDataError, match=code):
         scanners._bi_background_scan("fake", candidates=["TEST"])
     assert final.read_bytes() == before
+
+
+def test_bi_local_geometry_error_is_explicit_data_exclusion_not_technical_rejection(monkeypatch, tmp_path):
+    payload = {"results": [{"t": 1, "o": 2, "h": 1, "l": 1, "c": 2, "v": 1}]}
+    final, before = bi_io(monkeypatch, tmp_path, Reply(payload=payload))
+    scanners._bi_background_scan("fake", candidates=["TEST"])
+    result = json.loads(final.read_text())
+    d = result["diagnostics"]
+    assert d["coverage"] == "complete_with_exclusions"
+    assert d["excluded_data_symbols"] == d["data_failures"] == 1
+    assert d["valid_data_symbols"] == d["analyzed"] == 0
+    assert result["results"] == [] and d["rejected"] == {}
 
 
 def test_bi_under17_is_legitimate_zero_with_separate_funnel(monkeypatch, tmp_path):

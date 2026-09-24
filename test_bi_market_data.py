@@ -200,12 +200,15 @@ def _lifecycle(monkeypatch, tmp_path, result, direction, responses):
     final = tmp_path / (direction + ".json")
     final.write_text('{"results":[{"previous":true}]}', encoding="utf-8")
     before = final.read_bytes()
-    response_iter = iter(responses)
+    # Re-fetching a malformed history must repeat the same ticker's response,
+    # not accidentally borrow the following ticker's valid history.
+    response_by_ticker = dict(zip(tickers, responses))
     calls = []
 
     def get(*args, **kwargs):
         calls.append(1)
-        return _Reply(next(response_iter))
+        ticker = args[0].split('/ticker/', 1)[1].split('/', 1)[0]
+        return _Reply(response_by_ticker[ticker])
 
     monkeypatch.setattr(scanners, "rate_limited_get", get)
     analyses = []

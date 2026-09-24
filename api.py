@@ -171,6 +171,7 @@ from modules.email_dedupe import (
     email_delivery_claim as _shared_email_delivery_claim,
     email_delivery_mark as _shared_email_delivery_mark,
     email_delivery_release as _shared_email_delivery_release,
+    email_delivery_renew as _shared_email_delivery_renew,
     email_dedupe_active as _shared_email_dedupe_active,
     email_dedupe_claim as _shared_email_dedupe_claim,
     email_dedupe_mark as _shared_email_dedupe_mark,
@@ -2815,6 +2816,11 @@ _ALERT_SUPPRESSION_LABELS = {
     "non_common_stock_product": "kein handelbarer Common Stock/ADR",
     "momentum_mail_blocked_late_session_without_daily_close": "Momentum-Mail: zu spaet in der Session, erst Daily-Close/naechste Session",
     "momentum_mail_blocked_late_intraday_chase": "Momentum-Mail: Tagesmove schon erweitert, kein sauberer frischer Breakout",
+    "momentum_mail_blocked_daily_move_extended": "Momentum-Mail: abgeschlossener Tagesmove ab 8%; Ausnahme nur fuer besonders starke 20T-Ausbrueche",
+    "momentum_mail_blocked_daily_quality_below_threshold": "Momentum-Mail: Tageskerzen-Qualitaet unter 78 von 96 Punkten; kein fehlender Ruecktest",
+    "momentum_mail_blocked_daily_quality_unavailable": "Momentum-Mail: belastbare Tageskerzen-Qualitaet fehlt",
+    "momentum_mail_blocked_daily_quality_unconfirmed": "Momentum-Mail: Tageskerzen-Qualitaet nicht freigegeben",
+    "momentum_mail_blocked_daily_target_previously_touched": "Momentum-Mail: Tageshoch der Referenzkerze erreicht TP1 oder liegt hoechstens 0,5% darunter",
     "momentum_mail_blocked_tp1_already_touched_intraday": "Momentum-Mail: TP1 wurde intraday schon erreicht",
     "momentum_mail_blocked_spike_rejected_from_high": "Momentum-Mail: Spike vom Tageshoch wurde abverkauft",
     "momentum_mail_blocked_missing_liquidity_history": "Momentum-Mail: historische Basis-Liquiditaet fehlt",
@@ -3077,6 +3083,21 @@ def _email_dedupe_release(key: str, claimed_at: Optional[float] = None) -> bool:
         return _shared_email_delivery_release(_EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at)
     except Exception as exc:
         print(f"[Alert] Dedupe-Claim konnte nicht freigegeben werden: {exc}")
+        return False
+
+
+def _email_dedupe_renew(key: str, *, claimed_at: float, now: float) -> bool:
+    """Extend only this worker's still-owned lease; never steal or send blind."""
+    try:
+        if (_mail_outbox is not None
+                and hasattr(_mail_outbox, "has_uncertain_delivery_key")
+                and _mail_outbox.has_uncertain_delivery_key(str(key))):
+            return False
+        return _shared_email_delivery_renew(
+            _EMAIL_DEDUPE_FILE, key, claimed_at=claimed_at, now=now,
+        )
+    except Exception as exc:
+        print(f"[Alert] Dedupe-Erneuerung fehlgeschlagen: {type(exc).__name__}")
         return False
 
 
@@ -9148,9 +9169,8 @@ def _stock_strategy_mail_quality_state(
         or row.get("breakout_continuation_status")
         or ""
     ).upper()
-    continuation_score = _alert_float(
+    continuation_score = stock_swing.number(
         row.get("Breakout_Continuation_Score", row.get("breakout_continuation_score")),
-        None,
     )
     fakeout_risk = str(
         row.get("Breakout_Fakeout_Risk")
@@ -9189,10 +9209,20 @@ def _stock_strategy_mail_quality_state(
         return False, "momentum_mail_blocked_trend_reclaim_not_breakout"
     if breakout_type not in {"20D_HIGH_BREAKOUT", "10D_HIGH_BREAKOUT", "RANGE_BREAKOUT"}:
         return False, "momentum_mail_blocked_unknown_breakout_type"
+    daily_quality_mode = bool(daily_close_confirmed_mode and stock_swing.is_swing(row))
+    if daily_quality_mode:
+        score_raw = row.get("Breakout_Continuation_Score", row.get("breakout_continuation_score"))
+        if (isinstance(score_raw, bool) or continuation_score is None
+                or not 0 <= continuation_score <= 96 or not continuation_status):
+            return False, "momentum_mail_blocked_daily_quality_unavailable"
     if continuation_status and continuation_status != "CONTINUATION_OK":
+        if daily_quality_mode:
+            return False, ("momentum_mail_blocked_daily_quality_below_threshold"
+                           if continuation_score < 78 else "momentum_mail_blocked_daily_quality_unconfirmed")
         return False, "momentum_mail_blocked_breakout_continuation_watch"
     if continuation_score is not None and continuation_score < 78:
-        return False, "momentum_mail_blocked_breakout_quality_low"
+        return False, ("momentum_mail_blocked_daily_quality_below_threshold" if daily_quality_mode
+                       else "momentum_mail_blocked_breakout_quality_low")
     if fakeout_risk in {"HIGH", "CRITICAL"}:
         return False, "momentum_mail_blocked_fakeout_risk"
     if upper_wick is not None and upper_wick >= 38:
@@ -9208,7 +9238,8 @@ def _stock_strategy_mail_quality_state(
         return False, "momentum_mail_blocked_late_session_without_daily_close"
     if day_high is not None and tp1 is not None and day_high > 0 and tp1 > 0:
         if day_high >= tp1 * 0.995:
-            return False, "momentum_mail_blocked_tp1_already_touched_intraday"
+            return False, ("momentum_mail_blocked_daily_target_previously_touched" if daily_quality_mode
+                           else "momentum_mail_blocked_tp1_already_touched_intraday")
     pullback_from_high_pct = None
     if price is not None and day_high is not None and price > 0 and day_high > price:
         pullback_from_high_pct = (day_high - price) / day_high * 100.0
@@ -9228,7 +9259,8 @@ def _stock_strategy_mail_quality_state(
             and (pullback_from_high_pct is None or pullback_from_high_pct <= 3.0)
         )
         if not clean_big_breakout:
-            return False, "momentum_mail_blocked_late_intraday_chase"
+            return False, ("momentum_mail_blocked_daily_move_extended" if daily_quality_mode
+                           else "momentum_mail_blocked_late_intraday_chase")
     if breakout_type == "RANGE_BREAKOUT":
         near_real_breakout = (
             (breakout10 is not None and breakout10 >= -1.0)
@@ -13843,7 +13875,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         reverse=True,
     )
     total_alerts = len(alerts)
-    claim_candidates = alerts[:_ALERT_EMAIL_MAX_ROWS]
+    # Final validity, not cached rank, selects the delivered stock plans.
+    # The classifier above already bounds inspection to 50 rows. Retaining
+    # that bounded reserve lets a lower-ranked valid row replace a leader
+    # rejected by regime, open-trade equivalence or final market evidence.
+    # Crypto retains its existing top-N batch contract.
+    claim_candidates = alerts if market_type == "stocks" else alerts[:_ALERT_EMAIL_MAX_ROWS]
     email_alerts = [
         alert for alert in claim_candidates
         if _email_dedupe_claim(
@@ -13870,6 +13907,67 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     # cheap regime/equivalence filters have run and a row is immediately about
     # to be sent.  This helper applies that one authoritative result to the
     # rendered and tracked candidate.
+    # A row quota for sender calls is shared by existing WATCH groups and
+    # actionable single-row messages. Final revalidation failures do not spend
+    # it; failed or uncertain sends do, keeping attempts bounded.
+    remaining_email_rows = _ALERT_EMAIL_MAX_ROWS
+
+    def _take_mail_row_quota(candidates):
+        kept = list(candidates[:remaining_email_rows])
+        for deferred in candidates[remaining_email_rows:]:
+            _email_dedupe_release(deferred["cooldown_key"], claimed_at=deferred.get("_mail_claimed_at", now))
+        return kept
+
+    def _watch_rows_html_for(alert_list):
+        return "".join(
+            "<tr>"
+            f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(a['ticker']))}</b></td>"
+            f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('strategy') or strategy_name))}</td>"
+            f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('grade') or '-'))}</td>"
+            f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('score') or '-'))}</td>"
+            f"<td style='padding:8px;border-bottom:1px solid #eee'>{a.get('trade_plan_html') or ''}</td>"
+            "</tr>" for a in alert_list
+        )
+
+    def _owned_watch_message(alert_list, body, rows_html, cap_claim=None):
+        # Rendering/context work may outlive an initial WATCH lease too.
+        # Drop lost rows and rebuild the table before passing matching keys to
+        # the sender. Recheck after a rebuild; no provider work occurs here.
+        owned = list(alert_list)
+        for _round in range(_ALERT_EMAIL_MAX_ROWS + 2):
+            retained = []
+            for alert in owned:
+                key = alert["cooldown_key"]
+                claimed_at = alert.get("_mail_claimed_at", now)
+                current = time.time()
+                if current - claimed_at >= 300:
+                    if not _email_dedupe_renew(key, claimed_at=claimed_at, now=current):
+                        _record_suppression_counts(scanner_key, {"dedupe_claim_not_owned": 1})
+                        _email_dedupe_release(key, claimed_at=claimed_at)
+                        continue
+                    alert["_mail_claimed_at"] = current
+                retained.append(alert)
+            if cap_claim is not None:
+                current = time.time()
+                if current - cap_claim["claimed_at"] >= 300:
+                    if not _email_dedupe_renew(cap_claim["key"], claimed_at=cap_claim["claimed_at"], now=current):
+                        _record_suppression_counts(scanner_key, {"dedupe_claim_not_owned": 1})
+                        for alert in retained:
+                            _email_dedupe_release(alert["cooldown_key"], claimed_at=alert.get("_mail_claimed_at", now))
+                        return [], body
+                    cap_claim["claimed_at"] = current
+            if not retained:
+                return [], body
+            if len(retained) == len(owned):
+                return retained, body
+            next_rows_html = _watch_rows_html_for(retained)
+            body = body.replace(rows_html, next_rows_html, 1)
+            rows_html, owned = next_rows_html, retained
+        # A pathological renderer must not bypass ownership or spin forever.
+        for alert in owned:
+            _email_dedupe_release(alert["cooldown_key"], claimed_at=alert.get("_mail_claimed_at", now))
+        return [], body
+
     def _alert_with_revalidated_candidate(alert, validation):
         revalidated_row = dict(validation.get("candidate") or {})
         refreshed = dict(alert)
@@ -13990,26 +14088,20 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             if _trade_key:
                 _email_dedupe_release(_trade_key, claimed_at=now)
             _watch_key = f"{_trade_key}__watch" if _trade_key else ""
+            _watch_claimed_at = time.time()
             if _watch_key and _email_dedupe_claim(
                 _watch_key,
                 _alert_dedupe_ttl_seconds(scanner_key),
-                now=now,
+                now=_watch_claimed_at,
             ):
                 _watch_alert = dict(_alert)
                 _watch_alert["cooldown_key"] = _watch_key
+                _watch_alert["_mail_claimed_at"] = _watch_claimed_at
                 _market_watch_alerts.append(_watch_alert)
 
+        _market_watch_alerts = _take_mail_row_quota(_market_watch_alerts)
         if _market_watch_alerts:
-            _watch_rows_html = "".join(
-                "<tr>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(a['ticker']))}</b></td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('strategy') or strategy_name))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('grade') or '-'))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('score') or '-'))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{a.get('trade_plan_html') or ''}</td>"
-                "</tr>"
-                for a in _market_watch_alerts
-            )
+            _watch_rows_html = _watch_rows_html_for(_market_watch_alerts)
             _watch_cluster_hint = (
                 _cluster_warning_html(_cluster_context_alerts)
                 if market_type == "stocks"
@@ -14024,8 +14116,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             <table style="width:100%;border-collapse:collapse;font-size:13px">
             <tr style="background:#fef2f2"><th>Ticker</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Plan</th></tr>
             {_watch_rows_html}</table></body></html>'''
+            _market_watch_alerts, _watch_body = _owned_watch_message(
+                _market_watch_alerts, _watch_body, _watch_rows_html,
+            )
             try:
-                _watch_sent = _send_email_alert(
+                remaining_email_rows -= len(_market_watch_alerts)
+                _watch_sent = bool(_market_watch_alerts) and _send_email_alert(
                     f"Markt-Regime: {len(_market_watch_alerts)} Setup(s) - {strategy_name}",
                     _watch_body,
                     trade_horizon="swing",
@@ -14041,7 +14137,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             except Exception:
                 for _alert in _market_watch_alerts:
                     _email_dedupe_release(
-                        _alert["cooldown_key"], claimed_at=now
+                        _alert["cooldown_key"], claimed_at=_alert.get("_mail_claimed_at", now)
                     )
                 # Sending aborts the function, so every unaffected trade claim
                 # that has not been attempted must also be released.
@@ -14051,13 +14147,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                         _email_dedupe_release(_pending_key, claimed_at=now)
                 raise
             if _watch_sent:
+                _watch_accepted_at = time.time()
                 for _alert in _market_watch_alerts:
-                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = now
-                    _email_dedupe_mark(_alert["cooldown_key"], now=now)
+                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = _watch_accepted_at
+                    _email_dedupe_mark(_alert["cooldown_key"], now=_watch_accepted_at)
             else:
                 for _alert in _market_watch_alerts:
                     _email_dedupe_release_after_send(
-                        _alert["cooldown_key"], claimed_at=now
+                        _alert["cooldown_key"], claimed_at=_alert.get("_mail_claimed_at", now)
                     )
         else:
             _record_email_event(
@@ -14135,14 +14232,17 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 if _trade_key:
                     _email_dedupe_release(_trade_key, claimed_at=now)
                 _watch_key = f"{_trade_key}__watch" if _trade_key else ""
+                _watch_claimed_at = time.time()
                 if _watch_key and _email_dedupe_claim(
                     _watch_key,
                     _alert_dedupe_ttl_seconds(scanner_key),
-                    now=now,
+                    now=_watch_claimed_at,
                 ):
                     _watch_alert = dict(_alert)
                     _watch_alert["cooldown_key"] = _watch_key
+                    _watch_alert["_mail_claimed_at"] = _watch_claimed_at
                     _watch_alerts.append(_watch_alert)
+            _watch_alerts = _take_mail_row_quota(_watch_alerts)
             if not _watch_alerts:
                 continue
 
@@ -14153,10 +14253,11 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 str(_cell_key).encode("utf-8")
             ).hexdigest()[:20]
             _watch_cap_key = f"regime_cooldown_watch_{_cell_digest}"
-            if not _email_dedupe_claim(_watch_cap_key, _watch_cap, now=now):
+            _watch_cap_claim = {"key": _watch_cap_key, "claimed_at": time.time()}
+            if not _email_dedupe_claim(_watch_cap_key, _watch_cap, now=_watch_cap_claim["claimed_at"]):
                 for _alert in _watch_alerts:
                     _email_dedupe_release(
-                        _alert["cooldown_key"], claimed_at=now
+                        _alert["cooldown_key"], claimed_at=_alert.get("_mail_claimed_at", now)
                     )
                 _record_email_event(
                     f"{'Crypto' if market_type == 'crypto' else 'Aktien'} Strategie Alert - {strategy_name}",
@@ -14165,16 +14266,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
                 continue
 
-            _watch_rows_html = "".join(
-                "<tr>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'><b>{html.escape(str(a['ticker']))}</b></td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('strategy') or strategy_name))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('grade') or '-'))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{html.escape(str(a.get('score') or '-'))}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #eee'>{a.get('trade_plan_html') or ''}</td>"
-                "</tr>"
-                for a in _watch_alerts
-            )
+            _watch_rows_html = _watch_rows_html_for(_watch_alerts)
             _watch_rendered_at = datetime.now(timezone.utc)
             _watch_body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
             <h2 style="color:#991b1b">Performance-Cooldown - nur Beobachtung</h2>
@@ -14183,8 +14275,17 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             <table style="width:100%;border-collapse:collapse;font-size:13px">
             <tr style="background:#fef2f2"><th>Ticker</th><th>Strategie</th><th>Grade</th><th>Score</th><th>Plan</th></tr>
             {_watch_rows_html}</table></body></html>'''
+            _watch_alerts, _watch_body = _owned_watch_message(
+                _watch_alerts, _watch_body, _watch_rows_html, _watch_cap_claim,
+            )
+            if not _watch_alerts:
+                # No transport occurred; do not inherit an earlier message's
+                # uncertain/outbox outcome when releasing this unused cap.
+                _email_dedupe_release(_watch_cap_key, claimed_at=_watch_cap_claim["claimed_at"])
+                continue
             try:
-                _watch_sent = _send_email_alert(
+                remaining_email_rows -= len(_watch_alerts)
+                _watch_sent = bool(_watch_alerts) and _send_email_alert(
                     f"Performance-Cooldown: {len(_watch_alerts)} Setup(s) - {strategy_name}",
                     _watch_body,
                     trade_horizon="swing",
@@ -14200,22 +14301,27 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             except Exception:
                 for _alert in _watch_alerts:
                     _email_dedupe_release(
-                        _alert["cooldown_key"], claimed_at=now
+                        _alert["cooldown_key"], claimed_at=_alert.get("_mail_claimed_at", now)
                     )
-                _email_dedupe_release(_watch_cap_key, claimed_at=now)
+                _email_dedupe_release(_watch_cap_key, claimed_at=_watch_cap_claim["claimed_at"])
+                for _pending in email_alerts:
+                    _pending_key = str(_pending.get("cooldown_key") or "")
+                    if _pending_key:
+                        _email_dedupe_release(_pending_key, claimed_at=now)
                 raise
             if _watch_sent:
+                _watch_accepted_at = time.time()
                 for _alert in _watch_alerts:
-                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = now
-                    _email_dedupe_mark(_alert["cooldown_key"], now=now)
-                _email_dedupe_mark(_watch_cap_key, now=now)
+                    _EMAIL_COOLDOWN[_alert["cooldown_key"]] = _watch_accepted_at
+                    _email_dedupe_mark(_alert["cooldown_key"], now=_watch_accepted_at)
+                _email_dedupe_mark(_watch_cap_key, now=_watch_accepted_at)
             else:
                 for _alert in _watch_alerts:
                     _email_dedupe_release_after_send(
-                        _alert["cooldown_key"], claimed_at=now
+                        _alert["cooldown_key"], claimed_at=_alert.get("_mail_claimed_at", now)
                     )
                 _email_dedupe_release_after_send(
-                    _watch_cap_key, claimed_at=now
+                    _watch_cap_key, claimed_at=_watch_cap_claim["claimed_at"]
                 )
 
         if _breaker_alert_ids:
@@ -14232,7 +14338,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         if _regime.get("state") == "YELLOW":
             _boosted = _ALERT_MIN_SCORE + int(_regime.get("score_boost") or 5)
             _max_rows = max(1, int(_regime.get("max_rows") or 2))
-            _kept = [a for a in email_alerts if _alert_float(a.get("score"), 0) >= _boosted][:_max_rows]
+            _kept = [a for a in email_alerts if _alert_float(a.get("score"), 0) >= _boosted]
+            if market_type == "stocks":
+                # The stricter YELLOW quota still applies, but final-invalid
+                # leaders must not consume its slots either.
+                remaining_email_rows = min(remaining_email_rows, _max_rows)
+            else:
+                _kept = _kept[:_max_rows]
             _dropped = [a for a in email_alerts if a not in _kept]
             if _dropped:
                 _record_suppression_counts(
@@ -14318,7 +14430,31 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             for alert in email_alerts
             if str(alert.get("cooldown_key") or "")
         }
+        delivery_selection_limit = min(remaining_email_rows, len(email_alerts))
+        def _refresh_stock_mail_claim(key, claimed_at):
+            current = time.time()
+            # The shared lease remains 900s. Refresh after 300s of waiting,
+            # both before provider work and afterward, so a slow reserve does
+            # not rely on a lease acquired for the entire batch long ago.
+            if current - claimed_at < 300:
+                return claimed_at
+            if _email_dedupe_renew(key, claimed_at=claimed_at, now=current):
+                return current
+            _record_suppression_counts(scanner_key, {"dedupe_claim_not_owned": 1})
+            _email_dedupe_release(key, claimed_at=claimed_at)
+            pending_claims.discard(str(key))
+            return None
+
         for pending_alert in list(email_alerts):
+            if remaining_email_rows <= 0:
+                # Do not fetch a new price or mark a deferred plan delivered.
+                for unattempted_key in sorted(pending_claims):
+                    _email_dedupe_release(unattempted_key, claimed_at=now)
+                pending_claims.clear()
+                break
+            row_claimed_at = _refresh_stock_mail_claim(pending_alert["cooldown_key"], now)
+            if row_claimed_at is None:
+                continue
             source_row = dict(pending_alert.get("source_row") or {})
             row_premarket_mode = bool(pending_alert.get("premarket"))
             label = "Aktien Pre-Market Radar" if row_premarket_mode else "Aktien Strategie Swing"
@@ -14362,7 +14498,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
                 _record_suppression_counts(scanner_key, {reason: 1})
                 _email_dedupe_release(
-                    pending_alert["cooldown_key"], claimed_at=now
+                    pending_alert["cooldown_key"], claimed_at=row_claimed_at
                 )
                 pending_claims.discard(str(pending_alert["cooldown_key"]))
                 _record_email_event(
@@ -14372,6 +14508,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
                 continue
 
+            row_claimed_at = _refresh_stock_mail_claim(pending_alert["cooldown_key"], row_claimed_at)
+            if row_claimed_at is None:
+                continue
             alert = _alert_with_revalidated_candidate(
                 pending_alert, validation
             )
@@ -14409,7 +14548,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             rendered_at = datetime.now(timezone.utc)
             body = f'''<html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
             <h2 style="color:#1a73e8">{label} Alert - {html.escape(str(strategy_name))}</h2>
-            <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Top {len(email_alerts)} von {total_alerts}; Einzelversand 1 Setup ab Score {score_floor}</p>
+            <p style="color:#666">{_mail_timestamp_dual(rendered_at)} | Top {delivery_selection_limit} von {total_alerts}; Einzelversand 1 Setup ab Score {score_floor}</p>
             <p style="background:#eef6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;color:#1e3a8a;font-size:13px">{horizon_note}</p>
             {_regime_banner}{cluster_hint}
             <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -14428,8 +14567,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 market_regime=_alert_exogenous_market_regime(alert),
             )
             try:
+                remaining_email_rows -= 1
                 sent = _send_email_alert(
-                    f"{label}: Top {len(email_alerts)} von {total_alerts} "
+                    f"{label}: Top {delivery_selection_limit} von {total_alerts} "
                     f"(Einzelversand {alert['ticker']}) - {strategy_name}",
                     body,
                     trade_horizon="swing",
@@ -14446,7 +14586,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
             except Exception:
                 _email_dedupe_release(
-                    alert["cooldown_key"], claimed_at=now
+                    alert["cooldown_key"], claimed_at=row_claimed_at
                 )
                 pending_claims.discard(str(alert["cooldown_key"]))
                 for unattempted_key in sorted(pending_claims):
@@ -14458,12 +14598,13 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 raise
             if sent:
                 sent_any = True
-                _EMAIL_COOLDOWN[alert["cooldown_key"]] = now
-                _email_dedupe_mark(alert["cooldown_key"], now=now)
+                accepted_at = time.time()
+                _EMAIL_COOLDOWN[alert["cooldown_key"]] = accepted_at
+                _email_dedupe_mark(alert["cooldown_key"], now=accepted_at)
                 pending_claims.discard(str(alert["cooldown_key"]))
             else:
                 _email_dedupe_release_after_send(
-                    alert["cooldown_key"], claimed_at=now
+                    alert["cooldown_key"], claimed_at=row_claimed_at
                 )
                 pending_claims.discard(str(alert["cooldown_key"]))
         if not sent_any:
@@ -16369,7 +16510,40 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     entry timing, fakeout risk, non-stock products, invalid levels and chase
     risk must affect the row that the trader sees.
     """
-    state = _classify_alert_candidate(scanner_name, row, time.time())
+    # Re-decoration must not feed the previous derived score/action back into
+    # its own calculation. Preserve the producer's exact fields, not arbitrary
+    # raw_score values (those may predate legitimate scanner score caps).
+    basis = row.get("_scanner_display_basis")
+    if (isinstance(basis, dict) and basis.get("version") == 1
+            and basis.get("scanner") == scanner_name and isinstance(basis.get("fields"), dict)):
+        row = dict(row)
+        for key in _SCANNER_DISPLAY_SOURCE_FIELDS:
+            if key in basis["fields"]:
+                row[key] = basis["fields"][key]
+            else:
+                row.pop(key, None)
+    assessed_at = time.time()
+    state = _classify_alert_candidate(scanner_name, row, assessed_at)
+    # Explain the actual mail score separately from scanner release. This is
+    # a read-only preview, not a send/claim or proof of inbox delivery.
+    mail_reasons = list(state.get("suppression_reasons") or [])
+    mail_preview_complete = True
+    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
+        try:
+            clock = datetime.fromtimestamp(assessed_at, timezone.utc)
+            quality_ok, quality_reason = _stock_strategy_mail_quality_state(
+                row, daily_close_confirmed_mode=stock_swing.validate(row, clock),
+                now_utc=clock,
+            )
+            if not quality_ok:
+                mail_reasons.append(quality_reason or "stock_strategy_mail_quality_gate")
+        except (TypeError, ValueError, AttributeError, KeyError, OverflowError):
+            mail_preview_complete = False
+    mail_preview = scanner_visibility.mail_check_summary(
+        row, state, reasons=mail_reasons, labels=_ALERT_SUPPRESSION_LABELS,
+        minimum_score=_ALERT_MIN_SCORE, assessed_at=assessed_at,
+        complete=mail_preview_complete,
+    )
     display_reasons = [
         reason for reason in (state.get("suppression_reasons") or [])
         if reason not in _DISPLAY_ONLY_SUPPRESSION_REASONS
@@ -16412,6 +16586,7 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
         "trade_grade": trade_grade,
         "trade_grade_label": trade_grade_label,
         "release_grade": release_grade,
+        "mail_check": mail_preview,
         **decision,
     }
 
@@ -16502,6 +16677,12 @@ def _bi_user_reason_labels(row: Dict[str, Any], state: Dict[str, Any], scanner_n
     return labels
 
 
+_SCANNER_DISPLAY_SOURCE_FIELDS = (
+    "score", "Score", "grade", "Grade", "trade_signal", "entry_status",
+    "trade_action", "signal_label",
+)
+
+
 def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -> None:
     """Make user-facing stock scanner rows reflect tradeability, not raw interest."""
     if scanner_name not in _STOCK_RESULT_TRADE_STATE_SCANNERS:
@@ -16510,6 +16691,14 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
     ticker = _extract_alert_ticker(item)
     if not ticker:
         return
+
+    basis = item.get("_scanner_display_basis")
+    if not (isinstance(basis, dict) and basis.get("version") == 1
+            and basis.get("scanner") == scanner_name and isinstance(basis.get("fields"), dict)):
+        item["_scanner_display_basis"] = {
+            "version": 1, "scanner": scanner_name,
+            "fields": {key: item[key] for key in _SCANNER_DISPLAY_SOURCE_FIELDS if key in item},
+        }
 
     raw_score = _alert_float(item.get("score", item.get("Score", item.get("BI_Score"))), None)
     raw_grade = item.get("grade", item.get("Grade", item.get("BI_Grade")))
@@ -16545,6 +16734,7 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
     item["scanner_decision_label"] = state.get("decision_label")
     item["scanner_decision_reason"] = state.get("decision_reason")
     item["scanner_suppression_reasons"] = state.get("display_reasons", [])
+    item["mail_check"] = state.get("mail_check")
     if scanner_name in {"bi_long", "bi_short"}:
         item["bi_criteria"] = _bi_trade_criteria(item, state)
         item["scanner_suppression_labels"] = _bi_user_reason_labels(item, state, scanner_name)
@@ -19762,14 +19952,25 @@ def _stock_momentum_breakout_continuation_quality(
     close_pos: float,
     gap_pct: Optional[float] = None,
     open_to_current_pct: Optional[float] = None,
+    completed_daily: bool = False,
 ) -> Dict[str, Any]:
-    """Estimate whether a momentum breakout is likely follow-through or a wick trap."""
+    """Score current/completed daily candle quality, not future continuation.
+
+    Legacy status names remain stable. The separate audit states exactly which
+    existing score threshold failed, without claiming a later retest is needed.
+    """
     if _normalize_strategy_key(strategy_name) != _normalize_strategy_key("Momentum Breakout Long"):
         return {}
 
-    price = float(price or 0)
-    if price <= 0:
+    parsed = [stock_swing.number(value) for value in (price, change_pct, rvol, close_pos)]
+    if any(value is None for value in parsed):
         return {}
+    price, change_pct, rvol, close_pos = parsed
+    if price <= 0 or rvol < 0 or not 0 <= close_pos <= 1:
+        return {}
+    for key in ("upper_wick_pct", "extension_atr", "atr_pct"):
+        if key in score_meta and stock_swing.number(score_meta[key]) is None:
+            return {}
 
     upper_wick = _clamp_float(score_meta.get("upper_wick_pct"), 0.0, 100.0, 0.0)
     atr_pct = max(_alert_float(score_meta.get("atr_pct"), 2.5) or 2.5, 0.1)
@@ -19797,10 +19998,9 @@ def _stock_momentum_breakout_continuation_quality(
         level_source = "EMA reclaim"
 
     breakout_buffer_pct = ((price - level) / level * 100.0) if level and level > 0 else None
-    # Forward-looking quality rubric, not a win probability.  The five buckets
-    # sum to 96 points on purpose: before the next bars exist, a scanner must
-    # never communicate certainty.  Close position and upper wick share the
-    # candle-acceptance budget instead of both adding oversized bonuses.
+    # Existing daily-bar quality rubric, not future continuation or a win
+    # probability. Its five buckets sum to 96 points; the automatic-mail floor
+    # remains 78. Close and wick share the candle-acceptance budget.
     close_points = 30.0 * _clamp_float((close_pos - 0.45) / 0.50, 0.0, 1.0, 0.0)
     wick_points = 16.0 * _clamp_float((45.0 - upper_wick) / 40.0, 0.0, 1.0, 0.0)
 
@@ -19844,6 +20044,7 @@ def _stock_momentum_breakout_continuation_quality(
     score = close_points + wick_points + volume_points + level_points + timing_points
     reasons: List[str] = []
     blockers: List[str] = []
+    deductions: List[Dict[str, Any]] = []
 
     if close_pos >= 0.88:
         reasons.append("Close nahe Tageshoch")
@@ -19901,12 +20102,15 @@ def _stock_momentum_breakout_continuation_quality(
     if meaningful_gap_overlap:
         if breakout_type == "TREND_RECLAIM":
             score -= 12
+            deductions.append({"code": "gap_reclaim", "label": "Gap/Reclaim statt Hoch-Ausbruch", "points": 12})
             blockers.append("Gap/Reclaim: erst Retest")
         if open_to_current_pct is not None and open_to_current_pct < 0.25:
             score -= 12
+            deductions.append({"code": "gap_open_not_held", "label": "Anschlussbewegung ab Open unter 0,25%", "points": 12})
             blockers.append("Gap haelt Open nicht")
         if close_pos < 0.72:
             score -= 10
+            deductions.append({"code": "gap_close_weak", "label": "Schlusskurslage des Gaps unter 72%", "points": 10})
             blockers.append("Gap schliesst nicht stark")
 
     if extension_atr >= 4.5 or change_pct >= 18:
@@ -19916,6 +20120,7 @@ def _stock_momentum_breakout_continuation_quality(
 
     if change_pct > 8 and upper_wick > 30:
         score -= 8
+        deductions.append({"code": "blowoff_wick", "label": "Tagesmove ueber 8% mit oberem Docht ueber 30%", "points": 8})
         blockers.append("Blowoff-Wick")
 
     score = int(round(_clamp_float(score, 0.0, 100.0, 0.0)))
@@ -19936,13 +20141,50 @@ def _stock_momentum_breakout_continuation_quality(
         status = "FAKEOUT_RISK"
         risk = "CRITICAL"
 
+    shortfall = max(0, 78 - score)
+    threshold_label = (
+        f"Tageskerzen-Qualitaet {score}/96; Mail-Mindestwert 78; es fehlen {shortfall} Punkte"
+        if shortfall else
+        f"Tageskerzen-Qualitaet {score}/96; Mindestwert 78 erreicht (weitere Mailpruefungen bleiben)"
+    )
+    if shortfall:
+        # Positive descriptive bins do not imply that the summed score passes.
+        blockers.insert(0, threshold_label)
+    quality_audit = {
+        "schema_version": 1,
+        "timeframe": "1D",
+        "evidence": "completed_daily" if completed_daily is True else "current_session",
+        "score": score,
+        "maximum_score": 96,
+        "mail_min_score": 78,
+        "score_deficit": shortfall,
+        "meets_mail_quality_floor": score >= 78,
+        "label": threshold_label,
+        "components": [
+            {
+                "code": code, "label": title, "points": round(points, 6),
+                "max_points": maximum, "shortfall_points": round(maximum - points, 6),
+            }
+            for code, title, points, maximum in (
+                ("close", "Schlusskurslage innerhalb der Tageskerze", close_points, 30),
+                ("wick", "Oberer Docht der Tageskerze", wick_points, 16),
+                ("volume", "Relatives Tagesvolumen", volume_points, 20),
+                ("level", "Abstand zum historischen Ausbruchslevel", level_points, 20),
+                ("timing", "Tagesbewegung und ATR-Erweiterung", timing_points, 10),
+            )
+        ],
+        "deductions": deductions,
+        "blockers": list(blockers),
+        "semantics": "daily_bar_quality_not_future_continuation_or_retest",
+    }
+
     return {
         "score": score,
         "label": label,
         "status": status,
         "risk": risk,
         "reasons": reasons[:4],
-        "blockers": blockers[:4],
+        "blockers": blockers[:5] if shortfall else blockers[:4],
         "level": _round_trade_price(level) if level else None,
         "level_source": level_source,
         "breakout_buffer_pct": round(breakout_buffer_pct, 2) if breakout_buffer_pct is not None else None,
@@ -19954,6 +20196,7 @@ def _stock_momentum_breakout_continuation_quality(
             "timing": round(timing_points, 1),
         },
         "interpretation": "quality_not_probability",
+        "quality_audit": quality_audit,
     }
 
 
@@ -22960,6 +23203,7 @@ def _strategy_scan_wrapper(
                         close_pos=close_pos,
                         gap_pct=gap_pct,
                         open_to_current_pct=((price - day_open) / day_open * 100) if day_open > 0 else None,
+                        completed_daily=swing_daily_mode,
                     )
                     if _breakout_quality:
                         _bq_score = int(_breakout_quality.get("score") or 0)
@@ -23137,6 +23381,7 @@ def _strategy_scan_wrapper(
                         "Breakout_Continuation_Label": _breakout_quality.get("label") if _breakout_quality else None,
                         "breakout_continuation_label": _breakout_quality.get("label") if _breakout_quality else None,
                         "Breakout_Continuation_Status": _breakout_quality.get("status") if _breakout_quality else None,
+                        "momentum_quality": _breakout_quality.get("quality_audit") if _breakout_quality else None,
                         "breakout_continuation_status": _breakout_quality.get("status") if _breakout_quality else None,
                         "Breakout_Fakeout_Risk": _breakout_quality.get("risk") if _breakout_quality else None,
                         "breakout_fakeout_risk": _breakout_quality.get("risk") if _breakout_quality else None,
@@ -31278,6 +31523,10 @@ def get_scan_results(
         diagnostics["suppressed_by_signal_policy"] = max(0, decorated_count - visible_count)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     warnings = list(quality["warnings"])
+    if scanner_name in _BI_SIGNAL_SCANNERS:
+        exclusion_warning = _bi_data_exclusion_warning(diagnostics)
+        if exclusion_warning:
+            warnings.insert(0, exclusion_warning)
     if stale_strategy_cache:
         warnings.insert(0, "Strategie-Cache ist alt - bitte Scan neu starten")
     if cache_identity_unverified:
@@ -31336,6 +31585,18 @@ def trigger_bi_scan(request: BIScanRequest):
     accepted = _run_scan_safe(f"bi_{request.direction}", lambda: _bi_background_scan_wrapper(request.direction))
     return _manual_scan_ack(f"bi_{request.direction}", accepted,
                             message=f"BI scan started ({request.direction})", direction=request.direction)
+
+
+def _bi_data_exclusion_warning(diagnostics):
+    """Completed BI worker is distinct from complete provider-data coverage."""
+    if not isinstance(diagnostics, dict) or diagnostics.get("coverage") != "complete_with_exclusions":
+        return None
+    excluded = diagnostics.get("excluded_data_symbols")
+    if type(excluded) is not int or not 0 < excluded <= 10**9:
+        return None
+    return (f"BI Scan beendet mit Datenausschluessen: {excluded} Aktien wegen ungueltiger Kursdaten "
+            "nicht ausgewertet. Nur separat gueltige 17/20-Signale werden angezeigt; "
+            "keine vollstaendige Datenabdeckung.")
 
 
 @app.get("/api/bi-results", response_model=ScanResultsResponse)
@@ -31405,6 +31666,9 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
         "funnel": cache_meta.get("diagnostics"),
         "attempt_diagnostics": scan_state.get("last_attempt_diagnostics"),
     }
+    exclusion_warning = _bi_data_exclusion_warning(diagnostics["funnel"])
+    if exclusion_warning:
+        quality["warnings"] = [exclusion_warning, *quality["warnings"]]
     scan_error = _public_scan_error_code(scan_state.get("last_error"))
     if scan_error:
         quality["warnings"] = [f"Letzter Scan fehlgeschlagen: {scan_error}", *quality["warnings"]]

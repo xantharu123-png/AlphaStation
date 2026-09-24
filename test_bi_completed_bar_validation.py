@@ -163,7 +163,7 @@ def test_actual_swing_scan_ignores_ineligible_open_without_changing_17_of_20(mon
 
 
 @pytest.mark.parametrize("swing_mode", [False, True])
-def test_actual_scan_keeps_bad_completed_series_quarantined_and_prior_final(monkeypatch, tmp_path, swing_mode):
+def test_actual_scan_excludes_bad_completed_series_and_publishes_independent_valid_rows(monkeypatch, tmp_path, swing_mode):
     raw = _to_polygon(_attach_ts(_flat_bars(), end_day=date(2026, 9, 22)))
     bad = copy.deepcopy(raw)
     bad[-2]["o"] = 0
@@ -171,15 +171,18 @@ def test_actual_scan_keeps_bad_completed_series_quarantined_and_prior_final(monk
         monkeypatch, tmp_path, _result(17), "short", [{"results": bad}, {"results": raw}],
     )
     monkeypatch.setenv("STOCK_SWING_DATA_MODE", "starter_swing" if swing_mode else "realtime")
-    with pytest.raises(scanners.ScannerDataError, match="scan_data_incomplete") as caught:
-        scanners._bi_background_scan("fixture", "short", tickers)
-    diagnostics = caught.value.diagnostics
-    assert len(analyses) == 1 and final.read_bytes() == before
+    scanners._bi_background_scan("fixture", "short", tickers)
+    cache = json.loads(final.read_text())
+    diagnostics = cache["diagnostics"]
+    assert len(analyses) == 1 and final.read_bytes() != before
+    assert cache["count"] == 1 and cache["results"][0]["Ticker"] == tickers[1]
     assert diagnostics["data_error_value_classes"] == {"zero_price": 1}
     assert diagnostics["data_error_positions"] == {"interior": 1}
     assert diagnostics["data_error_fields"] == {"o": 1}
     assert diagnostics["data_failures"] == diagnostics["quarantined_symbols"] == 1
-    assert diagnostics["coverage"] == "incomplete"
+    assert diagnostics["coverage"] == "complete_with_exclusions"
+    assert diagnostics["excluded_data_symbols"] == 1
+    assert diagnostics["data_retry_attempts"] == diagnostics["data_retry_failed"] == 1
 
 
 def test_live_path_still_requires_valid_uncompleted_prices():

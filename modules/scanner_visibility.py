@@ -75,6 +75,38 @@ def number(value):
         return None
 
 
+def mail_check_summary(row, state, *, reasons, labels, minimum_score, assessed_at, complete=True):
+    """Explain existing decisions; never authorize a send or recompute scores."""
+    row, state = mapping(row), mapping(state)
+    score = number(state.get("score"))
+    minimum = number(minimum_score)
+    # Match the producer score precedence; raw_score may predate a legitimate
+    # scanner cap and is not the currently classified setup score.
+    setup_score = next((value for key in ("BI_Score", "Score", "score", "setup_score", "raw_score")
+                        if (value := number(row.get(key))) is not None), None)
+    codes = list(dict.fromkeys(strings(reasons)))
+    translated = {**mapping(labels), **LABELS}
+    details = []
+    for code in codes:
+        label = translated.get(code, code.replace("_", " "))
+        if code == "score_below_alert_threshold" and score is not None and minimum is not None:
+            label = f"Mail-/Handelsplan-Score {score:g}; benoetigt mindestens {minimum:g}"
+        details.append({"code": code, "label": label})
+    valid = bool(complete and score is not None and 0 <= score <= 100
+                 and minimum is not None and 0 <= minimum <= 100
+                 and (score >= minimum or codes))
+    return {
+        "schema_version": 1,
+        "status": "blocked" if valid and codes else "checks_passed" if valid else "unavailable",
+        "semantics": "read_only_precheck_not_delivery_or_send_permission",
+        "assessed_at": number(assessed_at),
+        "setup_score": setup_score,
+        "trade_score": score,
+        "minimum_trade_score": minimum,
+        "reasons": details,
+    }
+
+
 def reasons(row):
     row = mapping(row)
     result = []

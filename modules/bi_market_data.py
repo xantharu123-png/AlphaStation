@@ -43,6 +43,18 @@ class BIAggregateDataError(ValueError):
         super().__init__(self.reason)
 
 
+def bi_symbol_local_price_error(error):
+    """Only OHLCV defects qualify for an independently excluded symbol.
+
+    Timestamp, response/envelope and transport failures are not granted this
+    exception. A series with this error is never repaired or partly consumed.
+    """
+    return isinstance(error, BIAggregateDataError) and (
+        (error.reason == "invalid_bar_value" and error.field in {"o", "h", "l", "c", "v"})
+        or (error.reason == "invalid_bar_geometry" and error.field == "bar")
+    )
+
+
 def parse_bi_daily_aggregates(payload, *, completed_through=None, as_of=None):
     """Return validated bars, including a confirmed empty history.
 

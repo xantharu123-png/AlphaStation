@@ -13,7 +13,7 @@ from test_bi_deep_fixes_scan import _flat_bars, _to_polygon
 
 @pytest.mark.parametrize("direction", ["long", "short"])
 @pytest.mark.parametrize("field,value", [("o", 0), ("v", -1), ("c", None), ("t", 0)])
-def test_bad_series_does_not_prevent_other_symbols_but_cannot_publish_final(
+def test_local_price_defects_exclude_only_bad_symbol_but_timestamp_defects_stay_incomplete(
     monkeypatch, tmp_path, direction, field, value
 ):
     valid = {"results": _to_polygon(_flat_bars())}
@@ -21,22 +21,33 @@ def test_bad_series_does_not_prevent_other_symbols_but_cannot_publish_final(
     scanners, tickers, final, before, calls, analyses, _ = _lifecycle(
         monkeypatch, tmp_path, _result(17), direction, [valid, invalid, valid]
     )
-    with pytest.raises(scanners.ScannerDataError, match="scan_data_incomplete"):
+    if field == "t":
+        with pytest.raises(scanners.ScannerDataError, match="scan_data_incomplete"):
+            scanners._bi_background_scan("fixture", direction, tickers)
+    else:
         scanners._bi_background_scan("fixture", direction, tickers)
     progress = json.loads((tmp_path / (direction + "-progress.json")).read_text())
     d = progress["diagnostics"]
-    assert len(calls) == d["checked"] == d["total"] == 3
+    assert d["checked"] == d["total"] == 3
+    assert len(calls) == (3 if field == "t" else 4)
     assert len(analyses) == d["analyzed"] == d["indicator_passed"] == 2
     assert d["quarantined_symbols"] == d["data_failures"] == 1
     assert d["data_error_fields"] == {field: 1}
     assert d["analysis_errors"] == 0 and progress["no_data"] == 0
-    assert d["coverage"] == "incomplete" and d["final_results"] is None
-    assert final.read_bytes() == before
-    # Any intermediate valid rows remain explicitly partial, never a fresh
-    # final. The API wrapper deletes this partial on error and sends no mail.
-    partial = json.loads((tmp_path / (direction + ".json.partial")).read_text())
-    assert partial["partial"] is True
-    assert all(r["BI_IndicatorsGreen"] >= 17 for r in partial["results"])
+    if field == "t":
+        assert d["coverage"] == "incomplete" and d["final_results"] is None
+        assert final.read_bytes() == before
+        partial = json.loads((tmp_path / (direction + ".json.partial")).read_text())
+        assert partial["partial"] is True
+        assert all(r["BI_IndicatorsGreen"] >= 17 for r in partial["results"])
+    else:
+        # Approved 2026-09-24: publish the finished, explicitly narrower scope.
+        assert d["coverage"] == "complete_with_exclusions" and d["final_results"] == 2
+        assert d["excluded_data_symbols"] == 1 and d["valid_data_symbols"] == 2
+        cache = json.loads(final.read_text())
+        assert cache["partial"] is False
+        assert {r["Ticker"] for r in cache["results"]} == {tickers[0], tickers[2]}
+        assert not (tmp_path / (direction + ".json.partial")).exists()
 
 
 @pytest.mark.parametrize("payload", [{"status": "NOT_AUTHORIZED"}, {"status": "RATE_LIMITED"}, {"results": "bad"}])
@@ -77,6 +88,7 @@ def test_future_bar_cannot_supply_live_price_or_indicators(monkeypatch, tmp_path
     assert len(calls) == 2 and len(analyses) == 1
     assert d["data_error_counts"] == {"invalid_bar_timestamp": 1}
     assert d["data_error_fields"] == {"t": 1}
+    assert d["valid_data_symbols"] == 1  # Only the other, convertible history.
     assert final.read_bytes() == before
 
 
