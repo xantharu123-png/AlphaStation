@@ -1287,6 +1287,10 @@ def _snapshot_break_transition(
     from overlapping bars in different timeframes. All completed closes can
     reset that witness, including a contradictory close at the same timestamp.
     A subsequent completed breakout may start a new, initially unretested leg.
+    Select only current proofs before ranking their strength: an expired fast
+    timeframe must not shadow a still-current daily close. The age limit is the
+    existing downstream trade-evidence limit (two source bars plus clock skew),
+    not a new tolerance or a preference for the longest timeframe.
     """
     confirmation = _reclaim_confirmation_at(zone, side)
     boundary = zone.upper if side == "LONG" else zone.lower
@@ -1324,10 +1328,19 @@ def _snapshot_break_transition(
     if proofs:
         # A genuine historical retest is stronger evidence than a shorter
         # unretested slice, provided every newer completed close still holds.
-        return min(proofs, key=lambda item: (
+        current_proofs = [
+            (seconds, proof) for seconds, proof in proofs
+            if (cutoff - proof.last_completed_at).total_seconds() <= seconds * 2 + 2
+        ]
+        selected = min(current_proofs or proofs, key=lambda item: (
             item[1].state != "RECLAIMED", -item[1].last_completed_at.timestamp(),
             item[0], item[1].timeframe,
         ))[1]
+        if current_proofs:
+            return selected
+        # Retain the old witness for diagnostics, but do not assert a current
+        # breakout or support/resistance role flip using only expired feeds.
+        return replace(selected, state="RECLAIM_PENDING", reason="completed_break_evidence_stale")
 
     # Preserve the newest failed/pending witness and its actual bar counts.
     # Choosing a fast but stale feed here would conceal a newer invalidation.

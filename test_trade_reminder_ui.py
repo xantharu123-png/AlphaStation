@@ -21,7 +21,8 @@ def test_sidebar_exposes_consistent_trigger_and_retest_reminders():
 def test_sidebar_persists_and_can_cancel_active_reminders():
     source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
-    assert "fetch(`${API}/api/trade-reminders?status=active`)" in source
+    assert "fetch(`${API}/api/trade-reminders?status=active&personal_only=true`)" in source
+    assert "fetch(`${API}/api/trade-reminders?status=triggered&personal_only=true`)" in source
     assert "fetch(`${API}/api/trade-reminders/${activeReminder.id}`" in source
     assert "typeof reminderExpiryValue === 'number' ? reminderExpiryValue * 1000" in source
     assert "Aktiv bis" in source

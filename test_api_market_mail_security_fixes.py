@@ -65,9 +65,13 @@ def test_trade_reminder_unknown_smtp_is_terminal_and_never_auto_retried(monkeypa
         "owner_email": "owner@example.invalid",
         "ticker": "ETH",
         "asset_type": "crypto",
+        "scanner": "early_movers",
+        "condition": "trigger",
         "channel": "email_browser",
-        "row": {"entry": 100, "stop": 95, "tp1": 110, "tp2": 120},
+        "row": {"Symbol": "ETH", "direction": "LONG", "entry": 100, "stop": 95,
+                "tp1": 110, "tp2": 120, "PerpChartSymbol": "ETHUSDT", "PerpChartExchange": "binance"},
     }
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda _: reminder["row"])
     calls = []
     monkeypatch.setattr(api, "HAS_AUTH", True)
     monkeypatch.setattr(

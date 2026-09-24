@@ -103,6 +103,7 @@ from modules import scan_control, scan_control_policy, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
 from modules.breakout_warnings import apply_breakout_warning, breakout_warning_fields
+from modules import scanner_visibility
 from modules.cup_shape import validate_cup_shape
 from modules.cup_signal_contract import (
     CUP_PATTERN_CONTRACT_VERSION,
@@ -1798,9 +1799,17 @@ _CRYPTO_FINAL_QUOTE_MAX_AGE_SECONDS = 10.0
 _CRYPTO_FINAL_PATH_TIMEFRAME = "1m"
 _CRYPTO_FINAL_PATH_INTERVAL_SECONDS = 60
 _CRYPTO_FINAL_PATH_MAX_BARS = 1000
-_TRADE_REMINDERS_FILE = "/tmp/alphastation_trade_reminders.json"
+_TRADE_REMINDERS_DEFAULT_FILE = str(
+    Path(os.environ.get("ALPHA_DATA_DIR", Path(__file__).parent / "data_cache"))
+    / "trade_reminders.json"
+)
+_TRADE_REMINDERS_FILE = _TRADE_REMINDERS_DEFAULT_FILE
+_TRADE_REMINDERS_LEGACY_FILE = str(
+    Path(os.environ.get("ALPHA_RUNTIME_TMP_DIR", "/tmp")) / "alphastation_trade_reminders.json"
+)
 _TRADE_REMINDER_CHECK_SEC = 60
 _TRADE_REMINDER_MAX_HOURS = 24
+_STRUCTURE_REMINDER_MAX_HOURS = 30 * 24
 _STOCK_REMINDER_TRIGGER_TIMEFRAME = "5m"
 # Polygon timestamps identify the candle open. A reminder check may lag one
 # scheduler interval, while the stock final-quote contract already tolerates
@@ -6408,36 +6417,198 @@ def _reminder_created_epoch(reminder: Dict[str, Any]) -> Optional[float]:
 
 
 def _load_trade_reminders() -> List[Dict[str, Any]]:
-    try:
-        if not os.path.exists(_TRADE_REMINDERS_FILE):
-            return []
-        with open(_TRADE_REMINDERS_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        return raw if isinstance(raw, list) else []
-    except Exception as exc:
-        print(f"[Reminder] load error: {exc}")
-        return []
+    """Load durable personal reminders with the existing legacy migration."""
+    from modules.scanner_reminders import load_records
+    legacy = _TRADE_REMINDERS_LEGACY_FILE if _TRADE_REMINDERS_FILE == _TRADE_REMINDERS_DEFAULT_FILE else None
+    return load_records(_TRADE_REMINDERS_FILE, legacy_path=legacy)
 
 
 def _save_trade_reminders(reminders: List[Dict[str, Any]]) -> None:
-    tmp_path = f"{_TRADE_REMINDERS_FILE}.{os.getpid()}.tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(reminders, f, indent=2, default=_serialize_json)
-        os.replace(tmp_path, _TRADE_REMINDERS_FILE)
-    except Exception as exc:
-        print(f"[Reminder] save error: {exc}")
+    from modules.scanner_reminders import save_records
+    save_records(_TRADE_REMINDERS_FILE, reminders)
+
+
+def _structure_reminder_server_row(ticker: str, scanner: str, direction: str) -> Dict[str, Any]:
+    """Resolve browser selection against a server-owned scanner snapshot."""
+    scanner_key = str(scanner or "").strip()
+    if scanner_key in {"bi_long", "bi_short"}:
+        expected_direction = "SHORT" if scanner_key == "bi_short" else "LONG"
+        if direction != expected_direction:
+            raise ValueError("reminder_scanner_direction_mismatch")
+        row, _ = _find_bi_signal_cache_row(ticker, direction)
+        if row is None:
+            raise ValueError("server_scanner_row_missing")
+        return deepcopy(row)
+    canonical = resolve_strategy_name(scanner_key, "stocks")
+    special = {"bear": BEAR_CACHE, "turtle": TURTLE_CACHE, "volume_spikes": VOLUME_SPIKES_CACHE}
+    if canonical in STRATEGIES:
+        path = _strategy_cache_path(canonical)
+        metadata = load_cache_metadata(path)
+        if metadata.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION:
+            raise ValueError("server_scanner_cache_version_old")
+        rows, _ = load_cache_file(path)
+    elif scanner_key in special:
+        rows = _extract_cache_rows_for_alert_audit(scanner_key, special[scanner_key])
+    else:
+        raise ValueError("structure_reminder_scanner_not_supported")
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("ticker") or row.get("Ticker") or row.get("Symbol") or "").upper()
+        setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+        side = str(row.get("direction") or row.get("Signal_Direction") or row.get("Direction") or setup.get("direction") or "").upper()
+        if symbol == ticker and side == direction:
+            matches.append(row)
+    if len(matches) != 1:
+        raise ValueError("server_scanner_row_missing_or_ambiguous")
+    from modules.scanner_visibility import unusable_reason
+    row = matches[0]
+    if unusable_reason(row):
+        raise ValueError("server_scanner_data_invalid")
+    if (not _cup_signal_contract_valid(row, strategy_name=canonical if canonical in STRATEGIES else None)
+            or not _stock_wyckoff_row_contract_valid(row, expected_strategy=canonical)
+            or not _stock_momentum_row_contract_valid(row)):
+        raise ValueError("server_scanner_pattern_contract_invalid")
+    return deepcopy(matches[0])
+
+
+def _evaluate_structure_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.scanner_reminders import evaluate
+    if not POLYGON_KEY:
+        return {"triggered": False, "reason": "daily_provider_not_configured"}
+    # Provider request is scoped to explicitly registered personal reminders.
+    # No live quote/session gate: evidence is the delayed completed daily close.
+    from modules.data_fetchers import fetch_daily_candles
+    bars = fetch_daily_candles(POLYGON_KEY, str(reminder.get("ticker") or ""), days=180)
+    return evaluate(reminder, bars, now=_reminder_now())
 
 
 def _find_early_mover_row(symbol: str) -> Optional[Dict[str, Any]]:
     rows, _ = load_cache_file(EARLY_MOVERS_CACHE, max_age_hours=24)
-    wanted = str(symbol or "").upper().replace("USDT", "")
+    wanted = str(symbol or "").strip().upper().removesuffix("USDT")
+    matches = []
     for row in _flatten_early_mover_rows(rows):
         if not isinstance(row, dict):
             continue
-        row_symbol = str(row.get("Symbol", row.get("symbol", row.get("ticker", "")))).upper().replace("USDT", "")
+        row_symbol = str(row.get("Symbol", row.get("symbol", row.get("ticker", "")))).strip().upper().removesuffix("USDT")
         if row_symbol == wanted:
-            return dict(row)
+            matches.append(row)
+    return deepcopy(matches[0]) if len(matches) == 1 else None
+
+
+def _crypto_reminder_capability_reason(
+    reminder: Dict[str, Any], row: Dict[str, Any], *, check_plan: bool = True,
+) -> Optional[str]:
+    """The existing crypto evaluator supports only Early-Mover LONG plans."""
+    if str(reminder.get("scanner") or "").strip().lower() != "early_movers":
+        return "unsupported_crypto_reminder_source"
+    if str(reminder.get("mode") or "intraday").strip().lower() != "intraday":
+        return "unsupported_crypto_reminder_mode"
+    if str(reminder.get("condition") or "trigger_or_retest").strip().lower() not in {
+        "trigger", "retest", "trigger_or_retest",
+    }:
+        return "unsupported_crypto_reminder_condition"
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    for source in (row, setup):
+        for key in ("scanner", "source_scanner", "scanner_source"):
+            if source.get(key) and str(source[key]).strip().lower() != "early_movers":
+                return "unsupported_crypto_reminder_source"
+    directions = [reminder.get("direction"), row.get("direction"), row.get("Direction"),
+                  row.get("Signal_Direction"), setup.get("direction"), setup.get("Direction")]
+    if any(str(direction).strip().upper() != "LONG" for direction in directions if direction):
+        return "unsupported_crypto_reminder_direction"
+    health = row.get("trade_health") if isinstance(row.get("trade_health"), dict) else {}
+    actions = " ".join(
+        str(source.get(key) or "").upper()
+        for source in (row, setup, health)
+        for key in ("trade_action", "trade_signal", "entry_status", "trade_decision",
+                    "action", "signal", "decision")
+    )
+    if "SHORT" in actions:
+        return "unsupported_crypto_reminder_direction"
+    if "CONTINUATION" in actions or "FORTSETZUNG" in actions:
+        return "unsupported_crypto_reminder_condition"
+    entry = _first_trade_level(row, ("entry",))
+    stop = _first_trade_level(row, ("stop_loss", "stop"))
+    tp1 = _first_trade_level(row, ("tp1",))
+    # An explicitly submitted or persisted Short-shaped plan cannot silently
+    # become a different LONG plan just because the same coin is cached.
+    if all(value is not None for value in (entry, stop, tp1)) and not stop < entry < tp1:
+        return "crypto_reminder_long_plan_invalid"
+    if not check_plan:
+        return None
+    contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol")
+    exchange = row.get("PerpChartExchange") or row.get("BestExchange")
+    if not isinstance(contract, str) or not contract.strip() or not isinstance(exchange, str) or not exchange.strip():
+        return "crypto_reminder_perp_market_missing"
+    if not all(value is not None and math.isfinite(value) and value > 0 for value in (entry, stop, tp1)):
+        return "crypto_reminder_long_plan_invalid"
+    if not stop < entry < tp1:
+        return "crypto_reminder_long_plan_invalid"
+    if any(row.get(key) for key in ("data_invalid", "partial_data", "data_partial")):
+        return "crypto_reminder_data_invalid"
+    return None
+
+
+def _resolve_crypto_reminder_row(
+    reminder: Dict[str, Any], *, require_current: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Resolve cache authority; never promote a client source claim to proof."""
+    saved = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    reason = _crypto_reminder_capability_reason(reminder, saved, check_plan=False)
+    if reason:
+        return None, reason
+    ticker = str(reminder.get("ticker") or "").strip().upper().removesuffix("USDT")
+    row = _find_early_mover_row(ticker) if ticker else None
+    if row is None:
+        # Only snapshots actually persisted by this API may outlive their
+        # scanner cache row. Legacy client-submitted rows have no such proof.
+        if require_current or reminder.get("crypto_source_verified") != "early_movers_cache_v1":
+            return None, "crypto_reminder_source_unverifiable"
+        row = deepcopy(saved)
+    reason = _crypto_reminder_capability_reason(reminder, row)
+    if reason:
+        return None, reason
+    symbol = str(row.get("Symbol") or row.get("symbol") or row.get("ticker") or "").strip().upper().removesuffix("USDT")
+    if not ticker or symbol != ticker:
+        return None, "crypto_reminder_symbol_mismatch"
+    return deepcopy(row), None
+
+
+def _crypto_reminder_delivery_reason(
+    reminder: Dict[str, Any], result: Dict[str, Any],
+) -> Optional[str]:
+    """Validate the actual stored trigger payload, not a newer cache plan."""
+    result_row = result.get("row") if isinstance(result.get("row"), dict) else {}
+    for candidate in (result, result_row):
+        reason = _crypto_reminder_capability_reason(reminder, candidate, check_plan=False)
+        if reason:
+            return reason
+        if any(candidate.get(key) for key in ("data_invalid", "partial_data", "data_partial")):
+            return "crypto_reminder_data_invalid"
+    row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
+    setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
+    # Match _format_reminder_email's exact precedence. In particular the
+    # triggered result.stop must never be shadowed by saved row.stop_loss.
+    levels = {
+        "entry": result.get("entry") or row.get("entry") or setup.get("entry") or setup.get("main_entry"),
+        "stop": result.get("stop") or row.get("stop_loss") or row.get("stop") or setup.get("stop_loss") or setup.get("stop"),
+        "tp1": result.get("tp1") or row.get("tp1") or setup.get("tp1"),
+        "tp2": result.get("tp2") or row.get("tp2") or setup.get("tp2"),
+    }
+    measured = {}
+    for key, value in levels.items():
+        number = _alert_float(value, None)
+        if key == "tp2" and value is None:
+            continue
+        if isinstance(value, bool) or number is None or not math.isfinite(number) or number <= 0:
+            return "crypto_reminder_long_plan_invalid"
+        measured[key] = number
+    if not measured["stop"] < measured["entry"] < measured["tp1"]:
+        return "crypto_reminder_long_plan_invalid"
+    if "tp2" in measured and measured["tp2"] <= measured["tp1"]:
+        return "crypto_reminder_long_plan_invalid"
     return None
 
 
@@ -6917,16 +7088,10 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
 
 def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     asset_type = str(reminder.get("asset_type", "crypto") or "crypto").lower()
-    ticker = str(reminder.get("ticker", "")).upper()
     if asset_type == "crypto":
-        row = _find_early_mover_row(ticker)
-        if not row:
-            saved_row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
-            if not saved_row:
-                return {"triggered": False, "reason": "missing_crypto_reminder_data"}
-            row = deepcopy(saved_row)
-            row.setdefault("Symbol", ticker.replace("USDT", ""))
-            row.setdefault("symbol", ticker.replace("USDT", ""))
+        row, unsupported_reason = _resolve_crypto_reminder_row(reminder)
+        if unsupported_reason:
+            return {"triggered": False, "reason": unsupported_reason}
         trigger_check = _verify_early_mover_intraday_trigger(row)
         _apply_early_mover_signal_state(row, trigger_check)
         created_epoch = _reminder_created_epoch(reminder)
@@ -6960,12 +7125,30 @@ def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
                 "row": row,
             }
         return {"triggered": False, "reason": trigger_check.get("reason", "crypto_trigger_not_ready"), "check": trigger_check}
+    if reminder.get("mode") == "structure_1d":
+        return _evaluate_structure_reminder(reminder)
     return _evaluate_stock_reminder(reminder)
 
 
 def _format_reminder_email(reminder: Dict[str, Any], result: Dict[str, Any]) -> str:
     ticker = html.escape(str(reminder.get("ticker", "?")).upper())
     reason = html.escape(str(result.get("reason", "Trigger bereit")).replace("_", " "))
+    if reminder.get("mode") == "structure_1d":
+        event_label = "Ruecktest" if reminder.get("condition") == "retest" else "Ausbruch"
+        zone = reminder.get("zone") or {}
+        return (
+            '<html><body style="font-family:Arial,sans-serif">'
+            f'<h2>Persoenlicher Strukturhinweis: {ticker} - 1D-{event_label} bestaetigt</h2>'
+            f'<p>Abgeschlossener Tageskurs: {_format_alert_price(result.get("last_close"))}. '
+            f'Kerzenschluss: {html.escape(str(result.get("candle_closed_at") or ""))}.</p>'
+            f'<p>Beobachtete Zone: {_format_alert_price(zone.get("lower"))} - '
+            f'{_format_alert_price(zone.get("upper"))}.</p>'
+            '<p>Deine gespeicherte Beobachtungsbedingung ist eingetreten. Dies ist kein neues '
+            'freigegebenes Handelssignal und keine Ausfuehrungsbestaetigung. Andere Scannerwarnungen '
+            '(z.B. naher Widerstand oder ungueltiger Handelsplan) koennen fortbestehen.</p>'
+            '<p>1D-Swing-Beobachtung mit verzoegerten Kursdaten. Der Reminder ist jetzt beendet.</p>'
+            '</body></html>'
+        )
     row = reminder.get("row") if isinstance(reminder.get("row"), dict) else {}
     setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
     entry = _format_alert_price(result.get("entry") or row.get("entry") or setup.get("entry") or setup.get("main_entry"))
@@ -7038,13 +7221,33 @@ def _deliver_trade_reminder_email(
     if str(reminder.get("email_delivery_status") or "").lower() in {
         "uncertain",
         "uncertain_manual_reconciliation",
+        "attempt_in_flight",
     }:
+        reminder["email_delivery_status"] = "uncertain_manual_reconciliation"
         reminder["email_delivery_manual_reconciliation_required"] = True
         reminder.pop("next_email_attempt_at", None)
         return False
+    if reminder.get("email_delivery_status") == "outbox_owned":
+        return False
+
+    if str(reminder.get("asset_type") or "crypto").strip().lower() == "crypto":
+        _, unsupported_reason = _resolve_crypto_reminder_row(reminder)
+        if not unsupported_reason:
+            unsupported_reason = _crypto_reminder_delivery_reason(reminder, result)
+        if unsupported_reason:
+            # Legacy already-triggered records bypass evaluation. Their retry
+            # path must not route unsupported Short/Continuation rows as Long.
+            reminder["email_delivery_status"] = "unsupported"
+            reminder["email_delivery_reason"] = unsupported_reason
+            reminder.pop("next_email_attempt_at", None)
+            return False
 
     owner_email = str(reminder.get("owner_email") or "").strip().lower()
     users = (_load_users() or {}).get("users", {}) if HAS_AUTH else {}
+    if not HAS_AUTH or not isinstance(users, dict) or owner_email not in users or not isinstance(users[owner_email], dict):
+        reminder["email_delivery_status"] = "disabled"
+        reminder["email_delivery_reason"] = "reminder_owner_missing"
+        return False
     owner = users.get(owner_email, {}) if isinstance(users, dict) else {}
     alert_email = str(owner.get("alert_email") or owner_email).strip().lower()
     email_enabled = owner.get("email_alerts_enabled", True) is not False
@@ -7071,6 +7274,7 @@ def _deliver_trade_reminder_email(
         tp2=result.get("tp2"),
     )]
     reason_label = str(result.get("reason") or "Trigger bereit").replace("_", " ").strip()
+    is_structure_notice = reminder.get("mode") == "structure_1d"
     # Real transport code always sets a more specific outcome.  Initialising
     # here also keeps simple test doubles/backward integrations classified as
     # a definite pre-DATA failure instead of inheriting thread-local state
@@ -7085,6 +7289,25 @@ def _deliver_trade_reminder_email(
                 f"{str(reminder.get('created_at') or '')}"
             ).encode("utf-8")
         ).hexdigest()
+    reminder.setdefault("id", reminder_dedupe_key)
+    persisted = _load_trade_reminders()
+    existing = next((r for r in persisted if r.get("id") == reminder["id"]), None)
+    if existing is not None and existing.get("email_delivery_status") in {
+        "sent", "outbox_owned", "attempt_in_flight", "uncertain_manual_reconciliation",
+    }:
+        reminder.update({key: value for key, value in existing.items()
+                         if key.startswith("email_") or key in {"next_email_attempt_at", "last_email_attempt_at"}})
+        return existing.get("email_delivery_status") == "sent"
+    # Claim the attempt durably before SMTP. If the process dies after DATA,
+    # restart sees in-flight and requires reconciliation, never an auto resend.
+    reminder["email_delivery_status"] = "attempt_in_flight"
+    reminder["email_attempts"] = attempts + 1
+    reminder["last_email_attempt_at"] = now
+    if existing is None:
+        persisted.append(dict(reminder))
+    else:
+        existing.update(reminder)
+    _save_trade_reminders(persisted)
     sent = _send_email_alert(
         f"Reminder: {reminder.get('ticker', '').upper()} {reason_label}",
         _format_reminder_email(reminder, result),
@@ -7094,9 +7317,9 @@ def _deliver_trade_reminder_email(
             if str(reminder.get("asset_type") or "crypto").lower() == "crypto"
             else str(row.get("trade_horizon") or "swing").strip().lower()
         ),
-        mail_class="trade",
+        mail_class="info" if is_structure_notice else "trade",
         recipient_emails=[alert_email],
-        telegram_text=_safe_format_telegram_rows(signal_rows),
+        telegram_text="" if is_structure_notice else _safe_format_telegram_rows(signal_rows),
         mail_channel=(
             "crypto"
             if str(reminder.get("asset_type") or "crypto").lower() == "crypto"
@@ -7121,6 +7344,13 @@ def _deliver_trade_reminder_email(
         return True
 
     delivery_outcome = _last_delivery_outcome()
+    if delivery_outcome == "outbox_queued":
+        # The durable outbox is now the sole retry owner. Its acceptance is not
+        # inbox delivery and must not be relabelled as sent by this worker.
+        reminder["email_delivery_status"] = "outbox_owned"
+        reminder["email_delivery_reason"] = "queued_for_delivery"
+        reminder.pop("next_email_attempt_at", None)
+        return False
     if delivery_outcome in {
         "unknown",
         "partial_unknown",
@@ -7191,7 +7421,11 @@ def _process_trade_reminders_once() -> None:
             if now - last_checked < _TRADE_REMINDER_CHECK_SEC:
                 continue
             reminder["last_checked_at"] = now
-            result = _evaluate_trade_reminder(reminder)
+            try:
+                result = _evaluate_trade_reminder(reminder)
+            except Exception as exc:
+                result = {"triggered": False, "reason": "reminder_evaluation_error"}
+                print(f"[Reminder] evaluation error: {type(exc).__name__}")
             reminder["last_check"] = result
             reminder["updated_at"] = _reminder_iso(now)
             changed = True
@@ -7199,7 +7433,13 @@ def _process_trade_reminders_once() -> None:
                 reminder["status"] = "triggered"
                 reminder["triggered_at"] = _reminder_iso(now)
                 reminder["trigger_result"] = result
+                # Persist terminal event before transport; durable transport
+                # dedupe handles a crash after SMTP acceptance.
+                _save_trade_reminders(reminders)
                 _deliver_trade_reminder_email(reminder, result, now)
+            elif result.get("invalidated"):
+                reminder["status"] = "invalidated"
+                reminder["invalidation_reason"] = result.get("reason")
         if changed:
             _save_trade_reminders(reminders)
 
@@ -15155,8 +15395,9 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
         "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
         "market_context": _get_market_context_snapshot().get("summary"),
         "diagnostics": diagnostics,
-        "signal_only": scanner_name in _SIGNAL_ONLY_SCANNERS,
-        "signal_policy": "Nur echte Trade-Signale; Watch-/Warte-/Kontext-Zeilen werden aus Trading-Listen entfernt." if scanner_name in _SIGNAL_ONLY_SCANNERS else "Kontext-/Statusdaten",
+        "signal_only": False,
+        "visibility_counts": scanner_visibility.counts(_visibility_instrument_rows(results)),
+        "signal_policy": "Scanner-Kandidaten mit Warnungen; Freigabe separat ausgewiesen. Mail- und Handelspruefungen bleiben unveraendert.",
     }
 
 
@@ -16368,7 +16609,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
     return decorated
 
 
-def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
+def _early_mover_visible_candidate(row: Dict[str, Any], *, display_only: bool = False) -> bool:
     """Show elite crypto trigger candidates without turning the tab into a watchlist.
 
     This is deliberately stricter than "interesting coin" and looser than
@@ -16387,6 +16628,33 @@ def _early_mover_visible_candidate(row: Dict[str, Any]) -> bool:
     entry_score = int(entry_score_value if entry_score_value is not None else _early_mover_entry_score(row))
     explosion_score = int(_alert_float(row.get("explosion_score"), None) if _alert_float(row.get("explosion_score"), None) is not None else _early_mover_explosion_score(row))
     risk_level = str(row.get("risk_level", "") or "").upper()
+
+    if display_only:
+        # Preserve primary setup/data quality, not downstream execution gates.
+        # Decoration may replace LONG_TRIGGER with NO_TRADE for a missing plan.
+        # This opt-in branch NEVER participates in mail/signal admission.
+        execution_score = _alert_float(row.get("execution_quality_score"), None)
+        confirmed_execution = bool(
+            signal == "JETZT_TRADEN"
+            and execution_score is not None
+            and execution_score >= _EARLY_MOVER_MIN_ARMED_PREBREAKOUT_SCORE
+        )
+        supported_action = action in {
+            "LONG_NOW", "LONG_TRIGGER", "WAIT_FOR_RETEST", "WAIT_FOR_TRIGGER",
+            "WAIT_FOR_CONTINUATION", "NO_TRADE",
+        }
+        return bool(
+            supported_action
+            and fields["direction"] in {"", "LONG"}
+            and max(setup_score, explosion_score) >= _EARLY_MOVER_VISIBLE_MIN_SETUP_SCORE
+            and (entry_score >= _EARLY_MOVER_VISIBLE_MIN_ENTRY_SCORE
+                 or explosion_score >= _ALERT_MIN_SCORE or confirmed_execution)
+            and _early_mover_btc_allows_long(fields)
+            and not fields["partial_data"]
+            and not fields["data_warning"]
+            and not flags.intersection({"partial_crypto_data", "data_warning"})
+            and not scanner_visibility.unusable_reason(row)
+        )
 
     if decision == "NO_TRADE":
         return False
@@ -16715,6 +16983,78 @@ def _filter_signal_rows(rows: List[Dict[str, Any]], scanner_name: str) -> Tuple[
     return kept, suppressed
 
 
+def _visibility_instrument_rows(results):
+    """Count nested instrument lists once, not ORB's duplicate convenience lists."""
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        nested = [key for key in ("breakdown_stocks", "coins", "breakouts", "failed_breakouts", "candidates") if isinstance(row.get(key), list)]
+        if not nested:
+            nested = [key for key in ("actionable_breakouts", "rejected_range_breaks") if isinstance(row.get(key), list)]
+        if nested:
+            for key in nested:
+                yield from _visibility_instrument_rows(row[key])
+        else:
+            yield row
+
+
+def _apply_scanner_visibility_policy(scanner_name: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """User-requested UI candidates. NEVER used to grant mail/tracker permission."""
+    visible = []
+    for raw in results or []:
+        if not isinstance(raw, dict):
+            continue
+        nested = [key for key in ("breakdown_stocks", "coins", "breakouts", "failed_breakouts", "candidates") if isinstance(raw.get(key), list)]
+        if not nested:
+            nested = [key for key in ("actionable_breakouts", "rejected_range_breaks") if isinstance(raw.get(key), list)]
+        if nested:
+            payload = dict(raw)
+            for key in nested:
+                payload[key] = _apply_scanner_visibility_policy(scanner_name, raw[key])
+            for key in ("actionable_breakouts", "rejected_range_breaks"):
+                if key not in nested and isinstance(raw.get(key), list):
+                    payload[key] = _apply_scanner_visibility_policy(scanner_name, raw[key])
+            stats = dict(scanner_visibility.mapping(payload.get("stats")))
+            stats.update(signal_only=False, visibility_counts=scanner_visibility.counts(_visibility_instrument_rows([payload])))
+            payload["stats"] = stats
+            visible.append(payload)
+            continue
+        management = str(raw.get("trade_action") or "").upper() in {"HALTEN", "AKTIV_HALTEN", "JETZT_VERKAUFEN"}
+        context = scanner_name in {"volume_spikes", "crash_monitor", "market_context", "money_flow", "narrative"} or management
+        if not context and scanner_visibility.unusable_reason(raw):
+            continue
+        try:
+            if stock_swing.is_swing(raw) and not management and not stock_swing.validate(raw, datetime.now(timezone.utc)):
+                continue
+            if scanner_name in _BI_SIGNAL_SCANNERS and not _filter_bi_signal_rows(scanner_name, [raw]):
+                continue
+            if scanner_name in {"strategy_scan", "stock_strategy"} and not _stock_momentum_row_contract_valid(raw):
+                continue
+            if scanner_name == "early_movers" and not _early_mover_visible_candidate(raw, display_only=True):
+                continue
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # An unreadable primary scanner contract is not a valid candidate.
+            continue
+        price = scanner_visibility.number(_extract_alert_price(raw))
+        if not context and (not _extract_alert_ticker(raw) or price is None or price <= 0):
+            continue
+        # ARMED is visible but is not a released trade. The pure presenter
+        # independently keeps canonical waiting/blocked states authoritative.
+        try:
+            released = _scanner_row_is_trade_signal(raw, scanner_name)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # Malformed optional display metadata cannot grant signal status.
+            # The presenter keeps this row as a warning, without fabricating a
+            # canonical decision or touching execution/mail consumers.
+            released = False
+        if scanner_name == "crypto_trade_signals":
+            released = released and str(raw.get("trade_action") or "").upper() in {"JETZT_LONG", "JETZT_SHORT"}
+        elif scanner_name == "penny_stocks":
+            released = released and str(raw.get("trade_action") or "").upper() == "JETZT_KAUFEN"
+        visible.append(scanner_visibility.present(raw, released=released, context=context, labels=_ALERT_SUPPRESSION_LABELS))
+    return visible
+
+
 def _apply_signal_only_policy(scanner_name: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove watchlist/wait/context rows from user-facing scanner results."""
     if scanner_name not in _SIGNAL_ONLY_SCANNERS:
@@ -16984,7 +17324,7 @@ def _decorate_early_mover_results(results: List[Dict[str, Any]], cache_age_secon
         rows = payload.get("coins")
         if isinstance(rows, list):
             payload["coins"] = _decorate_scan_results(rows, "early_movers", cache_age_seconds)
-    return _apply_signal_only_policy("early_movers", decorated)
+    return _apply_scanner_visibility_policy("early_movers", decorated)
 
 
 def load_cache_file(filepath: str, max_age_hours: Optional[int] = None) -> tuple[List[Dict], Optional[str]]:
@@ -17850,6 +18190,11 @@ def _build_structured_trade_setup(
             proof = _confirmed_trade_break_evidence(
                 {"price": entry, "scan_price_observed_at": structure_snapshot.as_of.isoformat()}, barrier)
             if zone.break_state != "break_confirmed" or not proof or proof.get("state") != "BREAK_CONFIRMED":
+                if isinstance(diagnostics, dict):
+                    diagnostics["barrier"] = {
+                        **barrier, "price": zone.upper if side == "LONG" else zone.lower,
+                        "timeframe": "/".join(sorted({e.timeframe for e in zone.evidence})),
+                    }
                 return _unavailable("crossed_resistance_unconfirmed" if side == "LONG" else "crossed_support_unconfirmed")
             breakout_warnings.append(proof)
         try:
@@ -22000,6 +22345,7 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
     # later VRVP, trade-health, mail or execution gates passed.
     strategy_row["native_plan_status"] = _plan_diagnostics["status"]
     strategy_row["native_plan_reason"] = _plan_diagnostics["reason"]
+    strategy_row["native_plan_diagnostics"] = dict(_plan_diagnostics)
     final_setup = strategy_row.get("trade_setup") or {}
     if (final_setup.get("breakout_confirmation") == "confirmed_close"
             and final_setup.get("retest_status") == "not_confirmed"):
@@ -28270,7 +28616,7 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
             "early_mover_min_rr": _EARLY_MOVER_MIN_ALERT_RR,
             "early_mover_retest_max_distance_r": _EARLY_MOVER_RETEST_MAX_DISTANCE_R,
             "bearish_stock_dedupe_seconds": _BEARISH_STOCK_ALERT_DEDUPE_SEC,
-            "note": "Alerts are defensive: S/A/A+ only; watch/wait/context rows are suppressed from scanner signal lists and do not email. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed closed 5m execution, BTC tailwind, fresh data, TP1 not missed, live R:R and a weak-link trade score. Explosion-Armed/watch mails are hard-disabled.",
+            "note": "Alerts are defensive: S/A/A+ only; warning candidates can be visible in the app but do not receive scanner trade-mail permission. Personal structure reminders are separate opt-in information. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed closed 5m execution, BTC tailwind, fresh data, TP1 not missed, live R:R and a weak-link trade score. Explosion-Armed/watch mails are hard-disabled.",
         },
         "coverage": {
             "automatic_api_scheduler": ["quote_capability", "bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan", "cup_handle_watch"],
@@ -28289,12 +28635,13 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
 def get_trade_reminders(
     status: Optional[str] = Query(None, description="Filter: active, triggered, expired, cancelled"),
     authorization: Optional[str] = Header(None),
+    personal_only: bool = False,
 ):
     """List trade reminders for browser polling and UI status."""
     owner_email, is_admin = _authenticated_request_identity(authorization)
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
-    if not is_admin:
+    if not is_admin or personal_only:
         reminders = [
             reminder for reminder in reminders
             if str(reminder.get("owner_email") or "").strip().lower() == owner_email
@@ -28318,6 +28665,10 @@ def get_trade_reminders(
             "asset_type": r.get("asset_type"),
             "scanner": r.get("scanner"),
             "condition": r.get("condition"),
+            "mode": r.get("mode", "intraday"),
+            "timeframe": r.get("timeframe", "5m"),
+            "zone": r.get("zone"),
+            "notification_kind": r.get("notification_kind"),
             "channel": r.get("channel"),
             "status": r.get("status"),
             "created_at": r.get("created_at"),
@@ -28325,6 +28676,8 @@ def get_trade_reminders(
             "triggered_at": r.get("triggered_at"),
             "last_check": last_check,
             "trigger_result": trigger_result,
+            "email_delivery_status": r.get("email_delivery_status", "not_triggered"),
+            "invalidation_reason": r.get("invalidation_reason"),
             "remaining_seconds": max(0, int(expires_at - now)) if expires_at else None,
         })
     return {
@@ -28351,12 +28704,43 @@ def create_trade_reminder(
     condition = str(request.condition or "trigger_or_retest").strip().lower()
     if condition not in {"trigger", "retest", "continuation", "trigger_or_retest"}:
         raise HTTPException(status_code=400, detail="Unbekannte Reminder-Bedingung")
-    duration_hours = max(0.25, min(float(request.duration_hours or 6), _TRADE_REMINDER_MAX_HOURS))
+    row = request.row if isinstance(request.row, dict) else {}
+    mode = str(row.get("reminder_mode") or "intraday").lower()
+    if mode not in {"intraday", "structure_1d"}:
+        raise HTTPException(status_code=400, detail="Unbekannter Reminder-Modus")
+    if mode == "structure_1d" and (asset_type != "stock" or condition not in {"trigger", "retest"}):
+        raise HTTPException(status_code=400, detail="1D-Strukturreminder braucht Aktien und Ausbruch oder Ruecktest")
+    duration_number = _alert_float(request.duration_hours, None)
+    if duration_number is None or not math.isfinite(duration_number) or duration_number <= 0:
+        raise HTTPException(status_code=400, detail="Ungueltige Reminder-Dauer")
+    max_hours = _STRUCTURE_REMINDER_MAX_HOURS if mode == "structure_1d" else _TRADE_REMINDER_MAX_HOURS
+    duration_hours = max(0.25, min(duration_number, max_hours))
     channel = str(request.channel or "email_browser").lower()
     if channel not in ("email", "browser", "email_browser"):
         channel = "email_browser"
     now = _reminder_now()
-    row = request.row if isinstance(request.row, dict) else {}
+    zone = None
+    if mode == "structure_1d":
+        from modules.scanner_reminders import anchor_from_row
+        direction = str(row.get("direction") or "").upper()
+        try:
+            server_row = _structure_reminder_server_row(ticker, request.scanner, direction)
+            zone = anchor_from_row(
+                server_row, ticker=ticker, direction=direction, condition=condition, now=now,
+                zone_id=row.get("reminder_zone_id"),
+            )
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        # Only minimal server-owned identity persists. A client cannot inject
+        # a synthetic entry/stop or provenance claim into this notification.
+        row = {"direction": direction, "trade_horizon": "swing"}
+    if asset_type == "crypto":
+        row, unsupported_reason = _resolve_crypto_reminder_row({
+            "ticker": ticker, "scanner": request.scanner, "condition": condition,
+            "mode": mode, "row": row,
+        }, require_current=True)
+        if unsupported_reason:
+            raise HTTPException(status_code=400, detail=unsupported_reason)
     normalized_ticker = ticker[:-4] if asset_type == "crypto" and ticker.endswith("USDT") else ticker
     reminder = {
         "id": uuid.uuid4().hex[:12],
@@ -28365,6 +28749,10 @@ def create_trade_reminder(
         "asset_type": asset_type,
         "scanner": str(request.scanner or "early_movers"),
         "condition": condition,
+        "mode": mode,
+        "timeframe": "1D" if mode == "structure_1d" else "5m",
+        "zone": zone,
+        "notification_kind": "personal_structure_update" if mode == "structure_1d" else "personal_trigger",
         "channel": channel,
         "status": "active",
         "row": row,
@@ -28376,8 +28764,27 @@ def create_trade_reminder(
         "last_checked_at": 0,
         "last_check": None,
     }
+    if asset_type == "crypto":
+        reminder["crypto_source_verified"] = "early_movers_cache_v1"
     with _TRADE_REMINDER_LOCK:
         reminders = _load_trade_reminders()
+        if mode == "structure_1d":
+            for old in reminders:
+                if (old.get("status") == "active" and float(old.get("expires_at") or 0) > now
+                        and old.get("owner_email") == owner_email and old.get("ticker") == normalized_ticker
+                        and old.get("mode") == mode and old.get("condition") == condition
+                        and old.get("zone") == zone):
+                    # Repeated clicks/HTTP retries retain event identity and the
+                    # causal activation time; only the requested expiry extends.
+                    old["expires_at"] = max(old["expires_at"], reminder["expires_at"])
+                    old["expires_at_iso"] = _reminder_iso(old["expires_at"])
+                    old["updated_at"] = _reminder_iso(now)
+                    old["channel"] = channel
+                    _save_trade_reminders(reminders)
+                    public_old = {k: v for k, v in old.items() if k not in {"row", "owner_email"}}
+                    public_old["expires_at"] = old["expires_at_iso"]
+                    public_old["remaining_seconds"] = max(0, int(old["expires_at"] - now))
+                    return {"status": "ok", "message": "Bestehender Reminder verlaengert", "reminder": public_old}
         # One active reminder per user and instrument avoids duplicate trigger/retest mails.
         for old in reminders:
             if (
@@ -28385,12 +28792,17 @@ def create_trade_reminder(
                 and str(old.get("owner_email") or "").strip().lower() == owner_email
                 and str(old.get("ticker", "")).upper() == reminder["ticker"]
                 and str(old.get("asset_type", "")).lower() == reminder["asset_type"]
+                and (str(old.get("mode") or "intraday") == mode)
+                and (mode != "structure_1d" or (
+                    old.get("mode") == mode and old.get("condition") == condition
+                    and (old.get("zone") or {}).get("direction") == zone["direction"]
+                ))
             ):
                 old["status"] = "cancelled"
                 old["updated_at"] = _reminder_iso(now)
         reminders.append(reminder)
         _save_trade_reminders(reminders)
-    public_reminder = {k: v for k, v in reminder.items() if k != "row"}
+    public_reminder = {k: v for k, v in reminder.items() if k not in {"row", "owner_email"}}
     public_reminder["expires_at"] = reminder["expires_at_iso"]
     public_reminder["remaining_seconds"] = max(0, int(reminder["expires_at"] - now))
     return {
@@ -30729,7 +31141,7 @@ def get_scan_results(
     pre_policy_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)
     decorated_count = len(results or [])
-    results = _apply_signal_only_policy(scanner_name, results)
+    results = _apply_scanner_visibility_policy(scanner_name, results)
     visible_count = len(results or [])
     if diagnostics is not None:
         diagnostics = dict(diagnostics)
@@ -30841,7 +31253,7 @@ def get_bi_results(direction: str = Query("long", description="long or short")):
     pre_decorate_count = len(results or [])
     results = _decorate_scan_results(results, scanner_name, cache_age)
     decorated_count = len(results or [])
-    results = _apply_signal_only_policy(scanner_name, results)
+    results = _apply_scanner_visibility_policy(scanner_name, results)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     diagnostics = {
         "mode": "scanner_signals_only",
@@ -30922,7 +31334,7 @@ def get_bear_results():
             print(f"[Warning] {e}")
 
     results = _decorate_scan_results(results, "bear", cache_age)
-    results = _apply_signal_only_policy("bear", results)
+    results = _apply_scanner_visibility_policy("bear", results)
     quality = _scan_quality_payload("bear", cache_age, results)
     result_count = _effective_scan_result_count("bear", results)
     return ScanResultsResponse(
@@ -30975,7 +31387,7 @@ def get_biotech_results():
             print(f"[Warning] {e}")
 
     results = _decorate_scan_results(results, "biotech", cache_age)
-    results = _apply_signal_only_policy("biotech", results)
+    results = _apply_scanner_visibility_policy("biotech", results)
     quality = _scan_quality_payload("biotech", cache_age, results)
     return ScanResultsResponse(
         status="success",
@@ -34060,10 +34472,10 @@ def get_crypto_explosion_results():
         except Exception as exc:
             print(f"[Warning] {exc}")
     decorated = _decorate_scan_results(results, "crypto_explosion", cache_age)
-    decorated = _apply_signal_only_policy("crypto_explosion", decorated)
     # AUDIT M-CryptoExplosion: abgelaufene 5m-Trigger VOR Quality/Stats
     # downgraden, damit trade_now_count die Wahrheit zeigt.
     decorated = _downgrade_expired_crypto_triggers(decorated, cache_age)
+    decorated = _apply_scanner_visibility_policy("crypto_explosion", decorated)
     quality = _scan_quality_payload("crypto_explosion", cache_age, decorated)
     runtime_stats = (_scan_cache_payload(CRYPTO_EXPLOSION_CACHE) or {}).get("scan_stats") or {}
     if runtime_stats.get("source_degraded"):
@@ -34357,7 +34769,7 @@ def get_btc_divergenz():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_scan_results(results, "btc_divergenz", cache_age)
-    decorated = _apply_signal_only_policy("btc_divergenz", decorated)
+    decorated = _apply_scanner_visibility_policy("btc_divergenz", decorated)
     quality = _scan_quality_payload("btc_divergenz", cache_age, decorated)
     source_status = cache_payload.get("source_status")
     if not isinstance(source_status, dict):
@@ -35652,6 +36064,7 @@ def get_new_listing_results():
     raw_count = len(results) if results else 0
     results = _downgrade_expired_new_listing_triggers(results or [], cache_age)
     decorated, display_stats = _decorate_new_listing_display_results(results, cache_age)
+    decorated = _apply_scanner_visibility_policy("new_listing", decorated)
     stats = {
         "raw_rows": raw_count,
         "new_listings": len(decorated) if decorated else 0,
@@ -35801,13 +36214,34 @@ def _enforce_crypto_structure_wait(row: Dict[str, Any]) -> Dict[str, Any]:
     return downgraded
 
 
-def _normalize_crypto_long_signal(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _normalize_crypto_long_signal(row: Dict[str, Any], *, display_only: bool = False) -> Optional[Dict[str, Any]]:
     if not isinstance(row, dict):
         return None
     symbol = str(row.get("Symbol") or row.get("symbol") or "").upper()
     if not symbol:
         return None
     signal = str(row.get("trade_signal") or "").upper()
+    if display_only:
+        price = scanner_visibility.number(row.get("Price", row.get("price")))
+        score = scanner_visibility.number(row.get("explosion_score", row.get("score")))
+        decision = str(row.get("trade_decision") or scanner_visibility.mapping(row.get("trade_health")).get("decision") or "").upper()
+        action = str(row.get("trade_action") or "").upper()
+        waiting_states = {"NO_TRADE", "BLOCKED", "WAIT_FOR_TRIGGER", "WAIT_FOR_RETEST", "WAIT_FOR_CONTINUATION"}
+        if (price is None or price <= 0 or score is None or score < 70
+                or scanner_visibility.unusable_reason(row) or row.get("partial_data")
+                or row.get("data_partial")):
+            return None
+        if signal in {"WARTEN", "WAIT", "NICHT_TRADEN"} or decision in waiting_states or action in waiting_states:
+            # Present an existing cache candidate without manufacturing ARMED,
+            # NOW, alertability, or replacing its canonical wait/blocker.
+            return {
+                **deepcopy(row),
+                "Symbol": symbol, "symbol": symbol, "direction": "LONG",
+                "strategy": "Explosion Long", "scanner_source": "crypto_explosion",
+                "Price": price, "price": price, "trade_score": int(round(score)),
+                "direction_reason": "Compression/Reclaim/Breakout-Engine",
+                "isCrypto": True, "isExchangeCrypto": True,
+            }
     if signal not in {"JETZT_TRADEN", "EXPLOSION_ARMED"}:
         return None
     score = _crypto_trade_to_float(row.get("explosion_score", row.get("score")), 0)
@@ -36083,10 +36517,11 @@ def _crypto_trade_prefer_candidate(candidate: Dict[str, Any], current: Dict[str,
     return _crypto_trade_to_float(candidate.get("risk_reward"), 0) > _crypto_trade_to_float(current.get("risk_reward"), 0)
 
 
-def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: List[Dict[str, Any]], *, display_only: bool = False) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     for row in long_rows or []:
-        normalized = _normalize_crypto_long_signal(row)
+        normalized = (_normalize_crypto_long_signal(row, display_only=True)
+                      if display_only else _normalize_crypto_long_signal(row))
         if normalized:
             candidates.append(_enforce_crypto_structure_wait(normalized))
     for row in short_rows or []:
@@ -36152,20 +36587,22 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
     return rows[:120]
 
 
-def _build_crypto_trade_signals_from_caches() -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str], Optional[int], List[str]]:
+def _build_crypto_trade_signals_from_caches(*, display_only: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str], Optional[int], List[str]]:
     long_raw, long_cached_at = load_cache_file(CRYPTO_EXPLOSION_CACHE)
     short_raw, short_cached_at = load_cache_file(NEW_LISTING_CACHE)
     long_age = _crypto_trade_cache_age(long_cached_at)
     short_age = _crypto_trade_cache_age(short_cached_at)
     long_rows = _decorate_scan_results(long_raw or [], "crypto_explosion", long_age)
-    long_rows = _apply_signal_only_policy("crypto_explosion", long_rows)
+    if not display_only:
+        long_rows = _apply_signal_only_policy("crypto_explosion", long_rows)
     # AUDIT M-CryptoExplosion: gleicher Stale-Trigger-Downgrade wie im
     # crypto-explosion-GET — die Merge-Engine darf keine abgelaufenen
     # LONG_NOW-Trigger als handelbar weiterreichen.
     long_rows = _downgrade_expired_crypto_triggers(long_rows, long_age)
     short_raw = _downgrade_expired_new_listing_triggers(short_raw or [], short_age)
     short_rows, short_stats = _decorate_new_listing_display_results(short_raw, short_age)
-    merged = _merge_crypto_trade_signals(long_rows, short_rows)
+    merged = (_merge_crypto_trade_signals(long_rows, short_rows, display_only=True)
+              if display_only else _merge_crypto_trade_signals(long_rows, short_rows))
     cached_at = _crypto_trade_max_cached_at(long_cached_at, short_cached_at)
     cache_age = _crypto_trade_cache_age(cached_at)
     warnings = []
@@ -36217,7 +36654,8 @@ def trigger_crypto_trade_signals_scan():
 
 @app.get("/api/crypto-trade-signals-results")
 def get_crypto_trade_signals_results():
-    rows, stats, cached_at, cache_age, source_warnings = _build_crypto_trade_signals_from_caches()
+    rows, stats, cached_at, cache_age, source_warnings = _build_crypto_trade_signals_from_caches(display_only=True)
+    rows = _apply_scanner_visibility_policy("crypto_trade_signals", rows)
     quality = _scan_quality_payload("crypto_trade_signals", cache_age, rows)
     quality["signal_policy"] = (
         "Unified crypto direction scanner: LONG from explosion/reclaim, SHORT from pump/new-listing crack. "
@@ -39694,6 +40132,9 @@ def get_penny_stock_results(include_watch: bool = False):
     auto_show_prep = bool(not rows and not include_watch and prep_rows)
     if auto_show_prep:
         rows = prep_rows
+    rows = _apply_scanner_visibility_policy("penny_stocks", rows)
+    near_entries = _apply_scanner_visibility_policy("penny_stocks", near_entries)
+    prep_rows = _apply_scanner_visibility_policy("penny_stocks", prep_rows)
     requested_actions = _PENNY_VISIBLE_ACTIONS | (
         _PENNY_OPTIONAL_ACTIONS if (effective_include_watch or auto_show_prep) else frozenset()
     )
@@ -39739,6 +40180,7 @@ def get_penny_stock_results(include_watch: bool = False):
         "data": rows,
         "near_entries": near_entries,
         "trigger_prep_rows": prep_rows,
+        "data_quality": {"visibility_counts": scanner_visibility.counts(rows), "signal_only": False},
         "cached_at": cached_at,
         "cache_age_seconds": cache_age,
         "monitor_cached_at": monitor_cached_at,
@@ -39989,7 +40431,7 @@ def get_volume_spikes():
         except Exception as e:
             print(f"[Warning] {e}")
     decorated = _decorate_scan_results(results, "volume_spikes", cache_age)
-    decorated = _apply_signal_only_policy("volume_spikes", decorated)
+    decorated = _apply_scanner_visibility_policy("volume_spikes", decorated)
     quality = _scan_quality_payload("volume_spikes", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 
@@ -40981,6 +41423,7 @@ def get_orb_results():
         except Exception:
             pass
     decorated = _decorate_orb_results(results, cache_age)
+    decorated = _apply_scanner_visibility_policy("orb", decorated)
     quality = _scan_quality_payload("orb", cache_age, decorated)
     return {"status": "success", "data": decorated, "cached_at": cached_at, "cache_age_seconds": cache_age, "data_quality": quality, "warnings": quality["warnings"], "exclusion_policy": quality["exclusion_policy"]}
 

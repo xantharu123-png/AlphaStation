@@ -522,6 +522,10 @@
             .secondary-tab { padding: 10px 14px; white-space: nowrap; }
             .scanner-mobile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
+        .table-row:has([data-visibility-status="candidate_warning"]) .grade-badge,
+        .scanner-mobile-card:has([data-visibility-status="candidate_warning"]) .grade-badge {
+            background: #fef3c7 !important; color: #92400e !important; border: 1px solid #f59e0b;
+        }
     </style>
 </head>
 <body>
@@ -2428,6 +2432,18 @@ function ToastContainer() {
     );
 }
 
+function tradeReminderNotification(reminder = {}) {
+    const structural = reminder.mode === 'structure_1d' || reminder.reminder_mode === 'structure_1d';
+    const condition = reminder.condition === 'retest' ? 'Ruecktest' : 'Ausbruch';
+    return structural ? {
+        title: `1D-${condition} bestaetigt: ${reminder.ticker || ''}`,
+        body: 'Persoenlicher Strukturhinweis. Kein neues Handelssignal und keine automatische Handelsfreigabe.',
+    } : {
+        title: `Trigger bereit: ${reminder.ticker || ''}`,
+        body: String(reminder.trigger_result?.reason || reminder.last_check?.reason || 'Trigger bereit').replaceAll('_', ' '),
+    };
+}
+
 function TradeReminderPoller() {
     const seenRef = useRef(new Set((() => {
         try { return JSON.parse(localStorage.getItem('tradeReminderSeen') || '[]'); }
@@ -2439,8 +2455,7 @@ function TradeReminderPoller() {
             localStorage.setItem('tradeReminderSeen', JSON.stringify(Array.from(seenRef.current).slice(-100)));
         };
         const notify = (reminder) => {
-            const title = `Trigger bereit: ${reminder.ticker}`;
-            const reason = (reminder.trigger_result?.reason || reminder.last_check?.reason || 'Trigger bereit').replaceAll('_', ' ');
+            const { title, body: reason } = tradeReminderNotification(reminder);
             if (window.addToast) window.addToast(`${title} - ${reason}`, 'success');
             if ('Notification' in window && Notification.permission === 'granted') {
                 try { new Notification(title, { body: reason }); } catch(e) {}
@@ -2448,7 +2463,7 @@ function TradeReminderPoller() {
         };
         const poll = async () => {
             try {
-                const res = await fetch(`${API}/api/trade-reminders?status=triggered`);
+                const res = await fetch(`${API}/api/trade-reminders?status=triggered&personal_only=true`);
                 if (!res.ok) return;
                 const data = await res.json();
                 (data.reminders || []).forEach(reminder => {
@@ -2979,6 +2994,109 @@ function SwingPlanNotice({ row = {} }) {
     </div>;
 }
 
+function scannerCandidatePresentation(row = {}) {
+    if (!row || typeof row !== 'object' || !['released', 'candidate_warning', 'context'].includes(row.visibility_status)) return null;
+    const released = row.visibility_status === 'released' && row.visibility_is_trade_signal === true;
+    const context = row.visibility_status === 'context';
+    const warnings = (Array.isArray(row.visibility_warnings) ? row.visibility_warnings : []).filter(w => (
+        w && typeof w === 'object' && typeof w.code === 'string' && typeof w.label === 'string' && w.label.trim()
+    )).slice(0, 12).map(w => {
+        const numeric = key => typeof w[key] === 'number' && Number.isFinite(w[key]) ? w[key] : null;
+        const detail = [];
+        if (numeric('price') !== null && w.price > 0) detail.push(`Level ${w.price.toLocaleString('de-CH', { maximumFractionDigits: 6 })}`);
+        if (numeric('distance_pct') !== null) detail.push(`${w.distance_pct.toFixed(2)}% Abstand`);
+        if (numeric('distance_r') !== null) detail.push(`Abstand ${w.distance_r.toFixed(2)}R`);
+        if (typeof w.timeframe === 'string' && /^(1m|5m|15m|30m|1H|4H|1D|1W)$/i.test(w.timeframe)) detail.push(w.timeframe);
+        return { code: w.code.slice(0, 100), label: w.label.trim().slice(0, 350), detail: detail.join(' · ') };
+    });
+    return {
+        status: released ? 'released' : context ? 'context' : 'candidate_warning',
+        label: released ? 'Freigegebenes Signal' : context ? 'Marktkontext · kein Handelssignal' : 'Kandidat mit Warnung · kein freigegebener Einstieg',
+        warnings,
+    };
+}
+
+function stockStructureReminderSource(row = {}) {
+    if (!row || typeof row !== 'object' || row.isCrypto === true) return null;
+    const setup = row.trade_setup && typeof row.trade_setup === 'object' ? row.trade_setup : {};
+    const structure = row.level_structure || row.Level_Structure || setup.level_structure || setup.Level_Structure;
+    const dailySwing = row.stock_swing_mode === 'completed_daily_swing'
+        || (row.swing_timeframe === '1D' && row.trade_horizon === 'swing')
+        || (structure?.asset_class === 'stock' && structure?.horizon === 'swing' && structure?.completed_bar_counts?.['1D'] > 0);
+    const direction = String(row.direction || row.BI_Direction || row.Direction || setup.direction || '').toUpperCase();
+    // UI availability is not validation: the server re-loads its current cache
+    // and freezes its own native zone; no submitted client level is trusted.
+    if (!dailySwing || !structure || !['LONG', 'SHORT'].includes(direction)) return null;
+    if (row.data_invalid || row.partial_data || row.data_partial || row.visibility_status === 'context') return null;
+    const codes = (Array.isArray(row.visibility_warnings) ? row.visibility_warnings : []).map(w => String(w?.code || ''));
+    if (codes.some(code => /invalid_bar|data_(invalid|missing|stale)|stale_data|expired_data/.test(code))) return null;
+    return { mode: 'structure_1d', direction, timeframe: '1D' };
+}
+
+function cryptoExecutionReminderCapability(row = {}, condition = 'trigger') {
+    const unsupported = reason => ({ supported: false, reason });
+    if (!row || typeof row !== 'object') return unsupported('Quelle nicht belegt');
+    if (!['trigger', 'retest', 'trigger_or_retest'].includes(condition)) return unsupported('Fortsetzungs-Reminder fuer Krypto nicht verifiziert');
+    const setup = row.trade_setup && typeof row.trade_setup === 'object' ? row.trade_setup : {};
+    const source = String(row.scanner || row.source_scanner || row.scanner_source || '').toLowerCase();
+    if (source !== 'early_movers') return unsupported('Fuer diese Kryptoquelle ist kein verifizierter Reminder verfuegbar');
+    const directions = [row.direction, row.Direction, setup.direction].filter(Boolean).map(value => String(value).toUpperCase());
+    const action = [row.trade_action, row.trade_signal, row.entry_status, row.trade_decision, row.trade_health?.decision, setup.trade_action].filter(Boolean).join(' ').toUpperCase();
+    if (directions.some(direction => direction !== 'LONG') || action.includes('SHORT')) return unsupported('Krypto-Short-Reminder nicht verifiziert');
+    if (/CONTINUATION|FORTSETZUNG/.test(action)) return unsupported('Fortsetzungs-Reminder fuer Krypto nicht verifiziert');
+    if (!(row.PerpChartSymbol || row.PerpMatchSymbol) || !(row.PerpChartExchange || row.BestExchange)) return unsupported('Verifizierte Perp-Boerse oder Kontrakt fehlt');
+    const measured = (...values) => {
+        for (const value of values) {
+            if (typeof value !== 'number' && typeof value !== 'string') continue;
+            if (typeof value === 'string' && !value.trim()) continue;
+            const number = Number(value);
+            if (Number.isFinite(number) && number > 0) return number;
+        }
+        return null;
+    };
+    const entry = measured(row.entry, setup.entry);
+    const stop = measured(row.stop_loss, row.stop, setup.stop_loss, setup.stop);
+    const tp1 = measured(row.tp1, setup.tp1);
+    if (entry === null || stop === null || tp1 === null || !(stop < entry && entry < tp1)) return unsupported('Verifizierter Long-Handelsplan fehlt');
+    if (row.data_invalid || row.partial_data || row.data_partial) return unsupported('Verwertbare Kursdaten fehlen');
+    return { supported: true, reason: 'Early-Mover Long: abgeschlossener 5m-Trigger oder Ruecktest' };
+}
+
+function scannerVisibleRowsSummary(rows) {
+    if (!Array.isArray(rows)) return null;
+    const counts = { released: 0, candidate_warning: 0, context: 0, unclassified: 0, total: rows.length };
+    rows.forEach(row => {
+        const view = scannerCandidatePresentation(row);
+        counts[view ? view.status : 'unclassified'] += 1;
+    });
+    return counts.total > counts.unclassified ? counts : null;
+}
+
+function ScannerVisibilitySummary({ rows }) {
+    const counts = scannerVisibleRowsSummary(rows);
+    if (!counts) return null;
+    return <div className="text-xs border border-amber-200 bg-amber-50 text-amber-900 rounded-lg p-3" role="status" data-testid="scanner-visibility-summary">
+        Im angezeigten Ergebnisstand: {counts.released} freigegebene Signale · {counts.candidate_warning} Kandidaten mit Warnungen · {counts.context} Marktkontext
+        {counts.unclassified > 0 && <span> · {counts.unclassified} ohne aktuellen Sichtbarkeitsnachweis</span>}.
+        {' '}Zaehlt nur die aktuell angezeigten Zeilen, gegebenenfalls einen Zwischenstand; keine Aussage ueber Mailzustellung.
+    </div>;
+}
+
+function ScannerCandidateStatus({ row = {}, compact = false }) {
+    const view = scannerCandidatePresentation(row);
+    if (!view) return null;
+    const tone = view.status === 'released' ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+        : view.status === 'context' ? 'border-gray-300 bg-gray-50 text-gray-700' : 'border-amber-300 bg-amber-50 text-amber-950';
+    return <div className={`${compact ? 'mt-1 px-2 py-1 text-[11px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border ${tone} whitespace-normal`}
+        data-testid="scanner-candidate-status" data-visibility-status={view.status} role="note">
+        <div className="font-semibold">{view.label}</div>
+        {view.warnings.map((warning, index) => <div key={`${warning.code}-${index}`} className="mt-1" data-warning-code={warning.code}>
+            {warning.label}{warning.detail && <span> · {warning.detail}</span>}
+        </div>)}
+        {view.status !== 'released' && <div className="mt-1">Setup-Score und Grade sind keine Handelsfreigabe. Keine automatische Signal-Mail.</div>}
+    </div>;
+}
+
 const BREAKOUT_WITHOUT_RETEST_CODE = 'breakout_confirmed_without_retest';
 
 function breakoutRetestWarningEvidence(row = {}) {
@@ -3002,13 +3120,14 @@ function breakoutRetestWarningEvidence(row = {}) {
 
 function BreakoutRetestWarning({ row = {}, compact = false }) {
     const evidence = breakoutRetestWarningEvidence(row);
-    if (!evidence) return null;
+    if (!evidence) return <ScannerCandidateStatus row={row} compact={compact} />;
     const heading = evidence.direction === 'SHORT'
         ? 'SHORT-Breakdown bestaetigt, Ruecktest offen'
         : evidence.direction === 'LONG'
             ? 'LONG-Ausbruch bestaetigt, Ruecktest offen'
             : 'Ausbruch bestaetigt, Ruecktest offen';
-    return (
+    return (<>
+        <ScannerCandidateStatus row={row} compact={compact} />
         <div
             className={`${compact ? 'mt-1 px-2 py-1 text-[10px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border border-amber-300 bg-amber-50 text-amber-900 whitespace-normal`}
             data-testid="breakout-retest-warning"
@@ -3018,6 +3137,7 @@ function BreakoutRetestWarning({ row = {}, compact = false }) {
             <div className="font-semibold">{heading}</div>
             {!compact && <div className="mt-1">{evidence.warning}</div>}
         </div>
+        </>
     );
 }
 
@@ -3222,7 +3342,7 @@ function isCupScannerSelection(row) {
 
 function scannerSelection(item, marketType, strategy) {
     return marketType === 'crypto' ? { ...item, isCrypto: true }
-        : { ...item, scanner: item.scanner || strategy, selected_snapshot: true };
+        : { ...item, scanner: strategy || item.scanner, selected_snapshot: true };
 }
 
 function cupInitialVisibleRange(count, evidence) {
@@ -3377,6 +3497,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [overlays, setOverlays] = useState(() => ({ ema: true, vwap: false, sr: false, fib: false, patterns: isWyckoffScannerSelection(scannerData), bb: false, vrvp: true, vol: false }));
     const [reminderBusy, setReminderBusy] = useState(false);
     const [activeReminder, setActiveReminder] = useState(null);
+    const [reminderConditionChoice, setReminderConditionChoice] = useState(null);
     const [personalPositions, setPersonalPositions] = useState([]);
     const [positionBusy, setPositionBusy] = useState(false);
     const chartContainer = useRef(null);
@@ -3470,9 +3591,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         let cancelled = false;
         const wantedTicker = String(ticker || '').toUpperCase().replace(/USDT$/, '');
         setActiveReminder(null);
+        setReminderConditionChoice(null);
         const loadActiveReminder = async () => {
             try {
-                const res = await fetch(`${API}/api/trade-reminders?status=active`);
+                const res = await fetch(`${API}/api/trade-reminders?status=active&personal_only=true`);
                 if (!res.ok) return;
                 const payload = await res.json();
                 const match = (payload.reminders || []).find(reminder => (
@@ -4188,12 +4310,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         confluence: {direction: cd.direction},
         bi_scanner: String(cd.scanner || '').startsWith('bi_') ? {grade_label: cd.grade_label} : null,
     } : liveDetail;
-    const retestWarningRow = breakoutRetestWarningEvidence(cd) ? cd : d;
+    const retestWarningRow = cd.visibility_status || breakoutRetestWarningEvidence(cd) ? cd : d;
+    const nativePlanUnavailable = cd.native_plan_status === 'unavailable';
+    const sidebarCandidate = scannerCandidatePresentation(cd);
     const sidebarCompanyName = stockCompanyName({...d, ...cd, ticker});
     const quality = cd._quality || d._quality || null;
     const tradeHealth = cd.trade_health || d.trade_health || null;
     const marketContext = cd.market_context || d.market_context || tradeHealth?.market_context || quality?.market_context || null;
-    const tradeHealthTone = !tradeHealth ? '' :
+    const tradeHealthTone = nativePlanUnavailable || sidebarCandidate?.status === 'candidate_warning' ? 'border-amber-200 bg-amber-50 text-amber-900' : !tradeHealth ? '' :
         tradeHealth.decision === 'TRADEABLE' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' :
         tradeHealth.decision === 'NO_TRADE' ? 'border-red-200 bg-red-50 text-red-900' :
         tradeHealth.decision === 'WAIT_FOR_RETEST' ? 'border-amber-200 bg-amber-50 text-amber-900' :
@@ -4241,6 +4365,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const changeClass = change == null ? 'text-gray-500' : change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = (() => {
+        if (nativePlanUnavailable) return null;
         const scannerSetup = cd.trade_setup || null;
         const detailSetup = d.trade_setup || null;
         if (cd.selected_snapshot && scannerSetup) return scannerSetup;
@@ -4257,8 +4382,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const finalWaitTrigger = finalTradeDecision === 'WAIT_FOR_TRIGGER';
     const finalWaitContinuation = finalTradeDecision === 'WAIT_FOR_CONTINUATION';
     const finalWatchOnly = finalTradeDecision === 'WATCH_ONLY';
-    const finalTradeable = !tradeHealth || finalTradeDecision === 'TRADEABLE';
+    const finalTradeable = !nativePlanUnavailable && (!sidebarCandidate || sidebarCandidate.status === 'released') && (!tradeHealth || finalTradeDecision === 'TRADEABLE');
     const timingHeadline = (() => {
+        if (nativePlanUnavailable) return 'KEIN FREIGEGEBENER HANDELSPLAN';
         if (finalNoTrade) return 'NICHT TRADEN';
         if (finalWaitRetest) return 'WARTEN AUF RETEST';
         if (finalWaitTrigger) return 'ENTRY WARTEN';
@@ -4610,17 +4736,25 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         tradeSignal === 'NICHT_TRADEN' ||
         ['NO_TRADE', 'NO_LONG_CHASE'].includes(normalizedSetupAction)
     );
-    const reminderEligible = Boolean(
-        reminderEntry &&
-        explicitReminderWait &&
-        !hardReminderBlock &&
-        !(tradeSignal === 'JETZT_TRADEN' && finalTradeable)
-    );
-    const reminderCondition = (finalWaitRetest || reminderStateText.includes('RETEST'))
+    const structureReminderSource = !isCrypto ? stockStructureReminderSource(cd) : null;
+    const isStructureReminder = Boolean(structureReminderSource);
+    const legacyReminderCondition = (finalWaitRetest || reminderStateText.includes('RETEST'))
         ? 'retest'
         : (finalWaitContinuation || reminderStateText.includes('CONTINUATION') || reminderStateText.includes('FORTSETZUNG'))
             ? 'continuation'
             : 'trigger';
+    const cryptoReminderCapability = isCrypto ? cryptoExecutionReminderCapability(cd, legacyReminderCondition) : null;
+    const reminderUnsupportedReason = isCrypto && !cryptoReminderCapability.supported ? cryptoReminderCapability.reason : '';
+    const reminderEligible = isStructureReminder || Boolean(
+        reminderEntry &&
+        explicitReminderWait &&
+        !hardReminderBlock &&
+        (!isCrypto || cryptoReminderCapability.supported) &&
+        !(tradeSignal === 'JETZT_TRADEN' && finalTradeable)
+    );
+    const reminderCondition = isStructureReminder
+        ? (reminderConditionChoice || (breakoutRetestWarningEvidence(cd) ? 'retest' : 'trigger'))
+        : legacyReminderCondition;
     const triggerChecklist = (() => {
         const raw = activeTradeSetup?.trigger_conditions || cd.trigger_conditions;
         const lines = Array.isArray(raw) && raw.length
@@ -4633,7 +4767,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3);
     })();
     const showTriggerChecklist = isCrypto && reminderEligible && triggerChecklist.length > 0;
-    const reminderDurationOptions = [
+    const reminderDurationOptions = isStructureReminder ? [
+        { hours: 168, label: '7 Tage' },
+        { hours: 336, label: '14 Tage' },
+        { hours: 720, label: '30 Tage' },
+    ] : [
         { hours: 1, label: '1h' },
         { hours: 3, label: '3h' },
         { hours: 6, label: '6h' },
@@ -4668,6 +4806,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     row: {
                         ...d,
                         ...cd,
+                        ...(isStructureReminder ? { reminder_mode: 'structure_1d' } : {}),
                         trade_setup: activeTradeSetup,
                         direction: viewDirection || activeTradeSetup?.direction || cd.direction || d.direction || 'LONG',
                         entry: reminderEntry,
@@ -4682,7 +4821,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht erstellt werden');
             setActiveReminder(data.reminder || null);
-            const durationLabel = hours === 24 ? '1 Tag' : `${hours}h`;
+            const durationLabel = hours >= 24 && hours % 24 === 0 ? `${hours / 24} ${hours === 24 ? 'Tag' : 'Tage'}` : `${hours}h`;
             if (window.addToast) window.addToast(`Reminder aktiv: ${ticker} fuer ${durationLabel}`, 'success');
         } catch (err) {
             if (window.addToast) window.addToast(err.message || 'Reminder Fehler', 'error');
@@ -4806,28 +4945,39 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         );
     };
     const renderReminderControls = () => {
-        if (!reminderEligible) return null;
+        if (!reminderEligible && !activeReminder && !reminderUnsupportedReason) return null;
         return (
-            <div className="mt-3 border-t border-white/60 pt-2">
-                <div className="font-semibold">Mail-Reminder bei bestaetigtem {reminderCondition === 'retest' ? 'Retest' : 'Trigger'}</div>
-                <div className="text-xs opacity-75 mt-1 mb-2">Pruefung jede Minute. Mail und Browser-Hinweis werden einmalig gesendet.</div>
+            <div className="mt-3 border-t border-white/60 pt-2" data-testid="trade-reminder-controls">
+                {reminderUnsupportedReason ? <div className="text-xs text-amber-900" role="note" data-testid="reminder-unsupported">{reminderUnsupportedReason}. Kein neues Abo moeglich; bestehende Reminder koennen beendet werden.</div>
+                    : <><div className="font-semibold">Mail-Reminder bei bestaetigtem {isStructureReminder ? '1D-' : ''}{reminderCondition === 'retest' ? 'Retest' : 'Trigger'}</div>
+                <div className="text-xs opacity-75 mt-1 mb-2">{isStructureReminder
+                    ? 'Persoenlicher Strukturhinweis nach einer neu abgeschlossenen Tageskerze. Mail und In-App-Hinweis sind kein neues Handelssignal. Die native Zone wird auf dem Server geprueft; keine automatische Anmeldung.'
+                    : 'Pruefung jede Minute. Mail und Browser-Hinweis werden einmalig gesendet.'}</div></>}
+                {isStructureReminder && <label className="block text-xs mb-2">Benachrichtigen, wenn
+                    <select value={reminderCondition} onChange={event => setReminderConditionChoice(event.target.value)} className="block mt-1 w-full" disabled={reminderBusy}>
+                        <option value="trigger">1D-Ausbruch bestaetigt</option>
+                        <option value="retest">1D-Ruecktest bestaetigt</option>
+                    </select>
+                </label>}
                 {activeReminder && (
                     <div className="mb-2 flex items-center gap-2 flex-wrap text-xs">
                         <span className="font-semibold text-emerald-700">Aktiv bis {reminderExpiryLabel || '-'}</span>
+                        {activeReminder.timeframe && <span>{activeReminder.timeframe} · {activeReminder.condition === 'retest' ? 'Ruecktest' : 'Ausbruch'}</span>}
+                        {activeReminder.zone && <span>Zone {activeReminder.zone.lower}–{activeReminder.zone.upper}</span>}
                         <button disabled={reminderBusy} onClick={cancelTradeReminder}
                             className="px-2 py-1 rounded bg-white/80 border border-red-200 text-red-700 font-semibold hover:bg-red-50 disabled:opacity-50">
                             Beenden
                         </button>
                     </div>
                 )}
-                <div className="flex gap-2 flex-wrap">
+                {reminderEligible && <div className="flex gap-2 flex-wrap">
                     {reminderDurationOptions.map(option => (
                         <button key={option.hours} disabled={reminderBusy} onClick={() => createTradeReminder(option.hours, 'email_browser')}
                             className="px-2 py-1 rounded bg-white/80 border border-sky-200 text-sky-800 font-semibold hover:bg-sky-50 disabled:opacity-50">
-                            {option.label} Mail + Browser
+                            {option.label} Mail + App
                         </button>
                     ))}
-                </div>
+                </div>}
             </div>
         );
     };
@@ -5485,6 +5635,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
+                {!activeTradeSetup && !isCrypto && (reminderEligible || activeReminder) && <div className="border border-amber-200 bg-amber-50 p-3 rounded-lg mb-3 text-xs text-amber-900">
+                    {renderReminderControls()}
+                </div>}
                 </div>{/* End Content Grid */}
 
                 {/* AI Analysis Button - full width */}
@@ -6509,6 +6662,7 @@ function scannerSnapshotInfo(data) {
         cached_at: data?.cached_at || null,
         cache_age_seconds: data?.cache_age_seconds ?? null,
         diagnostics: data?.diagnostics || null,
+        data_quality: data?.data_quality && typeof data.data_quality === 'object' && !Array.isArray(data.data_quality) ? data.data_quality : null,
         warnings: Array.isArray(data?.warnings) ? data.warnings : [],
         scan_error: data?.scan_error || null,
         partial: !!data?.partial,
@@ -6529,6 +6683,14 @@ function biSnapshotCountLabel({ info, loading, hasLoaded, count }) {
         return 'Anzahl noch nicht bestaetigt';
     }
     return `${count} BI-Signale im angezeigten Stand (mindestens 17/20)`;
+}
+
+function scannerVisibilityCounts(info) {
+    const values = info?.data_quality?.visibility_counts;
+    if (!values || !['released', 'candidate_warning', 'context', 'total', 'warning_count'].every(key =>
+        typeof values[key] === 'number' && Number.isSafeInteger(values[key]) && values[key] >= 0 && values[key] <= 1e9)) return null;
+    if (values.released + values.candidate_warning + values.context !== values.total) return null;
+    return values;
 }
 
 function scannerEvidenceState({ info, loading, running, error, hasLoaded, count, kind = 'strategy' }) {
@@ -6559,6 +6721,9 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
     if (!count) return { tone: 'empty', text: kind === 'bi'
         ? 'Abgeschlossener BI-Scan: keine gueltigen Signale mit mindestens 17/20 und den zusaetzlichen Struktur-/Risikopruefungen.'
         : 'Abgeschlossener Scan: keine aktuell freigegebenen Signale. Geprueftes Universum und Ausschlussgruende stehen unten.' };
+    const visibility = scannerVisibilityCounts(info);
+    if (visibility && visibility.total === count) return { tone: visibility.candidate_warning > 0 ? 'candidates' : 'ready',
+        text: `${visibility.total} ${kind === 'bi' ? 'BI-Setups (mindestens 17/20)' : 'Treffer'} · ${visibility.released} freigegeben · ${visibility.candidate_warning} Kandidaten mit Warnungen${visibility.context ? ` · ${visibility.context} Marktkontext` : ''}. Sichtbarkeit ist keine Mailfreigabe.` };
     return { tone: 'ready', text: `${count} gepruefte ${kind === 'bi' ? 'BI-' : ''}Signale im angezeigten Ergebnisstand. Keine Aussage ueber spaetere Gewinne.` };
 }
 
@@ -6761,7 +6926,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             if (outcome === 'complete') {
                 stopPolling(); scanning(false);
                 setNotice(null);
-                if (notify && window.addToast) window.addToast(`Scan abgeschlossen: ${data.data.length} Signale`, 'success');
+                if (notify && window.addToast) window.addToast(`Scan abgeschlossen: ${data.data.length} Treffer. Freigaben und Warnungen stehen bei den Ergebnissen.`, 'success');
                 return;
             }
             if (['error', 'missing_final', 'superseded', 'unverified_final'].includes(outcome)) {
@@ -6936,7 +7101,7 @@ function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
     const counts = kind === 'bi'
         ? [['Geprueft', feed.info?.checked], ['Universum', feed.info?.total], ['Cache-Zeilen', diag.raw_cache_rows], ['17/20 gueltig', diag.validated_scanner_signals], ['Sichtbar', diag.visible_scanner_signals]]
         : [['Universum', diag.universe_count], ['Geprueft', feed.info?.checked], ['Vor Freigabe', diag.raw_matches_before_special_filter], ['Sichtbar', diag.visible_results_after_signal_policy ?? diag.final_results]];
-    const tone = ['error', 'warning', 'stale', 'missing'].includes(state.tone) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700';
+    const tone = ['error', 'warning', 'candidates', 'stale', 'missing'].includes(state.tone) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700';
     return <div className={`rounded-lg border p-3 text-sm ${tone}`} role="status" aria-live="polite">
         <div>{state.text}</div>
         {diag.data_mode === 'completed_daily_swing' && <div className="mt-1 text-xs">
@@ -7131,7 +7296,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     </div>
                                     <div className="text-right">
                                         <div className="text-lg font-bold">{item.score?.toFixed(1) || '–'}</div>
-                                        <div className="text-xs text-gray-500">Score</div>
+                                        <div className="text-xs text-gray-500">Trade-Score, keine Freigabe</div>
                                         {item.Business_Quality_Score != null && (
                                             <div
                                                 className="text-xs text-gray-500 mt-1"
@@ -7186,7 +7351,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
                             <th className="text-center py-2 px-2" title={breakoutQualityHelp}>Breakout-Bestaetigung</th>
-                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Score {sortKey === 'score' && '↓'}</th>
+                            <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Trade-Score {sortKey === 'score' && '↓'}</th>
                             <th className="text-center py-2 px-2">Grade</th>
                         </tr>
                     </thead>
@@ -7297,7 +7462,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                             <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('bi_indicators_green')}>Konfluenz {sortKey === 'bi_indicators_green' && '↓'}</th>
                             <th className="text-left py-2 px-2 sortable-header" onClick={() => toggleSort('trade_action')}>Aktion {sortKey === 'trade_action' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Trade-Score {sortKey === 'score' && '↓'}</th>
-                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('grade')}>Freigabe {sortKey === 'grade' && '↓'}</th>
+                            <th className="text-center py-2 px-2 sortable-header" onClick={() => toggleSort('grade')}>Grade {sortKey === 'grade' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('volume')}>Volumen {sortKey === 'volume' && '↓'}</th>
                             <th className="text-left py-2 px-2">Fehlt noch</th>
                         </tr>
@@ -7477,6 +7642,7 @@ function BiotechTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="biotech" />
+            <ScannerVisibilitySummary rows={sorted} />
 
             <LiveScanStatus
                 active={isScanning || liveInfo?.scan_running}
@@ -7749,8 +7915,9 @@ function BTCDivergenzTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="btc_divergenz" />
+            <ScannerVisibilitySummary rows={sorted} />
             <div className="p-3 rounded-lg bg-orange-50 border border-orange-100 text-sm text-orange-900">
-                BTC-Divergenz liefert relativen Marktkontext, keinen eigenen Entry-Trigger oder vollständigen Tradeplan. Im Signal-Only-Modus bleiben solche Kontextzeilen ausgeblendet; eine leere Liste bedeutet hier nicht automatisch fehlende Marktdaten.
+                BTC-Divergenz liefert relativen Marktkontext, keinen eigenen Entry-Trigger oder vollständigen Tradeplan. Kontext und Kandidaten bleiben klar gekennzeichnet; Sichtbarkeit allein ist keine Handels- oder Mailfreigabe.
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
@@ -8120,6 +8287,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="early_movers" />
+            <ScannerVisibilitySummary rows={filtered} />
 
             <LiveScanStatus
                 active={isScanning || liveInfo?.scan_running}
@@ -8197,7 +8365,7 @@ function EarlyMoversTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
                             const targetTone = targetQualityTone(item.target_quality, itemTargetFlags);
                             const targetLabel = targetQualityLabel(item.target_quality, itemTargetFlags);
                             return (
-                            <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item})}>
+                            <tr key={idx} className="table-row border-b border-gray-200 cursor-pointer hover:bg-gray-50" onClick={() => onSelectTicker({ticker: item.Symbol, isCrypto: true, ...item, scanner: 'early_movers'})}>
                                 <td className="py-3 px-2 text-center" title={item.phase_label}>
                                     <span className="text-lg">{phaseIcon(item.phase)}</span>
                                     <span className="text-xs ml-1 text-gray-500">{item.phase}</span>
@@ -9278,7 +9446,7 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                         if (data.cached_at && data.cached_at !== prevCachedAt) {
                             const nextItems = applyResults(data);
                             setIsScanning(false);
-                            if (window.addToast) window.addToast(`Scan fertig: ${nextItems.length} Crypto-Signale`, 'success');
+                            if (window.addToast) window.addToast(`Scan fertig: ${nextItems.length} Crypto-Treffer. Freigaben und Warnungen stehen bei den Ergebnissen.`, 'success');
                             return;
                         }
                     }
@@ -9296,6 +9464,7 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="crypto_trade_signals" progressOverride={schedulerStatus?.scans?.crypto_explosion?.progress} />
+            <ScannerVisibilitySummary rows={sorted} />
             <div className="text-xs rounded-lg border border-cyan-100 bg-cyan-50 text-cyan-900 px-3 py-2">
                 Crypto Signals: ein Coin bekommt genau eine Richtung. <b>JETZT LONG</b> kommt aus frischem 5m Breakout/Reclaim, <b>JETZT SHORT</b> aus bestaetigtem Pump/New-Listing-Crack. Watch/Armed ist Vorbereitung, kein Blind-Entry.
             </div>
@@ -9527,6 +9696,7 @@ function ShortScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="bear" />
+            <ScannerVisibilitySummary rows={sortedBreakdown} />
 
             {shortMessage && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-4 py-3 text-sm">
@@ -11418,6 +11588,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
         <div className="space-y-6">
 
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="new_listing" />
+            <ScannerVisibilitySummary rows={sorted} />
             <div className="p-3 rounded-lg bg-blue-50 border border-blue-100 text-sm text-blue-800">
                 Analyse-Modus: <b>JETZT SHORTEN</b> steht nur bei bestaetigtem Crack/Rejection. Darunter erscheinen sinnvolle Dump-/Crack-Watch-Kandidaten mit live Preis/Pump-Kontext; reine Listing-Ankuendigungen ohne Trade-Daten bleiben ausgeblendet und werden nicht als Signal gemailt.
                 {stats && (
@@ -11455,7 +11626,7 @@ function NewListingTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                         )}
                         {sorted.map((item, idx) => (
                             <tr key={idx} className="table-row border-b border-gray-200" onClick={() => onSelectTicker({ticker: item.symbol, isCrypto: true, isExchangeCrypto: true, exchange: item.exchange, contract: item.contract, ...item})}>
-                                <td className="py-3 px-2 font-semibold">{item.symbol}</td>
+                                <td className="py-3 px-2 font-semibold">{item.symbol}<BreakoutRetestWarning row={item} compact /></td>
                                 <td className="py-3 px-2">{item.exchange}</td>
                                 <td className="py-3 px-2 text-center"><span className={`signal-badge ${pdTypeClass(item)}`} title={item.listing_age_hours != null ? `${item.listing_age_hours}h alt` : 'Alter unklar'}>{pdTypeLabel(item)}</span></td>
                                 <td className="py-3 px-2 text-right">{pdPrice(item.price)}</td>
@@ -11499,7 +11670,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     const [results, setResults] = useState(scanCache.penny_results || []);
     const [diagnostics, setDiagnostics] = useState(scanCache.penny_diagnostics || {});
     const [liveInfo, setLiveInfo] = useState(scanCache.penny_live_info || null);
-    const [showWatchRows, setShowWatchRows] = useState(false);
+    const [showWatchRows, setShowWatchRows] = useState(true);
     const pollRef = useRef(null);
     const activeActions = new Set(['JETZT_KAUFEN', 'HALTEN', 'JETZT_VERKAUFEN']);
     const optionalActions = new Set(['TRIGGER_WARTEN', 'BEOBACHTEN']);
@@ -11664,6 +11835,7 @@ function PennyStocksTab({ onSelectTicker, scanCache = {}, updateScanCache = () =
     return (
         <div className="space-y-5">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="penny_stocks" />
+            <ScannerVisibilitySummary rows={sorted} />
 
             <LiveScanStatus
                 active={isScanning || liveInfo?.scan_running}
@@ -11856,6 +12028,7 @@ function VolumeSpikesTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     return (
         <div className="space-y-6">
             <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey="volume_spikes" />
+            <ScannerVisibilitySummary rows={sorted} />
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
@@ -12045,10 +12218,12 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             </div>
 
             <ScanControl onScan={triggerScan} isScanning={loading} schedulerStatus={schedulerStatus} scanKey="orb" />
+            <ScannerVisibilitySummary rows={subView === 'breakouts' ? [...actionableBreakouts, ...rejectedRangeBreaks, ...candidates]
+                : subView === 'rejected' ? rejectedRangeBreaks : subView === 'failed' ? failedBOs : candidates} />
 
             <div className="flex gap-2 mb-2">
                 <button onClick={() => setSubView('breakouts')} className={`text-xs px-3 py-1 rounded ${subView === 'breakouts' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600'}`}>
-                    ORB Signale ({actionableBreakouts.length})
+                    Alle ORB-Setups
                 </button>
                 <button onClick={() => setSubView('rejected')} className={`text-xs px-3 py-1 rounded ${subView === 'rejected' ? 'bg-gray-700 text-white' : 'bg-gray-100 text-gray-600'}`}>
                     Abgelehnte Range-Brueche ({rejectedRangeBreaks.length})
@@ -12062,8 +12237,8 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
             </div>
             {subView === 'breakouts' && actionableBreakouts.length > 0 && (
                 <div className="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded px-3 py-2">
-                    Nur bestaetigte ORB-Setups: Handelbar zuerst, danach konkrete Retest-/Trigger-Faelle.
-                    Reine Range-Brueche ohne Volumen, Halt oder saubere Risikostruktur stehen separat unter "Abgelehnte Range-Brueche".
+                    Freigegebene ORB-Signale zuerst, danach Kandidaten mit Warnungen und unbestaetigte Range-Brueche in derselben Liste.
+                    Warnungen sind keine Handelsfreigabe; die Mailpruefung bleibt unveraendert.
                     <span className="ml-2 text-emerald-700 font-medium">Handelbar: {decisionCounts.tradeable || 0}</span>
                     <span className="ml-2 text-amber-700 font-medium">Warten: {decisionCounts.wait || 0}</span>
                 </div>
@@ -12114,7 +12289,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                     ))}
                 </div>
             )}
-            {subView === 'breakouts' && actionableBreakouts.length === 0 && (
+            {subView === 'breakouts' && actionableBreakouts.length === 0 && rejectedRangeBreaks.length === 0 && candidates.length === 0 && (
                 <div className="card p-6 text-center text-gray-400">
                     <p className="text-lg mb-1">Kein freigegebenes ORB-Signal</p>
                     {Number(stats.range_breaks || stats.breakouts || 0) > 0 && (
@@ -12126,7 +12301,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 </div>
             )}
 
-            {subView === 'rejected' && rejectedRangeBreaks.length > 0 && (
+            {['breakouts', 'rejected'].includes(subView) && rejectedRangeBreaks.length > 0 && (
                 <div className="space-y-2">
                     <p className="text-xs text-gray-500 mb-1">
                         Preis hat die Opening Range verlassen, aber die aktuelle Bewegung ist kein freigegebenes ORB-Signal.
@@ -12191,7 +12366,7 @@ function ORBScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () =>
                 <div className="card p-4 text-center text-gray-400 text-sm">Keine Failed Breakouts erkannt</div>
             )}
 
-            {subView === 'candidates' && candidates.length > 0 && (
+            {['breakouts', 'candidates'].includes(subView) && candidates.length > 0 && (
                 <div className="space-y-1">
                     <p className="text-xs text-gray-500 mb-1">Pre-ORB Kandidaten (Gap + RVOL Filter, warten auf Breakout)</p>
                     {candidates.map((c, i) => (

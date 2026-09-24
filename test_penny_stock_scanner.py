@@ -592,6 +592,9 @@ def test_penny_results_expose_only_active_trade_decisions(monkeypatch):
         {"ticker": "STALE_WAIT", "trade_action": "TRIGGER_WARTEN", "trigger_timestamp": now_ts - 1_500},
         {"ticker": "NO", "trade_action": "NICHT_KAUFEN"},
     ]
+    # Candidate presentation requires a real positive quote, not only an action.
+    for row in legacy_rows:
+        row["price"] = 1.0
     monkeypatch.setattr(api, "load_cache_file", lambda path: (legacy_rows, None))
     monkeypatch.setattr(api, "load_cache_metadata", lambda path: {"diagnostics": {}})
 
@@ -642,6 +645,8 @@ def test_penny_results_auto_show_strong_trigger_prep_when_no_active_rows(monkeyp
             "trade_setup": {"entry": 1.0, "stop_loss": 0.9, "tp1": 1.2, "tp2": 1.45},
         },
     ]
+    for row in rows:
+        row["price"] = 1.0
     monkeypatch.setattr(api, "load_cache_file", lambda path: (rows, None))
     monkeypatch.setattr(api, "load_cache_metadata", lambda path: {"diagnostics": {}})
 

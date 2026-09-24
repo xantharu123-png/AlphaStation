@@ -2863,11 +2863,19 @@ def test_early_mover_signal_state_keeps_1m_trigger_as_wait():
     assert "Entry-Bestaetigung" in row["signal_label"]
 
 
+def _reminder_early_mover_row(symbol):
+    return _early_mover_row(
+        Symbol=symbol, scanner="early_movers",
+        PerpChartSymbol=f"{symbol}USDT", PerpChartExchange="binance",
+    )
+
+
 def test_trade_reminder_triggers_early_mover_email(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_load_users", lambda: {"users": {"owner@example.com": {"email_alerts_enabled": True}}})
     reminder_file = tmp_path / "trade_reminders.json"
     monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(reminder_file))
     monkeypatch.setattr(api, "_reminder_now", lambda: 1_000_000.0)
-    row = _early_mover_row(Symbol="BROCCOLI")
+    row = _reminder_early_mover_row("BROCCOLI")
     monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: row)
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -2911,8 +2919,10 @@ def test_personal_crypto_trade_reminder_is_routed_but_not_product_tracked(monkey
     }})
     reminder = {
         "owner_email": "owner@example.com", "ticker": "ETH", "asset_type": "crypto",
-        "channel": "email", "row": {"entry": 100, "stop": 95, "tp1": 110, "tp2": 120},
+        "scanner": "early_movers", "condition": "trigger",
+        "channel": "email", "row": _reminder_early_mover_row("ETH"),
     }
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda _: reminder["row"])
 
     assert api._deliver_trade_reminder_email(reminder, {"entry": 100, "stop": 95, "tp1": 110, "tp2": 120})
 
@@ -2922,11 +2932,12 @@ def test_personal_crypto_trade_reminder_is_routed_but_not_product_tracked(monkey
 
 
 def test_triggered_trade_reminder_retries_email_without_retriggering(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_load_users", lambda: {"users": {"owner@example.com": {"email_alerts_enabled": True}}})
     reminder_file = tmp_path / "trade_reminders.json"
     now = [1_000_000.0]
     monkeypatch.setattr(api, "_TRADE_REMINDERS_FILE", str(reminder_file))
     monkeypatch.setattr(api, "_reminder_now", lambda: now[0])
-    row = _early_mover_row(Symbol="RETRY")
+    row = _reminder_early_mover_row("RETRY")
     monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: row)
     trigger_checks = []
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda candidate: trigger_checks.append(candidate) or {
@@ -3314,7 +3325,7 @@ def test_stale_stock_reminder_retries_later_without_mail_or_tracking(
 
 
 def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypatch):
-    saved_row = _early_mover_row(Symbol="SAVED")
+    saved_row = _reminder_early_mover_row("SAVED")
     monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: None)
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -3327,6 +3338,8 @@ def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypat
     result = api._evaluate_trade_reminder({
         "ticker": "SAVED",
         "asset_type": "crypto",
+        "scanner": "early_movers",
+        "crypto_source_verified": "early_movers_cache_v1",
         "condition": "trigger",
         "row": saved_row,
     })
@@ -3336,7 +3349,7 @@ def test_crypto_trade_reminder_uses_saved_row_when_scan_row_disappears(monkeypat
 
 
 def test_crypto_retest_reminder_requires_retest_hold(monkeypatch):
-    saved_row = _early_mover_row(Symbol="RETEST")
+    saved_row = _reminder_early_mover_row("RETEST")
     monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: saved_row)
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -3348,6 +3361,7 @@ def test_crypto_retest_reminder_requires_retest_hold(monkeypatch):
     result = api._evaluate_trade_reminder({
         "ticker": "RETEST",
         "asset_type": "crypto",
+        "scanner": "early_movers",
         "condition": "retest",
         "row": saved_row,
     })
@@ -3356,7 +3370,7 @@ def test_crypto_retest_reminder_requires_retest_hold(monkeypatch):
 
 
 def test_crypto_trade_reminder_waits_for_candle_closed_after_activation(monkeypatch):
-    saved_row = _early_mover_row(Symbol="FRESH")
+    saved_row = _reminder_early_mover_row("FRESH")
     monkeypatch.setattr(api, "_find_early_mover_row", lambda symbol: saved_row)
     monkeypatch.setattr(api, "_verify_early_mover_intraday_trigger", lambda row: {
         "ok": True,
@@ -3369,6 +3383,7 @@ def test_crypto_trade_reminder_waits_for_candle_closed_after_activation(monkeypa
     result = api._evaluate_trade_reminder({
         "ticker": "FRESH",
         "asset_type": "crypto",
+        "scanner": "early_movers",
         "condition": "trigger",
         "created_at_epoch": 1_700_000_600.0,
         "row": saved_row,

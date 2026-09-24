@@ -34,7 +34,7 @@ def _bi_row(ticker="VALID", *, green=17, available=20, contract_ok=True):
 
 def _patch_result_decoration(monkeypatch):
     monkeypatch.setattr(api, "_decorate_scan_results", lambda rows, *_a, **_k: rows)
-    monkeypatch.setattr(api, "_apply_signal_only_policy", lambda _scanner, rows: rows)
+    monkeypatch.setattr(api, "_apply_scanner_visibility_policy", lambda _scanner, rows: rows)
     monkeypatch.setattr(
         api,
         "_scan_quality_payload",

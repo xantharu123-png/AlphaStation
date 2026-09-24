@@ -150,7 +150,7 @@ def test_new_break_after_global_reset_cannot_borrow_old_retest(direction, new_re
             "4H": [_bar(72, direction, delta=-0.1, duration=4), _bar(76, direction, duration=4)]}
     if new_retest:
         bars["4H"].append(_bar(80, direction, retest=True, duration=4))
-    zone = _zone(_snapshot(direction, bars))
+    zone = _zone(_snapshot(direction, bars, hour=80 if new_retest else 76))
     assert zone.break_state == ("reclaimed" if new_retest else "break_confirmed")
     assert zone.break_reclaim_evidence.break_closed_at == BASE + timedelta(hours=76)
     assert zone.break_reclaim_evidence.retest_observed is new_retest
@@ -160,7 +160,7 @@ def test_new_break_after_global_reset_cannot_borrow_old_retest(direction, new_re
 def test_overlap_wick_before_new_break_cannot_prove_retest(direction):
     bars = {"4H": [_bar(72, direction, delta=-0.1, duration=4),
                     _bar(76, direction, duration=4), _bar(80, direction, retest=True, duration=12)]}
-    zone = _zone(_snapshot(direction, bars))
+    zone = _zone(_snapshot(direction, bars, hour=80))
     assert zone.break_state == "break_confirmed"
     assert zone.break_reclaim_evidence.retest_observed is False
 
@@ -191,7 +191,7 @@ def test_future_failure_does_not_change_fixed_snapshot(direction):
     {"break_closed_at": BASE + timedelta(hours=120)},
 ])
 def test_confirmed_break_dataclass_rejects_invalid_certificates(direction, changes):
-    proof = _zone(_snapshot(direction, {"1D": [_bar(24, direction)]})).break_reclaim_evidence
+    proof = _zone(_snapshot(direction, {"1D": [_bar(24, direction)]}, hour=24)).break_reclaim_evidence
     with pytest.raises(ValueError):
         replace(proof, **changes)
 
@@ -206,7 +206,7 @@ def test_optional_retest_proof_preserves_exact_historical_geometry_binding(direc
         observed_at=time, confirmed_at=time, data_cutoff_at=time,
         provenance={"role_hint": role},
     )
-    zone = _zone(_snapshot(direction, {"1D": [_bar(24, direction)]}, members=[member]))
+    zone = _zone(_snapshot(direction, {"1D": [_bar(24, direction)]}, hour=24, members=[member]))
     proof = zone.break_reclaim_evidence
     assert zone.break_state == "break_confirmed"
     assert proof.to_dict()["model"] == "break_confirmed_optional_retest_v1"

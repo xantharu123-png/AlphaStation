@@ -45,7 +45,7 @@ def _cache_fixture(monkeypatch, tmp_path, rows, *, version, partial=False):
         decorated.extend(items)
         return items
     monkeypatch.setattr(api, "_decorate_scan_results", decorate)
-    monkeypatch.setattr(api, "_apply_signal_only_policy", lambda scanner, items: items)
+    monkeypatch.setattr(api, "_apply_scanner_visibility_policy", lambda scanner, items: items)
     monkeypatch.setattr(api, "_scan_quality_payload", lambda *a: {
         "warnings": [], "data_source": "offline fixture", "exclusion_policy": [],
     })

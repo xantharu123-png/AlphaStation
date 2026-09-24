@@ -34,7 +34,7 @@ def status_io(monkeypatch, tmp_path):
         [], state["stamp"], {"cache_version": api.STOCK_STRATEGY_CACHE_VERSION,
                             "diagnostics": {"coverage": state["coverage"], "final_results": 0}}, state["partial"]))
     monkeypatch.setattr(api, "_decorate_scan_results", lambda rows, *a: rows)
-    monkeypatch.setattr(api, "_apply_signal_only_policy", lambda scanner, rows: rows)
+    monkeypatch.setattr(api, "_apply_scanner_visibility_policy", lambda scanner, rows: rows)
     monkeypatch.setattr(api, "_scan_quality_payload", lambda *a: {
         "warnings": [], "data_source": "synthetic", "exclusion_policy": []})
     monkeypatch.setattr(api, "rate_limited_get", lambda *a, **kw: pytest.fail("No provider calls"))

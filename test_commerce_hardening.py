@@ -227,6 +227,10 @@ def test_new_trade_reminder_replaces_existing_symbol_and_returns_iso_expiry(monk
     monkeypatch.setattr(api, "ADMIN_EMAILS", set())
     monkeypatch.setattr(api, "verify_token", lambda token: {"email": "owner@example.com"})
     monkeypatch.setattr(api, "_reminder_now", lambda: 1_700_000_000.0)
+    monkeypatch.setattr(api, "_find_early_mover_row", lambda _: {
+        "Symbol": "BTC", "direction": "LONG", "entry": 100, "stop_loss": 95,
+        "tp1": 110, "PerpChartSymbol": "BTCUSDT", "PerpChartExchange": "binance",
+    })
 
     first = api.create_trade_reminder(
         api.TradeReminderRequest(ticker="BTCUSDT", asset_type="crypto", condition="trigger"),

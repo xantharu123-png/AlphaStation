@@ -802,3 +802,25 @@ Referenz: `AUDIT_CRYPTO_RUNTIME_2026-09-08.md`.
   bestimmte produktive Beschleunigung noch einen besseren Trading-Edge.
   Produktive Laufzeit, Datenabdeckung und Forward-Erwartungswert brauchen
   jeweils eigene Nachweise. Keine Cron-/Live-Trading-Aktivierung.
+
+## 19. Kandidatenanzeige und persoenliche Struktur-Reminder, 24.09.2026
+
+Vom Nutzer explizit geaenderter Anzeigevertrag; Referenz:
+`docs/SCANNER_CANDIDATES_AND_REMINDERS_2026-09-24.md`.
+
+- Echte Scannerkandidaten bleiben mit sichtbaren Warnungen in der App, etwa
+  nahe Gegenbarriere, unbestaetigter Ausbruch oder fehlender nativer Plan.
+  Dies ersetzt die fruehere pauschale Signal-only-Anzeige, nicht die fachliche
+  primaere Musterauswahl. BI bleibt mindestens 17/20; fehlerhafte/veraltete
+  Daten werden nicht als Kandidat freigegeben.
+- Freigegebene Signale, Warnkandidaten und Kontext haben getrennte Zaehler.
+  Scores ersetzen keine Freigabe. Anzeige und persoenliche Hinweise aendern
+  weder Scanner-Mail-, Tracker-, Ausfuehrungs- noch Brokerberechtigungen.
+- Zeiteinheiten werden auf ihre eigene Belegfrische geprueft, bevor aus ihnen
+  der beste Ausbruchs-/Ruecktestbeleg gewaehlt wird. Ein abgelaufener 4H-Beleg
+  darf einen gueltigen 1D-Beleg nicht verdraengen. Gegenbeweise bleiben hart.
+- Persoenliche 1D-Aktien-Reminder sind ausdruecklich opt-in. Servergebundene
+  Zone, abgeschlossene Tageskerzen, spaeterer echter Ruecktest mit haltendem
+  Schlusskurs; keine blosse Preisnaehe und keine clientseitige Bestaetigung.
+  Info-Mail und App-Hinweis sind kein neues Handelssignal. Vor Serverneustart
+  bestehende Reminder im alten PrivateTmp pruefen und sicher erhalten.

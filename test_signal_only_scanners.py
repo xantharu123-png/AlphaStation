@@ -75,8 +75,8 @@ def test_strategy_scan_diagnostics_show_visible_after_signal_policy(monkeypatch,
     api.save_cache_file(
         str(cache_path),
         [
-            {"ticker": "KEEP", "trade_decision": "TRADEABLE", "trade_health": {"decision": "TRADEABLE"}, "grade": "A", "score": 84},
-            {"ticker": "WAIT", "trade_decision": "WAIT_FOR_RETEST", "trade_health": {"decision": "WAIT_FOR_RETEST"}, "grade": "S", "score": 91},
+            {"ticker": "KEEP", "price": 100, "trade_decision": "TRADEABLE", "trade_health": {"decision": "TRADEABLE"}, "grade": "A", "score": 84},
+            {"ticker": "WAIT", "price": 100, "trade_decision": "WAIT_FOR_RETEST", "trade_health": {"decision": "WAIT_FOR_RETEST"}, "grade": "S", "score": 91},
         ],
         metadata={
             "cache_version": api.STOCK_STRATEGY_CACHE_VERSION,
@@ -93,11 +93,12 @@ def test_strategy_scan_diagnostics_show_visible_after_signal_policy(monkeypatch,
 
     response = api.get_scan_results(strategy="Momentum Breakout Long", market_type="stocks")
 
-    assert response.count == 1
-    assert [row["ticker"] for row in response.data] == ["KEEP"]
+    assert response.count == 2
+    assert [row["ticker"] for row in response.data] == ["KEEP", "WAIT"]
+    assert [row["visibility_status"] for row in response.data] == ["released", "candidate_warning"]
     assert response.diagnostics["cache_results_before_signal_policy"] == 2
-    assert response.diagnostics["visible_results_after_signal_policy"] == 1
-    assert response.diagnostics["suppressed_by_signal_policy"] == 1
+    assert response.diagnostics["visible_results_after_signal_policy"] == 2
+    assert response.diagnostics["suppressed_by_signal_policy"] == 0
 
 
 def test_stock_strategy_swing_results_use_daily_state_not_5m(monkeypatch, tmp_path):
