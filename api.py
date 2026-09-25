@@ -132,6 +132,9 @@ from modules.data_fetchers import (
     rate_limited_get,
     redact_sensitive_query_values,
     fetch_ohlcv_for_chart,
+    fetch_stock_daily_history_strict,
+    StockHistoryDataError,
+    STOCK_HISTORY_ERROR_REASONS,
     chart_market_context,
     fetch_grouped_daily,
     fetch_daily_candles_crypto,
@@ -15768,20 +15771,33 @@ def _confirmed_break_reclaim_evidence(
     barrier_zone_id = str(barrier.get("zone_id") or "").strip()
     barrier_side = str(barrier.get("side") or "").strip().lower()
     expected_direction = "LONG" if barrier_side == "resistance" else "SHORT" if barrier_side == "support" else ""
+    barrier_prices = [
+        None if isinstance(barrier.get(key), bool) else _alert_float(barrier.get(key), None)
+        for key in ("zone_low", "zone_high", "reclaim_boundary")
+        if barrier.get(key) not in (None, "")
+    ]
+    if any(value is None or not math.isfinite(value) or value <= 0 for value in barrier_prices):
+        return None
     expected_boundary = _alert_float(
         barrier.get("zone_high") if barrier_side == "resistance" else barrier.get("zone_low"),
         None,
     )
     if expected_boundary is None:
         expected_boundary = _alert_float(barrier.get("reclaim_boundary"), None)
+    if expected_boundary is None or not math.isfinite(expected_boundary) or expected_boundary <= 0:
+        return None
     for raw in candidates:
         if not isinstance(raw, dict):
+            continue
+        if any(isinstance(raw.get(key), bool) for key in ("boundary", "last_completed_close")):
             continue
         evidence_model = str(raw.get("model") or "")
         breakout_only = allow_breakout and evidence_model == "break_confirmed_optional_retest_v1"
         if not breakout_only and evidence_model not in {"break_reclaim_close_hold_v1", "break_reclaim_close_hold_v2"}:
             continue
         if str(raw.get("state") or "").upper() != ("BREAK_CONFIRMED" if breakout_only else "RECLAIMED"):
+            continue
+        if any(type(raw.get(key)) is not bool for key in ("retest_required", "retest_observed")):
             continue
         if breakout_only and (
             raw.get("retest_required") is not False
@@ -15794,9 +15810,14 @@ def _confirmed_break_reclaim_evidence(
             continue
         if not raw.get("break_closed_at"):
             continue
-        completed_used = _alert_float(raw.get("completed_bars_used"), None)
-        hold_required = _alert_float(raw.get("hold_bars_required"), None)
-        hold_observed = _alert_float(raw.get("hold_bars_observed"), None)
+        counters = [
+            None if isinstance(raw.get(key), bool) else _alert_float(raw.get(key), None)
+            for key in ("completed_bars_used", "hold_bars_required", "hold_bars_observed")
+        ]
+        if any(value is None or not math.isfinite(value) or value < 0 or not value.is_integer()
+               for value in counters):
+            continue
+        completed_used, hold_required, hold_observed = counters
         if (
             completed_used is None
             or completed_used <= 0
@@ -15812,14 +15833,28 @@ def _confirmed_break_reclaim_evidence(
             continue
         if not expected_direction or str(raw.get("direction") or "").strip().upper() != expected_direction:
             continue
-        if breakout_only:
-            row_direction = _infer_alert_direction(item)
-            if row_direction and row_direction != expected_direction:
-                continue
+        # A valid historical reclaim cannot release the opposite row's trade.
+        # Inspect explicit aliases separately: the legacy direction normalizer
+        # prioritizes SHORT and could otherwise hide a conflicting LONG field.
+        # Neutral actions and directionless legacy evidence remain readable.
+        explicit_directions = set()
+        for source, keys in (
+            (item, ("Signal_Direction", "BI_Direction", "direction", "_direction", "side", "trade_action")),
+            (setup, ("direction", "trade_action")),
+        ):
+            for key in keys:
+                tokens = re.findall(r"(?<![A-Z])(LONG|SHORT|BUY|SELL)(?![A-Z])", str(source.get(key) or "").upper())
+                explicit_directions.update("LONG" if token in {"LONG", "BUY"} else "SHORT" for token in tokens)
+        row_direction = _infer_alert_direction(item)
+        if ((explicit_directions and explicit_directions != {expected_direction})
+                or (row_direction and row_direction != expected_direction)):
+            continue
         evidence_boundary = _alert_float(raw.get("boundary"), None)
         if (
             expected_boundary is None
             or evidence_boundary is None
+            or not math.isfinite(evidence_boundary)
+            or evidence_boundary <= 0
             or not math.isclose(
                 evidence_boundary,
                 expected_boundary,
@@ -15842,6 +15877,8 @@ def _confirmed_break_reclaim_evidence(
             or last_completed_at is None
             or evidence_as_of is None
             or last_close is None
+            or not math.isfinite(last_close)
+            or last_close <= 0
             or not timeframe
             or not (zone_confirmed_at < break_closed_at <= last_completed_at <= evidence_as_of)
             or completed_used < hold_observed + 1
@@ -15868,8 +15905,11 @@ def _confirmed_break_reclaim_evidence(
                 or not isinstance(proof_history, dict)
                 or set(history) != history_keys
                 or proof_history != history
-                or history.get("model") != "connected_role_geometry_v1"
+                or history.get("model") not in {
+                    "connected_role_geometry_v1", "connected_role_boundary_v2",
+                }
                 or history.get("zone_id") != barrier_zone_id
+                or any(isinstance(history.get(key), bool) for key in ("lower", "upper"))
             ):
                 continue
             history_lower = _alert_float(history.get("lower"), None)
@@ -15920,12 +15960,26 @@ def _confirmed_break_reclaim_evidence(
             or (expected_direction == "SHORT" and last_close >= expected_boundary)
         ):
             continue
-        if breakout_only:
-            current = _alert_float(_extract_alert_price(item), None)
-            if (current is None or not math.isfinite(current)
-                    or (expected_direction == "LONG" and current <= expected_boundary)
-                    or (expected_direction == "SHORT" and current >= expected_boundary)):
-                continue
+        # A previously valid retest is not permission to ignore a subsequent
+        # observed price back inside the zone. Use the supplied observation
+        # (including a completed 1D reference close), never require a new live
+        # quote here. Price-less legacy proofs keep their historical contract;
+        # an entry-only plan is not a fresh market-price observation.
+        observed_prices = [
+            None if isinstance(item.get(key), bool) else _alert_float(item.get(key), None)
+            for key in ("Preis", "Price", "price", "current", "current_price")
+            if item.get(key) not in (None, "")
+        ]
+        if breakout_only and not observed_prices:
+            fallback_price = _extract_alert_price(item)
+            observed_prices = [None if isinstance(fallback_price, bool) else _alert_float(fallback_price, None)]
+        # Aliases may differ by display rounding, but none may contradict the
+        # confirmed side or hide an invalid observation behind key precedence.
+        if any(current is None or not math.isfinite(current) or current <= 0
+               or (expected_direction == "LONG" and current <= expected_boundary)
+               or (expected_direction == "SHORT" and current >= expected_boundary)
+               for current in observed_prices):
+            continue
         return dict(raw)
     return None
 
@@ -19265,6 +19319,27 @@ def _fetch_strategy_daily_history(
 
     daily_bars: List[Dict[str, Any]] = []
 
+    if strict_data:
+        diagnostics = runtime.setdefault("stock_history_diagnostics", {}) if runtime else {}
+        retry_state = runtime["root"].setdefault("stock_history_retry_budget", {}) if runtime else {}
+        try:
+            daily_bars = fetch_stock_daily_history_strict(
+                ticker, POLYGON_KEY, completed_through=session,
+                as_of=runtime.get("stock_history_as_of") if runtime else None,
+                diagnostics=diagnostics, retry_state=retry_state,
+            )
+        except StockHistoryDataError as error:
+            _record_stock_history_error(error, diagnostics)
+            if error.symbol_local:
+                raise
+            raise ScannerDataError(error.code, diagnostics) from None
+        stock_scan_runtime.checkpoint()
+        if session:
+            stock_scan_runtime.cache_put(shared_key, {"bars": daily_bars, "requested": min_days})
+        else:
+            history_cache[cache_key] = daily_bars
+        return daily_bars
+
     # Cheap path for short lookbacks.
     if min_days <= 60:
         try:
@@ -19307,6 +19382,32 @@ def _fetch_strategy_daily_history(
     else:
         history_cache[cache_key] = daily_bars
     return daily_bars
+
+
+def _record_stock_history_error(error, diagnostics):
+    """Keep fixed categories, never provider bodies, URLs or ticker symbols."""
+    for key, value in (("stock_history_error_counts", error.reason),
+                       ("stock_history_error_fields", error.field),
+                       ("stock_history_error_value_classes", error.value_class),
+                       ("stock_history_error_positions", error.position)):
+        counts = diagnostics.setdefault(key, {})
+        counts[value] = int(counts.get(value, 0)) + 1
+
+
+def _exclude_stock_history_symbol(error, diagnostics):
+    """A bad OHLCV series cannot invalidate unrelated valid symbols."""
+    if not error.symbol_local:
+        raise ScannerDataError(error.code, diagnostics) from None
+    excluded = int(diagnostics.get("invalid_history_symbols", 0)) + 1
+    diagnostics["invalid_history_symbols"] = excluded
+    # A large malformed cohort may be a provider/schema incident.
+    if excluded > 20:
+        _record_stock_history_error(
+            StockHistoryDataError("scan_data_invalid", "symbol_exclusion_limit"), diagnostics)
+        raise ScannerDataError("scan_data_invalid", diagnostics) from None
+    diagnostics["excluded_data_symbols"] = int(diagnostics.get("excluded_data_symbols", 0)) + 1
+    rejected = diagnostics.setdefault("rejected", {})
+    rejected["invalid_daily_history"] = int(rejected.get("invalid_daily_history", 0)) + 1
 
 
 def _level_timestamp_seconds(value: Any) -> Optional[float]:
@@ -20654,6 +20755,7 @@ def _score_cup_handle_breakout_quality(
 
 _CUP_TERMINAL_REASONS = frozenset({
     "special_filter_accepted", "missing_symbol", "insufficient_completed_history",
+    "invalid_daily_history",
     "liquidity_below_floor", "invalid_pattern_data", "invalid_current_price",
     "pattern_unconfirmed", "breakout_close_unconfirmed", "entry_extension_rejected",
     "breakout_volume_unconfirmed", "handle_volume_unconfirmed", "trade_plan_unconfirmed",
@@ -22064,11 +22166,16 @@ def _apply_special_strategy_post_filter(
                 rejected["exception"] = int(rejected.get("exception", 0)) + 1
                 raise ScannerDataError("scan_data_incomplete", native_diagnostics) from None
 
-        daily_bars = _stock_completed_pattern_history(
-            _fetch_strategy_daily_history(str(ticker), requested_history, history_cache, True),
-            as_of=(stock_swing.session_close(candidate["swing_analysis_session"])
-                   if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
-        )
+        try:
+            daily_bars = _stock_completed_pattern_history(
+                _fetch_strategy_daily_history(str(ticker), requested_history, history_cache, True),
+                as_of=(stock_swing.session_close(candidate["swing_analysis_session"])
+                       if stock_swing.is_swing(candidate) else datetime.now(timezone.utc)),
+            )
+        except StockHistoryDataError as error:
+            _exclude_stock_history_symbol(error, diagnostics if diagnostics is not None else {})
+            checked_candidate("invalid_daily_history")
+            continue
         if len(daily_bars) < min_history:
             checked_candidate("insufficient_completed_history")
             continue
@@ -22309,6 +22416,9 @@ _STOCK_ATTEMPT_COUNTS = frozenset({
     "provider_requests", "history_cache_hits", "rate_wait_seconds", "elapsed_seconds", "leaf_elapsed_seconds",
     "special_filter_input_count", "special_filter_checked_count",
     "special_filter_unexamined_count", "special_filter_limit",
+    "excluded_data_symbols", "empty_history_symbols", "invalid_history_symbols",
+    "data_retry_attempts", "data_retry_recovered", "data_retry_failed",
+    "data_retry_budget_exhausted", "data_retry_observation_mismatches",
 })
 _STOCK_ATTEMPT_STAGES = frozenset("""
 snapshot_universe valid_symbol_and_prev_close common_stock_asset priced_snapshot
@@ -22318,6 +22428,7 @@ reversal_ad_gate raw_matches_before_special_filter final_results
 """.split())
 _STOCK_ATTEMPT_REJECTIONS = _STOCK_ATTEMPT_STAGES | frozenset(ScannerDataError.CODES) | frozenset("""
 invalid_symbol_or_missing_prev_close missing_price_or_prev_close exception
+empty_daily_history invalid_daily_history
 premarket_dollar_volume_filter premarket_missing_quote premarket_spread_guard premarket_extension_guard
 momentum:not_enough_daily_history momentum:invalid_momentum_inputs momentum:daily_momentum_too_small
 momentum:rvol_below_breakout_threshold momentum:daily_close_not_near_high
@@ -22378,12 +22489,21 @@ def _stock_strategy_attempt_diagnostics(value: Any, *, sweep: bool) -> Dict[str,
         result["runtime_phase"] = source["runtime_phase"]
     if source.get("final_results") is None:
         result["final_results"] = None
-    if source.get("coverage") in ("complete", "incomplete"):
+    if source.get("coverage") in ("complete", "complete_with_exclusions", "incomplete"):
         result["coverage"] = source["coverage"]
     mail_audit = scan_mail_audit.project(source.get("mail_audit"), ALLOWED_SUPPRESSION_REASONS)
     if mail_audit:
         result["mail_audit"] = mail_audit
     if not sweep:
+        from modules.bi_market_data import (
+            BI_DATA_ERROR_FIELDS, BI_DATA_ERROR_VALUE_CLASSES, BI_DATA_ERROR_POSITIONS,
+        )
+        for key, allowed in (("stock_history_error_counts", STOCK_HISTORY_ERROR_REASONS),
+                             ("stock_history_error_fields", BI_DATA_ERROR_FIELDS),
+                             ("stock_history_error_value_classes", BI_DATA_ERROR_VALUE_CLASSES),
+                             ("stock_history_error_positions", BI_DATA_ERROR_POSITIONS)):
+            if isinstance(source.get(key), dict):
+                result[key] = counts(source[key], allowed)
         result["stage_counts"] = counts(source.get("stage_counts"), _STOCK_ATTEMPT_STAGES)
         result["rejected"] = counts(source.get("rejected"), _STOCK_ATTEMPT_REJECTIONS)
         result["plan_build_counts"] = counts(source.get("plan_build_counts"), _STOCK_PLAN_BUILD_REASONS)
@@ -22552,7 +22672,7 @@ def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
             raise ValueError("invalid_attempt_status")
         if status == "complete":
             if (type(count) is not int or not 0 <= count <= 10**9 or error not in (None, "")
-                    or diagnostics.get("coverage") != "complete"
+                    or diagnostics.get("coverage") not in ("complete", "complete_with_exclusions")
                     or type(diagnostics.get("final_results")) is not int or diagnostics["final_results"] != count):
                 raise ValueError("invalid_attempt_completion")
         elif count is not None or (status == "error" and (not isinstance(error, str) or error not in _STOCK_ATTEMPT_ERRORS)):
@@ -22838,6 +22958,9 @@ def _strategy_scan_wrapper(
             },
         }
 
+        stock_scan_runtime.current()["stock_history_diagnostics"] = scan_diag
+        stock_scan_runtime.current()["stock_history_as_of"] = scan_now_utc
+
         def _reject(reason: str) -> None:
             rejected = scan_diag.setdefault("rejected", {})
             rejected[reason] = int(rejected.get(reason, 0)) + 1
@@ -23032,6 +23155,10 @@ def _strategy_scan_wrapper(
                     if swing_daily_mode:
                         daily_bars = [bar for bar in daily_bars if
                                       _daily_bar_date_str(bar) <= t["swing_analysis_session"]]
+                    if not daily_bars:
+                        scan_diag["empty_history_symbols"] = int(scan_diag.get("empty_history_symbols", 0)) + 1
+                        _reject("empty_daily_history")
+                        continue
                     _wyckoff_evidence = None
                     if _is_wyckoff:
                         _stage("wyckoff_analyzed")
@@ -23504,6 +23631,9 @@ def _strategy_scan_wrapper(
                     _publish_partial(checked, force=len(results) == 1)
                 except stock_scan_runtime.ScanWorkTimeout:
                     raise
+                except StockHistoryDataError as data_error:
+                    _exclude_stock_history_symbol(data_error, scan_diag)
+                    continue
                 except ScannerDataError as data_error:
                     _reject(data_error.code)
                     raise ScannerDataError(data_error.code, scan_diag) from None
@@ -23563,7 +23693,7 @@ def _strategy_scan_wrapper(
         results = _fresh_results
         stock_scan_runtime.checkpoint("publish")
         scan_diag["final_results"] = len(results)
-        scan_diag["coverage"] = "complete"
+        scan_diag["coverage"] = "complete_with_exclusions" if scan_diag.get("excluded_data_symbols") else "complete"
         scan_diag.setdefault("stage_counts", {})["raw_matches_before_special_filter"] = scan_diag["raw_matches_before_special_filter"]
         scan_diag.setdefault("stage_counts", {})["final_results"] = scan_diag["final_results"]
         scan_diag["top_rejects"] = sorted(
@@ -31617,7 +31747,7 @@ def get_scan_results(
         scan_state, latest_attempt = _stock_strategy_result_attempt(
             resolved_strategy, scan_state, cached_at,
             cache_complete=strategy_scoped_cache and not is_partial and not stale_strategy_cache
-            and (diagnostics or {}).get("coverage") == "complete",
+            and (diagnostics or {}).get("coverage") in ("complete", "complete_with_exclusions"),
         )
         diagnostics = dict(diagnostics or {})
         diagnostics["latest_attempt"] = latest_attempt

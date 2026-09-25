@@ -139,7 +139,7 @@ def _history(count):
 
 def test_same_complete_history_reused_across_leaf_and_special_filter(clock, monkeypatch):
     calls = []
-    monkeypatch.setattr(api, "fetch_ohlcv_for_chart", lambda *a, **k: calls.append(k) or _history(240))
+    monkeypatch.setattr(api, "fetch_stock_daily_history_strict", lambda *a, **k: calls.append(k) or _history(240))
     with runtime.scope("sweep", sweep=True):
         with runtime.scope("first") as state:
             state["analysis_session"] = "2026-09-15"
@@ -159,6 +159,7 @@ def test_same_complete_history_reused_across_leaf_and_special_filter(clock, monk
 def test_short_history_never_satisfies_larger_lookback_or_strict_source(clock, monkeypatch):
     calls = []
     monkeypatch.setattr(api, "fetch_ohlcv_for_chart", lambda *a, **k: calls.append(k) or _history(75 if len(calls) == 1 else 240))
+    monkeypatch.setattr(api, "fetch_stock_daily_history_strict", lambda *a, **k: calls.append(k) or _history(240))
     with runtime.scope("first") as state:
         state["analysis_session"] = "2026-09-15"
         assert len(api._fetch_strategy_daily_history("TEST", 70, {}, False)) == 75

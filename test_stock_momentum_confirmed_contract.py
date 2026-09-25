@@ -153,7 +153,12 @@ def _wrapper_fixture(monkeypatch, *, price=102., metrics=None, bars=None):
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **kw: None)
     monkeypatch.setattr(api, "get_current_trading_session", lambda: ("Regular", "Regular"))
     monkeypatch.setattr(api, "_us_equity_expected_volume_fraction", lambda *a: 1.)
-    monkeypatch.setattr(api, "_fetch_strategy_daily_history", lambda *a: [])
+    # Metrics are injected below; this fixture still represents an available
+    # history. Explicitly empty provider history is now correctly excluded.
+    monkeypatch.setattr(api, "_fetch_strategy_daily_history", lambda *a: [
+        {"date": "2026-08-03", "open": 99., "high": 103., "low": 98.,
+         "close": 102., "volume": 1_000_000},
+    ])
     monkeypatch.setattr(api, "_stock_previous_session_change", lambda *a, **kw: 11.)
     monkeypatch.setattr(api, "_strategy_daily_history_metrics", lambda *a, **kw: metrics or _metrics())
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *a, **kw: bars if bars is not None else [

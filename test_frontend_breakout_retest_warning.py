@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from test_frontend_scanner_lifecycle import node_run
 
 
@@ -92,6 +94,36 @@ def test_warning_accepts_complete_nested_trade_setup_but_never_merges_partial_so
     }
     assert evaluate_warning(split) is None
     assert evaluate_warning({"trade_setup": None}) is None
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("code", ["retest_not_confirmed", "crossed_resistance_unconfirmed",
+                                  "crossed_support_unconfirmed", "trigger_not_current",
+                                  "market_data_invalid", "display_metadata_invalid",
+                                  "breakout_evidence_conflict", "breakout_failed", "breakout_invalidated"])
+def test_current_visibility_contradiction_suppresses_old_raw_confirmed_marker(direction, code):
+    row = {**confirmed_warning(direction), "visibility_status": "candidate_warning",
+           "visibility_warnings": [{"code": code, "label": "Current diagnostic"}]}
+    assert evaluate_warning(row) is None
+    assert evaluate_warning({"trade_setup": confirmed_warning(direction),
+                             "visibility_status": row["visibility_status"],
+                             "visibility_warnings": row["visibility_warnings"]}) is None
+
+
+@pytest.mark.parametrize("status", ["released", "candidate_warning"])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_valid_optional_retest_warning_survives_independent_plan_or_target_risk(status, direction):
+    row = {**confirmed_warning(direction), "visibility_status": status,
+           "visibility_warnings": [{"code": "near_structural_barrier", "label": "Next barrier near"}]}
+    assert evaluate_warning(row)["direction"] == direction
+
+
+@pytest.mark.parametrize("completed", [{"retest_status": "confirmed"}, {"retest_confirmed": True}])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_completed_retest_overrides_stale_pending_copy_for_warning_only(completed, reverse):
+    row = {**(completed if reverse else confirmed_warning()),
+           "trade_setup": confirmed_warning() if reverse else completed}
+    assert evaluate_warning(row) is None
 
 
 def test_shared_warning_is_present_in_stock_crypto_sidebar_and_chart_surfaces():

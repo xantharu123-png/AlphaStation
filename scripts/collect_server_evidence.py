@@ -44,6 +44,7 @@ raw_matches_before_special_filter max_results quarantined_symbols
 special_filter_input_count special_filter_checked_count special_filter_unexamined_count special_filter_limit
 transport_requests transport_retries transport_recovered_incidents transport_retry_budget_exhausted
 excluded_uncompleted_bars excluded_data_symbols valid_data_symbols
+empty_history_symbols invalid_history_symbols
 data_retry_attempts data_retry_recovered data_retry_failed data_retry_budget_exhausted
 data_retry_observation_mismatches
 """.split())
@@ -76,6 +77,7 @@ malformed_json unexpected_failure
 """.split())
 REJECTION_CODES = DATA_FAILURE_CODES | frozenset("""
 insufficient_daily_history insufficient_completed_history insufficient_dollar_liquidity
+empty_daily_history invalid_daily_history
 rvol_anomaly spac_nav already_broke_out cumulative_pump indicator_or_hard_gate_contract
 invalid_symbol_or_missing_prev_close missing_price_or_prev_close change_filter
 price_filter close_position_filter gap_filter dollar_volume_filter vortag_filter
@@ -110,6 +112,13 @@ missing null boolean non_numeric non_finite zero_price negative_price negative_v
 nonpositive_timestamp nonascending_timestamp timestamp_out_of_range future_timestamp invalid_geometry unknown
 """.split())
 DATA_ERROR_POSITIONS = frozenset({"only", "first", "interior", "last", "unknown"})
+STOCK_HISTORY_MAPS = (
+    ("stock_history_error_counts", DATA_ERROR_REASONS | TRANSPORT_ERROR_REASONS
+     | frozenset({"symbol_exclusion_limit"})),
+    ("stock_history_error_fields", frozenset({"t", "o", "h", "l", "c", "v", "bar", "unknown"})),
+    ("stock_history_error_value_classes", DATA_ERROR_VALUE_CLASSES),
+    ("stock_history_error_positions", DATA_ERROR_POSITIONS),
+)
 SCAN_MAIL_EVENTS = frozenset(f"{kind}_{event}" for kind in ("trade", "other")
                             for event in ("sender_called", "accepted", "partial", "partial_unknown", "unknown", "failed", "queued"))
 SCAN_MAIL_SEMANTICS = "overlapping_reason_occurrences_and_message_events_not_inbox_delivery"
@@ -126,7 +135,7 @@ invalid_stop_risk invalid_trade_geometry native_structure_plan
 first_opposing_barrier_before_minimum_rr direction_missing plan_unavailable
 """.split())
 CUP_TERMINAL_REASONS = frozenset("""
-special_filter_accepted missing_symbol insufficient_completed_history
+special_filter_accepted missing_symbol insufficient_completed_history invalid_daily_history
 liquidity_below_floor invalid_pattern_data invalid_current_price pattern_unconfirmed
 breakout_close_unconfirmed entry_extension_rejected breakout_volume_unconfirmed
 handle_volume_unconfirmed trade_plan_unconfirmed pattern_score_below_threshold
@@ -1339,6 +1348,10 @@ def safe_cache_summary(path):
         diagnostics = payload.get("diagnostics") or {}
         if isinstance(diagnostics, dict):
             _project_stock_stage_timings(diagnostics, result)
+            for name, allowed in STOCK_HISTORY_MAPS:
+                counts = _count_projection(diagnostics.get(name), allowed)
+                if counts is not None:
+                    result[name] = counts
             result["numeric_diagnostics"] = {
                 key: value for key, value in diagnostics.items()
                 if key in DIAGNOSTIC_COUNTS and _nonnegative_count(value)
@@ -1468,6 +1481,10 @@ def safe_strategy_attempt_summary(path, expected_slug):
         if not isinstance(diagnostics, dict):
             raise ValueError("Missing attempt diagnostics")
         _project_stock_stage_timings(diagnostics, result)
+        for name, allowed in STOCK_HISTORY_MAPS:
+            counts = _count_projection(diagnostics.get(name), allowed)
+            if counts is not None:
+                result[name] = counts
         result["numeric_diagnostics"] = {
             key: value for key, value in diagnostics.items()
             if key in STOCK_ATTEMPT_COUNTS and _nonnegative_count(value)

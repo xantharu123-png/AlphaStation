@@ -16,6 +16,134 @@ import requests
 from modules import stock_scan_runtime
 import datetime as dt
 from datetime import datetime, timedelta
+from modules.bi_market_data import (
+    BIAggregateDataError, BI_DATA_ERROR_REASONS, parse_bi_daily_aggregates,
+    bi_symbol_local_price_error,
+)
+
+
+STOCK_HISTORY_ERROR_REASONS = BI_DATA_ERROR_REASONS | frozenset({
+    "timeout", "connection_failure", "tls_failure", "http_unauthorized",
+    "http_rate_limited", "http_server_error", "http_client_error",
+    "http_unexpected_status", "symbol_exclusion_limit",
+})
+
+
+class StockHistoryDataError(RuntimeError):
+    """Typed daily-history failure with fixed, non-sensitive diagnostics."""
+
+    def __init__(self, code, reason, *, bar_error=None):
+        self.code = code if code in {
+            "scan_data_unavailable", "scan_data_invalid", "scan_provider_unauthorized",
+            "scan_provider_rate_limited",
+        } else "scan_data_unavailable"
+        self.reason = reason if reason in STOCK_HISTORY_ERROR_REASONS else "invalid_payload"
+        self.field = getattr(bar_error, "field", "unknown")
+        self.value_class = getattr(bar_error, "value_class", "unknown")
+        self.position = getattr(bar_error, "position", "unknown")
+        self.symbol_local = bi_symbol_local_price_error(bar_error)
+        super().__init__(self.code)
+
+
+def fetch_stock_daily_history_strict(ticker, poly_key, *, completed_through=None,
+                                    as_of=None, diagnostics=None, retry_state=None):
+    """Validated 1D stock history, never a best-effort chart result.
+
+    Preserve the chart's 1095-calendar-day / 800-bar window. Empty success is
+    an empty history, not a provider outage. Whole-series OHLCV defects get at
+    most one identical-query retry (20 across an owning scan/sweep); no bad
+    candle is removed or repaired. Systemic errors and timestamps never qualify
+    for symbol-local isolation. Requests still use the shared rate limiter.
+    """
+    from zoneinfo import ZoneInfo
+
+    clock = as_of or datetime.now(dt.timezone.utc)
+    if not isinstance(clock, datetime) or clock.tzinfo is None or clock.utcoffset() is None:
+        raise ValueError("Stock history requires an aware clock")
+    session_date = clock.astimezone(ZoneInfo("America/New_York")).date()
+    cutoff = completed_through or session_date.isoformat()
+    start_date = (session_date - timedelta(days=1095)).isoformat()
+    end_date = session_date.isoformat()
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
+    params = {"apiKey": poly_key, "adjusted": "true", "sort": "asc", "limit": 50000}
+    counters = diagnostics if isinstance(diagnostics, dict) else {}
+    budget = retry_state if isinstance(retry_state, dict) else {}
+
+    def bump(name):
+        counters[name] = int(counters.get(name, 0)) + 1
+
+    def request_payload():
+        stock_scan_runtime.checkpoint("history")
+        try:
+            reply = rate_limited_get(url, params=dict(params), timeout=15)
+        except requests.exceptions.SSLError:
+            raise StockHistoryDataError("scan_data_unavailable", "tls_failure") from None
+        except requests.exceptions.Timeout:
+            raise StockHistoryDataError("scan_data_unavailable", "timeout") from None
+        except (requests.exceptions.RequestException, OSError):
+            raise StockHistoryDataError("scan_data_unavailable", "connection_failure") from None
+        stock_scan_runtime.checkpoint("history")
+        status = reply.status_code
+        if status in (401, 403):
+            raise StockHistoryDataError("scan_provider_unauthorized", "http_unauthorized")
+        if status == 429:
+            raise StockHistoryDataError("scan_provider_rate_limited", "http_rate_limited")
+        if status != 200:
+            reason = ("http_server_error" if 500 <= status <= 599 else
+                      "http_client_error" if 400 <= status <= 499 else "http_unexpected_status")
+            raise StockHistoryDataError("scan_data_unavailable", reason)
+        try:
+            payload = reply.json()
+        except ValueError:
+            raise StockHistoryDataError("scan_data_invalid", "invalid_json") from None
+        if isinstance(payload, dict):
+            provider_status = str(payload.get("status") or "").upper()
+            if provider_status in {"NOT_AUTHORIZED", "UNAUTHORIZED", "FORBIDDEN"}:
+                raise StockHistoryDataError("scan_provider_unauthorized", "http_unauthorized")
+            if provider_status in {"RATE_LIMITED", "TOO_MANY_REQUESTS"}:
+                raise StockHistoryDataError("scan_provider_rate_limited", "http_rate_limited")
+        return payload
+
+    def parse(payload):
+        try:
+            return parse_bi_daily_aggregates(payload, completed_through=cutoff, as_of=clock)
+        except BIAggregateDataError as exc:
+            raise StockHistoryDataError("scan_data_invalid", exc.reason, bar_error=exc) from None
+
+    payload = request_payload()
+    try:
+        bars = parse(payload)
+    except StockHistoryDataError as original:
+        if not original.symbol_local:
+            raise
+        if int(budget.get("used", 0)) >= 20:
+            bump("data_retry_budget_exhausted")
+            raise
+        budget["used"] = int(budget.get("used", 0)) + 1
+        bump("data_retry_attempts")
+        recovered = False
+        try:
+            retried = request_payload()
+            bars = parse(retried)
+            # An empty/shortened/different response cannot prove that the bad
+            # original observation was corrected. Compare the entire query.
+            original_times = [bar.get("t") if isinstance(bar, dict) else None
+                              for bar in payload["results"]]
+            retried_times = [bar["t"] for bar in retried.get("results", [])]
+            if original_times != retried_times:
+                bump("data_retry_observation_mismatches")
+                raise original from None
+            recovered = True
+            bump("data_retry_recovered")
+        finally:
+            if not recovered:
+                bump("data_retry_failed")
+
+    return [{"date": datetime.fromtimestamp(bar["t"] / 1000, dt.timezone.utc)
+             .astimezone(ZoneInfo("America/New_York")).date().isoformat(),
+             "open": float(bar["o"]), "high": float(bar["h"]), "low": float(bar["l"]),
+             "close": float(bar["c"]), "volume": float(bar["v"])}
+            for bar in bars[-800:]]
 
 # Rate limiter state (thread-safe)
 _rate_lock = threading.Lock()

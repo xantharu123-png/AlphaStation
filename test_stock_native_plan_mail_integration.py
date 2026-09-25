@@ -139,7 +139,9 @@ def _probe(direction, directory, scenario="barrier"):
         with patch.object(api, "datetime", Clock), patch.object(swing, "datetime", Clock), \
                 patch.object(api, "rate_limited_get", provider), \
                 patch.object(api.req.sessions.Session, "request", forbidden), \
-                patch.object(api, "fetch_ohlcv_for_chart", lambda *a, **k: history), \
+                patch.object(api, "fetch_stock_daily_history_strict", lambda *a, **k: [
+                    {**row, "date": datetime.fromtimestamp(row["time"], timezone.utc).date().isoformat()}
+                    for row in history]), \
                 patch.object(api, "_fetch_recent_stock_4h_bars", lambda *a, **k: four_hour), \
                 patch.object(api, "_load_common_stock_universe", lambda **k: ({"TEST"}, "fixture")), \
                 patch.object(api, "fetch_business_quality", lambda *a, **k: {}), \

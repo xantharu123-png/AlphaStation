@@ -3130,6 +3130,8 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
     if (has('market_data_invalid', 'display_metadata_invalid', 'scan_data_invalid')) message = 'Kursdaten prüfen';
     else if (has('trigger_not_current', 'stale_5m_candle', 'closed_5m_data_stale')) message = 'Einstiegssignal nicht mehr aktuell';
     else if (has('crossed_resistance_unconfirmed', 'crossed_support_unconfirmed')) message = 'Schlusskursbestätigung fehlt';
+    else if (has('breakout_evidence_conflict', 'breakout_failed', 'failed_breakout', 'breakout_invalidated',
+        'breakout_expired', 'live_price_lost_breakout_confirmation', 'orb_current_breakout_lost')) message = 'Ausbruch nicht gültig bestätigt';
     else if (has(...barrierCodes)) message = `${side}${price} nah`;
     else if (has('invalid_trade_geometry', 'invalid_trade_plan', 'estimated_trade_plan', 'native_trade_levels_missing',
         'no_structural_invalidation', 'plan_unavailable', 'causal_structure_missing', 'causal_structure_unavailable')) message = 'Handelsplan noch nicht bestätigt';
@@ -3180,7 +3182,8 @@ function ScannerCandidateStatus({ row = {}, compact = false, retest = null }) {
         {view.warnings.map((warning, index) => <div key={`${warning.code}-${index}`} className="mt-1" data-warning-code={warning.code}>
             {warning.label}{warning.detail && <span> · {warning.detail}</span>}
         </div>)}
-        {retest && !view.warnings.some(warning => ['breakout_confirmed_retest_pending', 'breakout_confirmed_without_retest'].includes(warning.code))
+        {retest && !breakoutRetestWarningBlockedByVisibility(row)
+            && !view.warnings.some(warning => ['breakout_confirmed_retest_pending', 'breakout_confirmed_without_retest'].includes(warning.code))
             && <div data-warning-code={retest.code}>{retest.warning}</div>}
         {mail && <div className="mt-2 border-t border-current/15 pt-2" data-testid="scanner-mail-check">
             <div className="font-semibold">{mail.label}</div>
@@ -3206,9 +3209,23 @@ function ScannerCandidateStatus({ row = {}, compact = false, retest = null }) {
 
 const BREAKOUT_WITHOUT_RETEST_CODE = 'breakout_confirmed_without_retest';
 
+function breakoutRetestWarningBlockedByVisibility(row = {}) {
+    if (!['released', 'candidate_warning', 'context'].includes(row?.visibility_status)) return false;
+    const contradictions = new Set(['retest_not_confirmed', 'crossed_resistance_unconfirmed',
+        'crossed_support_unconfirmed', 'trigger_not_current', 'market_data_invalid', 'display_metadata_invalid',
+        'breakout_evidence_conflict', 'breakout_failed', 'failed_breakout', 'breakout_invalidated',
+        'breakout_expired', 'live_price_lost_breakout_confirmation', 'orb_current_breakout_lost']);
+    return (Array.isArray(row.visibility_warnings) ? row.visibility_warnings : []).some(warning =>
+        warning && typeof warning.code === 'string' && contradictions.has(warning.code));
+}
+
 function breakoutRetestWarningEvidence(row = {}) {
     if (!row || typeof row !== 'object') return null;
+    // Current visibility diagnostics outrank an older copied producer marker.
+    // Do not reinsert "confirmed" text that the server deliberately neutralized.
+    if (breakoutRetestWarningBlockedByVisibility(row)) return null;
     const sources = [row, row.trade_setup].filter(source => source && typeof source === 'object');
+    if (sources.some(source => source.retest_status === 'confirmed' || source.retest_confirmed === true)) return null;
     for (const source of sources) {
         const warningCodes = Array.isArray(source.warning_codes) ? source.warning_codes : [];
         const warning = typeof source.retest_warning === 'string' ? source.retest_warning.trim() : '';

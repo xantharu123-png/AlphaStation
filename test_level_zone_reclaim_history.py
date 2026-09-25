@@ -98,14 +98,57 @@ def test_contained_late_evidence_preserves_old_role_proof(direction, late_kind):
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
 @pytest.mark.parametrize("lower,upper", [(99.97, 100.01), (99.99, 100.03)])
-def test_extension_of_either_zone_bound_cannot_borrow_old_bars(direction, lower, upper):
+def test_only_breakout_edge_extension_resets_directional_history(direction, lower, upper):
     zone = _zone(_snapshot(direction, [
         _evidence(_role(direction)),
         _evidence(_role(direction), day=2, lower=lower, upper=upper),
     ]))
+    breakout_edge_changed = upper > 100.02 if direction == "LONG" else lower < 99.98
+    assert zone.break_state == ("intact" if breakout_edge_changed else "reclaimed")
+    proof = zone.break_reclaim_evidence
+    assert proof.zone_confirmed_at == (BASE + timedelta(days=2) if breakout_edge_changed else BASE)
+    assert proof.completed_bars_used == (0 if breakout_edge_changed else 2)
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_new_disconnected_component_invalidates_earlier_edge_until_late_bridge(direction):
+    # The edge itself existed on day 0. A new island on day 1 must still reset
+    # proof; looking only for the earliest edge would incorrectly borrow it.
+    role = _role(direction)
+    edge, other = (100.05, 99.95) if direction == "LONG" else (99.95, 100.05)
+    zone = _zone(_snapshot(direction, [
+        _evidence(role, lower=edge),
+        _evidence(role, day=1, lower=other),
+        _evidence(role, day=2, lower=99.97, upper=100.03),
+    ]))
     assert zone.break_state == "intact"
     assert zone.break_reclaim_evidence.zone_confirmed_at == BASE + timedelta(days=2)
-    assert zone.break_reclaim_evidence.completed_bars_used == 0
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("late_role", ["support", "resistance"])
+def test_opposite_edge_extension_preserves_only_the_unchanged_direction(direction, late_role):
+    lower, upper = (99.97, 100.01) if direction == "LONG" else (99.99, 100.03)
+    zone = _zone(_snapshot(direction, [
+        _evidence(_role(direction)),
+        _evidence(late_role, day=2, lower=lower, upper=upper),
+    ]))
+    assert zone.break_state == "reclaimed"
+    assert zone.confirmed_at == BASE + timedelta(days=2)
+    assert zone.break_reclaim_evidence.zone_confirmed_at == BASE
+    assert zone.reclaim_history.to_dict()["model"] == "connected_role_boundary_v2"
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_opposite_edge_growth_does_not_hide_a_subsequent_failed_close(direction):
+    lower, upper = (99.97, 100.01) if direction == "LONG" else (99.99, 100.03)
+    zone = _zone(_snapshot(direction, [
+        _evidence(_role(direction)),
+        _evidence(_role(direction), day=3, lower=lower, upper=upper),
+    ], [_bar(1, direction), _bar(2, direction), _bar(3, direction, failure=True)], day=3))
+    assert zone.break_state == "intact"
+    assert zone.break_reclaim_evidence.completed_bars_used == 3
+    assert zone.break_reclaim_evidence.break_closed_at is None
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

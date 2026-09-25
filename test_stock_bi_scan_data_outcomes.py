@@ -176,6 +176,9 @@ def test_valid_stock_zero_remains_success(monkeypatch, tmp_path):
 
 def test_strict_stock_history_failure_does_not_change_optional_enrichment_contract(monkeypatch):
     monkeypatch.setattr(api, "fetch_ohlcv_for_chart", lambda *a, **kw: None)
+    def strict_unavailable(*args, **kwargs):
+        raise api.StockHistoryDataError("scan_data_unavailable", "connection_failure")
+    monkeypatch.setattr(api, "fetch_stock_daily_history_strict", strict_unavailable)
     cache = {}
     assert api._fetch_strategy_daily_history("TEST", 70, cache) == []
     with pytest.raises(scanners.ScannerDataError, match="scan_data_unavailable"):

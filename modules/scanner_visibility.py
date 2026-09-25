@@ -4,6 +4,11 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 
+from modules.breakout_warnings import (
+    BREAKOUT_WITHOUT_RETEST_CODE,
+    BREAKOUT_WITHOUT_RETEST_WARNING,
+)
+
 
 LABELS = {
     "crossed_resistance_unconfirmed": "Widerstandsausbruch noch nicht durch Schlusskurs bestaetigt",
@@ -11,6 +16,8 @@ LABELS = {
     "first_opposing_barrier_before_minimum_rr": "Naechste Gegenbarriere sehr nahe; weniger als 1,35R Platz",
     "near_structural_barrier": "Naechste Unterstuetzung / naechster Widerstand sehr nahe",
     "breakout_confirmed_retest_pending": "Ausbruch bestaetigt; Ruecktest noch offen",
+    "retest_not_confirmed": "Ruecktest noch nicht bestaetigt; Ausbruchsstatus separat pruefen",
+    "breakout_evidence_conflict": "Ausbruch nicht gueltig bestaetigt; neue Bestaetigung abwarten",
     "invalid_trade_geometry": "Kein gueltiger Handelsplan: Entry, Stop oder Ziele passen nicht zusammen",
     "no_structural_invalidation": "Kein belastbarer struktureller Stop vorhanden",
     "causal_structure_missing": "Bestaetigte Marktstruktur fehlt fuer den Handelsplan",
@@ -43,6 +50,20 @@ TRIGGER_NOT_CURRENT = frozenset({
     "new_listing_short_cache_contract_invalid", "trigger_not_current",
 })
 
+_CONFIRMED_RETEST_CODES = frozenset({
+    "breakout_confirmed_retest_pending", BREAKOUT_WITHOUT_RETEST_CODE,
+})
+_CONFIRMED_RETEST_LABELS = frozenset({
+    LABELS["breakout_confirmed_retest_pending"], BREAKOUT_WITHOUT_RETEST_WARNING,
+})
+_BREAKOUT_WARNING_CONFLICTS = frozenset({
+    "crossed_resistance_unconfirmed", "crossed_support_unconfirmed",
+    "breakout_failed", "failed_breakout", "breakout_invalidated", "breakout_expired",
+    "live_price_lost_breakout_confirmation", "orb_current_breakout_lost",
+    "trigger_not_current", *TRIGGER_NOT_CURRENT,
+    "breakout_evidence_conflict",
+})
+
 PLAN_BLOCKERS = frozenset({
     "invalid_trade_geometry", "invalid_trade_plan", "estimated_trade_plan",
     "native_trade_levels_missing", "no_structural_invalidation", "plan_unavailable",
@@ -50,6 +71,7 @@ PLAN_BLOCKERS = frozenset({
     "crossed_resistance_unconfirmed", "crossed_support_unconfirmed",
     "first_opposing_barrier_before_minimum_rr", "near_structural_barrier",
     "near_structural_barrier_wait_trigger", "trade_health_no_trade",
+    *_BREAKOUT_WARNING_CONFLICTS,
 })
 
 
@@ -73,6 +95,86 @@ def number(value):
         return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _breakout_display_conflicts(row):
+    """Downgrade explicit contradictory states, not absent optional metadata."""
+    result = []
+    directions = set()
+    negative_states = {"invalid", "invalidated", "failed", "expired"}
+    for source in (row, mapping(row.get("trade_setup"))):
+        source_reasons = strings(source.get("native_plan_reason"))
+        source_reasons.extend(strings(mapping(source.get("native_plan_diagnostics")).get("reason")))
+        source_reasons.extend(strings(source.get("structure_reason")))
+        source_reasons.extend(strings(source.get("trigger_expiry_reason")))
+        for key in ("scanner_suppression_reasons", "exclusion_reasons", "risk_flags"):
+            source_reasons.extend(strings(source.get(key)))
+        result.extend(code for code in source_reasons if code in _BREAKOUT_WARNING_CONFLICTS)
+        explicit_conflict = (
+            source.get("breakout_confirmation") not in (None, "", "confirmed_close")
+            or any(source.get(key) is True for key in (
+                "failed_breakout", "breakout_failed", "breakout_invalidated", "trigger_expired",
+            ))
+            or any(str(source.get(key) or "").lower() in negative_states
+                   for key in ("break_state", "structure_state", "entry_state", "retest_status"))
+            or str(source.get("break_state") or "").lower() in {"intact", "unconfirmed", "pending"}
+            or str(mapping(source.get("entry_trigger")).get("state") or "").lower() in negative_states
+        )
+        for key in ("direction", "Direction", "BI_Direction"):
+            value = source.get(key)
+            if value is None or value == "":
+                continue
+            direction = str(value).strip().upper()
+            if direction not in {"LONG", "SHORT"}:
+                # Other strategies may use their own direction vocabulary;
+                # do not impose this optional breakout contract on them.
+                if any(item.get("breakout_confirmation") or item.get("break_state")
+                       or item.get("retest_status") == "not_confirmed"
+                       for item in (row, mapping(row.get("trade_setup")))):
+                    explicit_conflict = True
+            else:
+                directions.add(direction)
+        if explicit_conflict:
+            result.append("breakout_evidence_conflict")
+    if len(directions) > 1:
+        result.append("breakout_evidence_conflict")
+    return list(dict.fromkeys(result))
+
+
+def _retest_warning_code(row, codes):
+    """Describe coherent producer metadata, never infer a break from no retest.
+
+    The four fields are the existing breakout_warnings producer contract also
+    consumed by the mail and chart warning renderers. They must coexist in one
+    container; fields from a row and its nested plan are never combined. This is
+    presentation only: no warning can establish trade/mail eligibility.
+    """
+    sources = (row, mapping(row.get("trade_setup")))
+    # Explicit completed-retest metadata contradicts a pending annotation;
+    # without a timeline, do not assert that the retest is still missing.
+    if any(source.get("retest_status") == "confirmed" or source.get("retest_confirmed") is True
+           for source in sources):
+        return None
+    if not any(source.get("retest_status") == "not_confirmed" for source in sources):
+        return None
+
+    neutral = "retest_not_confirmed"
+    if _BREAKOUT_WARNING_CONFLICTS.intersection(codes) or _breakout_display_conflicts(row):
+        return neutral
+    for source in sources:
+        if source.get("retest_status") not in (None, "", "not_confirmed"):
+            return neutral
+
+    complete = any(
+        source.get("breakout_confirmation") == "confirmed_close"
+        and source.get("retest_status") == "not_confirmed"
+        and isinstance(source.get("warning_codes"), (list, tuple))
+        and BREAKOUT_WITHOUT_RETEST_CODE in source["warning_codes"]
+        and isinstance(source.get("retest_warning"), str)
+        and bool(source["retest_warning"].strip())
+        for source in sources
+    )
+    return "breakout_confirmed_retest_pending" if complete else neutral
 
 
 def mail_check_summary(row, state, *, reasons, labels, minimum_score, assessed_at, complete=True):
@@ -120,11 +222,17 @@ def reasons(row):
         result.append(str(native_reason))
     if row.get("barrier_gate_active"):
         result.append("near_structural_barrier")
-    if row.get("retest_status") == "not_confirmed" or mapping(row.get("trade_setup")).get("retest_status") == "not_confirmed":
-        result.append("breakout_confirmed_retest_pending")
     result.extend(strings(row.get("trigger_expiry_reason")))
     if row.get("trigger_expired") is True:
         result.append("trigger_not_current")
+    result.extend(_breakout_display_conflicts(row))
+    # Discard stale copies of this owned annotation from generic reason lists;
+    # only the complete, non-contradictory producer bundle may recreate it.
+    result = [code for code in result
+              if code not in _CONFIRMED_RETEST_CODES and code not in _CONFIRMED_RETEST_LABELS]
+    retest_code = _retest_warning_code(row, result)
+    if retest_code:
+        result.append(retest_code)
     return list(dict.fromkeys(result))
 
 
@@ -184,6 +292,9 @@ def present(row, *, released=False, context=False, labels=None):
     translated = {**mapping(labels), **LABELS}
     warnings = [{"code": code, "label": translated.get(code, code.replace("_", " "))} for code in codes]
     for value in strings(quality.get("warnings")):
+        if value in _CONFIRMED_RETEST_CODES or value in _CONFIRMED_RETEST_LABELS:
+            # Owned breakout text is represented once via validated metadata.
+            continue
         if isinstance(value, str) and value and not any(w["label"] == value for w in warnings):
             warnings.append({"code": "risk_warning", "label": value})
     # Only report supplied, finite distances. Never fabricate a risk or R:R.

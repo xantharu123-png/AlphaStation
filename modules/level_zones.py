@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from bisect import bisect_left
 import hashlib
 import math
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -217,7 +218,12 @@ class LevelEvidence:
 
 @dataclass(frozen=True)
 class ReclaimHistory:
-    """Direction anchors bound to one exact, currently known zone geometry."""
+    """Causal directional-edge anchors bound to the exact current geometry.
+
+    The membership timestamp still dates the full zone (including its stop
+    edge). An earlier directional anchor dates only the continuously connected
+    role and breakout boundary, never historical knowledge of the other edge.
+    """
 
     zone_id: str
     lower: float
@@ -249,7 +255,7 @@ class ReclaimHistory:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "model": "connected_role_geometry_v1",
+            "model": "connected_role_boundary_v2",
             "zone_id": self.zone_id,
             "lower": self.lower,
             "upper": self.upper,
@@ -278,6 +284,7 @@ class LevelZone:
     break_reclaim_evidence: Optional["BreakReclaimEvidence"] = None
     quality_flags: Tuple[str, ...] = ()
     reclaim_confirmation_times: Tuple[Tuple[str, datetime], ...] = ()
+    reclaim_retest_widths: Tuple[Tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.reclaim_confirmation_times:
@@ -288,6 +295,15 @@ class LevelZone:
             object.__setattr__(self, "reclaim_confirmation_times", history.confirmation_times)
         else:
             object.__setattr__(self, "reclaim_confirmation_times", ())
+        widths = []
+        for side, raw_width in self.reclaim_retest_widths:
+            width = _safe_float(raw_width)
+            if (side not in dict(self.reclaim_confirmation_times)
+                    or side in dict(widths) or width is None or width <= 0
+                    or width > self.upper - self.lower + 1e-9):
+                raise ValueError("invalid causal retest width")
+            widths.append((side, width))
+        object.__setattr__(self, "reclaim_retest_widths", tuple(sorted(widths)))
 
     @property
     def reclaim_history(self) -> Optional[ReclaimHistory]:
@@ -894,58 +910,57 @@ def _is_session_reference_evidence(item: LevelEvidence) -> bool:
     )
 
 
-def _connected_role_confirmation_times(
+def _connected_role_history(
     members: Sequence[Tuple[LevelEvidence, float, float]],
     lower: float,
     upper: float,
-) -> Tuple[Tuple[str, datetime], ...]:
-    """Find when the full current geometry and each causal role both existed.
+) -> Tuple[Tuple[str, datetime, float], ...]:
+    """Date each breakout edge without borrowing a new edge or a late bridge.
 
-    Bounds use the same noise padding as this snapshot, not a reconstructed
-    historical ATR. Later evidence can inherit old proof only when a connected
-    union of actual role-bearing members already covers *both* current bounds.
-    References and projections cannot provide missing extent or a bridge.
+    Expanding only a LONG zone's lower edge (SHORT: upper) changes the stop
+    geometry, not the already established breakout boundary. It must not erase
+    a completed break/retest. Replay *confirmation batches* and keep an anchor
+    only while all then-known structural members remain connected, the causal
+    role exists, and the direction's current boundary is already covered.
+    A newly disconnected component resets proof until a causal bridge exists.
+    References/projections cannot supply extent, a role, or a bridge.
+
+    Bounds use this snapshot's noise padding, never a reconstructed old ATR.
+    Full geometry/membership and latest-bar checks remain separate safeguards.
     """
-    structural = sorted(
-        (row for row in members
-         if not row[0].projection_only and _evidence_origin_role(row[0]) is not None),
-        key=lambda row: (row[1], row[2]),
-    )
-    if not structural:
-        return ()
-    times = sorted({row[0].confirmed_at for row in structural})
-
-    def covered_by(time: datetime) -> bool:
-        covered = lower
-        for item, start, end in structural:
-            if item.confirmed_at > time:
-                continue
-            if start > covered:
-                return False
-            covered = max(covered, end)
-            if covered >= upper:
-                return True
-        return False
-
-    if not covered_by(times[-1]):
-        return ()
-    # Coverage is monotonic as confirmed members are added. Binary search
-    # avoids replaying every possible prefix for unusually crowded zones.
-    left, right = 0, len(times) - 1
-    while left < right:
-        middle = (left + right) // 2
-        if covered_by(times[middle]):
-            right = middle
-        else:
-            left = middle + 1
-    geometry_time = times[left]
-    result = []
-    for direction, role in (("LONG", "resistance"), ("SHORT", "support")):
-        role_times = [row[0].confirmed_at for row in structural
-                      if _evidence_origin_role(row[0]) == role]
-        if role_times:
-            result.append((direction, max(geometry_time, min(role_times))))
-    return tuple(result)
+    batches: Dict[datetime, List[Tuple[LevelEvidence, float, float]]] = {}
+    for row in members:
+        if not row[0].projection_only and _evidence_origin_role(row[0]) is not None:
+            batches.setdefault(row[0].confirmed_at, []).append(row)
+    intervals: List[Tuple[float, float]] = []
+    roles = set()
+    anchors: Dict[str, Tuple[datetime, float]] = {}
+    for confirmed_at in sorted(batches):
+        for item, start, end in batches[confirmed_at]:
+            roles.add(_evidence_origin_role(item))
+            index = bisect_left(intervals, (start, end))
+            if index and intervals[index - 1][1] >= start:
+                index -= 1
+            stop = index
+            while stop < len(intervals) and intervals[stop][0] <= end:
+                start = min(start, intervals[stop][0])
+                end = max(end, intervals[stop][1])
+                stop += 1
+            intervals[index:stop] = [(start, end)]
+        connected = len(intervals) == 1
+        for direction, role, edge in (("LONG", "resistance", upper),
+                                      ("SHORT", "support", lower)):
+            edge_known = connected and (
+                intervals[0][1] == edge if direction == "LONG"
+                else intervals[0][0] == edge
+            )
+            if role in roles and edge_known:
+                # Retest tolerance must not grow retrospectively when the
+                # opposite edge widens. Keep the width at this causal anchor.
+                anchors.setdefault(direction, (confirmed_at, intervals[0][1] - intervals[0][0]))
+            else:
+                anchors.pop(direction, None)
+    return tuple((side, time, width) for side, (time, width) in sorted(anchors.items()))
 
 
 def _reclaim_confirmation_at(zone: LevelZone, direction: str) -> datetime:
@@ -1086,6 +1101,7 @@ def build_level_zones(
                 else "resistance" if cluster_lower > reference
                 else "overlap"
             )
+            role_history = _connected_role_history(members, cluster_lower, cluster_upper)
             zones.append(LevelZone(
                 zone_id=zone_id,
                 lower=cluster_lower,
@@ -1101,9 +1117,8 @@ def build_level_zones(
                 strength=round(combined_strength, 6),
                 origin_roles=origin_roles,
                 quality_flags=tuple(flags),
-                reclaim_confirmation_times=_connected_role_confirmation_times(
-                    members, cluster_lower, cluster_upper
-                ),
+                reclaim_confirmation_times=tuple((side, time) for side, time, _ in role_history),
+                reclaim_retest_widths=tuple((side, width) for side, _, width in role_history),
             ))
             members = []
             cluster_lower = cluster_upper = 0.0
@@ -1231,13 +1246,14 @@ def build_structure_snapshot(
             continue
 
         zone_width = max(0.0, zone.upper - zone.lower)
+        retest_width = dict(zone.reclaim_retest_widths).get(transition_direction, zone_width)
         transition = _snapshot_break_transition(
             zone,
             trigger_candidates,
             cutoff=cutoff,
             side=transition_direction,
             buffer_value=max(tick * 1.0, quoted_spread * 0.25),
-            tolerance=max(tick * 2.0, quoted_spread * 0.75, zone_width * 0.20),
+            tolerance=max(tick * 2.0, quoted_spread * 0.75, retest_width * 0.20),
             conflicting_closes=conflicting_closes,
         )
         flags = list(zone.quality_flags)

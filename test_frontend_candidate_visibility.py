@@ -365,3 +365,18 @@ def test_retest_without_visibility_keeps_only_evidence_backed_fallback_panel():
     assert tree["stopped"] == tree["detailCount"] == 1
     row.pop("breakout_confirmation")
     assert render_candidate(row)["visible"] == ""
+
+
+@pytest.mark.parametrize("code", ["retest_not_confirmed", "crossed_resistance_unconfirmed",
+                                  "crossed_support_unconfirmed"])
+def test_neutralized_backend_warning_is_not_reinserted_from_stale_raw_evidence(code):
+    from test_frontend_breakout_retest_warning import confirmed_warning
+
+    row = _candidate_row(code, **confirmed_warning())
+    row["visibility_warnings"][0]["label"] = "Current unconfirmed structural evidence"
+    tree = render_candidate(row)
+    assert tree["statusPanels"] == 1 and tree["retestPanels"] == 0
+    assert row["retest_warning"] not in tree["visible"]
+    assert row["retest_warning"] not in tree["full"]
+    assert "breakout_confirmed_without_retest" not in tree["warningCodes"]
+    assert "Current unconfirmed structural evidence" in tree["full"]

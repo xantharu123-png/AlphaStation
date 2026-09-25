@@ -94,8 +94,10 @@ def test_nested_payload_counts_do_not_count_orb_duplicate_views():
 
 
 def test_confirmed_breakout_without_retest_keeps_warning_but_not_false_pending():
+    from modules.breakout_warnings import breakout_warning_fields
+
     source = row(trade_decision="TRADEABLE", trade_action="LONG_NOW", trade_signal="JETZT_TRADEN",
-                 breakout_confirmation="confirmed_close", retest_status="not_confirmed")
+                 **breakout_warning_fields(confirmed_close=True))
     actual = api._apply_scanner_visibility_policy("stock_strategy", [source])[0]
     assert actual["visibility_status"] == "released"
     assert any(w["code"] == "breakout_confirmed_retest_pending" for w in actual["visibility_warnings"])

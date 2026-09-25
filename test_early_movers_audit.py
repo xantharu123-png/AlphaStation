@@ -182,6 +182,8 @@ def test_early_mover_compact_vrvp_keeps_causal_reclaim_identity(monkeypatch):
         "hold_bars_required": 1,
         "hold_bars_observed": 1,
         "retest_required": False,
+        # Canonical v1 serialization has always carried both retest flags.
+        "retest_observed": False,
         "timeframe": "5m",
     }
     assert api._confirmed_break_reclaim_evidence(row, barrier) is not None
