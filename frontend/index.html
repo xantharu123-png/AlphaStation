@@ -2988,9 +2988,9 @@ function stockCompanyName(row = {}, fallbackName = '') {
 
 function SwingPlanNotice({ row = {} }) {
     if (row.stock_swing_mode !== 'completed_daily_swing' || row.stock_swing_contract_version !== 1) return null;
-    return <div className="text-xs text-amber-800 mt-1 whitespace-normal" data-testid="swing-plan-notice">
-        Swing-Plan · 1D · Starter (15 Min verzögert)<br/>
-        Referenzschluss: {row.swing_analysis_session || 'unbekannt'} · kein Livekurs, kein ausgeführter Einstieg.
+    return <div className="text-[11px] text-gray-500 mt-1 whitespace-normal font-normal" data-testid="swing-plan-notice"
+        title="Swing-Plan auf abgeschlossenen Tageskerzen. Kein Livekurs, kein ausgeführter Einstieg.">
+        1D · Schlusskurs {row.swing_analysis_session || 'unbekannt'} · kein Livekurs
     </div>;
 }
 
@@ -3007,7 +3007,9 @@ function scannerCandidatePresentation(row = {}) {
         if (numeric('distance_pct') !== null) detail.push(`${w.distance_pct.toFixed(2)}% Abstand`);
         if (numeric('distance_r') !== null) detail.push(`Abstand ${w.distance_r.toFixed(2)}R`);
         if (typeof w.timeframe === 'string' && /^(1m|5m|15m|30m|1H|4H|1D|1W)$/i.test(w.timeframe)) detail.push(w.timeframe);
-        return { code: w.code.slice(0, 100), label: w.label.trim().slice(0, 350), detail: detail.join(' · ') };
+        return { code: w.code.slice(0, 100), label: w.label.trim().slice(0, 350), detail: detail.join(' · '),
+            price: numeric('price') !== null && w.price > 0 ? w.price : null,
+            side: ['support', 'resistance'].includes(w.side) ? w.side : null };
     });
     return {
         status: released ? 'released' : context ? 'context' : 'candidate_warning',
@@ -3109,6 +3111,44 @@ function scannerVisibleRowsSummary(rows) {
     return counts.total > counts.unclassified ? counts : null;
 }
 
+function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePresentation(row), retest = null) {
+    if (!view) return null;
+    const warnings = view.warnings;
+    const codes = new Set(warnings.map(warning => warning.code.toLowerCase()));
+    const has = (...values) => values.some(value => codes.has(value));
+    const direction = String(row.direction || row.BI_Direction || row.Direction || row.trade_setup?.direction || '').toUpperCase();
+    const barrierCodes = ['near_structural_barrier', 'first_opposing_barrier_before_minimum_rr',
+        'near_structural_barrier_wait_trigger', 'near_overhead_resistance', 'near_underlying_support'];
+    const barrier = warnings.find(warning =>
+        warning && barrierCodes.includes(warning.code) && typeof warning.price === 'number'
+        && Number.isFinite(warning.price) && warning.price > 0);
+    const side = barrier?.side === 'support' || direction === 'SHORT' || has('near_underlying_support')
+        ? 'Unterstützung' : barrier?.side === 'resistance' || direction === 'LONG' || has('near_overhead_resistance')
+            ? 'Widerstand' : 'Preiszone';
+    const price = barrier ? ` bei ${barrier.price.toLocaleString('de-CH', {maximumFractionDigits: 6})}` : '';
+    let message = '';
+    if (has('market_data_invalid', 'display_metadata_invalid', 'scan_data_invalid')) message = 'Kursdaten prüfen';
+    else if (has('trigger_not_current', 'stale_5m_candle', 'closed_5m_data_stale')) message = 'Einstiegssignal nicht mehr aktuell';
+    else if (has('crossed_resistance_unconfirmed', 'crossed_support_unconfirmed')) message = 'Schlusskursbestätigung fehlt';
+    else if (has(...barrierCodes)) message = `${side}${price} nah`;
+    else if (has('invalid_trade_geometry', 'invalid_trade_plan', 'estimated_trade_plan', 'native_trade_levels_missing',
+        'no_structural_invalidation', 'plan_unavailable', 'causal_structure_missing', 'causal_structure_unavailable')) message = 'Handelsplan noch nicht bestätigt';
+    else if (has('trade_rr_below_threshold')) message = 'Zu wenig Platz bis zum Kursziel';
+    else if (has('wait_for_trigger')) message = 'Einstiegsbestätigung fehlt';
+    else if (has('wait_for_continuation')) message = 'Fortsetzung noch offen';
+    const retestPending = Boolean(retest) || has('breakout_confirmed_retest_pending', 'breakout_confirmed_without_retest', 'wait_for_retest');
+    // A pending retest does not prove a breakout by itself. Avoid a second,
+    // contradictory "confirmed" headline beside a blocked structural plan.
+    if (retestPending && !has('crossed_resistance_unconfirmed', 'crossed_support_unconfirmed')) {
+        message = message ? `${message} · Rücktest offen` : 'Rücktest offen';
+    }
+    return {
+        label: view.status === 'released' ? 'Signal freigegeben'
+            : view.status === 'context' ? 'Marktkontext · kein Signal' : 'Einstieg nicht freigegeben',
+        message,
+    };
+}
+
 function ScannerVisibilitySummary({ rows }) {
     const counts = scannerVisibleRowsSummary(rows);
     if (!counts) return null;
@@ -3119,19 +3159,29 @@ function ScannerVisibilitySummary({ rows }) {
     </div>;
 }
 
-function ScannerCandidateStatus({ row = {}, compact = false }) {
+function ScannerCandidateStatus({ row = {}, compact = false, retest = null }) {
     const view = scannerCandidatePresentation(row);
     if (!view) return null;
+    const summary = scannerCandidateCompactPresentation(row, view, retest);
     const mail = scannerMailPresentation(row);
     const momentum = scannerMomentumQualityPresentation(row);
     const tone = view.status === 'released' ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
         : view.status === 'context' ? 'border-gray-300 bg-gray-50 text-gray-700' : 'border-amber-300 bg-amber-50 text-amber-950';
-    return <div className={`${compact ? 'mt-1 px-2 py-1 text-[11px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border ${tone} whitespace-normal font-normal`}
+    return <div className={`${compact ? 'mt-1 px-2 py-1 text-[11px] max-w-sm rounded' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border ${tone} whitespace-normal font-normal break-words`}
         data-testid="scanner-candidate-status" data-visibility-status={view.status} role="note">
-        <div className="font-semibold">{view.label}</div>
+        <div data-testid="scanner-candidate-summary">
+            <div className="font-semibold">{summary.label}</div>
+            {summary.message && <div className="mt-0.5">{summary.message}</div>}
+        </div>
+        <details className="mt-1" data-testid="scanner-candidate-details" onClick={event => event.stopPropagation()}>
+        <summary className="cursor-pointer select-none opacity-75">Details</summary>
+        <div className="mt-2 space-y-1">
+        <div className="font-semibold">Prüfgründe</div>
         {view.warnings.map((warning, index) => <div key={`${warning.code}-${index}`} className="mt-1" data-warning-code={warning.code}>
             {warning.label}{warning.detail && <span> · {warning.detail}</span>}
         </div>)}
+        {retest && !view.warnings.some(warning => ['breakout_confirmed_retest_pending', 'breakout_confirmed_without_retest'].includes(warning.code))
+            && <div data-warning-code={retest.code}>{retest.warning}</div>}
         {mail && <div className="mt-2 border-t border-current/15 pt-2" data-testid="scanner-mail-check">
             <div className="font-semibold">{mail.label}</div>
             {mail.score !== null && mail.minimum !== null && <div>Mail-/Handelsplan-Score {mail.score} · benötigt {mail.minimum}
@@ -3149,6 +3199,8 @@ function ScannerCandidateStatus({ row = {}, compact = false }) {
             <div>Kerzenbild, Volumen und Ausbruchsabstand – kein Nachweis eines späteren Rücktests. Weitere Mailprüfungen bleiben separat.</div>
         </details>}
         {view.status !== 'released' && <div className="mt-1">Setup-Score und Grade sind keine Handelsfreigabe. Keine automatische Signal-Mail.</div>}
+        </div>
+        </details>
     </div>;
 }
 
@@ -3175,14 +3227,14 @@ function breakoutRetestWarningEvidence(row = {}) {
 
 function BreakoutRetestWarning({ row = {}, compact = false }) {
     const evidence = breakoutRetestWarningEvidence(row);
-    if (!evidence) return <ScannerCandidateStatus row={row} compact={compact} />;
+    if (scannerCandidatePresentation(row)) return <ScannerCandidateStatus row={row} compact={compact} retest={evidence} />;
+    if (!evidence) return null;
     const heading = evidence.direction === 'SHORT'
-        ? 'SHORT-Breakdown bestaetigt, Ruecktest offen'
+        ? 'Breakdown bestätigt · Rücktest offen'
         : evidence.direction === 'LONG'
-            ? 'LONG-Ausbruch bestaetigt, Ruecktest offen'
-            : 'Ausbruch bestaetigt, Ruecktest offen';
-    return (<>
-        <ScannerCandidateStatus row={row} compact={compact} />
+            ? 'Ausbruch bestätigt · Rücktest offen'
+            : 'Ausbruch bestätigt · Rücktest offen';
+    return (
         <div
             className={`${compact ? 'mt-1 px-2 py-1 text-[10px]' : 'mb-3 rounded-lg px-3 py-2 text-xs'} border border-amber-300 bg-amber-50 text-amber-900 whitespace-normal`}
             data-testid="breakout-retest-warning"
@@ -3190,9 +3242,10 @@ function BreakoutRetestWarning({ row = {}, compact = false }) {
             role="note"
         >
             <div className="font-semibold">{heading}</div>
-            {!compact && <div className="mt-1">{evidence.warning}</div>}
+            {!compact && <details className="mt-1" onClick={event => event.stopPropagation()}>
+                <summary className="cursor-pointer">Details</summary><div>{evidence.warning}</div>
+            </details>}
         </div>
-        </>
     );
 }
 
@@ -7364,16 +7417,21 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
         const s = Number.isFinite(rawScore) ? Math.max(0, Math.min(96, rawScore)) : 0;
         const legacyLabel = String(label || '').trim();
         const normalizedLabel = ({
-            'Durchzug OK': 'Bestaetigung stark',
-            'Durchzug moeglich': 'Bestaetigung gemischt',
-            'Durchzug möglich': 'Bestaetigung gemischt',
-            'Durchzug schwach': 'Wick-Risiko',
-        })[legacyLabel] || legacyLabel || 'Breakout-Bestaetigung';
+            'Durchzug OK': 'Stark',
+            'Durchzug moeglich': 'Gemischt',
+            'Durchzug möglich': 'Gemischt',
+            'Durchzug schwach': 'Dochtrisiko',
+            'Bestaetigung stark': 'Stark',
+            'Bestätigung stark': 'Stark',
+            'Bestaetigung gemischt': 'Gemischt',
+            'Bestätigung gemischt': 'Gemischt',
+            'Wick-Risiko': 'Dochtrisiko',
+        })[legacyLabel] || 'Nicht bewertet';
         const tone = risk === 'LOW' ? 'good' : (risk === 'MEDIUM' ? 'warn' : 'bad');
         const riskLabel = ({LOW: 'niedrig', MEDIUM: 'mittel', HIGH: 'hoch', CRITICAL: 'sehr hoch'})[risk] || '-';
         return { score: s, label: normalizedLabel, risk: riskLabel, tone };
     };
-    const breakoutQualityHelp = 'Qualitaetsbewertung, keine Gewinnwahrscheinlichkeit: Schlusskurslage, oberer Wick, RVOL, Halt des Breakout-Levels und Ueberdehnung.';
+    const breakoutQualityHelp = 'Tagesqualität: Kerzenbild, Volumen und Ausbruchsabstand. Maximal 96 Punkte. Keine Einstiegsfreigabe und kein Rücktestnachweis.';
     const breakoutBadgeStyle = (tone) => ({
         display: 'inline-flex',
         alignItems: 'center',
@@ -7484,10 +7542,10 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     </div>
                                     {getBreakoutQuality(item) && (
                                         <div>
-                                            <div className="scanner-mobile-label" title={breakoutQualityHelp}>Breakout-Bestaetigung</div>
+                                            <div className="scanner-mobile-label" title={breakoutQualityHelp}>Tagesqualität</div>
                                             <div className="scanner-mobile-value">
                                                 <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)} title={breakoutQualityHelp}>
-                                                    {getBreakoutQuality(item).label} {getBreakoutQuality(item).score}/100
+                                                    {getBreakoutQuality(item).label} · {getBreakoutQuality(item).score}/96
                                                 </span>
                                             </div>
                                         </div>
@@ -7506,7 +7564,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('change_pct')}>Änderung% {sortKey === 'change_pct' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rsi')}>RSI {sortKey === 'rsi' && '↓'}</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('rvol')}>RVOL {sortKey === 'rvol' && '↓'}</th>
-                            <th className="text-center py-2 px-2" title={breakoutQualityHelp}>Breakout-Bestaetigung</th>
+                            <th className="text-center py-2 px-2" title={breakoutQualityHelp}>Tagesqualität</th>
                             <th className="text-right py-2 px-2 sortable-header" onClick={() => toggleSort('score')}>Trade-Score {sortKey === 'score' && '↓'}</th>
                             <th className="text-center py-2 px-2">Grade</th>
                         </tr>
@@ -7536,9 +7594,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                                     {getBreakoutQuality(item) ? (
                                         <div className="inline-flex flex-col items-center gap-1">
                                             <span style={breakoutBadgeStyle(getBreakoutQuality(item).tone)} title={breakoutQualityHelp}>
-                                                {getBreakoutQuality(item).label}
+                                                {getBreakoutQuality(item).label} · {getBreakoutQuality(item).score}/96
                                             </span>
-                                            <span className="text-xs text-gray-500" title={breakoutQualityHelp}>Qualitaet {getBreakoutQuality(item).score}/100 | Risiko {getBreakoutQuality(item).risk}</span>
                                         </div>
                                     ) : '–'}
                                 </td>

@@ -5,7 +5,7 @@ import pytest
 
 import api
 from modules import scanner_visibility
-from test_frontend_candidate_visibility import run
+from test_frontend_candidate_visibility import run, render_candidate
 from test_frontend_candidate_visibility import SOURCE
 from test_frontend_scanner_lifecycle import evaluate
 
@@ -128,4 +128,21 @@ def test_unknown_momentum_schema_cannot_invent_pass(patch):
 
 def test_explanation_disclosures_do_not_open_ticker_sidebar():
     area = SOURCE[SOURCE.index("function ScannerCandidateStatus("):SOURCE.index("const BREAKOUT_WITHOUT_RETEST_CODE")]
-    assert area.count("onClick={event => event.stopPropagation()}") == 2
+    outer = area[area.index('<details className="mt-1" data-testid="scanner-candidate-details"'):]
+    assert 'onClick={event => event.stopPropagation()}' in outer.split("<summary", 1)[0]
+    assert outer.index('data-testid="scanner-mail-check"') < outer.rindex("</details>")
+
+
+@pytest.mark.parametrize("mail_status", ["blocked", "checks_passed", "unavailable"])
+def test_compact_candidate_does_not_turn_mail_preview_into_release_or_delivery(mail_status):
+    check = summary(state={"score": 95}, reasons=[])
+    check["status"] = mail_status
+    row = {"mail_check": check, "visibility_status": "candidate_warning",
+           "visibility_is_trade_signal": False, "score": 100, "grade": "S"}
+    tree = render_candidate(row)
+    assert "Einstieg nicht freigegeben" in tree["visible"]
+    assert "Mail" not in tree["visible"] and "95" not in tree["visible"]
+    assert "kein Zustellnachweis" in tree["full"]
+    assert tree["statuses"] == ["candidate_warning"]
+    if mail_status == "checks_passed":
+        assert "Mail-Vorprüfung erfüllt; Versand separat" in tree["full"]

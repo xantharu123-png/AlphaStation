@@ -8,9 +8,14 @@ def test_frontend_normalizes_legacy_breakout_labels_and_caps_display_score():
     source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
     assert "Math.min(96, rawScore)" in source
-    assert "'Durchzug OK': 'Bestaetigung stark'" in source
-    assert "'Durchzug moeglich': 'Bestaetigung gemischt'" in source
-    assert "'Durchzug schwach': 'Wick-Risiko'" in source
+    assert "'Durchzug OK': 'Stark'" in source
+    assert "'Durchzug moeglich': 'Gemischt'" in source
+    assert "'Durchzug schwach': 'Dochtrisiko'" in source
+    assert "'Bestaetigung stark': 'Stark'" in source
+    assert '>Tagesqualität</th>' in source
+    assert 'getBreakoutQuality(item).score}/100' not in source
+    assert 'getBreakoutQuality(item).score}/96' in source
+    assert 'Keine Einstiegsfreigabe und kein Rücktestnachweis.' in source
 
 
 def test_frontend_breakout_quality_suppression_label_names_actual_gates():

@@ -159,7 +159,9 @@ def test_snapshot_rejects_malformed_quality_payload(malformed):
 
 def test_shared_status_reaches_all_existing_stock_crypto_and_detail_warning_surfaces():
     warning = SOURCE[SOURCE.index("function BreakoutRetestWarning("):SOURCE.index("function StockIdentity(")]
-    assert warning.count("<ScannerCandidateStatus row={row} compact={compact} />") == 2
+    assert "if (scannerCandidatePresentation(row)) return <ScannerCandidateStatus" in warning
+    assert "retest={evidence}" in warning
+    assert "if (!evidence) return null;" in warning
     for start, end in [("function ScannerTab(", "function BIScannerTab("),
                        ("function BIScannerTab(", "function BiotechTab("),
                        ("function NewListingTab(", "function observedMetricNumber(")]:
@@ -184,3 +186,182 @@ def test_penny_defaults_to_candidates_and_orb_main_view_includes_warnings():
     assert "const [showWatchRows, setShowWatchRows] = useState(true);" in SOURCE
     assert "['breakouts', 'rejected'].includes(subView)" in SOURCE
     assert "['breakouts', 'candidates'].includes(subView)" in SOURCE
+
+
+def _candidate_row(*codes, **extra):
+    return {
+        "visibility_status": "candidate_warning",
+        "visibility_is_trade_signal": False,
+        "direction": "LONG",
+        "visibility_warnings": [{"code": code, "label": f"Technical detail: {code}"} for code in codes],
+        **extra,
+    }
+
+
+def compact_candidate(row):
+    return run(f"scannerCandidateCompactPresentation({json.dumps(row)})")
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("market_data_invalid", "Kursdaten prüfen"),
+    ("display_metadata_invalid", "Kursdaten prüfen"),
+    ("trigger_not_current", "Einstiegssignal nicht mehr aktuell"),
+    ("crossed_resistance_unconfirmed", "Schlusskursbestätigung fehlt"),
+    ("crossed_support_unconfirmed", "Schlusskursbestätigung fehlt"),
+    ("near_structural_barrier", "Widerstand nah"),
+    ("first_opposing_barrier_before_minimum_rr", "Widerstand nah"),
+    ("no_structural_invalidation", "Handelsplan noch nicht bestätigt"),
+    ("native_trade_levels_missing", "Handelsplan noch nicht bestätigt"),
+    ("trade_rr_below_threshold", "Zu wenig Platz bis zum Kursziel"),
+    ("WAIT_FOR_TRIGGER", "Einstiegsbestätigung fehlt"),
+    ("WAIT_FOR_CONTINUATION", "Fortsetzung noch offen"),
+    ("WAIT_FOR_RETEST", "Rücktest offen"),
+])
+def test_compact_candidate_maps_codes_to_one_plain_language_warning(code, expected):
+    assert compact_candidate(_candidate_row(code)) == {
+        "label": "Einstieg nicht freigegeben", "message": expected,
+    }
+
+
+def test_compact_candidate_has_one_primary_warning_plus_optional_retest():
+    row = _candidate_row("plan_unavailable", "near_structural_barrier", "trade_rr_below_threshold",
+                         "breakout_confirmed_retest_pending", "unknown_internal_gate")
+    view = compact_candidate(row)
+    assert view["message"] == "Widerstand nah · Rücktest offen"
+    assert "Technical" not in json.dumps(view)
+    assert "unknown_internal_gate" not in json.dumps(view)
+    assert len(view["message"].split(" · ")) == 2
+
+
+def test_compact_candidate_never_invents_breakout_confirmation_from_pending_retest():
+    for code in ("WAIT_FOR_RETEST", "breakout_confirmed_retest_pending"):
+        view = compact_candidate(_candidate_row(code))
+        assert view["message"] == "Rücktest offen"
+        assert "bestätigt" not in view["message"]
+    row = _candidate_row("crossed_resistance_unconfirmed", "breakout_confirmed_retest_pending")
+    assert compact_candidate(row)["message"] == "Schlusskursbestätigung fehlt"
+
+
+@pytest.mark.parametrize("price", [None, True, False, "0", "123.45", 0, -1])
+def test_compact_candidate_does_not_coerce_malformed_or_nonpositive_barrier_price(price):
+    row = _candidate_row("near_structural_barrier")
+    row["visibility_warnings"][0]["price"] = price
+    assert compact_candidate(row)["message"] == "Widerstand nah"
+
+
+def test_compact_barrier_price_cannot_come_from_a_discarded_malformed_warning():
+    row = _candidate_row("near_structural_barrier")
+    row["visibility_warnings"].insert(0, {"code": "near_structural_barrier", "price": 777})
+    assert compact_candidate(row)["message"] == "Widerstand nah"
+
+
+def test_compact_short_uses_support_without_changing_release_contract():
+    row = _candidate_row("near_underlying_support", direction="SHORT")
+    row["visibility_warnings"][0]["price"] = 123.45
+    assert compact_candidate(row)["message"] == "Unterstützung bei 123.45 nah"
+    row.update(visibility_status="released", visibility_is_trade_signal=True)
+    assert compact_candidate(row)["label"] == "Signal freigegeben"
+    row["visibility_is_trade_signal"] = False
+    assert compact_candidate(row)["label"] == "Einstieg nicht freigegeben"
+    row.update(visibility_status="context", visibility_is_trade_signal=True)
+    assert compact_candidate(row)["label"] == "Marktkontext · kein Signal"
+    assert compact_candidate({"score": 100}) is None
+
+
+def render_candidate(row, compact=True):
+    """Evaluate actual JSX with a tiny React tree; no browser, API, or I/O."""
+    component = SOURCE[SOURCE.index("function ScannerCandidateStatus("):SOURCE.index("function StockIdentity(")]
+    babel = Path(__file__).resolve().parent / "frontend/vendor/babel.min.js"
+    return json.loads(node_run("""
+const babel=require(""" + json.dumps(str(babel)) + """);
+const source=babel.transform(""" + json.dumps(component) + """,{presets:['react'],sourceType:'script'}).code;
+const React={createElement:(type,props,...children)=>typeof type==='function'
+ ? type({...props,children}) : ({type,props:props||{},children})};
+const render=new Function('React',""" + json.dumps(PURE) + """+source+';return BreakoutRetestWarning;')(React);
+function text(n,visible=true){
+ if(Array.isArray(n))return n.map(v=>text(v,visible)).join(' ');
+ if(n==null||typeof n==='boolean')return '';
+ if(typeof n!=='object')return String(n);
+ if(visible&&n.type==='details'&&!n.props.open)return text(n.children.filter(c=>c?.type==='summary'),visible);
+ return text(n.children,visible);
+}
+function nodes(n){return Array.isArray(n)?n.flatMap(nodes):!n||typeof n!=='object'?[]:[n,...nodes(n.children)];}
+const tree=render({row:""" + json.dumps(row) + ",compact:" + json.dumps(compact) + """});
+const all=nodes(tree),details=all.filter(n=>n.type==='details');let stopped=0;
+details.forEach(n=>n.props.onClick?.({stopPropagation:()=>stopped++}));
+console.log(JSON.stringify({visible:text(tree),full:text(tree,false),
+ statusPanels:all.filter(n=>n.props['data-testid']==='scanner-candidate-status').length,
+ retestPanels:all.filter(n=>n.props['data-testid']==='breakout-retest-warning').length,
+ statuses:all.filter(n=>n.props['data-visibility-status']).map(n=>n.props['data-visibility-status']),
+ warningCodes:all.map(n=>n.props['data-warning-code']).filter(Boolean),
+ details:details.map(n=>({open:!!n.props.open,testid:n.props['data-testid']||null})),
+ stopped,detailCount:details.length}));
+"""))
+
+
+@pytest.mark.parametrize("compact", [True, False])
+def test_candidate_details_start_closed_keep_exact_diagnostics_and_do_not_bubble(compact):
+    row = _candidate_row("near_structural_barrier", "unknown_internal_gate")
+    row["visibility_warnings"][0].update(price=120.5, distance_pct=0, distance_r=0, timeframe="1D")
+    row["visibility_warnings"][1]["label"] = "Technical diagnostic retained only inside details"
+    row["mail_check"] = {
+        "schema_version": 1, "semantics": "read_only_precheck_not_delivery_or_send_permission",
+        "status": "blocked", "trade_score": 67, "minimum_trade_score": 80, "setup_score": 94,
+        "reasons": [{"code": "score_below_alert_threshold", "label": "Mail score below threshold"}],
+    }
+    row["momentum_quality"] = {
+        "schema_version": 1, "timeframe": "1D", "evidence": "completed_daily", "score": 70,
+        "maximum_score": 96, "mail_min_score": 78,
+        "semantics": "daily_bar_quality_not_future_continuation_or_retest",
+        "components": [{"label": "Volumen", "points": 14, "max_points": 22}], "deductions": [],
+    }
+    tree = render_candidate(row, compact)
+    assert "Einstieg nicht freigegeben" in tree["visible"]
+    assert "Widerstand bei 120.5 nah" in tree["visible"]
+    assert "Details" in tree["visible"] and len(tree["visible"]) < 150
+    for phrase in ("Technical diagnostic", "Mail-/Handelsplan-Score", "67", "94",
+                   "0.00R", "0.00%", "kein Zustellnachweis"):
+        assert phrase not in tree["visible"]
+        assert phrase in tree["full"]
+    assert "70/96" not in tree["visible"].replace(" ", "")
+    assert "70/96" in tree["full"].replace(" ", "")
+    assert tree["statusPanels"] == 1 and tree["retestPanels"] == 0
+    assert tree["statuses"] == ["candidate_warning"]
+    assert tree["details"] and not any(item["open"] for item in tree["details"])
+    assert tree["stopped"] == tree["detailCount"]
+
+
+def test_unknown_warning_is_retained_in_details_not_promoted_to_summary():
+    tree = render_candidate(_candidate_row("unknown_internal_gate"))
+    assert "Einstieg nicht freigegeben" in tree["visible"]
+    assert "unknown_internal_gate" not in tree["visible"]
+    assert "unknown_internal_gate" in tree["full"]
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_retest_warning_shares_one_candidate_panel_without_changing_release(released):
+    from test_frontend_breakout_retest_warning import confirmed_warning
+
+    row = _candidate_row("breakout_confirmed_without_retest", **confirmed_warning())
+    row.update(visibility_status="released" if released else "candidate_warning",
+               visibility_is_trade_signal=released)
+    tree = render_candidate(row)
+    assert tree["statusPanels"] == 1 and tree["retestPanels"] == 0
+    assert tree["visible"].count("Rücktest offen") == 1
+    assert tree["warningCodes"].count("breakout_confirmed_without_retest") == 1
+    assert tree["statuses"] == ["released" if released else "candidate_warning"]
+    assert ("Signal freigegeben" if released else "Einstieg nicht freigegeben") in tree["visible"]
+
+
+def test_retest_without_visibility_keeps_only_evidence_backed_fallback_panel():
+    from test_frontend_breakout_retest_warning import confirmed_warning
+
+    row = confirmed_warning("SHORT")
+    tree = render_candidate(row, compact=False)
+    assert tree["statusPanels"] == 0 and tree["retestPanels"] == 1
+    assert "Breakdown bestätigt · Rücktest offen" in tree["visible"]
+    assert row["retest_warning"] not in tree["visible"]
+    assert row["retest_warning"] in tree["full"]
+    assert tree["stopped"] == tree["detailCount"] == 1
+    row.pop("breakout_confirmation")
+    assert render_candidate(row)["visible"] == ""
