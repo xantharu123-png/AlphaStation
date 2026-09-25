@@ -31228,17 +31228,64 @@ def list_strategies(market_type: str = Query("stocks", description="Market type:
     )
 
 
+def _manual_scan_blocking_owner_locked(scan_name: str) -> Optional[str]:
+    """Read current competing owners; caller holds _scan_lock.
+
+    Mirror _run_scan_safe's existing admission checks, without changing their
+    order, reservations or scheduling. This is a current snapshot, not a claim
+    that a previous failed admission started the requested scanner.
+    """
+    if _is_heavy_stock_worker(scan_name):
+        for other, state in _scan_status.items():
+            if other != scan_name and _is_heavy_stock_worker(other):
+                thread = _scan_threads.get(other)
+                if state.get("running") or (thread is not None and thread.is_alive()):
+                    return other
+    siblings = {
+        "crypto_explosion": {"crypto_trade_signals"},
+        "crypto_trade_signals": {"crypto_explosion", "new_listing"},
+        "new_listing": {"crypto_trade_signals"},
+    }.get(scan_name, ())
+    for sibling in siblings:
+        thread = _scan_threads.get(sibling)
+        if (_scan_status.get(sibling, {}).get("running")
+                or (thread is not None and thread.is_alive())):
+            return sibling
+    return None
+
+
 def _manual_scan_ack(scan_name: str, accepted: bool, **fields) -> Dict[str, Any]:
-    """A busy worker is not a newly accepted manual scan."""
+    """Follow only an accepted run or a proven live worker of this scanner."""
     with _scan_lock:
         state = dict(_scan_status.get(scan_name, {}))
+        thread = _scan_threads.get(scan_name)
+        own_worker_alive = thread is not None and thread.is_alive()
+        blocking_owner = (
+            _manual_scan_blocking_owner_locked(scan_name)
+            if not accepted and not own_worker_alive else None
+        )
+    if accepted or own_worker_alive:
+        return {
+            **fields,
+            "status": "started" if accepted else "already_running",
+            "accepted": bool(accepted),
+            "run_id": state.get("last_run_id"),
+            "last_attempt_at": state.get("last_attempt_at"),
+            "message": fields.get("message") if accepted else "Scan laeuft bereits; kein neuer Lauf gestartet.",
+        }
     return {
         **fields,
-        "status": "started" if accepted else "already_running",
-        "accepted": bool(accepted),
-        "run_id": state.get("last_run_id"),
-        "last_attempt_at": state.get("last_attempt_at"),
-        "message": fields.get("message") if accepted else "Scan laeuft bereits; kein neuer Lauf gestartet.",
+        "status": "busy",
+        "accepted": False,
+        # Never make the client follow an old failed/completed requested run.
+        "run_id": None,
+        "last_attempt_at": None,
+        "reason": "other_scanner_running" if blocking_owner else "start_not_accepted",
+        "blocking_scan_key": blocking_owner,
+        "message": (
+            "Ein anderer Scan belegt die Scan-Engine; kein neuer Lauf gestartet."
+            if blocking_owner else "Scanstart nicht angenommen; kein neuer Lauf gestartet."
+        ),
     }
 
 

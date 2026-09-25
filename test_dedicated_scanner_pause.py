@@ -3,6 +3,7 @@ import ast
 from datetime import datetime, timezone
 import inspect
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -267,6 +268,7 @@ def test_dedicated_alias_ack_reports_actual_admission_and_owner_run(monkeypatch,
     monkeypatch.setattr(api,"resolve_strategy_name",lambda name,market: name)
     monkeypatch.setattr(api,"get_strategies_for_market",lambda market: {strategy:{}})
     monkeypatch.setattr(api,"_scan_status",{key:{"last_run_id":"actual-owner"}})
+    monkeypatch.setattr(api,"_scan_threads",{key:SimpleNamespace(is_alive=lambda:True)})
     observed = []
     monkeypatch.setattr(api,"_run_scan_safe",lambda owner,func: observed.append(owner) or accepted)
     result = api.run_scan(api.ScanRequest(strategy=strategy,market_type="stocks"),None)

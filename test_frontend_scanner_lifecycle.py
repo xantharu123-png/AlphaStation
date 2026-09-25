@@ -280,6 +280,87 @@ def test_busy_ack_does_not_claim_to_have_launched_another_worker():
     """)
 
 
+@pytest.mark.parametrize("owner,label", [
+    ("biotech", "Biotech"), ("strategy_scan", "Automatische Aktienrunde"),
+    ("crypto_trade_signals", "Crypto Trade Signals"), ("apiKey=SECRET", "Ein anderer Scanner"),
+    ("__proto__", "Ein anderer Scanner"),
+])
+def test_other_worker_refusal_never_polls_old_failed_run_and_survives_refresh(owner, label):
+    lifecycle("""
+      const old=payload(t1,null,{scan_run_id:'old-cup',scan_error:'scan_data_invalid'});
+      queue.push({body:old}); render(options()); await settle();
+      queue.push({body:old},{body:{status:'busy',accepted:false,run_id:null,
+        reason:'other_scanner_running',blocking_scan_key:OWNER,message:'apiKey=SECRET'}});
+      await feed.start(); await settle();
+      assert.equal(feed.isScanning,false); assert.equal(timers.size,0);
+      assert.match(feed.blockedStart,/Nicht gestartet/);
+      assert.ok(feed.blockedStart.includes(LABEL)); assert.ok(!feed.blockedStart.includes('SECRET'));
+      assert.equal(feed.notice,null); assert.equal(feed.info.scan_run_id,'old-cup');
+      assert.equal(toasts.length,0); assert.equal(requests.length,3);
+      const refusal=feed.blockedStart;
+      // ScanControl performs this refresh after every start attempt.
+      queue.push({body:old}); await feed.refresh(); await settle();
+      assert.equal(feed.blockedStart,refusal); assert.ok(feed.error);
+      assert.equal(feed.isScanning,false); assert.equal(timers.size,0);
+      assert.equal(toasts.length,0); assert.equal(requests.length,4);
+    """.replace("OWNER", json.dumps(owner)).replace("LABEL", json.dumps(label)))
+
+
+def test_refused_start_can_be_retried_without_following_old_error():
+    lifecycle("""
+      const old=payload(t1,null,{scan_run_id:'old-cup',scan_error:'scan_data_invalid'});
+      queue.push({body:old}); render(options()); await settle();
+      queue.push({body:old},{body:{status:'busy',accepted:false,run_id:null,reason:'start_not_accepted'}});
+      await feed.start(); await settle();
+      assert.match(feed.blockedStart,/nicht angenommen/); assert.equal(timers.size,0);
+      queue.push({body:old},{body:{status:'started',accepted:true,run_id:'new-cup'}});
+      await feed.start(); await settle();
+      assert.equal(feed.blockedStart,null); assert.equal(feed.isScanning,true);
+      queue.push({body:payload(t2,'NEW',{scan_run_id:'new-cup'})}); await timer();
+      assert.equal(feed.isScanning,false); assert.equal(feed.results[0].ticker,'NEW');
+      assert.equal(toasts.length,1);
+    """)
+
+
+def test_later_observed_run_clears_previous_refused_start_without_claiming_manual_success():
+    lifecycle("""
+      const old=payload(t1,null,{scan_run_id:'old-cup',scan_error:'scan_data_invalid'});
+      queue.push({body:old}); render(options()); await settle();
+      queue.push({body:old},{body:{status:'busy',accepted:false,run_id:null,
+        reason:'other_scanner_running',blocking_scan_key:'biotech'}});
+      await feed.start(); await settle(); assert.ok(feed.blockedStart);
+      queue.push({body:payload(t2,'AUTO',{scan_run_id:'new-auto'})});
+      await feed.refresh(); await settle();
+      assert.equal(feed.blockedStart,null); assert.equal(feed.error,null);
+      assert.equal(feed.results[0].ticker,'AUTO'); assert.equal(toasts.length,0);
+    """)
+
+
+def test_strategy_switch_clears_refused_start_and_late_refusal_cannot_leak():
+    lifecycle("""
+      queue.push({body:payload(t1)}); render(options()); await settle();
+      queue.push({body:payload(t1)},{body:{status:'busy',accepted:false,reason:'other_scanner_running',blocking_scan_key:'biotech'}});
+      await feed.start(); await settle(); assert.ok(feed.blockedStart);
+      queue.push({body:payload(t2,'SHORT')});
+      render(options({scopeKey:'bi:short',resultsUrl:'/results?direction=short'})); await settle();
+      assert.equal(feed.blockedStart,null); assert.equal(feed.results[0].ticker,'SHORT');
+      const slow=defer(); queue.push({body:payload(t2,'SHORT')},{promise:slow.promise});
+      const pending=feed.start(); await settle();
+      queue.push({body:payload(t1,'LONG')}); render(options()); await settle();
+      slow.resolve(response(200,{status:'busy',accepted:false,blocking_scan_key:'biotech'}));
+      await pending; await settle();
+      assert.equal(feed.blockedStart,null); assert.equal(feed.results[0].ticker,'LONG');
+    """)
+
+
+def test_busy_notice_is_rendered_even_when_previous_scan_failed():
+    evidence = SOURCE[SOURCE.index("function ScannerEvidence("):SOURCE.index("// Scanner Tab")]
+    assert '{feed.blockedStart && <div' in evidence
+    assert 'data-testid="scanner-start-blocked"' in evidence
+    assert evidence.index('{feed.blockedStart && <div') < evidence.index('<div>{state.text}</div>')
+    assert 'nicht das Ergebnis dieses Startversuchs' in evidence
+
+
 def test_direction_change_ignores_late_previous_direction_response():
     lifecycle("""
       const slow=defer(); queue.push({promise:slow.promise}); render(options()); await settle();

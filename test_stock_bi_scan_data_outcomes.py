@@ -285,19 +285,29 @@ def test_bi_empty_validated_broad_universe_never_falls_back_to_movers(monkeypatc
 @pytest.mark.parametrize("accepted", [True, False])
 def test_manual_bi_acknowledges_acceptance(monkeypatch, accepted):
     monkeypatch.setattr(api, "POLYGON_KEY", "fake")
+    monkeypatch.setattr(api, "_scan_status", {"bi_long": {}})
+    monkeypatch.setattr(api, "_scan_threads", {})
     monkeypatch.setattr(api, "_run_scan_safe", lambda *a, **kw: accepted)
     result = api.trigger_bi_scan(api.BIScanRequest(direction="long"))
     assert result["accepted"] is accepted
-    assert result["status"] == ("started" if accepted else "already_running")
+    assert result["status"] == ("started" if accepted else "busy")
+    if not accepted:
+        assert result["reason"] == "start_not_accepted"
+        assert result["run_id"] is None
 
 
 @pytest.mark.parametrize("accepted", [True, False])
 def test_manual_stock_acknowledges_acceptance(monkeypatch, accepted):
     monkeypatch.setattr(api, "POLYGON_KEY", "fake")
+    monkeypatch.setattr(api, "_scan_status", {})
+    monkeypatch.setattr(api, "_scan_threads", {})
     monkeypatch.setattr(api, "_run_scan_safe", lambda *a, **kw: accepted)
     result = api.run_scan(api.ScanRequest(strategy="Momentum Breakout Long", market_type="stocks"), None)
     assert result["accepted"] is accepted
-    assert result["status"] == ("started" if accepted else "already_running")
+    assert result["status"] == ("started" if accepted else "busy")
+    if not accepted:
+        assert result["reason"] == "start_not_accepted"
+        assert result["run_id"] is None
 
 
 def test_public_data_errors_are_safe():

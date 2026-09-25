@@ -6826,6 +6826,23 @@ function scannerDiagnosticSummary(diagnostics) {
         rejected: [...counts].sort((a, b) => b[1] - a[1]).slice(0, 4) };
 }
 
+function scannerBlockedStartNotice(ack) {
+    const labels = {
+        biotech: 'Biotech', strategy_scan: 'Automatische Aktienrunde',
+        bi_long: 'BI Long', bi_short: 'BI Short',
+        strat_momentum_breakout_long: 'Momentum Breakout Long',
+        strat_gap_momentum_long: 'Gap Momentum Long', strat_gap_momentum_short: 'Gap Momentum Short',
+        strat_cup_and_handle_breakout: 'Cup and Handle Breakout',
+        crypto_explosion: 'Crypto Explosion', crypto_trade_signals: 'Crypto Trade Signals',
+        new_listing: 'New Listing',
+    };
+    if (ack?.reason === 'other_scanner_running') {
+        const label = Object.prototype.hasOwnProperty.call(labels, ack.blocking_scan_key) ? labels[ack.blocking_scan_key] : 'Ein anderer Scanner';
+        return `Nicht gestartet: ${label} belegt den gemeinsamen Scanner. Es wurde kein neuer Lauf gestartet oder eingereiht. Nach dessen Ende erneut starten.`;
+    }
+    return 'Nicht gestartet: Der Server hat den Start nicht angenommen. Kein neuer Lauf oder Warteschlangenplatz bestaetigt. Status erneut laden und nochmals versuchen.';
+}
+
 function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix, scanCache, updateScanCache, schedulerState = null,
     controlEnabled = false, isAdmin = false, controlUrl = null }) {
     const cacheKey = `${cachePrefix}:snapshot:${scopeKey}`;
@@ -6837,6 +6854,8 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
     const [isScanning, setIsScanning] = useState(false);
     const [error, setError] = useState(null);
     const [notice, setNotice] = useState(null);
+    const [blockedStart, setBlockedStart] = useState(null);
+    const blockedStartRef = useRef(null);
     const [controlPending, setControlPending] = useState(null);
     const [controlNotice, setControlNotice] = useState(null);
     const [controlError, setControlError] = useState(null);
@@ -6910,6 +6929,14 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
                 return data;
             }
             const info = scannerSnapshotInfo(data);
+            const blocked = blockedStartRef.current;
+            if (blocked && (data.scan_running === true
+                || (data.scan_run_id && data.scan_run_id !== blocked.runId)
+                || (data.cached_at && data.cached_at !== blocked.cachedAt))) {
+                // A later observed run supersedes the previous refused start.
+                // Refreshing the same old error must NOT erase that refusal.
+                blockedStartRef.current = null; setBlockedStart(null);
+            }
             const livePartialTimeout = scannerLivePartialTimeout(data, expectedRunId);
             const observedOutcome = scannerPollOutcome(data, pollContext?.previousStamp ?? null,
                 pollContext?.sawRunning === true, expectedRunId);
@@ -7022,6 +7049,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         if (!resultsUrl || !current() || startingRef.current || pollingRef.current) return;
         startingRef.current = true;
         const operation = ++operationRef.current;
+        blockedStartRef.current = null; setBlockedStart(null);
         setError(null); setNotice(null); scanning(true);
         // Without a successful baseline read, an old cache could look like the
         // result of the new request. Do not launch an untrackable scan.
@@ -7044,6 +7072,14 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             if (!ack || !['started', 'already_running', 'busy'].includes(ack.status)) {
                 restoreFinalSnapshot();
                 setError('Scanstart wurde nicht bestaetigt. Kein neues Ergebnis.'); scanning(false); return;
+            }
+            if (ack.status === 'busy') {
+                // No requested worker exists to follow. In particular, never
+                // bind this refusal to the requested scanner's OLD run/error.
+                stopPolling(); scanning(false); setNotice(null);
+                blockedStartRef.current = { runId: before.scan_run_id, cachedAt: before.cached_at };
+                setBlockedStart(scannerBlockedStartNotice(ack));
+                return;
             }
             const busy = ack.accepted === false || ack.status !== 'started';
             setError(null);
@@ -7111,6 +7147,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         mountedRef.current = true;
         operationRef.current += 1;
         startingRef.current = false;
+        blockedStartRef.current = null; setBlockedStart(null);
         controlVerifiedRef.current = false;
         controlRequestRef.current = null;
         setControlPending(null); setControlNotice(null); setControlError(null);
@@ -7147,7 +7184,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         diagnostics: sameScope ? snapshot.info?.diagnostics || null : null,
         loading: !sameScope || loading, hasLoaded: sameScope && hasLoaded,
         isScanning: sameScope && isScanning, error: sameScope ? error : null,
-        notice: sameScope ? notice : null, start, refresh, setControl,
+        notice: sameScope ? notice : null, blockedStart: sameScope ? blockedStart : null, start, refresh, setControl,
         control: sameScope ? activeControlRef.current : null,
         schedule: sameScope && controlEnabled ? snapshot.info?.scan_schedule || schedulerState?.schedule || null : null,
         controlPending: sameScope ? controlPending : null, controlNotice: sameScope ? controlNotice : null,
@@ -7164,6 +7201,10 @@ function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
         : [['Universum', diag.universe_count], ['Geprueft', feed.info?.checked], ['Vor Freigabe', diag.raw_matches_before_special_filter], ['Sichtbar', diag.visible_results_after_signal_policy ?? diag.final_results]];
     const tone = ['error', 'warning', 'candidates', 'stale', 'missing'].includes(state.tone) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700';
     return <div className={`rounded-lg border p-3 text-sm ${tone}`} role="status" aria-live="polite">
+        {feed.blockedStart && <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3" data-testid="scanner-start-blocked">
+            <div className="font-semibold">{feed.blockedStart}</div>
+            <div className="mt-1 text-xs">Darunter steht der bisherige Scanstand, nicht das Ergebnis dieses Startversuchs.</div>
+        </div>}
         <div>{state.text}</div>
         {diag.data_mode === 'completed_daily_swing' && <div className="mt-1 text-xs">
             Swing-Modus: abgeschlossene Tageskerzen. Analysestand {diag.analysis_as_of || 'unbekannt'}.
