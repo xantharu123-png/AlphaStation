@@ -356,8 +356,8 @@ def test_strategy_switch_clears_refused_start_and_late_refusal_cannot_leak():
 def test_busy_notice_is_rendered_even_when_previous_scan_failed():
     evidence = SOURCE[SOURCE.index("function ScannerEvidence("):SOURCE.index("// Scanner Tab")]
     assert '{feed.blockedStart && <div' in evidence
-    assert 'data-testid="scanner-start-blocked"' in evidence
-    assert evidence.index('{feed.blockedStart && <div') < evidence.index('<div>{state.text}</div>')
+    assert "data-testid={feed.blockedStart ? 'scanner-start-blocked' : undefined}" in evidence
+    assert evidence.index('{compact.text}') < evidence.index('<div>{state.text}</div>')
     assert 'nicht das Ergebnis dieses Startversuchs' in evidence
 
 
@@ -470,7 +470,7 @@ def test_both_tabs_use_shared_lifecycle_and_bi_refresh_is_direction_scoped():
     assert "const feed = useScannerFeed({" in scanner and "const feed = useScannerFeed({" in bi
     assert "schedulerState: schedulerStatus?.scans?.[scannerKey] || null" in bi
     assert "<ScannerEvidence feed={feed}" in scanner and "<ScannerEvidence feed={feed}" in bi
-    assert "scannerEvidenceState({" in scanner and "scannerEvidenceState({" in bi
+    assert "scannerCompactEvidence({" in scanner and "scannerCompactEvidence({" in bi
     assert "Keine Stock-BI-Signale mit mindestens 17 von 20" not in bi
 
 
