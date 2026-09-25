@@ -54,6 +54,33 @@ def _selection_fixture(monkeypatch, size=15):
     return rows, checked, sent, tracked, events, released
 
 
+@pytest.mark.parametrize("send_result", [False, True])
+def test_validated_stock_row_is_not_misreported_as_missing_when_delivery_fails(monkeypatch, send_result):
+    rows, checked, sent, _tracked, events, _released = _selection_fixture(monkeypatch, size=1)
+
+    def send(_subject, _body, **kwargs):
+        sent.append(kwargs)
+        return send_result
+
+    monkeypatch.setattr(api, "_send_email_alert", send)
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
+    assert checked == ["R00"]
+    assert len(sent) == 1
+    assert not any(event[2] == "no_mail_adjacent_revalidated_rows" for event in events)
+    assert ("stock_strategy_R00" in api._EMAIL_COOLDOWN) is send_result
+
+
+def test_no_validated_stock_rows_still_reports_validation_skip_without_sending(monkeypatch):
+    rows, _checked, sent, _tracked, events, released = _selection_fixture(monkeypatch, size=1)
+    monkeypatch.setattr(api, "_revalidate_stock_strategy_mail_candidate",
+                        lambda *_a, **_k: {"ok": False, "reason": "final_stop_touched_since_scan"})
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", rows, "stocks")
+    assert not sent
+    assert "stock_strategy_R00" in released
+    assert any(event[2] == "mail_adjacent_stock_revalidation:final_stop_touched_since_scan" for event in events)
+    assert any(event[2] == "no_mail_adjacent_revalidated_rows" for event in events)
+
+
 @pytest.mark.parametrize("send_result", [True, False])
 def test_strategy_selection_caps_sender_attempts_and_releases_unused(monkeypatch, send_result):
     rows, checked, sent, _tracked, _events, released = _selection_fixture(monkeypatch)

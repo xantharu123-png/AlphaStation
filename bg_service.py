@@ -4682,15 +4682,28 @@ def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout
                 gmail_user, normalized_recipients, msg_string
             ) or {}
         except smtplib.SMTPRecipientsRefused as exc:
-            refused = getattr(exc, "recipients", None) or {
-                value: (550, b"recipient refused")
+            # A 421 can interrupt RCPT after earlier 250 replies. No DATA
+            # was accepted, including for recipients missing from this dict.
+            reported = getattr(exc, "recipients", None) or {}
+            refused = {
+                value: reported.get(value, (450, b"transaction aborted before DATA"))
                 for value in normalized_recipients
             }
-        except smtplib.SMTPResponseException as exc:
+        except (smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as exc:
+            try:
+                response_code = int(exc.smtp_code)
+            except (TypeError, ValueError):
+                response_code = 0
+            if not 400 <= response_code < 600:
+                raise _SMTPDataOutcomeUnknown(
+                    "SMTP 465 unexpected DATA reply; automatic resend blocked"
+                ) from exc
             raise _SMTPDefinitiveDeliveryFailure(
                 f"SMTP 465 explicitly rejected DATA ({exc.smtp_code})"
             ) from exc
         except Exception as exc:
+            # A generic SMTPResponseException can be a local parser failure
+            # after DATA, not a negative acknowledgement from the server.
             raise _SMTPDataOutcomeUnknown(
                 "SMTP 465 DATA outcome unknown; automatic resend blocked"
             ) from exc
@@ -4726,11 +4739,22 @@ def _smtp_transport_send(msg_string, gmail_user, gmail_pass, recipients, timeout
                 gmail_user, normalized_recipients, msg_string
             ) or {}
         except smtplib.SMTPRecipientsRefused as exc:
-            refused = getattr(exc, "recipients", None) or {
-                value: (550, b"recipient refused")
+            # RCPT acceptance is not DATA acceptance; cover the full envelope
+            # even when a 421 stopped iteration before all recipients.
+            reported = getattr(exc, "recipients", None) or {}
+            refused = {
+                value: reported.get(value, (450, b"transaction aborted before DATA"))
                 for value in normalized_recipients
             }
-        except smtplib.SMTPResponseException as exc:
+        except (smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as exc:
+            try:
+                response_code = int(exc.smtp_code)
+            except (TypeError, ValueError):
+                response_code = 0
+            if not 400 <= response_code < 600:
+                raise _SMTPDataOutcomeUnknown(
+                    "SMTP 587 unexpected DATA reply; automatic resend blocked"
+                ) from exc
             raise _SMTPDefinitiveDeliveryFailure(
                 f"SMTP 587 explicitly rejected DATA ({exc.smtp_code})"
             ) from exc

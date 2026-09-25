@@ -11361,15 +11361,45 @@ def _send_email_alert(
                     gmail_user, pending_recipients, wire_message
                 ) or {}
             except smtplib.SMTPRecipientsRefused as exc:
-                # All recipients were rejected during RCPT; DATA was not
-                # accepted, so retrying only transient addresses is safe.
+                # No DATA was accepted for this envelope. A 421 can abort the
+                # RCPT loop after earlier 250 replies and before later RCPTs;
+                # exc.recipients then names only the refusals seen so far.
+                # Retain every still-unmailed recipient except explicit 5xx
+                # refusals. Start from the attempted envelope, never exception
+                # keys, so this cannot add recipients or replay prior DATA.
                 attempt_refused = dict(getattr(exc, "recipients", {}) or {})
                 refused.update(attempt_refused)
                 last_error = exc
-                pending_recipients = _transient_refused_addresses(attempt_refused)
+                permanently_refused = set()
+                for address, detail in attempt_refused.items():
+                    try:
+                        code = int(detail[0] if isinstance(detail, (tuple, list)) else detail)
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    if 500 <= code < 600:
+                        permanently_refused.add(str(address).strip().lower())
+                pending_recipients = [
+                    address for address in pending_recipients
+                    if str(address).strip().lower() not in permanently_refused
+                ]
                 if pending_recipients and attempt < 2:
                     time.sleep(2 ** attempt)
                     continue
+                break
+            except (smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as exc:
+                # An explicit negative MAIL/DATA reply proves non-acceptance;
+                # it is not an ambiguous lost DATA response. Do not strand the
+                # tracker intent/quarantine forever after a temporary rejection.
+                # End this time-sensitive send; a later scanner decision must
+                # revalidate the signal before preparing another delivery.
+                # Generic SMTPResponseException may be a local parser failure
+                # (e.g. an oversized reply after DATA), not a server rejection.
+                last_error = exc
+                try:
+                    response_code = int(exc.smtp_code)
+                except (TypeError, ValueError):
+                    response_code = 0
+                delivery_outcome_unknown = not 400 <= response_code < 600
                 break
             except Exception as exc:
                 last_error = exc
@@ -14536,7 +14566,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         # It is informational and contains no mutable quote, so it can be
         # copied into every row's mail without reopening the TOCTOU window.
         batch_cluster_hint = _cluster_warning_html(_cluster_context_alerts)
-        sent_any = False
+        revalidated_any = False
         pending_claims = {
             str(alert.get("cooldown_key") or "")
             for alert in email_alerts
@@ -14620,6 +14650,9 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 )
                 continue
 
+            # A valid row and successful delivery are separate outcomes. The
+            # sender records transport failures; do not call those no-signal.
+            revalidated_any = True
             row_claimed_at = _refresh_stock_mail_claim(pending_alert["cooldown_key"], row_claimed_at)
             if row_claimed_at is None:
                 continue
@@ -14709,7 +14742,6 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 pending_claims.clear()
                 raise
             if sent:
-                sent_any = True
                 accepted_at = time.time()
                 _EMAIL_COOLDOWN[alert["cooldown_key"]] = accepted_at
                 _email_dedupe_mark(alert["cooldown_key"], now=accepted_at)
@@ -14719,7 +14751,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     alert["cooldown_key"], claimed_at=row_claimed_at
                 )
                 pending_claims.discard(str(alert["cooldown_key"]))
-        if not sent_any:
+        if not revalidated_any:
             _record_email_event(
                 f"Aktien Strategie Alert - {strategy_name}",
                 "skipped",
