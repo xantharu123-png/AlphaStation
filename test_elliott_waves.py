@@ -335,3 +335,81 @@ def test_stored_report_cannot_reintroduce_counts_outside_analysis_horizon():
     for pattern in report["patterns"]:
         pattern["bars_since_completed"] = 299 - pattern["points"][-1]["index"]
     assert not validate_elliott_report(report)
+
+
+@pytest.mark.parametrize("confirmed_at", [
+    "2025-01-09T21:00:01Z",  # Before the known observation at index 10.
+    "2025-01-11T21:00:00Z",  # Index 11 cannot close at index 10's time.
+    "2025-01-13T21:00:00Z",  # Nor at index 12's time.
+])
+def test_stored_major_confirmation_respects_known_support_bar_indices(confirmed_at):
+    report = report_for(pattern_bars(subdivide=True))
+    impulse = next(p for p in report["patterns"] if p["family"] == "impulse")
+    report["patterns"] = [impulse]
+    assert validate_elliott_report(report)
+    # Origin index 8 uses radius 3; its confirmation belongs to index 11.
+    impulse["points"][0]["confirmed_at"] = confirmed_at
+    impulse["waves"][0]["subwaves"][0]["confirmed_at"] = confirmed_at
+    assert not validate_elliott_report(report)
+
+
+@pytest.mark.parametrize("confirmed_at", [
+    "2025-01-12T20:59:59Z", "2025-01-12T21:00:01Z",
+])
+def test_stored_minor_and_major_cannot_disagree_on_same_confirmation_bar(confirmed_at):
+    report = report_for(pattern_bars(subdivide=True))
+    impulse = next(p for p in report["patterns"] if p["family"] == "impulse")
+    report["patterns"] = [impulse]
+    assert validate_elliott_report(report)
+    # Minor index 10 + radius 1 and origin index 8 + radius 3 both use bar 11.
+    impulse["waves"][0]["subwaves"][1]["confirmed_at"] = confirmed_at
+    assert not validate_elliott_report(report)
+
+
+@pytest.mark.parametrize("confirmed_at", [
+    "2025-01-15T21:00:00Z", "2025-01-15T21:00:01Z",
+])
+def test_stored_minor_confirmation_must_precede_later_observed_bar(confirmed_at):
+    report = report_for(pattern_bars(subdivide=True))
+    impulse = next(p for p in report["patterns"] if p["family"] == "impulse")
+    report["patterns"] = [impulse]
+    assert validate_elliott_report(report)
+    # Minor index 12 confirms at 13, strictly before observed index 14.
+    impulse["waves"][0]["subwaves"][2]["confirmed_at"] = confirmed_at
+    assert not validate_elliott_report(report)
+
+
+def test_stored_alternatives_cannot_assign_different_clocks_to_same_minor_bar():
+    report = report_for(pattern_bars(subdivide=True))
+    impulse = next(p for p in report["patterns"] if p["family"] == "impulse")
+    assert validate_elliott_report(report)
+    # This minor pivot also appears in the overlapping zigzag. Within either
+    # individual count, a one-second shift still fits the adjacent observations.
+    impulse["waves"][2]["subwaves"][2]["confirmed_at"] = "2025-01-30T21:00:01Z"
+    assert not validate_elliott_report(report)
+
+
+def test_stored_latest_bar_clock_must_equal_confirmation_at_final_index():
+    report = report_for(pattern_bars(subdivide=True)[:54])
+    assert any(p["family"] == "impulse" for p in report["patterns"])
+    assert validate_elliott_report(report)
+    # The fifth-wave radius-3 support ends at index 53, the final input bar.
+    report["latest_completed_at"] = report["as_of"]  # One second later.
+    assert not validate_elliott_report(report)
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("timeframe", ["1D", "1H"])
+def test_clock_consistency_accepts_real_counts_with_irregular_session_spacing(family, timeframe):
+    bars = pattern_bars(family, subdivide=True)
+    for i, bar in enumerate(bars):
+        if timeframe == "1D":
+            opened = START + timedelta(days=i + 2 * (i // 5), hours=(i // 10) % 2)
+            closed = opened + timedelta(hours=6, minutes=30)
+        else:
+            opened = START + timedelta(hours=i + 2 * (i // 7))
+            closed = opened + timedelta(minutes=45)
+        bar.update(timestamp=opened.isoformat(), close_time=closed.isoformat())
+    report = report_for(bars, timeframe=timeframe)
+    assert any(p["family"] == family and p["pattern_status"] == "confirmed" for p in report["patterns"])
+    assert validate_elliott_report(report, timeframe=timeframe)

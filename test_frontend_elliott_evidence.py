@@ -111,6 +111,31 @@ assert.match(text(render({rows:[],onSelect:()=>{},emptyText:'Kein Muster'})),/Ke
 """)
 
 
+def test_empty_pattern_list_uses_actual_feed_state_instead_of_claiming_no_matches():
+    from test_frontend_scanner_lifecycle import PURE as scanner_pure
+    component = SOURCE[SOURCE.index("function ElliottScannerResults("):SOURCE.index("function ElliottPatternEvidence(")]
+    node_run("""
+const assert=require('node:assert/strict');
+const Babel=require(""" + json.dumps(str(ROOT / "frontend/vendor/babel.min.js")) + """);
+const React={createElement:(type,props,...children)=>({type,props:props||{},children})};
+const render=new Function('React',""" + json.dumps(scanner_pure + PURE) + """+Babel.transform(""" + json.dumps(component) + """,{presets:['react']}).code+';return ElliottScannerResults;')(React);
+function text(n){return Array.isArray(n)?n.map(text).join(' '):n==null||typeof n==='boolean'?'':typeof n!=='object'?String(n):text(n.children);}
+const base={hasLoaded:true,info:{cached_at:'2026-09-25T20:14:00Z',diagnostics:{coverage:'complete'}}};
+for(const state of [
+ {...base,info:{...base.info,data_quality:{cache_status:'stale'}}},
+ {...base,error:'Marktdaten unvollständig'},
+ {...base,running:true},
+ {hasLoaded:false}
+]){
+ const content=text(render({rows:[],onSelect:()=>{},evidence:state,emptyText:'Keine passenden Wellenmuster im letzten Scan.'}));
+ assert.ok(!content.includes('Keine passenden Wellenmuster'),content);
+ assert.ok(!content.includes('0 Aktien'),content);
+}
+const current=text(render({rows:[],onSelect:()=>{},evidence:base}));
+assert.match(current,/Scan abgeschlossen/);assert.match(current,/Keine passenden Wellenmuster/);
+""")
+
+
 def test_wyckoff_is_opt_in_outside_its_scanner_and_closed_by_default():
     from test_frontend_wyckoff_evidence import fixture as wyckoff_fixture
     component = SOURCE[SOURCE.index("function WyckoffPatternEvidence("):SOURCE.index("// Cup scanner evidence:")]
@@ -135,6 +160,60 @@ def test_completed_empty_pattern_scan_is_not_a_failed_signal_scan():
     from test_frontend_scanner_lifecycle import evaluate as scanner_evaluate
     result = scanner_evaluate('scannerCompactEvidence({kind:"pattern",count:0,hasLoaded:true,info:{cached_at:"2026-09-25T12:00:00Z",diagnostics:{coverage:"complete"}}})')
     assert result["text"] == "Scan abgeschlossen · Keine passenden Wellenmuster"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"data_quality": {"cache_status": "stale"}},
+    {"diagnostics": {"coverage": "complete", "warning": "elliott_cache_session_stale"}},
+])
+def test_session_rollover_cannot_be_presented_as_successful_no_pattern_scan(metadata):
+    from test_frontend_scanner_lifecycle import evaluate as scanner_evaluate
+    info = {"cached_at": "2026-09-25T20:14:00Z", "cache_age_seconds": 120,
+            "diagnostics": {"coverage": "complete"}, **metadata}
+    options = dict(kind="pattern", count=0, hasLoaded=True, info=info)
+    result = scanner_evaluate("scannerCompactEvidence(" + json.dumps(options) + ")")
+    assert result["tone"] == "stale"
+    assert "neu scannen" in result["text"]
+    assert "Keine passenden" not in result["text"]
+    payload = dict(info, data=[], partial=False, scan_running=False)
+    assert scanner_evaluate("scannerPollOutcome(" + json.dumps(payload) + ",null,true)") == "stale"
+    # A new live worker and a genuine failure retain precedence over old-cache age.
+    payload["scan_running"] = True
+    assert scanner_evaluate("scannerPollOutcome(" + json.dumps(payload) + ",null,true)") == "running"
+    payload["scan_error"] = "scan_data_invalid"
+    assert scanner_evaluate("scannerPollOutcome(" + json.dumps(payload) + ",null,true)") == "error"
+
+
+def test_rollover_during_poll_stops_without_zero_result_success_toast():
+    from test_frontend_scanner_lifecycle import lifecycle
+    lifecycle("""
+      const stale={data_quality:{cache_status:'stale'},
+        diagnostics:{coverage:'complete',warning:'elliott_cache_session_stale'}};
+      queue.push({body:payload(t1,'OLD')});
+      render(options({scopeKey:'elliott',cachePrefix:'elliott'})); await settle();
+      queue.push({body:payload(t1,'OLD')},{body:{status:'started',run_id:'new'}});
+      await feed.start(); await settle();
+      queue.push({body:payload(t2,null,{...stale,scan_run_id:'new'})}); await timer();
+      assert.equal(feed.isScanning,false); assert.equal(timers.size,0);
+      assert.equal(feed.results.length,0); assert.equal(feed.error,null);
+      assert.equal(toasts.length,0);
+      assert.equal(scannerCompactEvidence({kind:'pattern',info:feed.info,count:0,hasLoaded:true}).tone,'stale');
+      // A read failure must not resurrect OLD after the server withdrew it.
+      queue.push({error:true}); await feed.refresh(); await settle();
+      assert.equal(feed.results.length,0);
+    """)
+
+
+def test_incomplete_attempt_takes_precedence_over_obsolete_pattern_cache():
+    from test_frontend_scanner_lifecycle import evaluate as scanner_evaluate
+    payload = dict(cached_at="2026-09-25T20:14:00Z", data=[], partial=False, scan_running=False,
+                   data_quality={"cache_status": "stale"},
+                   diagnostics={"coverage": "complete", "attempt_diagnostics": {"coverage": "incomplete"}})
+    assert scanner_evaluate("scannerPollOutcome(" + json.dumps(payload) + ",null,true)") == "error"
+    options = dict(kind="pattern", count=0, hasLoaded=True, info=payload)
+    result = scanner_evaluate("scannerCompactEvidence(" + json.dumps(options) + ")")
+    assert result["tone"] == "warning"
+    assert "unvollständig" in result["text"]
 
 
 def test_elliott_mobile_sidebar_fits_client_width_not_scrollbar_viewport():

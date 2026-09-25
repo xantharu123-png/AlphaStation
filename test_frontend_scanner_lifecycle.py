@@ -479,7 +479,9 @@ def test_stock_tab_binds_leaf_and_auto_scheduler_state_to_feed_and_controls():
     assert "schedulerState," in scanner
     assert "scanKey={scannerKey}" in scanner
     assert "'strategy_scan'" in scanner and "last_attempt_at" in scanner
-    assert scanner.count("running: isScanning || !!schedulerState?.running") == 2
+    # Additional result views may use the same binding; their existence must
+    # not invalidate the desktop/mobile scheduler contract.
+    assert scanner.count("running: isScanning || !!schedulerState?.running") >= 2
 
 
 @pytest.mark.parametrize("strategy", ["Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout"])

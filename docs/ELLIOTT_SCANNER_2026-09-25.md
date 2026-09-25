@@ -3,7 +3,8 @@
 ## Implemented scope
 
 `Elliott Wave Muster` is a separate, manual stock scanner. It uses completed
-daily sessions (1D), a 300-calendar-day history request, common-stock membership,
+daily sessions (1D), the strict provider's 1095-calendar-day history request
+(at most 800 bars), common-stock membership,
 a $5–$100,000 price range and at least $1 million session dollar volume.
 It does not require a momentum-day percentage or relative-volume spike.
 
@@ -21,6 +22,7 @@ independently observed subdivision degree. Unverified smaller pivots are named
 P0, P1, etc.; they are not relabelled as verified Elliott waves. Multiple counts
 remain selectable. Direction describes the observed structure, not a forecast.
 Fibonacci ratios are descriptive, not substitutes for the hard topology rules.
+Wave-length comparisons use absolute price distances, not percentage returns.
 
 Source references: [Impulse](https://www.elliottwave.com/waveopedia/impulse/),
 [corrective waves](https://www.elliottwave.com/waveopedia/corrective-waves/).
@@ -88,7 +90,7 @@ A warmed local Windows microbenchmark (20 runs per synthetic case, 240–284
 bars, analysis plus validation) measured median 8.01–10.74 ms per symbol and a
 12.21 ms maximum. This does not measure network requests or Hetzner throughput.
 
-Final broad regression: **8,811 passed** in 405.58 seconds. The sole warning was
+Initial release broad regression: **8,811 passed** in 405.58 seconds. The sole warning was
 the existing pytest/anyio import-rewrite warning, not a failed test. Frontend
 bundle validation passed (`f0e92e99247e`). Publication revision is recorded in
 the delivery message. The broad Windows run uses isolated fake credentials/state and blocked
@@ -96,6 +98,44 @@ external network/SMTP. Linux-specific `test_deploy_auto_update.py` and
 `test_deploy_migration.py` are excluded from that local run; this task does not
 claim their platform verification. Private data exports and browser fixtures
 are not release artifacts.
+
+## Follow-up release audit repair
+
+- Stored observations and confirmations now share one monotonic bar-index
+  clock across main waves, smaller waves, alternate counts and the last bar.
+  A radius-three pivot cannot claim confirmation before an already known
+  intervening bar. Shared main-wave endpoints retain their main radius; no
+  calendar-day spacing is assumed.
+- Session expiry is separate from cache-file age. After a new completed daily
+  session becomes available, even a two-minute-old result is marked stale.
+  This also applies to a previously empty result and unverifiable session
+  metadata. Old rows are withheld without overwriting historical scan counts
+  or inventing a failed scan.
+- The compact status and empty results panel both request a new scan instead
+  of claiming no patterns were found. Polling does not announce a successful
+  zero-match completion. Actual failed/incomplete attempts take precedence.
+- The catalog's history-days description now matches the already-used strict
+  provider horizon. This does not change the provider request or chart window.
+
+Regression cases cover early/late/contradictory confirmation clocks, irregular
+session spacing, rollover with one or zero patterns, missing/bad/future session
+metadata, polling notifications and the rendered empty-state component.
+Independent follow-up review reproduced an incomplete-attempt precedence case;
+that case is fixed and tested. The review then passed 252 targeted tests and
+300 generated reports (2,138 patterns), with no remaining important findings.
+The core implementation was also checked against 600 generated causal reports
+(4,426 pattern observations) without changed historical anchors.
+
+Local Playwright verification on `127.0.0.1:8776` used synthetic API responses
+with outside traffic blocked. Desktop 1365×900 and mobile 390×844 showed the
+same short stale status in both summary and empty list, with no false zero
+count. Opening the collapsed details worked. There were no console errors;
+the existing locally served Tailwind runtime emitted its production-use warning.
+This browser check concerns status handling, not a live provider scan.
+
+Final frozen-code follow-up regression: **8,841 passed** in 363.29 seconds,
+with the same existing AnyIO warning and Windows platform exclusions described
+above. Frontend source/bundle verification passed (`5a6ce5ba82a5`).
 
 ## Explicit remaining boundaries
 

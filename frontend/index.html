@@ -3485,11 +3485,12 @@ function formatFundingRate(row) {
     return Number.isFinite(Number(raw)) ? `${Number(raw).toFixed(3)}%` : 'Nicht verfügbar';
 }
 
-function ElliottScannerResults({ rows, onSelect, emptyText }) {
+function ElliottScannerResults({ rows, onSelect, emptyText, evidence }) {
     const valid = rows.map(row => ({ row, patterns: elliottPatterns({ ...row, scanner: 'Elliott Wave Muster' }) })).filter(item => item.patterns.length);
+    const emptyStatus = evidence ? scannerCompactEvidence({ ...evidence, kind: 'pattern', count: 0 }).text : emptyText;
     return <section className="card border border-gray-200 p-4 rounded-lg" aria-label="Elliott-Muster">
-        <div className="mb-3 flex flex-wrap justify-between gap-2 text-sm"><strong>{valid.length} {valid.length === 1 ? 'Aktie' : 'Aktien'} mit Wellenmustern</strong><span className="text-gray-500">1D · Musteranalyse</span></div>
-        {!valid.length && <p className="py-6 text-center text-sm text-gray-500">{emptyText}</p>}
+        <div className="mb-3 flex flex-wrap justify-between gap-2 text-sm"><strong>{valid.length ? `${valid.length} ${valid.length === 1 ? 'Aktie' : 'Aktien'} mit Wellenmustern` : 'Elliott-Wellenmuster'}</strong><span className="text-gray-500">1D · Musteranalyse</span></div>
+        {!valid.length && <p className="py-6 text-center text-sm text-gray-500">{emptyStatus}</p>}
         {valid.map(({ row, patterns }) => <button key={row.ticker} type="button" onClick={() => onSelect(row)} className="w-full text-left border-t border-gray-200 py-4 flex flex-wrap items-center justify-between gap-3">
             <span><strong>{row.ticker}</strong><span className="block text-xs text-gray-500">{row.company_name || row.name || ''}</span></span>
             <span className="text-sm">{elliottFamilyName(patterns[0].family)}<span className="block text-xs text-gray-500">{patterns[0].direction === 'LONG' ? 'Aufwärtsstruktur' : 'Abwärtsstruktur'} · {patterns.length} {patterns.length === 1 ? 'Zählung' : 'Zählungen'}</span></span>
@@ -6948,6 +6949,12 @@ function scannerLivePartialTimeout(data, expectedRunId = null) {
         && (!expectedRunId || expectedRunId === control.run_id);
 }
 
+function scannerCacheIsStale(info) {
+    return info?.data_quality?.cache_status === 'stale'
+        || ['strategy_cache_version_old_scan_again', 'elliott_cache_session_stale'].includes(info?.diagnostics?.warning)
+        || (info?.warnings || []).some(w => /^(Cache alt:|Strategie-Cache ist alt)/.test(String(w)));
+}
+
 function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = null) {
     if (expectedRunId && data?.scan_run_id && data.scan_run_id !== expectedRunId) return 'superseded';
     const control = scannerControlSnapshot(data);
@@ -6961,6 +6968,7 @@ function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = nul
     const diag = data?.diagnostics || {};
     const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
     if (coverage === 'incomplete') return 'error';
+    if (scannerCacheIsStale(data)) return 'stale';
     const stamp = scannerTimestamp(data?.cached_at);
     const previous = scannerTimestamp(previousStamp);
     if (stamp !== null && (previousStamp === null || (previous !== null && stamp > previous))) {
@@ -7012,8 +7020,7 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
     const control = scannerControlSnapshot(info);
     if (control && !['running', 'finished'].includes(control.state) && (control.worker_alive || control.state === 'restart_required')) return { tone: 'control', text: scannerControlPresentation(control).text };
     if (scannerLivePartialTimeout(info)) return { tone: 'warning', text: 'Zeitbudget ueberschritten, aber der bestaetigte Worker laeuft noch. Angezeigte Treffer sind ein laufender Zwischenstand; kein abgeschlossener Scan. Status wird weiter geprueft.' };
-    const stale = (info?.warnings || []).some(w => /^(Cache alt:|Strategie-Cache ist alt)/.test(String(w)))
-        || diag.warning === 'strategy_cache_version_old_scan_again';
+    const stale = scannerCacheIsStale(info);
     if (error || info?.scan_error) return { tone: 'error', text: error || scannerPublicFailure(200, info) };
     if (running) return { tone: 'running', text: info?.partial === true
         ? 'Scan laeuft. Die folgenden Zahlen und Treffer sind ein vorlaeufiger Zwischenstand; noch kein fertiger neuer Scan.'
@@ -7022,14 +7029,14 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
             : 'Scan laeuft. Noch kein bestaetigter Zwischenstand oder fertiger neuer Scan.' };
     if (loading) return { tone: 'loading', text: 'Ergebnisstand wird geladen; die angezeigte Anzahl ist noch nicht bestaetigt.' };
     if (!hasLoaded || scannerTimestamp(info?.cached_at) === null) return { tone: 'missing', text: 'Noch kein abgeschlossener Ergebnisstand vorhanden. Daraus folgt nicht, dass es keine Signale gibt.' };
+    const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
+    if (coverage === 'incomplete') return { tone: 'warning', text: 'Der letzte Scan war unvollstaendig. Angezeigte Daten sind kein vollstaendig geprueftes neues Ergebnis.' };
     if (stale) return { tone: 'stale', text: 'Ergebnisstand ist veraltet. Bitte einen neuen Scan abwarten oder starten.' };
     const raw = Number(diag.raw_cache_rows);
     const valid = Number(diag.validated_scanner_signals);
     const decorated = Number(diag.decorated_scanner_signals);
     if (kind === 'bi' && raw > 0 && valid === 0) return { tone: 'warning', text: 'Gespeicherte BI-Zeilen haben keinen gueltigen aktuellen 17/20-Nachweis. Nicht als neue Nulltreffer-Analyse werten.' };
     if (kind === 'bi' && valid > 0 && decorated === 0) return { tone: 'warning', text: 'BI-Signale vorhanden, aber die Auslieferungspruefung hat alle ausgeschlossen. Details unten; kein Nachweis fuer zu wenige gruene Indikatoren.' };
-    const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
-    if (coverage === 'incomplete') return { tone: 'warning', text: 'Der letzte Scan war unvollstaendig. Angezeigte Daten sind kein vollstaendig geprueftes neues Ergebnis.' };
     if (coverage === 'complete_with_exclusions') {
         const funnel = diag.attempt_diagnostics || diag.funnel || diag;
         const excluded = funnel.excluded_data_symbols ?? funnel.quarantined_symbols;
@@ -7317,6 +7324,12 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
                 stopPolling(); scanning(false);
                 setNotice(null);
                 if (notify && window.addToast) window.addToast(`Scan abgeschlossen: ${data.data.length} Treffer. Freigaben und Warnungen stehen bei den Ergebnissen.`, 'success');
+                return;
+            }
+            if (outcome === 'stale') {
+                stopPolling(); scanning(false); setNotice(null);
+                // The scan may have completed against the previous session.
+                // Its obsolete cache is not a new successful zero-match scan.
                 return;
             }
             if (['error', 'missing_final', 'superseded', 'unverified_final'].includes(outcome)) {
@@ -7695,7 +7708,8 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
 
             {marketType === 'stocks' && strategy === 'Elliott Wave Muster'
                 ? <ElliottScannerResults rows={sorted} onSelect={item => onSelectTicker(scannerSelection(item, marketType, strategy))}
-                    emptyText={isScanning ? 'Scan läuft…' : feed.error ? 'Ergebnis nicht verfügbar.' : 'Keine passenden Wellenmuster im letzten Scan.'} />
+                    evidence={{ info: scanInfo, loading: feed.loading, running: isScanning || !!schedulerState?.running,
+                        error: feed.error, hasLoaded: feed.hasLoaded, blockedStart: feed.blockedStart }} />
                 : <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
                 <div className="md:hidden">
                     {sorted.length === 0 ? (

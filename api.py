@@ -709,7 +709,7 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         "logic": "Getrennte Impuls- und Korrekturzaehlungen; Mustersuche ohne Handelsfreigabe.",
         "display_group": "Wellenmuster",
         "filters": {"Preis": (5.0, 100000.0)},
-        "min_dollar_volume": 1_000_000, "history_days": 300, "max_results": 100,
+        "min_dollar_volume": 1_000_000, "history_days": 1095, "max_results": 100,
         "pattern_type": "elliott_patterns", "signal_kind": "pattern_context",
         "trade_ready": False, "mail_eligible": False, "manual_only": True,
     }
@@ -31939,9 +31939,32 @@ def get_scan_results(
             "warning": "strategy_cache_version_old_scan_again",
         }
 
+    elliott_cache_warning = None
     if is_generic_stock_strategy:
+        result_clock = datetime.now(timezone.utc)
+        unverified_count = len(results)
         results = [row for row in results if _stock_elliott_row_contract_valid(
-            row, expected_strategy=resolved_strategy or strategy)]
+            row, as_of=result_clock, expected_strategy=resolved_strategy or strategy)]
+        if resolved_strategy == ELLIOTT_STRATEGY and cached_at and strategy_scoped_cache and not stale_strategy_cache:
+            diagnostics = dict(diagnostics or {})
+            # Row validation alone cannot mark a previously empty cache stale.
+            # Bind the result's analysis cutoff to the same completed-session
+            # contract, independently of its file timestamp or result count.
+            analysis_at = _stock_attempt_datetime(diagnostics.get("analysis_as_of"))
+            analysis_session = analysis_at.astimezone(stock_swing.NY).date().isoformat() if analysis_at else None
+            required_session = stock_swing.completed_sessions(result_clock, 1)[0]
+            required_close = stock_swing.session_close(required_session)
+            if (analysis_at is None or analysis_at != stock_swing.session_close(analysis_session)
+                    or analysis_at > required_close or diagnostics.get("data_mode") != stock_swing.MODE):
+                elliott_cache_warning = "elliott_cache_session_unverified"
+            elif analysis_at < required_close:
+                elliott_cache_warning = "elliott_cache_session_stale"
+            if elliott_cache_warning:
+                results = []
+                diagnostics["warning"] = elliott_cache_warning
+            diagnostics.update(elliott_cache_session=analysis_session,
+                               elliott_required_session=required_session,
+                               elliott_contract_rejected=unverified_count - len(results))
         cup_verified = [row for row in results if _cup_signal_contract_valid(
             row, strategy_name=resolved_strategy or strategy,
         )]
@@ -31978,6 +32001,11 @@ def get_scan_results(
         diagnostics["suppressed_by_signal_policy"] = max(0, decorated_count - visible_count)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     warnings = list(quality["warnings"])
+    if elliott_cache_warning:
+        quality["cache_status"] = "stale"
+        quality["cache_stale_reason"] = elliott_cache_warning
+        warnings.insert(0, "Elliott-Ergebnis ist veraltet oder der Sessionnachweis fehlt - bitte Scan neu starten")
+        quality["warnings"] = warnings
     if scanner_name in _BI_SIGNAL_SCANNERS:
         exclusion_warning = _bi_data_exclusion_warning(diagnostics)
         if exclusion_warning:

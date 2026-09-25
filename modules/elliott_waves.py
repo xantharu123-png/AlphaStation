@@ -397,6 +397,8 @@ def validate_elliott_report(report, *, timeframe="1D", as_of=None) -> bool:
     """Validate a stored report's internal contract; not a price-feed replay.
 
     This prevents malformed/stale-schema caches or accidental trade promotion.
+    Known observations and radius-based confirmations must share one consistent
+    bar-index clock across both degrees and all alternative counts.
     Freshness relative to a market session is the caller's separate contract.
     Without original OHLCV this is not proof of real feed correspondence.
     """
@@ -422,6 +424,7 @@ def validate_elliott_report(report, *, timeframe="1D", as_of=None) -> bool:
         if not isinstance(patterns, list) or len(patterns) > PARAMETERS["maximum_patterns"]:
             return False
         ids = set()
+        known_clocks = {(count - 1, latest)}
         for pattern in patterns:
             family = pattern["family"]
             labels = _LABELS[family]
@@ -441,6 +444,9 @@ def validate_elliott_report(report, *, timeframe="1D", as_of=None) -> bool:
             radius = pattern["pivot_radius"]
             if not geometry or any(p.index < radius or p.index + radius >= count for p in pivots):
                 return False
+            for pivot in pivots:
+                known_clocks.add((pivot.index, pivot.observed_at))
+                known_clocks.add((pivot.index + radius, pivot.confirmed_at))
             age = pattern.get("bars_since_completed")
             if (isinstance(age, bool) or not isinstance(age, int)
                     or age != count - 1 - pivots[-1].index
@@ -482,6 +488,11 @@ def validate_elliott_report(report, *, timeframe="1D", as_of=None) -> bool:
                     return False
                 if nested[0] != pivots[i] or nested[-1] != pivots[i + 1] or any(b.index <= a.index or b.observed_at <= a.observed_at for a, b in zip(nested, nested[1:])):
                     return False
+                # Shared endpoints retain their main-degree confirmation;
+                # only independently observed interior turns use minor radius.
+                for pivot in nested[1:-1]:
+                    known_clocks.add((pivot.index, pivot.observed_at))
+                    known_clocks.add((pivot.index + PARAMETERS["subdivision_radius"], pivot.confirmed_at))
                 if wave["observed_subwaves"] != len(nested) - 1 or isinstance(wave["observed_subwaves"], bool):
                     return False
                 valid_families = ("impulse",) if expected == 5 else ("zigzag", "regular_flat", "expanded_flat")
@@ -499,7 +510,13 @@ def validate_elliott_report(report, *, timeframe="1D", as_of=None) -> bool:
                 verified.append(wave["subdivision_status"] == "verified")
             if pattern["subdivision_status"] != ("verified" if all(verified) else "unverified") or pattern["pattern_status"] != ("confirmed" if all(verified) else "geometry_only"):
                 return False
-        return True
+        # Identical duplicated evidence is harmless. A bar cannot have two
+        # close times, nor may a later index close before/equal an earlier one.
+        # No calendar spacing is inferred: gaps and different sessions are OK.
+        ordered_clocks = sorted(known_clocks)
+        return all(a_index < b_index and a_time < b_time
+                   for (a_index, a_time), (b_index, b_time)
+                   in zip(ordered_clocks, ordered_clocks[1:]))
     except (TypeError, ValueError, KeyError, OverflowError, AttributeError):
         return False
 

@@ -230,3 +230,68 @@ def test_reference_prices_allow_only_legitimate_rounding(scan_environment):
     assert row["elliott_reference_close"] == history[-1]["close"]
     row["elliott_reference_close"] *= 2
     assert not api._stock_elliott_row_contract_valid(row, as_of=NOW)
+
+
+@pytest.mark.parametrize("has_patterns", [True, False], ids=["pattern-result", "empty-result"])
+def test_session_rollover_marks_recent_elliott_cache_stale(scan_environment, monkeypatch, has_patterns):
+    """A session-expired cache must not look like a fresh, completed zero scan."""
+    observation, history, root = scan_environment
+    if not has_patterns:
+        from modules import stock_swing_contract as swing
+        for bar in history:
+            bar.update(open=100.0, high=100.0, low=100.0, close=100.0)
+        observation["day"]["c"] = 100.0
+        observation.update(swing.metadata("2026-09-24", 100.0))
+
+    class Clock(datetime):
+        current = datetime(2026, 9, 25, 20, 14, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(api, "datetime", Clock)
+    rows = api._strategy_scan_wrapper(STRATEGY)
+    expected_count = 1 if has_patterns else 0
+    assert len(rows) == expected_count
+    before = api.get_scan_results(strategy=STRATEGY, market_type="stocks")
+    assert before.count == expected_count
+    assert before.data_quality["cache_status"] == "fresh"
+    saved = (root / "elliott_cache.json").read_bytes()
+
+    # The new daily session becomes available after the 15-minute delay.
+    Clock.current = datetime(2026, 9, 25, 20, 16, tzinfo=timezone.utc)
+    after = api.get_scan_results(strategy=STRATEGY, market_type="stocks")
+    assert after.count == 0
+    assert after.cached_at == before.cached_at
+    assert after.cache_age_seconds == 120
+    assert after.data_quality["cache_status"] == "stale"
+    assert after.diagnostics["warning"] == "elliott_cache_session_stale"
+    assert after.diagnostics["elliott_cache_session"] == "2026-09-24"
+    assert after.diagnostics["elliott_required_session"] == "2026-09-25"
+    assert after.diagnostics["elliott_contract_rejected"] == expected_count
+    # Historical scan evidence stays intact; expiry is not a failed scan.
+    assert after.diagnostics["coverage"] == "complete"
+    assert after.diagnostics["final_results"] == expected_count
+    assert after.scan_error is None
+    assert any("Elliott" in warning and "veraltet" in warning for warning in after.warnings)
+    assert after.warnings == after.data_quality["warnings"]
+    assert (root / "elliott_cache.json").read_bytes() == saved
+
+
+@pytest.mark.parametrize("analysis_as_of", [None, "not-a-date", "2026-09-24T12:00:00Z", "2026-09-25T20:00:00Z"])
+def test_empty_elliott_cache_requires_completed_session_metadata(scan_environment, analysis_as_of):
+    """Missing, malformed, non-close or future evidence cannot certify zero matches."""
+    _, _, root = scan_environment
+    api._strategy_scan_wrapper(STRATEGY)
+    path = str(root / "elliott_cache.json")
+    metadata = api.load_cache_metadata(path)
+    metadata["diagnostics"].update(final_results=0, raw_matches_before_special_filter=0,
+                                    analysis_as_of=analysis_as_of)
+    api.save_cache_file(path, [], metadata=metadata)
+    response = api.get_scan_results(strategy=STRATEGY, market_type="stocks")
+    assert response.count == 0
+    assert response.data_quality["cache_status"] == "stale"
+    assert response.diagnostics["warning"] == "elliott_cache_session_unverified"
+    assert response.diagnostics["elliott_required_session"] == "2026-09-24"
+    assert response.scan_error is None
