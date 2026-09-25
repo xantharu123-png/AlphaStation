@@ -123,21 +123,21 @@ def test_all_successful_zero_is_a_real_complete_sweep_without_guard_call(monkeyp
     assert state["mail_calls"] == []
 
 
-def test_all_success_keeps_existing_global_ranking_caps_and_combined_mail_context(monkeypatch, tmp_path):
+def test_all_success_keeps_all_leaf_reserves_for_combined_mail_context(monkeypatch, tmp_path):
     outcomes = {name: [_row(f"S{index}R{row}", score=1000 * index - row) for row in range(40)]
                 for index, name in enumerate(STRATEGIES)}
     cache, _, state = _mock_sweep(monkeypatch, tmp_path, outcomes)
     api._stock_strategy_alert_sweep_wrapper()
     payload = json.loads(cache.read_text())
     assert len(payload["results"]) == 100
-    assert all(sum(row["Strategy"] == name for row in payload["results"]) == 25 for name in STRATEGIES)
     assert len(state["mail_calls"]) == 1
     name, rows, market = state["mail_calls"][0]
-    assert name == "Aktien Auto-Sweep" and market == "stocks" and len(rows) == 75
-    assert rows == payload["results"][:75]
+    assert name == "Aktien Auto-Sweep" and market == "stocks" and len(rows) == 160
+    assert payload["results"] == rows[:100]
+    assert all(sum(row["Strategy"] == strategy for row in rows) == 40 for strategy in STRATEGIES)
     assert [row["score"] for row in rows] == sorted((row["score"] for row in rows), reverse=True)
     assert payload["diagnostics"]["final_results"] == 100
-    assert all(item["result_count"] == 40 and item["aggregate_candidate_count"] == 25
+    assert all(item["result_count"] == 40 and item["aggregate_candidate_count"] == 40
                for item in payload["diagnostics"]["strategy_results"].values())
 
 

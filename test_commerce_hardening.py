@@ -1270,7 +1270,10 @@ def test_frontend_uses_same_origin_in_production_and_explicit_dev_override():
 
 def test_auth_security_status_blocks_demo_secrets_and_legacy_bootstrap(monkeypatch, tmp_path):
     _isolate_auth_store(monkeypatch, tmp_path)
-    monkeypatch.setattr(auth, "JWT_SECRET_IS_DEFAULT", True)
+    # Readiness checks the actual key, not a cached flag from module import.
+    # A stale False flag must not allow a deliberately rejected default.
+    monkeypatch.setattr(auth, "JWT_SECRET", auth._JWT_DEFAULT_SECRET)
+    monkeypatch.setattr(auth, "JWT_SECRET_IS_DEFAULT", False)
     monkeypatch.setattr(auth, "ALLOW_LEGACY_ADMIN_MASTER_KEY", True)
     monkeypatch.setattr(auth, "STRIPE_SECRET_KEY", "")
     monkeypatch.setattr(auth, "STRIPE_WEBHOOK_SECRET", "")

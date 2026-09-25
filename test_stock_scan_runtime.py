@@ -204,7 +204,7 @@ def test_expired_real_leaf_keeps_last_good_cache_and_reports_timeout(clock, monk
     assert attempt["result_count"] is None
 
 
-def test_slow_cup_cannot_hold_ready_siblings_and_batch_caps_are_unchanged(clock, monkeypatch, tmp_path):
+def test_slow_cup_cannot_hold_ready_siblings_or_discard_their_candidate_reserve(clock, monkeypatch, tmp_path):
     monkeypatch.setenv("ALPHA_RUNTIME_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(api.time, "sleep", lambda *a: None)
     cache, before, recorded = _mock_sweep(monkeypatch, tmp_path, {})
@@ -223,7 +223,7 @@ def test_slow_cup_cannot_hold_ready_siblings_and_batch_caps_are_unchanged(clock,
     assert calls == list(STRATEGIES)
     assert len(recorded["mail_calls"]) == 1
     rows = recorded["mail_calls"][0][1]
-    assert len(rows) == 75 and all(row["Strategy"] != STRATEGIES[-1] for row in rows)
+    assert len(rows) == 120 and all(row["Strategy"] != STRATEGIES[-1] for row in rows)
     assert caught.value.diagnostics["strategy_results"][CODES[-1]]["error_code"] == "scan_timeout"
     assert caught.value.diagnostics["mail_status"] == "guarded"
     assert caught.value.diagnostics["coverage"] == "incomplete"

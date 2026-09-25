@@ -219,6 +219,16 @@ def test_server_cache_lookup_binds_direction_identity_and_usable_data(monkeypatc
     with pytest.raises(ValueError): api._structure_reminder_server_row("XYZ", "Compression Breakout", "LONG")
 
 
+@pytest.mark.parametrize("version", [None, 11, "11"])
+def test_reference_zone_legacy_cache_cannot_anchor_new_reminder(monkeypatch, version):
+    import api
+    assert api.STOCK_STRATEGY_CACHE_VERSION >= 12
+    monkeypatch.setattr(api, "load_cache_metadata", lambda *args: {"cache_version": version})
+    monkeypatch.setattr(api, "load_cache_file", lambda *args: pytest.fail("Old geometry must not be loaded"))
+    with pytest.raises(ValueError, match="^server_scanner_cache_version_old$"):
+        api._structure_reminder_server_row("XYZ", "Compression Breakout", "LONG")
+
+
 def test_owner_scoped_personal_poll_excludes_others_even_for_admin(monkeypatch, tmp_path):
     api = api_fixture(monkeypatch, tmp_path)
     api.create_trade_reminder(request(api))

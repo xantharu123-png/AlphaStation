@@ -828,7 +828,9 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-STOCK_STRATEGY_CACHE_VERSION = 11
+# PDC/PWC labels no longer participate in structural barrier geometry. Old
+# plans must be recomputed, not merely re-labelled as the corrected version.
+STOCK_STRATEGY_CACHE_VERSION = 12
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -11049,9 +11051,17 @@ def _send_email_alert(
         mail_channel=mail_channel,
     )
     if not recipients:
-        print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
-        _record_email_event(subject, "skipped", "missing_recipient")
-        _mail_suppressed("missing_recipient")
+        if str(mail_class or "").strip().lower() == "watch":
+            # WATCH is opt-in. An empty eligible cohort is not evidence of
+            # broken SMTP or missing global trade-mail addresses. Do not
+            # guess which opt-in/channel/permission excluded the cohort.
+            reason = "watch_no_eligible_recipients"
+            print("[Alert] SKIP WATCH: Keine berechtigten Empfaenger nach Opt-in-/Kanalpruefung; kein SMTP-Versuch")
+        else:
+            reason = "missing_recipient"
+            print("[Alert] SKIP: ALERT_EMAIL/GMAIL_USER Empfaenger fehlt")
+        _record_email_event(subject, "skipped", reason)
+        _mail_suppressed(reason)
         return False
     prepared_recipient_keys = sorted({
         key for key in (_recipient_delivery_key(value) for value in recipients) if key
@@ -13629,6 +13639,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if not results:
         return
+    # A stock sweep has at most 150 Momentum + 3 * 50 sibling rows. Inspect
+    # that finite producer pool before choosing the 50-row final reserve.
+    # Existing live/premarket enrichment remains limited to its original
+    # input window; additional rows must carry current completed-daily proof.
+    if market_type == "stocks":
+        results = results[:300]
     if market_type == "stocks":
         # Old Cup caches/watches never acquire the new morphology/close proof
         # through premarket, swing, enrichment, tracking or final mail checks.
@@ -13701,7 +13717,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             market_status = _stock_trade_email_status()
         if not market_status.get("allowed") and not starter_swing_mode:
             candidate_count = sum(
-                1 for row in results[:50] if isinstance(row, dict)
+                1 for row in results if isinstance(row, dict)
             )
             # A completed daily pattern is useful evidence, but after close
             # or before regular open there is no executable regular-session
@@ -13752,10 +13768,21 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     grade_counts: Dict[str, int] = {}
     seen_cooldown_keys = set()
     business_quality_fetches = 0
-    for row in results[:50]:
+    # Preserve the old first-50 window AFTER provenance filtering. Invalid
+    # Cup/Wyckoff/daily siblings must not consume another row's I/O slot.
+    stock_enrichment_rows = {id(row) for row in results[:50] if isinstance(row, dict)}
+    candidate_pool = results if market_type == "stocks" else results[:50]
+    for row in candidate_pool:
         if not isinstance(row, dict):
             continue
         row_daily_close_mode = market_type == "stocks" and stock_swing.validate(row, send_time_utc)
+        allow_stock_enrichment = market_type != "stocks" or id(row) in stock_enrichment_rows
+        if not allow_stock_enrichment and not (
+            row_daily_close_mode and _scanner_uses_swing_horizon(scanner_key)
+        ):
+            # Never manufacture missing live/PM evidence or expand its I/O
+            # budget merely because the daily candidate reserve is larger.
+            continue
         row_premarket_mode = premarket_mail_mode and not row_daily_close_mode
         if market_type == "stocks" and not market_status.get("allowed") and not row_daily_close_mode:
             if _strategy_row_previous_close_watch_only(row):
@@ -13786,6 +13813,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             score_for_business = _alert_float(row.get("score", row.get("Score")), 0) or 0
             if (
                 not row.get("Business_Data_Status")
+                and allow_stock_enrichment
                 and business_quality_fetches < 8
                 and score_for_business >= _ALERT_MIN_SCORE
                 and _stock_business_quality_context(row)
@@ -13876,11 +13904,12 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     )
     total_alerts = len(alerts)
     # Final validity, not cached rank, selects the delivered stock plans.
-    # The classifier above already bounds inspection to 50 rows. Retaining
-    # that bounded reserve lets a lower-ranked valid row replace a leader
-    # rejected by regime, open-trade equivalence or final market evidence.
+    # Only after all bounded daily candidates passed the unchanged cheap
+    # gates do we select the best 50. That reserve lets a valid row beyond
+    # the old raw-rank caps replace a leader rejected by regime, open-trade
+    # equivalence or final market evidence.
     # Crypto retains its existing top-N batch contract.
-    claim_candidates = alerts if market_type == "stocks" else alerts[:_ALERT_EMAIL_MAX_ROWS]
+    claim_candidates = alerts[:50] if market_type == "stocks" else alerts[:_ALERT_EMAIL_MAX_ROWS]
     email_alerts = [
         alert for alert in claim_candidates
         if _email_dedupe_claim(
@@ -23624,10 +23653,13 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
             rows = _strategy_scan_wrapper(
                 strategy_name, send_email=False, publish_generic_cache=False,
             )
-            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            producer_limit = int(STRATEGIES[strategy_name].get("max_results", 50) or 50)
+            producer_ceiling = 150 if strategy_name == "Momentum Breakout Long" else 50
+            if (not 1 <= producer_limit <= producer_ceiling or not isinstance(rows, list)
+                    or len(rows) > producer_limit or any(not isinstance(row, dict) for row in rows)):
                 raise ScannerDataError("scan_data_invalid")
             current_rows = []
-            for row in rows[:25]:
+            for row in rows:
                 enriched = dict(row)
                 enriched.setdefault("Strategy", strategy_name)
                 enriched.setdefault("strategy", strategy_name)
@@ -23693,15 +23725,17 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     diagnostics["current_result_count"] = len(all_rows)
     # Finish delivery ownership without ever parking inside SMTP/dedupe locks.
     _scan_control_point(finishing=True)
-    # Keep the existing global ranking, 25-per-strategy contribution, combined
-    # cluster context and mail helper's 50-row inspection budget. Never send a
-    # second per-strategy batch or interpret a guarded call as SMTP acceptance.
+    # Keep every already bounded leaf result for the single combined guard.
+    # Raw rank is not mail eligibility: per-strategy 25/global 75 caps could
+    # discard the only valid setup before its actual mail checks. The helper
+    # selects a bounded 50-row final reserve after cheap daily eligibility;
+    # sender quotas, dedupe and combined cluster context remain unchanged.
     if all_rows:
         try:
             stock_scan_runtime.checkpoint("mail_guard")
-            with scan_mail_audit.capture(len(all_rows[:75])) as mail_audit:
+            with scan_mail_audit.capture(len(all_rows)) as mail_audit:
                 try:
-                    _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows[:75]), "stocks")
+                    _send_strategy_scan_alerts("Aktien Auto-Sweep", deepcopy(all_rows), "stocks")
                 finally:
                     diagnostics["mail_audit"] = scan_mail_audit.project(mail_audit, ALLOWED_SUPPRESSION_REASONS)
             diagnostics["mail_status"] = "guarded"

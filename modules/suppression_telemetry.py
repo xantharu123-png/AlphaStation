@@ -104,6 +104,7 @@ ALLOWED_SUPPRESSION_REASONS = frozenset({
     "blocked_etf_content",
     "missing_gmail_config",
     "missing_recipient",
+    "watch_no_eligible_recipients",
     "smtp_delivery_failed",
     "smtp_delivery_outcome_unknown",
     "startup_cooldown",

@@ -885,6 +885,15 @@ def _evidence_origin_role(item: LevelEvidence) -> Optional[str]:
     return None
 
 
+def _is_session_reference_evidence(item: LevelEvidence) -> bool:
+    """A session close label has no independently observed supply/demand role."""
+    return (
+        item.source_family == "session"
+        and str(item.provenance.get("role_hint") or "").strip().lower() == "reference"
+        and _evidence_origin_role(item) is None
+    )
+
+
 def _connected_role_confirmation_times(
     members: Sequence[Tuple[LevelEvidence, float, float]],
     lower: float,
@@ -988,9 +997,14 @@ def build_level_zones(
         expanded.append((item, lower, upper))
 
     zones: List[LevelZone] = []
-    # One physical zone can contain evidence that previously acted as support
-    # and resistance. Splitting it at the quote would manufacture room to trade.
-    for group in (expanded,):
+    # An informational PDC/PWC label must not extend or bridge real barriers,
+    # inflate their strength/touches, or erase a causal breakout certificate.
+    # Keep those labels visible as separate reference zones. Real PDH/PDL and
+    # mixed support/resistance evidence still form one physical zone, without
+    # splitting it at the current quote or changing its conservative contract.
+    structural_rows = [row for row in expanded if not _is_session_reference_evidence(row[0])]
+    reference_rows = [row for row in expanded if _is_session_reference_evidence(row[0])]
+    for group in (structural_rows, reference_rows):
         members: List[Tuple[LevelEvidence, float, float]] = []
         cluster_lower = cluster_upper = 0.0
 
@@ -1375,12 +1389,7 @@ def _snapshot_break_transition(
 def _is_session_reference_only_zone(zone: LevelZone) -> bool:
     """Session closes label prices; alone they do not establish supply/demand."""
     non_projection = tuple(item for item in zone.evidence if not item.projection_only)
-    return bool(non_projection) and all(
-        item.source_family == "session"
-        and str(item.provenance.get("role_hint") or "").strip().lower() == "reference"
-        and _evidence_origin_role(item) is None
-        for item in non_projection
-    )
+    return bool(non_projection) and all(_is_session_reference_evidence(item) for item in non_projection)
 
 
 def classify_for_trade(

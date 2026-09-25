@@ -276,10 +276,22 @@ def test_only_pure_session_references_are_excluded_from_trade_candidates(
     if composition == "legacy_empty_evidence":
         snapshot = replace(snapshot, zones=tuple(replace(zone, evidence=()) for zone in snapshot.zones))
     directional = levels.classify_for_trade(snapshot, entry=100, direction=direction)
-    lower, upper = snapshot.zones
+    if len(constituents) > 1:
+        # The independent reference annotation must not become part of the
+        # actual high/low, legacy or projection zone being tested.
+        candidates = [zone for zone in snapshot.zones if "fixture_1" in zone.source_names]
+        references = [zone for zone in snapshot.zones if zone.source_names == ("fixture_0",)]
+        assert len(references) == 2
+        assert all(zone not in directional.opposing_barriers
+                   and zone not in directional.invalidation_candidates for zone in references)
+    else:
+        candidates = list(snapshot.zones)
+    lower, upper = candidates
     # Informational zones remain visible, regardless of their eligibility.
-    assert directional.supports == (lower,)
-    assert directional.resistances == (upper,)
+    assert {zone.zone_id for zone in directional.supports} == {
+        zone.zone_id for zone in snapshot.zones if zone.upper < 100}
+    assert {zone.zone_id for zone in directional.resistances} == {
+        zone.zone_id for zone in snapshot.zones if zone.lower > 100}
     assert directional.snapshot is snapshot
     expected_barrier = upper if direction == "LONG" else lower
     expected_invalidation = lower if direction == "LONG" else upper

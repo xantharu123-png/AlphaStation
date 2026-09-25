@@ -78,15 +78,17 @@ def test_real_timeout_retry_recovers_without_new_budget_or_duplicate_mail(monkey
         assert {key: row[key] for key in source} == source
 
 
-def test_retry_keeps_same_global_rank_and_per_strategy_mail_limits(monkeypatch, tmp_path):
+def test_retry_keeps_same_global_rank_and_full_bounded_leaf_mail_reserves(monkeypatch, tmp_path):
     cache, observed, *_ = _cached_retry_sweep(monkeypatch, tmp_path, rows_per_strategy=40)
     api._stock_strategy_alert_sweep_wrapper()
     payload = json.loads(cache.read_text())
     rows = payload["results"]
     assert len(rows) == 100
-    assert all(sum(row["Strategy"] == strategy for row in rows) == 25 for strategy in STRATEGIES)
     assert len(observed["mail_calls"]) == 1
-    assert observed["mail_calls"][0][1] == rows[:75]
+    mail_rows = observed["mail_calls"][0][1]
+    assert len(mail_rows) == 160
+    assert all(sum(row["Strategy"] == strategy for row in mail_rows) == 40 for strategy in STRATEGIES)
+    assert mail_rows[:100] == rows
     assert [row["score"] for row in rows] == sorted((row["score"] for row in rows), reverse=True)
 
 

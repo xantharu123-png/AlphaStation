@@ -98,6 +98,10 @@ reversal_ad:ad_confirms_selloff_falling_knife
 wyckoff:event_sequence_unconfirmed_or_invalid
 """.split())
 CACHE_MAX_BYTES = 8 * 1024 * 1024
+# Known stock caches embed duplicated causal zone histories. Read one bounded
+# file at a time, then export only scalar diagnostics (never those histories).
+STOCK_CACHE_MAX_BYTES = 32 * 1024 * 1024
+STOCK_PLAN_SAMPLE_LIMIT = 50
 CRYPTO_SCAN_COUNTS = frozenset("""
 universe_count chart_checked max_chart_checks venue_workers result_count trade_now_count armed_count
 """.split())
@@ -391,6 +395,7 @@ missing_cooldown_key
 missing_current_drop
 missing_entry_or_breakout_structure
 missing_gmail_config
+watch_no_eligible_recipients
 missing_recipient
 missing_symbol
 missing_ticker
@@ -1155,10 +1160,12 @@ class _CacheReadError(ValueError):
 def _read_cache_payload(path):
     """Bounded, read-only regular-file read; never wait on an exchanged FIFO."""
     path = Path(path)
+    stock_names = {"strategy_" + slug + "_cache.json" for slug in STOCK_STRATEGY_CACHE_NAMES}
+    max_bytes = STOCK_CACHE_MAX_BYTES if path.name in stock_names else CACHE_MAX_BYTES
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode):
         raise _CacheReadError("not_regular")
-    if before.st_size > CACHE_MAX_BYTES:
+    if before.st_size > max_bytes:
         raise _CacheReadError("too_large")
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_BINARY", 0)
@@ -1168,16 +1175,94 @@ def _read_cache_payload(path):
         if (not stat.S_ISREG(opened.st_mode)
                 or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
             raise _CacheReadError("changed_during_read")
-        if opened.st_size > CACHE_MAX_BYTES:
+        if opened.st_size > max_bytes:
             raise _CacheReadError("too_large")
-        raw = stream.read(CACHE_MAX_BYTES + 1)
+        raw = stream.read(max_bytes + 1)
         after = os.fstat(stream.fileno())
         if ((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
             raise _CacheReadError("changed_during_read")
-    if len(raw) > CACHE_MAX_BYTES:
+    if len(raw) > max_bytes:
         raise _CacheReadError("too_large")
     return json.loads(raw.decode("utf-8"))
+
+
+def _stock_plan_projection(rows):
+    """Private, bounded geometry samples; no symbols, text, credentials or OHLCV.
+
+    These are stored scanner observations, NOT fresh approvals or SMTP results.
+    Row index preserves within-cache ordering without exporting an identity.
+    """
+    sources = frozenset({"PDH", "PDL", "PDC", "PWH", "PWL", "PWC",
+                         "4H_HIGH", "4H_LOW", "4H_CLOSE", "confirmed_swing_high",
+                         "confirmed_swing_low", "VAH", "VAL", "POC"})
+    states = frozenset({"ACCEPT", "WAIT_BREAK_RECLAIM", "REJECT", "STRUCTURE_UNAVAILABLE"})
+    breaks = frozenset({"intact", "unbroken", "break_confirmed", "reclaimed", "failed_break",
+                       "BREAK_CONFIRMED", "RECLAIMED", "UNCONFIRMED", "FAILED"})
+
+    def mapping(value):
+        return value if type(value) is dict else {}
+
+    def numbers(value, fields):
+        return {key: value[key] for key in fields if type(value.get(key)) in (int, float)
+                and abs(value[key]) <= 1e15 and math.isfinite(value[key])}
+
+    def stamp(target, field, value):
+        if type(value) is not str or len(value) > 48:
+            return
+        try:
+            parsed = datetime.fromisoformat(_iso_timestamp(value))
+            if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                target[field] = parsed.astimezone(timezone.utc).isoformat()
+        except (ValueError, TypeError, OverflowError):
+            pass
+
+    projected = []
+    for index, raw in enumerate(rows[:STOCK_PLAN_SAMPLE_LIMIT]):
+        if type(raw) is not dict:
+            projected.append({"row_index": index, "invalid_row": True})
+            continue
+        setup = mapping(raw.get("trade_setup"))
+        diag = mapping(raw.get("native_plan_diagnostics"))
+        row = {"row_index": index, **numbers(raw, ("score", "Score", "price", "Price"))}
+        row["plan"] = numbers(setup, ("entry", "stop", "tp1", "tp2", "risk", "rr_tp1", "rr_tp2", "atr"))
+        reason = raw.get("native_plan_reason", diag.get("reason"))
+        row["native_plan_reason"] = reason if type(reason) is str and reason in PLAN_BUILD_CODES else "unknown"
+        status = setup.get("structure_status", raw.get("structure_status"))
+        row["structure_status"] = status if type(status) is str and status in states else "unknown"
+        direction = setup.get("direction", raw.get("direction"))
+        if type(direction) is str and direction.upper() in {"LONG", "SHORT"}:
+            row["direction"] = direction.upper()
+        barrier = mapping(setup.get("nearest_barrier") or raw.get("nearest_barrier") or diag.get("barrier"))
+        if barrier:
+            item = numbers(barrier, ("price", "zone_low", "zone_high", "distance_r", "distance_atr",
+                                     "strength", "independent_sources"))
+            if type(barrier.get("overlapping")) is bool:
+                item["overlapping"] = barrier["overlapping"]
+            stamp(item, "confirmed_at", barrier.get("confirmed_at"))
+            tf = barrier.get("timeframe")
+            if type(tf) is str and len(tf) < 32:
+                item["timeframes"] = sorted(set(tf.split("/")) & {"1D", "1W", "4H", "1H", "15m", "5m"})
+            structure = mapping(raw.get("level_structure") or raw.get("Level_Structure"))
+            stamp(row, "structure_as_of", structure.get("as_of"))
+            zones = structure.get("zones")
+            # Match the recorded barrier, not a guessed nearest zone. Never
+            # export arbitrary source labels or the evidence/provenance blobs.
+            if type(zones) is list and len(zones) <= 1000 and type(barrier.get("zone_id")) is str:
+                matches = [z for z in zones if type(z) is dict and z.get("zone_id") == barrier["zone_id"]]
+                if len(matches) == 1:
+                    zone = matches[0]
+                    labels = zone.get("sources")
+                    if type(labels) is list:
+                        item["sources"] = sorted({v for v in labels if type(v) is str and v in sources})
+                        item["unrecognized_source_count"] = sum(type(v) is not str or v not in sources for v in labels)
+                    if type(zone.get("break_state")) is str and zone["break_state"] in breaks:
+                        item["break_state"] = zone["break_state"]
+            row["barrier"] = item
+        projected.append(row)
+    return {"schema_version": 1, "semantics": "cached_geometry_not_fresh_approval_or_delivery",
+            "rows_total": len(rows), "rows_sampled": len(projected),
+            "rows_omitted": len(rows) - len(projected), "rows": projected}
 
 
 def _crypto_row_state_counts(rows):
@@ -1202,7 +1287,7 @@ def _crypto_row_state_counts(rows):
 
 
 def safe_cache_summary(path):
-    """Counts/numeric funnel only, not cached tickers or free-form messages."""
+    """Numeric funnel/geometry only, not cached tickers or free-form messages."""
     try:
         payload = _read_cache_payload(path)
         if not isinstance(payload, dict):
@@ -1232,6 +1317,10 @@ def safe_cache_summary(path):
             result["error_code"] = detail
         rows = payload.get("results")
         result["raw_rows"] = len(rows) if isinstance(rows, list) else None
+        if isinstance(rows, list) and Path(path).name in {
+            "strategy_" + slug + "_cache.json" for slug in STOCK_STRATEGY_CACHE_NAMES
+        }:
+            result["stock_plan_diagnostics"] = _stock_plan_projection(rows)
         if isinstance(rows, list) and Path(path).name in CRYPTO_CACHE_NAMES:
             result["row_state_counts"] = _crypto_row_state_counts(rows)
         scan_stats = payload.get("scan_stats")

@@ -311,8 +311,8 @@ def test_reference_close_alone_cannot_be_its_own_opposing_barrier(direction, sto
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_reference_close_mixed_with_actual_session_extreme_stays_blocking(direction):
-    """Removing pure reference barriers must not bypass a real PDH/PDL zone."""
+def test_reference_close_beside_actual_session_extreme_stays_blocking(direction):
+    """Separating reference annotations must not bypass a real PDH/PDL zone."""
     from datetime import datetime, timezone
     from modules.level_zones import build_structure_snapshot, classify_for_trade, select_trade_structure
 
@@ -325,10 +325,11 @@ def test_reference_close_mixed_with_actual_session_extreme_stays_blocking(direct
     snapshot = build_structure_snapshot({"1D": bars}, symbol="TEST", asset_class="stock",
         horizon="swing", as_of=cutoff, current_price=100., tick_size=.01)
     directional = classify_for_trade(snapshot, entry=100., direction=direction)
-    mixed = next(zone for zone in directional.opposing_barriers
-                 if "PDC" in {item.source_name for item in zone.evidence})
-    assert {item.source_name for item in mixed.evidence} == (
-        {"PDC", "PDH"} if direction == "LONG" else {"PDC", "PDL"})
+    real = next(zone for zone in directional.opposing_barriers
+                if ("PDH" if direction == "LONG" else "PDL") in zone.source_names)
+    assert set(real.source_names) == ({"PDH"} if direction == "LONG" else {"PDL"})
+    reference = next(zone for zone in snapshot.zones if zone.source_names == ("PDC",))
+    assert reference not in directional.opposing_barriers
     decision = select_trade_structure(directional, stop=95. if direction == "LONG" else 105.)
     assert decision.status == "WAIT_BREAK_RECLAIM"
     assert decision.barrier_r == 0.

@@ -54,7 +54,10 @@ def _snapshot(direction, evidence, bars=None, *, day=2, sessions=False):
 
 
 def _zone(snapshot):
-    return next(zone for zone in snapshot.zones if zone.lower < 100 < zone.upper)
+    # Reference close labels now remain separately visible at the same price.
+    # This suite checks the actual role-bearing boundary, not its annotation.
+    return next(zone for zone in snapshot.zones
+                if zone.lower < 100 < zone.upper and zone.origin_roles)
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

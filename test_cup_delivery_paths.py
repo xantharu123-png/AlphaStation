@@ -70,14 +70,14 @@ def test_public_cache_rejects_legacy_cup_before_decoration(monkeypatch, tmp_path
     assert result.diagnostics["cup_contract_rejected"] == 1
 
 
-@pytest.mark.parametrize("version", [None, 8, 9, "10"])
+@pytest.mark.parametrize("version", [None, 8, 9, 10, "10", 11, "11"])
 def test_public_cache_rejects_previous_cache_generation_even_with_current_row(monkeypatch, tmp_path, version):
-    assert api.STOCK_STRATEGY_CACHE_VERSION == 11
+    assert api.STOCK_STRATEGY_CACHE_VERSION >= 12
     decorated = _cache_fixture(monkeypatch, tmp_path, [_row()], version=version)
     result = api.get_scan_results(NAME, None, "stocks")
     assert result.count == 0 and decorated == []
     assert result.diagnostics["warning"] == "strategy_cache_version_old_scan_again"
-    assert result.diagnostics["required_cache_version"] == 11
+    assert result.diagnostics["required_cache_version"] == api.STOCK_STRATEGY_CACHE_VERSION
 
 
 @pytest.mark.parametrize("partial", [False, True])
