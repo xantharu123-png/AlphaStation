@@ -954,7 +954,7 @@ def test_email_status_exposes_dedupe(tmp_path, monkeypatch):
     assert status["dedupe"]["recent"][0]["key"] == "crash_stock_20260430_NCSM"
 
 
-def test_alert_trade_levels_derive_missing_targets_from_entry_stop():
+def test_alert_trade_levels_preserve_missing_targets_from_entry_stop():
     levels = api._alert_trade_levels({
         "Ticker": "SHORTY",
         "direction": "SHORT",
@@ -964,14 +964,15 @@ def test_alert_trade_levels_derive_missing_targets_from_entry_stop():
 
     assert levels["entry"] == 10.0
     assert levels["stop"] == 11.0
-    assert levels["tp1"] == 8.5
-    assert levels["tp2"] == 7.5
-    assert levels["rr"] == 2.0
-    assert levels["valid"] is True
-    assert levels["estimated"] is True
+    assert levels["tp1"] is None
+    assert levels["tp2"] is None
+    assert levels["rr"] is None
+    assert levels["valid"] is False
+    assert levels["estimated"] is False
+    assert levels["source"] == "incomplete"
 
 
-def test_estimated_trade_levels_do_not_pass_active_email_gate():
+def test_incomplete_trade_levels_do_not_pass_active_email_gate():
     row = {
         "ticker": "FWRD",
         "grade": "S",
@@ -989,7 +990,9 @@ def test_estimated_trade_levels_do_not_pass_active_email_gate():
     state = api._classify_alert_candidate("bear", row)
 
     assert state["alertable_now"] is False
-    assert "estimated_trade_plan" in state["suppression_reasons"]
+    assert "invalid_trade_plan" in state["suppression_reasons"]
+    assert "trade_missing_tp1,tp2" in state["suppression_reasons"]
+    assert "estimated_trade_plan" not in state["suppression_reasons"]
     assert api._alert_trade_plan_ok(row) is False
 
 

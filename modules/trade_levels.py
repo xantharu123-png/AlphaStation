@@ -491,7 +491,13 @@ def normalize_alert_trade_levels(
     price_fallback: Optional[float] = None,
     allow_estimated: bool = True,
 ) -> Dict[str, Any]:
-    """Extract, estimate when needed, then validate Entry/Stop/TP levels."""
+    """Extract individual levels, optionally estimate, then validate geometry.
+
+    Strict callers use ``allow_estimated=False``: an observation price is not
+    an entry instruction, and missing prices remain missing. Existing native
+    fields are preserved independently; one absent target does not turn the
+    other, observed levels into estimated prices.
+    """
     entry, entry_key = first_trade_level(row, ENTRY_KEYS)
     stop, stop_key = first_trade_level(row, STOP_KEYS)
     tp1, tp1_key = first_trade_level(row, TP1_KEYS)
@@ -505,7 +511,7 @@ def normalize_alert_trade_levels(
         "tp2": tp2_key,
     }
 
-    if entry is None and price_fallback is not None:
+    if allow_estimated and entry is None and price_fallback is not None:
         entry = safe_float(price_fallback, None)
         if entry:
             estimated = True

@@ -582,6 +582,10 @@ def test_api_imports_with_blocked_signal_tracker_module():
         "assert api.is_telegram_configured is None\n"
         "assert api.send_telegram_alert is None\n"
         "assert api.format_alert_rows_for_telegram is None\n"
+        "row = {'signal_kind': 'pattern_context', 'ticker': 'TEST', 'score': 100, 'trade_action': 'LONG_NOW'}\n"
+        "assert api.is_elliott_pattern_context(row)\n"
+        "assert not api._scanner_row_is_trade_signal(row, 'stock_strategy')\n"
+        "assert api._classify_alert_candidate('stock_strategy', row)['alertable_now'] is False\n"
         "print('DEFENSIVE_IMPORT_OK')\n"
     )
     proc = subprocess.run(

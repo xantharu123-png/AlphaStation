@@ -908,16 +908,21 @@ def test_api_and_background_renderers_name_tp2_budget_as_non_gate_telemetry():
                 "DayLow": 9.0,
                 "trade_setup": {"atr": 1.0},
             },
-            "estimated",
+            "incomplete",
         ),
     ],
 )
 def test_api_and_background_renderers_show_normalized_level_provenance(row, expected_provenance):
     for renderer in (api._format_alert_plan_html, bg_service._format_alert_plan_html):
         html_out = renderer(row)
-
-        assert f"Provenienz: {expected_provenance}" in html_out
-        assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
+        if expected_provenance == "incomplete":
+            assert "Kein gueltiger Trade-Plan" in html_out
+            assert "missing_tp1,tp2" in html_out
+            assert "estimated" not in html_out
+            assert "TP1 11.5" not in html_out and "TP2 12.5" not in html_out
+        else:
+            assert f"Provenienz: {expected_provenance}" in html_out
+            assert "deskriptive Telemetrie; kein Mail-Gate; keine Trefferwahrscheinlichkeit" in html_out
 
 
 def test_plan_quality_blocker_remains_independent_of_reachability_telemetry():

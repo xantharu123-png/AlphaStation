@@ -900,6 +900,42 @@ def test_fixed_scanner_cache_names_and_stock_strategy_names_match_api_source_wit
     assert set(collector.STOCK_STRATEGY_CACHE_NAMES) == slugs
 
 
+def test_elliott_cache_exports_counts_not_patterns_or_trade_plans(tmp_path):
+    slug = "elliott_wave_muster"
+    assert slug in collector.STOCK_STRATEGY_CACHE_NAMES
+    path = tmp_path / ("strategy_" + slug + "_cache.json")
+    reasons = {"elliott:no_pattern": 3, "elliott:history_not_current": 1,
+               "elliott:reference_price_mismatch": 1, "asset:not_common_stock": 4}
+    path.write_text(json.dumps({
+        "results": [{"ticker": "PRIVATE_SYMBOL", "price": 123.0, "entry": 100.0,
+                     "elliott": {"patterns": [{"points": [{"price": 777.0, "label": "PRIVATE_LABEL"}]}]}}],
+        "diagnostics": {"coverage": "complete_with_exclusions", "checked": 10,
+                        "rejected": {**reasons, "PRIVATE_REASON": 2},
+                        "notes": "PRIVATE_NOTE"},
+    }), encoding="utf8")
+    before = path.read_bytes()
+    result = collector.safe_cache_summary(path)
+    assert result["available"] and result["raw_rows"] == 1
+    assert result["rejected"] == {**reasons, "_omitted_categories": 1}
+    assert "stock_plan_diagnostics" not in result
+    assert "PRIVATE" not in json.dumps(result) and "777" not in json.dumps(result)
+    assert path.read_bytes() == before
+
+
+def test_elliott_manual_attempt_is_exported_without_private_payload(tmp_path):
+    slug = "elliott_wave_muster"
+    assert slug in collector.STOCK_ATTEMPT_SLUGS
+    payload = _attempt_payload(slug, "complete")
+    payload["diagnostics"].update(rejected={"elliott:no_pattern": 4, "PRIVATE_REASON": 2},
+                                  elliott={"points": "PRIVATE_POINTS"})
+    path = tmp_path / "attempt.json"
+    path.write_text(json.dumps(payload), encoding="utf8")
+    result = collector.safe_strategy_attempt_summary(path, slug)
+    assert result["available"] and result["result_count"] == 0
+    assert result["rejected"] == {"elliott:no_pattern": 4, "_omitted_categories": 1}
+    assert "PRIVATE" not in json.dumps(result)
+
+
 def test_mail_oversized_or_binary_dimensions_never_leave_sqlite(tmp_path):
     path = tmp_path / "mail.sqlite"
     _outbox_db(path, [("PRIVATE" * 10000, sqlite3.Binary(b"PRIVATE_BLOB"), 0, 1, 1, 300000, None)])
@@ -1062,10 +1098,16 @@ def test_collection_attempt_files_use_api_namespace_and_runtime_override_after_d
     monkeypatch.setattr(collector, "safe_strategy_attempt_summary", summary)
     result = collector.collect(app)
     namespace = Path(runtimes["tradingbot-api.service"]["process_root"])
-    assert len(calls) == 5
+    assert len(calls) == 6
+    assert {slug for _, slug in calls} == {
+        "momentum_breakout_long", "gap_momentum_long", "gap_momentum_short",
+        "cup_and_handle_breakout", "elliott_wave_muster", "stock_strategy_sweep",
+    }
     assert (namespace / "run" / "alpha-progress" / "stock_strategy_momentum_breakout_long_attempt.json",
             "momentum_breakout_long") in calls
     assert (namespace / "run" / "alpha-progress" / "stock_strategy_sweep_attempt.json", "stock_strategy_sweep") in calls
+    assert (namespace / "run" / "alpha-progress" / "stock_strategy_elliott_wave_muster_attempt.json",
+            "elliott_wave_muster") in calls
     assert result["stock_strategy_attempts"]["momentum_breakout_long"] == {"available": False, "reason": "missing"}
 
 

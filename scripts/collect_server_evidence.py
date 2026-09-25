@@ -98,6 +98,7 @@ momentum:intraday_stale_extension momentum:intraday_data_unavailable
 momentum:intraday_confirmation_stale momentum:confirmation_expired_before_publication
 reversal_ad:ad_confirms_selloff_falling_knife
 wyckoff:event_sequence_unconfirmed_or_invalid
+asset:not_common_stock elliott:no_pattern elliott:history_not_current elliott:reference_price_mismatch
 """.split())
 CACHE_MAX_BYTES = 8 * 1024 * 1024
 # Known stock caches embed duplicated causal zone histories. Read one bounded
@@ -600,10 +601,11 @@ STOCK_STRATEGY_CACHE_NAMES = (
     "momentum_breakout_long", "gap_momentum_long", "gap_momentum_short",
     "turtle_breakout", "bull_flag", "bear_flag", "compression_breakout",
     "cup_and_handle_breakout", "trend_reversal", "ma_bounce_long", "ma_bounce_short",
-    "wyckoff_accumulation", "wyckoff_distribution",
+    "wyckoff_accumulation", "wyckoff_distribution", "elliott_wave_muster",
 )
 STOCK_ATTEMPT_SLUGS = frozenset({
     "momentum_breakout_long", "gap_momentum_long", "gap_momentum_short", "cup_and_handle_breakout",
+    "elliott_wave_muster",
 })
 STOCK_ATTEMPT_ERROR_CODES = PUBLIC_SCAN_ERROR_CODES | frozenset({
     "scan_failed", "scan_timeout", "scan_already_running", "scan_cache_publish_failed", "scan_partial_cache",
@@ -1328,6 +1330,7 @@ def safe_cache_summary(path):
         result["raw_rows"] = len(rows) if isinstance(rows, list) else None
         if isinstance(rows, list) and Path(path).name in {
             "strategy_" + slug + "_cache.json" for slug in STOCK_STRATEGY_CACHE_NAMES
+            if slug != "elliott_wave_muster"
         }:
             result["stock_plan_diagnostics"] = _stock_plan_projection(rows)
         if isinstance(rows, list) and Path(path).name in CRYPTO_CACHE_NAMES:

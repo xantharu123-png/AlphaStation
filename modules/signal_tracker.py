@@ -78,6 +78,7 @@ from zoneinfo import ZoneInfo
 
 from modules.trade_levels import infer_trade_direction, trade_geometry
 from modules.breakout_warnings import BREAKOUT_WITHOUT_RETEST_CODE, breakout_warning_fields
+from modules.pattern_context import is_elliott_pattern_context
 
 logger = logging.getLogger(__name__)
 
@@ -2036,6 +2037,8 @@ def _deferred_delivery_candidates(
     seen_row_tokens = set()
     seen_public_refs = set()
     for row in rows:
+        if is_elliott_pattern_context(row, strategy=scanner):
+            return None
         fields = _prepare_identity_fields(
             extract_signal_fields(row), scanner, asset_class
         )
@@ -2234,6 +2237,11 @@ def record_alert_signals(
         if mail_norm not in ("trade", "shadow"):
             return 0
         if not rows or not isinstance(rows, (list, tuple)):
+            return 0
+        if _defer_activation and any(is_elliott_pattern_context(row, strategy=scanner_name) for row in rows):
+            return 0
+        rows = [row for row in rows if not is_elliott_pattern_context(row, strategy=scanner_name)]
+        if not rows:
             return 0
         scanner = str(scanner_name or "").strip().lower()
         if not scanner:

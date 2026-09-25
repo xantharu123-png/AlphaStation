@@ -506,10 +506,10 @@ def _extract_alert_price(row):
 
 
 def _alert_trade_levels(row):
+    """Keep absent plan evidence absent, matching the API mail projection."""
     return normalize_alert_trade_levels(
         row,
-        price_fallback=_extract_alert_price(row),
-        allow_estimated=True,
+        allow_estimated=False,
     )
 
 

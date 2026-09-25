@@ -101,6 +101,8 @@ from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, s
 from modules import stock_scan_runtime
 from modules import scan_control, scan_control_policy, scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
+from modules.pattern_context import is_elliott_pattern_context
+ELLIOTT_STRATEGY = "Elliott Wave Muster"
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
 from modules.breakout_warnings import apply_breakout_warning, breakout_warning_fields
 from modules import scanner_visibility
@@ -459,6 +461,7 @@ STOCK_STRATEGY_ORDER = [
     "MA Bounce Short",
     "Wyckoff Accumulation",
     "Wyckoff Distribution",
+    "Elliott Wave Muster",
 ]
 
 _AUTO_STOCK_ALERT_STRATEGIES = [
@@ -701,6 +704,15 @@ def _register_public_stock_strategies() -> Dict[str, Dict[str, Any]]:
         ),
     }
 
+    public_strategies[ELLIOTT_STRATEGY] = {
+        "description": "Elliott-Muster und Unterwellen auf abgeschlossenen Tageskerzen.",
+        "logic": "Getrennte Impuls- und Korrekturzaehlungen; Mustersuche ohne Handelsfreigabe.",
+        "display_group": "Wellenmuster",
+        "filters": {"Preis": (5.0, 100000.0)},
+        "min_dollar_volume": 1_000_000, "history_days": 300, "max_results": 100,
+        "pattern_type": "elliott_patterns", "signal_kind": "pattern_context",
+        "trade_ready": False, "mail_eligible": False, "manual_only": True,
+    }
     for name, config in public_strategies.items():
         config["canonical_name"] = name
         STRATEGIES[name] = config
@@ -3708,16 +3720,8 @@ def _infer_alert_direction(row: Dict[str, Any]) -> str:
 
 
 def _alert_trade_levels(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize Entry/Stop/TP1/TP2 for every mail path.
-
-    If a legacy scanner row has Entry/Stop but no targets, derive conservative
-    R-multiple targets so alerts never show an idealized price without a plan.
-    """
-    return normalize_alert_trade_levels(
-        row,
-        price_fallback=_extract_alert_price(row),
-        allow_estimated=True,
-    )
+    """Preserve supplied plan evidence; missing levels remain missing."""
+    return normalize_alert_trade_levels(row, allow_estimated=False)
 
 
 def _alert_trade_plan_quality(levels: Dict[str, Any]) -> Dict[str, Any]:
@@ -6499,6 +6503,8 @@ def _structure_reminder_server_row(ticker: str, scanner: str, direction: str) ->
             or not _stock_wyckoff_row_contract_valid(row, expected_strategy=canonical)
             or not _stock_momentum_row_contract_valid(row)):
         raise ValueError("server_scanner_pattern_contract_invalid")
+    if is_elliott_pattern_context(row, strategy=canonical):
+        raise ValueError("structure_reminder_scanner_not_supported")
     return deepcopy(matches[0])
 
 
@@ -9941,7 +9947,78 @@ def _orb_signal_gate_reasons(row: Dict[str, Any], *, as_of: Optional[datetime] =
     return list(dict.fromkeys(reasons))
 
 
+def _elliott_context_trade_state(row):
+    return {"ticker": _extract_alert_ticker(row), "grade": "", "score": 0,
+            "price": _extract_alert_price(row), "alertable_now": False,
+            "suppression_reasons": ["elliott_pattern_context"],
+            "decision": "CONTEXT_ONLY", "decision_label": "Elliott-Muster",
+            "decision_reason": "Musterzaehlung, kein Handelsplan"}
+
+
+def _stock_elliott_row_contract_valid(row, *, as_of=None, expected_strategy=None):
+    from modules.elliott_waves import MODEL, validate_elliott_report
+    if not isinstance(row, dict):
+        return False
+    relevant = is_elliott_pattern_context(row, strategy=expected_strategy)
+    if not relevant:
+        return True
+    if expected_strategy not in (None, "", ELLIOTT_STRATEGY):
+        return False
+    if any(row.get(key) != ELLIOTT_STRATEGY for key in ("Strategy", "strategy")):
+        return False
+    if (row.get("signal_kind") != "pattern_context" or row.get("trade_ready") is not False
+            or row.get("mail_eligible") is not False or row.get("elliott_model") != MODEL
+            or row.get("elliott_timeframe") != "1D"):
+        return False
+    # Stored contextual observations must not carry appended executable values.
+    if any(row.get(key) is not None for key in (
+        "Entry", "entry", "StopLoss", "stop", "stop_loss", "TP1", "tp1", "TP2", "tp2",
+        "trade_setup", "Signal_Direction", "trade_action", "trade_decision", "trade_signal",
+    )):
+        return False
+    clock = as_of or datetime.now(timezone.utc)
+    report = row.get("elliott")
+    if not validate_elliott_report(report, timeframe="1D", as_of=clock):
+        return False
+    patterns = report["patterns"]
+    if (not patterns or type(row.get("pattern_count")) is not int
+            or row["pattern_count"] != len(patterns) or row.get("elliott_as_of") != report["as_of"]
+            or not stock_swing.validate(row, clock)):
+        return False
+    ticker = row.get("ticker")
+    if (not isinstance(ticker, str) or not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,14}", ticker)
+            or row.get("Ticker") != ticker):
+        return False
+    prices = [stock_swing.number(row.get(key)) for key in ("price", "Preis", "swing_reference_close")]
+    history_close = stock_swing.number(row.get("elliott_reference_close"))
+    if (history_close is None or history_close <= 0 or prices[0] is None
+            or not math.isclose(history_close, prices[0], rel_tol=1e-6, abs_tol=1e-4)
+            or row.get("elliott_reference_session") != row.get("swing_analysis_session")):
+        return False
+    reference = _stock_attempt_datetime(row.get("scan_price_observed_at"))
+    return bool(reference and _stock_attempt_datetime(report.get("latest_completed_at")) == reference
+                and _stock_attempt_datetime(report.get("as_of")) == reference
+                and all(value is not None and math.isfinite(value) and value > 0 for value in prices)
+                and prices[0] == prices[1] == prices[2])
+
+
+def _elliott_display_row(row):
+    # Known fields only; generic trade-health, guessed levels and score badges
+    # are deliberately not calculated for a pattern interpretation.
+    keys = {"Strategy", "strategy", "ticker", "Ticker", "name", "Name", "price", "Preis",
+            "Change_Pct", "change_pct", "Volume", "volume", "Dollar_Volume", "History_Bars",
+            "elliott", "elliott_model", "elliott_timeframe", "elliott_as_of", "pattern_count",
+            "elliott_reference_close", "elliott_reference_session",
+            "signal_kind", "trade_ready", "mail_eligible", "stock_swing_contract_version",
+            "stock_swing_mode", "swing_analysis_session", "swing_reference_close", "swing_data_delay_seconds",
+            "swing_timeframe", "trade_horizon", "scan_price_observed_at", "scan_price_source",
+            "price_observed_at", "price_source", "price_mode", "price_session", "fill_evidence_verified"}
+    return {key: deepcopy(value) for key, value in row.items() if key in keys}
+
+
 def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    if is_elliott_pattern_context(row, strategy=scanner_name):
+        return _elliott_context_trade_state(row)
     now = now or time.time()
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
@@ -10190,6 +10267,8 @@ def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: O
     ATR-Extensions-Decke, valide Level. Eigener Cooldown-Namespace (_pm),
     damit die Regular-Mail nach Open unabhaengig bleibt.
     """
+    if is_elliott_pattern_context(row, strategy=scanner_name):
+        return _elliott_context_trade_state(row)
     now = now or time.time()
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
@@ -13640,6 +13719,7 @@ def _regime_mail_decision(
 
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
+    results = [row for row in results if not is_elliott_pattern_context(row, strategy=strategy_name)]
     if not results:
         return
     # A stock sweep has at most 150 Momentum + 3 * 50 sibling rows. Inspect
@@ -16873,6 +16953,10 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             decorated.append(raw)
             continue
         item = dict(raw)
+        if is_elliott_pattern_context(item, strategy=scanner_name):
+            if _stock_elliott_row_contract_valid(item):
+                decorated.append(_elliott_display_row(item))
+            continue
         why = []
         warnings = []
 
@@ -17187,6 +17271,8 @@ def _stock_wyckoff_row_contract_valid(
 
 def _stock_momentum_row_contract_valid(row: Dict[str, Any], *, as_of: Optional[datetime] = None) -> bool:
     """Reject legacy/unconfirmed Momentum entry rows, not personal positions."""
+    if is_elliott_pattern_context(row):
+        return _stock_elliott_row_contract_valid(row, as_of=as_of)
     if not _cup_signal_contract_valid(row):
         return False
     if not _stock_wyckoff_row_contract_valid(row, as_of=as_of):
@@ -17247,6 +17333,8 @@ def _scanner_row_is_trade_signal(row: Dict[str, Any], scanner_name: str) -> bool
     while the mail gate remains stricter and only sends confirmed entries.
     """
     if not isinstance(row, dict):
+        return False
+    if is_elliott_pattern_context(row, strategy=scanner_name):
         return False
 
     if scanner_name in {"strategy_scan", "stock_strategy"} and not _stock_momentum_row_contract_valid(row):
@@ -17409,7 +17497,7 @@ def _apply_scanner_visibility_policy(scanner_name: str, results: List[Dict[str, 
             visible.append(payload)
             continue
         management = str(raw.get("trade_action") or "").upper() in {"HALTEN", "AKTIV_HALTEN", "JETZT_VERKAUFEN"}
-        context = scanner_name in {"volume_spikes", "crash_monitor", "market_context", "money_flow", "narrative"} or management
+        context = scanner_name in {"volume_spikes", "crash_monitor", "market_context", "money_flow", "narrative"} or management or is_elliott_pattern_context(raw)
         if not context and scanner_visibility.unusable_reason(raw):
             continue
         try:
@@ -19050,7 +19138,7 @@ def _snapshot_atr_pct(day: Dict[str, Any], prev: Dict[str, Any], price: float) -
 def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]]:
     """Fetch a broad stock universe, with top movers only as a supplement."""
     stock_scan_runtime.checkpoint("universe")
-    if stock_swing.enabled():
+    if stock_swing.enabled() or strategy_name == ELLIOTT_STRATEGY:
         # Completed daily evidence, never a day close labelled as a live trade.
         sessions = stock_swing.completed_sessions()
         cache_key = ("daily_universe", tuple(sessions))
@@ -22398,6 +22486,7 @@ def _biotech_scan_wrapper() -> None:
 
 
 _STOCK_ATTEMPT_STRATEGIES = {
+    ELLIOTT_STRATEGY: "elliott_wave_muster",
     "Momentum Breakout Long": "momentum_breakout_long",
     "Gap Momentum Long": "gap_momentum_long",
     "Gap Momentum Short": "gap_momentum_short",
@@ -22428,7 +22517,8 @@ reversal_ad_gate raw_matches_before_special_filter final_results
 """.split())
 _STOCK_ATTEMPT_REJECTIONS = _STOCK_ATTEMPT_STAGES | frozenset(ScannerDataError.CODES) | frozenset("""
 invalid_symbol_or_missing_prev_close missing_price_or_prev_close exception
-empty_daily_history invalid_daily_history
+empty_daily_history invalid_daily_history insufficient_daily_history
+asset:not_common_stock elliott:history_not_current elliott:no_pattern elliott:reference_price_mismatch
 premarket_dollar_volume_filter premarket_missing_quote premarket_spread_guard premarket_extension_guard
 momentum:not_enough_daily_history momentum:invalid_momentum_inputs momentum:daily_momentum_too_small
 momentum:rvol_below_breakout_threshold momentum:daily_close_not_near_high
@@ -22600,6 +22690,7 @@ def _publish_stock_strategy_attempt(
 
 
 _STOCK_ATTEMPT_READ_STRATEGIES = frozenset({
+    ELLIOTT_STRATEGY,
     "Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short", "Cup and Handle Breakout",
 })
 _STOCK_ATTEMPT_READ_MAX_BYTES = 128 * 1024
@@ -22866,12 +22957,163 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
     _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
 
 
+def _elliott_scan_wrapper():
+    """Dedicated pattern-context leaf; no native plan, trade score or sender."""
+    from modules.elliott_waves import MODEL, analyze_elliott, validate_elliott_report
+    strategy = STRATEGIES[ELLIOTT_STRATEGY]
+    cache_path = _strategy_cache_path(ELLIOTT_STRATEGY)
+    attempt = _new_stock_strategy_attempt(ELLIOTT_STRATEGY)
+    now = datetime.now(timezone.utc)
+    session = stock_swing.completed_sessions(now, 1)[0]
+    cutoff = stock_swing.session_close(session)
+    diagnostics = {"strategy": ELLIOTT_STRATEGY, "market_type": "stocks",
+                   "cache_version": STOCK_STRATEGY_CACHE_VERSION,
+                   "data_mode": stock_swing.MODE, "analysis_as_of": cutoff.isoformat(),
+                   "coverage": "incomplete", "checked": 0, "universe_count": 0,
+                   "rejected": {}, "stage_counts": {}, "final_results": None,
+                   "signal_kind": "pattern_context", "mail_status": "not_applicable"}
+    _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
+    results, history_cache = [], {}
+    last_publish = -float("inf")
+
+    def reject(reason):
+        diagnostics["rejected"][reason] = diagnostics["rejected"].get(reason, 0) + 1
+
+    def exclude_reference(reason):
+        # Do not turn a provider-wide stale/split-basis incident into a clean
+        # empty result. As with invalid OHLCV, at most 20 symbols are isolated.
+        if diagnostics.get("excluded_data_symbols", 0) >= 20:
+            raise ScannerDataError("scan_data_invalid", diagnostics)
+        diagnostics["excluded_data_symbols"] = diagnostics.get("excluded_data_symbols", 0) + 1
+        reject(reason)
+
+    def ranked():
+        return sorted(results, key=lambda row: (
+            max(pattern["confirmed_at"] for pattern in row["elliott"]["patterns"]),
+            row["Dollar_Volume"], row["ticker"]), reverse=True)[:strategy["max_results"]]
+
+    def progress(force=False):
+        nonlocal last_publish
+        stock_scan_runtime.checkpoint("analyzing", checked=diagnostics["checked"], total=diagnostics["universe_count"])
+        if not force and time.monotonic() - last_publish < 2:
+            return
+        _publish_stock_strategy_attempt(attempt, "running", diagnostics=diagnostics)
+        save_partial_cache_file(cache_path, ranked(), checked=diagnostics["checked"],
+            total=diagnostics["universe_count"], detail="Elliott-Musterpruefung",
+            metadata={"cache_version": STOCK_STRATEGY_CACHE_VERSION, "diagnostics": dict(diagnostics)})
+        last_publish = time.monotonic()
+
+    try:
+        _scan_control_point()
+        stock_scan_runtime.checkpoint("universe")
+        snapshots = _fetch_strategy_snapshot_universe(ELLIOTT_STRATEGY)
+        if not snapshots:
+            raise ScannerDataError("scan_data_unavailable", diagnostics)
+        # Never downgrade to a current-session quote or fabricate daily stamps.
+        if any(not stock_swing.validate(row, now) or row.get("swing_analysis_session") != session for row in snapshots):
+            raise ScannerDataError("scan_data_invalid", diagnostics)
+        universe, source = _load_common_stock_universe()
+        if universe is None:
+            raise ScannerDataError("scan_data_unavailable", diagnostics)
+        diagnostics.update(universe_count=len(snapshots), common_stock_source=source,
+                           common_stock_universe_count=len(universe))
+        diagnostics["stage_counts"]["snapshot_universe"] = len(snapshots)
+        runtime = stock_scan_runtime.current()
+        runtime.update(stock_history_diagnostics=diagnostics, stock_history_as_of=now,
+                       analysis_session=session)
+        _remove_partial_cache(cache_path)
+        progress(True)
+        for index, observation in enumerate(snapshots, 1):
+            _scan_control_point()
+            diagnostics["checked"] = index
+            try:
+                ticker = str(observation.get("ticker") or "").strip().upper()
+                if not ticker or _stock_alert_asset_exclusion_reason(ticker, common_stock_universe=universe,
+                        universe_source=source, require_reference=False):
+                    reject("asset:not_common_stock")
+                    continue
+                day = observation.get("day") or {}
+                price, volume = stock_swing.number(day.get("c")), stock_swing.number(day.get("v"))
+                if price is None or volume is None or price <= 0 or volume < 0:
+                    raise ScannerDataError("scan_data_invalid", diagnostics)
+                if not strategy["filters"]["Preis"][0] <= price <= strategy["filters"]["Preis"][1]:
+                    reject("price_filter")
+                    continue
+                if price * volume < strategy["min_dollar_volume"]:
+                    reject("dollar_volume_filter")
+                    continue
+                with stock_scan_runtime.measure("history"):
+                    history = _fetch_strategy_daily_history(ticker, strategy["history_days"], history_cache, True)
+                if not history:
+                    diagnostics["empty_history_symbols"] = diagnostics.get("empty_history_symbols", 0) + 1
+                    reject("empty_daily_history")
+                    continue
+                with stock_scan_runtime.measure("special_filter"):
+                    daily_bars = _stock_wyckoff_daily_input(history)
+                    report = analyze_elliott(daily_bars, as_of=cutoff, timeframe="1D")
+                if report.get("status") == "insufficient_data":
+                    reject("insufficient_daily_history")
+                    continue
+                if not validate_elliott_report(report, as_of=cutoff):
+                    raise ScannerDataError("scan_data_invalid", diagnostics)
+                if _stock_attempt_datetime(report["latest_completed_at"]) != cutoff:
+                    exclude_reference("elliott:history_not_current")
+                    continue
+                reference_bars = [bar for bar in daily_bars if isinstance(bar, dict)
+                                  and _stock_attempt_datetime(bar.get("close_time")) == cutoff]
+                history_close = stock_swing.number(reference_bars[0].get("close")) if len(reference_bars) == 1 else None
+                if (history_close is None or history_close <= 0
+                        or not math.isclose(history_close, price, rel_tol=1e-6, abs_tol=1e-4)):
+                    exclude_reference("elliott:reference_price_mismatch")
+                    continue
+                if not report["patterns"]:
+                    reject("elliott:no_pattern")
+                    continue
+                previous = stock_swing.number((observation.get("prevDay") or {}).get("c"))
+                row = {"Strategy": ELLIOTT_STRATEGY, "strategy": ELLIOTT_STRATEGY,
+                       "Ticker": ticker, "ticker": ticker, "price": price, "Preis": price,
+                       "volume": volume, "Volume": volume, "Dollar_Volume": price * volume,
+                       "History_Bars": report["bars_used"], "elliott": report,
+                       "elliott_reference_close": history_close, "elliott_reference_session": session,
+                       "elliott_model": MODEL, "elliott_timeframe": "1D", "elliott_as_of": report["as_of"],
+                       "pattern_count": len(report["patterns"]), "signal_kind": "pattern_context",
+                       "trade_ready": False, "mail_eligible": False, **stock_swing.metadata(session, price)}
+                row.pop("entry_quality", None)
+                if previous is not None and previous > 0:
+                    row["change_pct"] = row["Change_Pct"] = (price / previous - 1) * 100
+                if not _stock_elliott_row_contract_valid(row, as_of=now):
+                    raise ScannerDataError("scan_data_invalid", diagnostics)
+                results.append(row)
+            except StockHistoryDataError as exc:
+                _exclude_stock_history_symbol(exc, diagnostics)
+            finally:
+                progress()
+        _scan_control_point(finishing=True)
+        # Parking or a long run must not publish yesterday as a fresh scan.
+        if stock_swing.completed_sessions(datetime.now(timezone.utc), 1)[0] != session:
+            raise ScannerDataError("scan_data_incomplete", diagnostics)
+        rows = ranked()
+        diagnostics.update(final_results=len(rows), raw_matches_before_special_filter=len(results),
+                           max_results=strategy["max_results"],
+                           coverage="complete_with_exclusions" if diagnostics.get("excluded_data_symbols") else "complete")
+        finalize_cache_file(cache_path, rows, metadata={"cache_version": STOCK_STRATEGY_CACHE_VERSION,
+                            "strategy": ELLIOTT_STRATEGY, "diagnostics": diagnostics})
+        _publish_stock_strategy_attempt(attempt, "complete", diagnostics=diagnostics, result_count=len(rows))
+        return rows
+    except Exception as exc:
+        _remove_partial_cache(cache_path)
+        _publish_stock_strategy_attempt(attempt, "error", diagnostics=diagnostics, error=exc)
+        raise
+
+
 @stock_scan_runtime.bounded_leaf
 def _strategy_scan_wrapper(
     strategy_name: str, send_email: bool = True, *, publish_generic_cache: bool = True,
 ) -> List[Dict[str, Any]]:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
+    if strategy_name == ELLIOTT_STRATEGY:
+        return _elliott_scan_wrapper()
     _strat_cache = _strategy_cache_path(strategy_name)
     _attempt = _new_stock_strategy_attempt(strategy_name)
     scan_diag: Dict[str, Any] = {}
@@ -31698,6 +31940,8 @@ def get_scan_results(
         }
 
     if is_generic_stock_strategy:
+        results = [row for row in results if _stock_elliott_row_contract_valid(
+            row, expected_strategy=resolved_strategy or strategy)]
         cup_verified = [row for row in results if _cup_signal_contract_valid(
             row, strategy_name=resolved_strategy or strategy,
         )]

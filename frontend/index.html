@@ -507,6 +507,7 @@
                 max-width: 100vw !important;
             }
             .detail-sidebar-content { padding: 16px; }
+            .detail-sidebar.elliott-sidebar { width: 100% !important; max-width: 100% !important; }
             .sidebar-resize-handle { display: none; }
             .detail-sidebar .grid.grid-cols-2 { grid-template-columns: repeat(1, minmax(0, 1fr)) !important; }
             .detail-sidebar .grid.grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
@@ -581,6 +582,100 @@ window.fetch = (input, init = {}) => {
     return rawFetch(input, init);
 };
 
+function isElliottScannerSelection(row) {
+    return !!row && !row.isCrypto && [row.scanner, row.strategy, row.Strategy, row.canonicalStrategy]
+        .some(value => value === 'Elliott Wave Muster' || value === 'elliott_wave');
+}
+
+function elliottPatterns(row) {
+    const report = row?.elliott;
+    if (!isElliottScannerSelection(row) || report?.model !== 'causal_elliott_v1'
+        || report.timeframe !== '1D' || report.status !== 'ok' || !Array.isArray(report.patterns)) return [];
+    const families = ['impulse', 'zigzag', 'regular_flat', 'expanded_flat', 'contracting_triangle'];
+    return report.patterns.slice(0, 12).filter(pattern => pattern && typeof pattern.id === 'string'
+        && families.includes(pattern.family) && ['LONG', 'SHORT'].includes(pattern.direction)
+        && ['geometry_only', 'confirmed'].includes(pattern.pattern_status)
+        && ['unverified', 'verified'].includes(pattern.subdivision_status)
+        && (pattern.pattern_status !== 'confirmed' || pattern.subdivision_status === 'verified')
+        && pattern.trade_ready === false && pattern.mail_eligible === false
+        && pattern.signal_kind === 'pattern_context' && Array.isArray(pattern.points));
+}
+
+function elliottFamilyName(family) {
+    return ({ impulse: 'Impuls 1–5', zigzag: 'Zigzag A–B–C', regular_flat: 'Flat A–B–C',
+        expanded_flat: 'Expanded Flat A–B–C', contracting_triangle: 'Dreieck A–B–C–D–E' })[family] || 'Muster';
+}
+
+function projectElliottChartEvidence({ ticker, row, chartData, timeframe, selectedId = '', showSubwaves = false }) {
+    const empty = message => ({ status: 'unavailable', message, points: [], markers: [], lines: [] });
+    const patterns = elliottPatterns(row);
+    if (!patterns.length) return empty('Keine gültige Elliott-Zählung geladen.');
+    if (timeframe !== '1D') return empty('Diese Zählung gehört zum 1D-Chart.');
+    if (!ticker || ticker !== row.ticker || ticker !== chartData?.ticker || chartData.timeframe !== '1D')
+        return empty('Chart und ausgewähltes Muster passen nicht zusammen.');
+    const pattern = selectedId ? patterns.find(item => item.id === selectedId) : patterns[0];
+    if (!pattern) return empty('Die ausgewählte Zählung ist nicht mehr verfügbar.');
+    const day = value => {
+        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(T|$)/.test(value)) return value.slice(0, 10);
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+            const date = new Date(value * 1000);
+            return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : null;
+        }
+        return null;
+    };
+    const candles = chartData?.candles;
+    if (!Array.isArray(candles) || !candles.length || candles.length > 10000) return empty('Chartdaten fehlen.');
+    const sessions = new Map();
+    let lastSession = '';
+    for (const bar of candles) {
+        const session = day(bar?.time);
+        if (!session || session <= lastSession) return empty('Chart-Zeitpunkte sind nicht eindeutig.');
+        sessions.set(session, bar);
+        lastSession = session;
+    }
+    const reportAsOf = Date.parse(row.elliott.as_of);
+    const project = (source, minor = false) => {
+        if (!Array.isArray(source) || source.length < 2 || source.length > 64) return null;
+        const result = [];
+        for (const point of source) {
+            const session = day(point?.observed_at || point?.time);
+            const bar = sessions.get(session);
+            const field = point?.price_field || (point?.kind === 'high' ? 'high' : point?.kind === 'low' ? 'low' : null);
+            const observed = Date.parse(point?.observed_at), confirmed = Date.parse(point?.confirmed_at);
+            if (!bar || !['high', 'low'].includes(field) || typeof point.price !== 'number' || !Number.isFinite(point.price) || point.price <= 0
+                || typeof bar[field] !== 'number' || !Number.isFinite(bar[field])
+                || Math.abs(bar[field] - point.price) > Math.max(1e-6, Math.abs(point.price) * 1e-8)
+                || !Number.isFinite(observed) || !Number.isFinite(confirmed) || !Number.isFinite(reportAsOf)
+                || confirmed < observed || confirmed > reportAsOf || !sessions.has(day(point.confirmed_at))
+                || (result.length && session <= result[result.length - 1].session)
+                || typeof point.label !== 'string' || !(minor ? /^(?:[0-5A-E]|P\d{1,2})$/ : /^[0-5A-E]$/).test(point.label)) return null;
+            result.push({ ...point, time: bar.time, session, field });
+        }
+        return result;
+    };
+    const points = project(pattern.points);
+    if (!points) return empty('Die datierten Musterpunkte passen nicht vollständig zu den geladenen Kursdaten.');
+    const color = pattern.direction === 'LONG' ? '#38bdf8' : '#fb923c';
+    const lines = [{ color, minor: false, data: points.map(point => ({ time: point.time, value: point.price })) }];
+    const markerMap = new Map();
+    const marker = (point, text, minor) => {
+        const key = `${point.time}-${point.field}`;
+        if (markerMap.has(key)) { markerMap.get(key).text += ` / ${text}`; return; }
+        markerMap.set(key, { time: point.time, text, color: minor ? '#94a3b8' : color,
+            position: point.field === 'low' ? 'belowBar' : 'aboveBar', shape: 'circle' });
+    };
+    points.forEach(point => marker(point, point.label, false));
+    if (showSubwaves && Array.isArray(pattern.waves)) {
+        for (const wave of pattern.waves.slice(0, 5)) {
+            const children = project(wave.subwaves, true);
+            if (!children || !/^[1-5A-E]$/.test(wave.label || '')) continue;
+            lines.push({ color: '#94a3b8', minor: true, data: children.map(point => ({ time: point.time, value: point.price })) });
+            children.slice(1).forEach(point => marker(point, `${wave.label}.${point.label}`, true));
+        }
+    }
+    return { status: 'available', pattern, message: '', points, lines, markers: [...markerMap.values()] };
+}
+
 function isWyckoffPattern(pattern) {
     return typeof pattern?.model === 'string' && pattern.model.startsWith('causal_wyckoff_');
 }
@@ -588,6 +683,12 @@ function isWyckoffPattern(pattern) {
 function isWyckoffScannerSelection(row) {
     return !!row && !row.isCrypto && (!!row.wyckoff || [row.scanner, row.strategy, row.Strategy, row.canonicalStrategy, row.pattern_type]
         .some(name => typeof name === 'string' && /wyckoff/i.test(name)));
+}
+
+function patternOverlaysAfterSelection(previous, previousRow, nextRow) {
+    if (isWyckoffScannerSelection(nextRow)) return { ...previous, patterns: true };
+    if (isWyckoffScannerSelection(previousRow)) return { ...previous, patterns: false, wyckoffSwings: false };
+    return previous;
 }
 
 function wyckoffPatternColor(pattern) {
@@ -3384,12 +3485,98 @@ function formatFundingRate(row) {
     return Number.isFinite(Number(raw)) ? `${Number(raw).toFixed(3)}%` : 'Nicht verfügbar';
 }
 
-function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction, showInternalSwings = false, onToggleInternalSwings }) {
+function ElliottScannerResults({ rows, onSelect, emptyText }) {
+    const valid = rows.map(row => ({ row, patterns: elliottPatterns({ ...row, scanner: 'Elliott Wave Muster' }) })).filter(item => item.patterns.length);
+    return <section className="card border border-gray-200 p-4 rounded-lg" aria-label="Elliott-Muster">
+        <div className="mb-3 flex flex-wrap justify-between gap-2 text-sm"><strong>{valid.length} {valid.length === 1 ? 'Aktie' : 'Aktien'} mit Wellenmustern</strong><span className="text-gray-500">1D · Musteranalyse</span></div>
+        {!valid.length && <p className="py-6 text-center text-sm text-gray-500">{emptyText}</p>}
+        {valid.map(({ row, patterns }) => <button key={row.ticker} type="button" onClick={() => onSelect(row)} className="w-full text-left border-t border-gray-200 py-4 flex flex-wrap items-center justify-between gap-3">
+            <span><strong>{row.ticker}</strong><span className="block text-xs text-gray-500">{row.company_name || row.name || ''}</span></span>
+            <span className="text-sm">{elliottFamilyName(patterns[0].family)}<span className="block text-xs text-gray-500">{patterns[0].direction === 'LONG' ? 'Aufwärtsstruktur' : 'Abwärtsstruktur'} · {patterns.length} {patterns.length === 1 ? 'Zählung' : 'Zählungen'}</span></span>
+            <span className="text-xs">{patterns[0].subdivision_status === 'verified' ? 'Unterwellen geprüft' : 'Unterwellen offen'}<span className="block text-gray-500">{String(patterns[0].confirmed_at || '').slice(0, 10)}</span></span>
+            <span className="text-blue-600 text-sm">Chart öffnen →</span>
+        </button>)}
+    </section>;
+}
+
+function ElliottPatternEvidence({ row, evidence, selectedId, onSelect, showSubwaves, onSubwaves }) {
+    const patterns = elliottPatterns(row);
+    const pattern = patterns.find(item => item.id === selectedId) || patterns[0];
+    if (!pattern) return <p className="text-sm">Kein nachprüfbares Elliott-Muster geladen.</p>;
+    return <section aria-label="Elliott-Zählung" className="mt-3 text-sm space-y-3">
+        <label className="block font-semibold">Zählung
+            <select className="mt-1 w-full" value={pattern.id} onChange={event => onSelect(event.target.value)}>
+                {patterns.map((p, i) => <option key={p.id} value={p.id}>{i + 1}. {elliottFamilyName(p.family)} · {p.direction === 'LONG' ? 'aufwärts' : 'abwärts'} · {String(p.confirmed_at || '').slice(0, 10)}</option>)}
+            </select>
+        </label>
+        <div className="flex flex-wrap justify-between gap-2"><span>{pattern.subdivision_status === 'verified' ? 'Unterwellen geprüft · eine Ebene' : 'Geometrie erkannt · Unterwellen offen'}</span><span className="text-gray-500">1D · keine Einstiegsfreigabe</span></div>
+        <label className="flex items-center gap-2"><input type="checkbox" checked={showSubwaves} onChange={onSubwaves} />Beobachtete Unterwellen anzeigen</label>
+        {evidence.status !== 'available' && <p className="text-amber-800" role="status">{evidence.message}</p>}
+        <details className="rounded border border-gray-200 p-3 text-xs"><summary className="cursor-pointer">Anker, Unterwellen und Regeln</summary>
+            <p className="my-2">Die Punkte zeigen beobachtete Wendepunkte. Bestätigt wurden sie erst nach weiteren Tageskerzen. Mehrere Zählungen sind möglich.</p>
+            <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr>{['Welle', 'Beobachtet', 'Bestätigt', 'Preis'].map(v => <th key={v} className="p-1">{v}</th>)}</tr></thead>
+                <tbody>{pattern.points.map(p => <tr key={p.label}><td className="p-1">{p.label}</td><td className="p-1 whitespace-nowrap">{String(p.observed_at || '').slice(0, 10)}</td><td className="p-1 whitespace-nowrap">{String(p.confirmed_at || '').slice(0, 10)}</td><td className="p-1">{Number(p.price).toLocaleString('de-CH', { maximumFractionDigits: 6 })}</td></tr>)}</tbody></table></div>
+            <div className="mt-2 space-y-1">{(pattern.waves || []).map(w => <p key={w.label}>Welle {w.label}: {w.observed_subwaves} beobachtet / {w.expected_subwaves} erwartet · {w.subdivision_status === 'verified' ? 'geprüft' : 'offen'}</p>)}</div>
+            <p className="mt-2">Fibonacci-Verhältnisse sind Zusatzinformationen, keine Pflichtregeln. Die Prüfung deckt eine kleinere Strukturebene ab, nicht beliebig viele Unterebenen.</p>
+        </details>
+    </section>;
+}
+
+function ElliottDetailSidebar({ ticker, scannerData, onClose }) {
+    const [chartData, setChartData] = useState(null);
+    const [error, setError] = useState(null);
+    const [selectedId, setSelectedId] = useState('');
+    const [showSubwaves, setShowSubwaves] = useState(false);
+    const container = useRef(null);
+    const evidence = useMemo(() => projectElliottChartEvidence({ ticker, row: scannerData, chartData, timeframe: '1D', selectedId, showSubwaves }), [ticker, scannerData, chartData, selectedId, showSubwaves]);
+    useEffect(() => {
+        const controller = new AbortController();
+        setChartData(null); setError(null); setSelectedId(''); setShowSubwaves(false);
+        fetch(`${API}/api/chart-data?ticker=${encodeURIComponent(ticker)}&timeframe=1D&overlays=`, { signal: controller.signal })
+            .then(async response => {
+                if (!response.ok) throw new Error('Chartdaten konnten nicht geladen werden.');
+                const data = await response.json();
+                if (!controller.signal.aborted) setChartData(data);
+            }).catch(err => { if (!controller.signal.aborted) setError(err.message); });
+        return () => controller.abort();
+    }, [ticker, scannerData]);
+    useEffect(() => {
+        if (!container.current || !chartData?.candles?.length || !window.LightweightCharts) return;
+        const instance = LightweightCharts.createChart(container.current, { width: container.current.clientWidth, height: 380,
+            layout: { background: { type: 'solid', color: '#0f172a' }, textColor: '#cbd5e1' }, timeScale: { timeVisible: false },
+            grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } } });
+        const candle = instance.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#ef4444' });
+        try {
+            candle.setData(chartData.candles);
+            for (const line of evidence.lines) {
+                const series = instance.addLineSeries({ color: line.color, lineWidth: line.minor ? 1 : 2, lastValueVisible: false, priceLineVisible: false });
+                series.setData(line.data);
+            }
+            candle.setMarkers([...evidence.markers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+            instance.timeScale().fitContent();
+        } catch (_) { setError('Chartdaten sind nicht konsistent.'); }
+        const resize = new ResizeObserver(() => resizeSidebarChart(instance, container.current, 380));
+        resize.observe(container.current);
+        return () => { resize.disconnect(); instance.remove(); };
+    }, [chartData, evidence]);
+    return <aside className="detail-sidebar sidebar-wide elliott-sidebar" style={{ width: 'min(760px, 100%)' }} aria-label="Elliott-Chart">
+        <div className="detail-sidebar-content" style={{ overflowY: 'auto', maxHeight: '100vh', paddingBottom: 32 }}>
+            <div className="flex justify-between items-start mb-4"><div><h2 className="text-xl font-bold">{ticker} · Elliott</h2><p className="text-sm text-gray-500">Tageskerzen · Wellen und Unterwellen</p></div><button type="button" onClick={onClose} className="text-2xl" aria-label="Elliott-Chart schließen">×</button></div>
+            {error && <p role="alert" className="text-amber-800 mb-3">{error}</p>}
+            {!chartData && !error && <p role="status">Chart wird geladen…</p>}
+            <div ref={container} className="rounded-lg overflow-hidden" />
+            <ElliottPatternEvidence row={scannerData} evidence={evidence} selectedId={selectedId} onSelect={setSelectedId} showSubwaves={showSubwaves} onSubwaves={() => setShowSubwaves(value => !value)} />
+        </div>
+    </aside>;
+}
+
+function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction, enabled = false, showInternalSwings = false, onToggleInternalSwings }) {
     const selectedWyckoff = isWyckoffScannerSelection(scannerRow);
+    if (!selectedWyckoff && !enabled) return null;
     const rows = wyckoffDisplayRows(patterns, scannerRow, direction);
     if (!rows.length && !selectedWyckoff) return null;
-    return <section className="mb-3 mt-3 rounded border border-slate-300 p-3 text-xs" aria-label="Wyckoff-Phasen und Ereignisse">
-        <h4 className="font-semibold">Wyckoff nachpruefen · Chart {timeframe}</h4>
+    return <details className="mb-3 mt-3 rounded border border-slate-300 p-3 text-xs" aria-label="Wyckoff-Phasen und Ereignisse">
+        <summary className="cursor-pointer font-semibold">Wyckoff · {timeframe} · {rows.length} Strukturen · Details</summary>
         <p className="mt-1">A–E sind Phasen; die Zahlen an Ereignissen zeigen nur deren zeitliche Reihenfolge, keine Elliott-Wellen und keine feste A1–A5-Regel. ST #1 / #2 bezeichnet wiederholte Tests. Swing-Zahlen gelten lokal je Strukturgrad und Richtung.</p>
         <p className="mt-1">Zeitrahmen: {timeframe}. Strukturgrad: grosse / interne Swings derselben Historie, kein Wechsel auf 1H. Aktien-Signale bleiben auf abgeschlossenen 1D-Sessions; 1W ist uebergeordneter Kontext, 1H eine getrennte Detailansicht.</p>
         {onToggleInternalSwings && <label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={showInternalSwings} onChange={onToggleInternalSwings} className="mt-0.5" />Interne Swings im Chart einblenden (inkl. gestricheltem, unbestaetigtem letzten Abschnitt)</label>}
@@ -3454,7 +3641,7 @@ function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, dire
                 <p className="mt-2">Musterqualitaet ist keine Gewinnwahrscheinlichkeit. Keine Aussage ueber institutionelle Kaeufe oder Verkaeufe; Handelsplan, Kosten und Ausfuehrung sind separat zu pruefen.</p>
             </details>;
         })}
-    </section>;
+    </details>;
 }
 
 // Cup scanner evidence: descriptive anchors from the selected scan window only.
@@ -3640,9 +3827,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     // Default only for a newly selected Cup row, never on a user's timeframe change.
     useEffect(() => {
         if (cupSelectionRef.current !== scannerData) {
+            const previousRow = cupSelectionRef.current;
             cupSelectionRef.current = scannerData;
             if (isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData)) setTimeframe('1D');
-            if (isWyckoffScannerSelection(scannerData)) setOverlays(previous => ({ ...previous, patterns: true }));
+            setOverlays(previous => patternOverlaysAfterSelection(previous, previousRow, scannerData));
         }
     }, [scannerData]);
 
@@ -5443,12 +5631,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 )}
 
                 <CupPatternEvidence evidence={cupEvidence} onDaily={() => setTimeframe('1D')} />
-                <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
+                <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.patterns}
                     onDaily={() => setTimeframe('1D')} scannerRow={scannerData} direction={viewDirection}
                     showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                 {/* Pattern Info */}
                 {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
-                {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
+                {overlays.patterns && chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                     const _vd = viewDirection;
                     const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
                     return filtered.length > 0 ? (
@@ -6393,9 +6581,9 @@ function App() {
             )}
 
             {/* Detail Sidebar */}
-            {selectedTicker && (
-                <DetailSidebar ticker={selectedTicker} onClose={() => { setSelectedTicker(null); setScannerItemData(null); }} scannerData={scannerItemData} />
-            )}
+            {selectedTicker && (isElliottScannerSelection(scannerItemData)
+                ? <ElliottDetailSidebar key={selectedTicker} ticker={selectedTicker} onClose={() => { setSelectedTicker(null); setScannerItemData(null); }} scannerData={scannerItemData} />
+                : <DetailSidebar ticker={selectedTicker} onClose={() => { setSelectedTicker(null); setScannerItemData(null); }} scannerData={scannerItemData} />)}
 
             {/* Toast Container */}
             <ToastContainer />
@@ -6874,7 +7062,7 @@ function scannerCompactEvidence(options) {
         case 'running': return { ...state, text: info?.partial === true
             ? `Scan läuft · Zwischenstand: ${count} Ergebnisse`
             : old ? 'Scan läuft · Angezeigt wird das vorherige Ergebnis' : 'Scan läuft …' };
-        case 'empty': return { ...state, text: kind === 'bi'
+        case 'empty': return { ...state, text: kind === 'pattern' ? 'Scan abgeschlossen · Keine passenden Wellenmuster' : kind === 'bi'
             ? 'Scan abgeschlossen · Keine freigegebenen BI-Signale' : 'Scan abgeschlossen · Keine freigegebenen Signale' };
         case 'warning':
             if (scannerLivePartialTimeout(info)) return { ...state, text: 'Scan läuft länger · Vorläufiger Zwischenstand' };
@@ -6886,6 +7074,7 @@ function scannerCompactEvidence(options) {
             if (coverage === 'complete_with_exclusions') return { ...state, text: `${count} Ergebnisse · Scan mit Datenausschlüssen abgeschlossen` };
             return { ...state, text: 'Ergebnis noch nicht bestätigt' };
         default: {
+            if (kind === 'pattern') return { ...state, text: `${count} ${count === 1 ? 'Aktie' : 'Aktien'} mit Wellenmustern · Musteranalyse` };
             const visibility = scannerVisibilityCounts(info);
             return { ...state, text: visibility && visibility.total === count
                 ? `${count} Ergebnisse · ${visibility.released} freigegeben${visibility.candidate_warning ? ` · ${visibility.candidate_warning} mit Warnungen` : ''}${visibility.context ? ` · ${visibility.context} Marktkontext` : ''}`
@@ -7502,9 +7691,12 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 control={feed.control}
             />
 
-            <ScannerEvidence feed={feed} kind="strategy" running={!!schedulerState?.running} />
+            <ScannerEvidence feed={feed} kind={marketType === 'stocks' && strategy === 'Elliott Wave Muster' ? 'pattern' : 'strategy'} running={!!schedulerState?.running} />
 
-            <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
+            {marketType === 'stocks' && strategy === 'Elliott Wave Muster'
+                ? <ElliottScannerResults rows={sorted} onSelect={item => onSelectTicker(scannerSelection(item, marketType, strategy))}
+                    emptyText={isScanning ? 'Scan läuft…' : feed.error ? 'Ergebnis nicht verfügbar.' : 'Keine passenden Wellenmuster im letzten Scan.'} />
+                : <div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">
                 <div className="md:hidden">
                     {sorted.length === 0 ? (
                         <div className="text-sm text-gray-500 text-center py-6">
@@ -7635,7 +7827,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                     </tbody>
                 </table>
                 </div>
-            </div>
+            </div>}
         </div>
     );
 }
@@ -13540,11 +13732,11 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         <div ref={chartContainer} style={{ position: 'relative', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
                     </div>
 
-                    <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe}
+                    <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.patterns}
                         onDaily={() => setTimeframe('1D')} direction={(d.confluence?.direction || '').toUpperCase()}
                         showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                     {/* Pattern badges */}
-                    {chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
+                    {overlays.patterns && chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                         const _vd = (d.confluence?.direction || '').toUpperCase();
                         const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
                         return filtered.length > 0 ? (

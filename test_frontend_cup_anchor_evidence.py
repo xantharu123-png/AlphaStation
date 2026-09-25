@@ -178,7 +178,10 @@ def test_handle_low_and_breakout_same_session_keep_distinct_exact_prices():
 def test_chart_render_and_both_scanner_click_paths_preserve_evidence():
     sidebar = SOURCE[SOURCE.index("function DetailSidebar("):SOURCE.index("function App(")]
     scanner = SOURCE[SOURCE.index("function ScannerTab("):SOURCE.index("function BIScannerTab(")]
-    assert scanner.count("onSelectTicker(scannerSelection(item, marketType, strategy))") == 2
+    # The dedicated Elliott context list has its own click path. Check the
+    # existing generic card's mobile and desktop paths, where Cup is rendered.
+    generic_card = scanner[scanner.index('<div className="card border border-gray-200 p-6 rounded-lg scanner-results-card">'):]
+    assert generic_card.count("onSelectTicker(scannerSelection(item, marketType, strategy))") == 2
     assert "Erkannte Anker, keine ideale U-Kurve" in SOURCE
     assert "1D-Daten bis" in SOURCE
     assert "lineVisible: false" in sidebar and "pointMarkersVisible: true" in sidebar
