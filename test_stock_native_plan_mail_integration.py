@@ -90,10 +90,19 @@ def _probe(direction, directory, scenario="barrier"):
         for index, session in enumerate(sessions):
             values = {"open": 100., "high": 116., "low": 96.,
                       "close": 100., "volume": 1_000_000.}
-            if scenario == "unreclaimed":
+            if scenario in {"unreclaimed", "breakout_close"}:
                 values["high"] = 103.
+                if scenario == "unreclaimed" and index == len(sessions) - 10:
+                    # An independently confirmed older high remains blocking.
+                    values["high"] = 110.
+                if scenario == "breakout_close" and index == len(sessions) - 60:
+                    # A real older target, beyond the 50D breakout baseline.
+                    # No projection-only target is authorized by this fixture.
+                    values["high"] = 125.
             if scenario == "reclaimed":
                 values.update(open=104.5, high=106., low=103., close=104.5)
+                if index == len(sessions) - 60:
+                    values["high"] = 120.
                 if index == len(sessions) - 3:
                     values.update(open=104.5, high=104.7, low=99.8, close=100.)
                 if index == len(sessions) - 2:
@@ -103,6 +112,10 @@ def _probe(direction, directory, scenario="barrier"):
                               volume=4_000_000.)
                 if scenario == "reclaimed":
                     values.update(open=104., high=110.3, low=98., close=107., volume=5_000_000.)
+                if scenario == "breakout_close":
+                    # Confirmed close through the PRIOR range. The signal's
+                    # own tiny wick is not a preceding-session resistance.
+                    values.update(high=107.55)
             if direction == "SHORT":
                 values.update(open=200-values["open"], high=200-values["low"],
                               low=200-values["high"], close=200-values["close"])
@@ -160,7 +173,7 @@ def _probe(direction, directory, scenario="barrier"):
             smtp_messages = []
             delivery_outcome = None
             persisted_deliveries = []
-            if scenario == "reclaimed":
+            if scenario in {"reclaimed", "breakout_close"}:
                 from modules import regime_filter
 
                 class OfflineSMTP:
@@ -198,14 +211,15 @@ def _probe(direction, directory, scenario="barrier"):
                 # SMTP acceptance alone could also mean a downgraded WATCH.
                 # Assert the actual durable delivery class after finalization.
                 import sqlite3
-                connection = sqlite3.connect((target / "tracker.sqlite").as_uri()+"?mode=ro", uri=True)
-                try:
-                    persisted_deliveries = connection.execute(
-                        "SELECT mail_class,channel,mail_channel,delivery_state,fill_evidence_verified "
-                        "FROM signals ORDER BY id"
-                    ).fetchall()
-                finally:
-                    connection.close()
+                if (target / "tracker.sqlite").exists():
+                    connection = sqlite3.connect((target / "tracker.sqlite").as_uri()+"?mode=ro", uri=True)
+                    try:
+                        persisted_deliveries = connection.execute(
+                            "SELECT mail_class,channel,mail_channel,delivery_state,fill_evidence_verified "
+                            "FROM signals ORDER BY id"
+                        ).fetchall()
+                    finally:
+                        connection.close()
             print("NATIVE_PLAN_RESULT=" + json.dumps({
                 "levels": levels, "raw_score": row["score"], "adjusted_score": state["score"],
                 "structure_status": row.get("structure_status"),
@@ -283,6 +297,25 @@ def test_real_completed_gap_retest_native_plan_passes_mail_classification(tmp_pa
     assert actual["final"] == {"ok": True}
     assert actual["validated_fill"] is False
     assert actual["validated_price_mode"] == "swing_delayed_close"
+    assert actual["smtp_messages"] == 1, actual
+    assert actual["delivery_outcome"] == "accepted"
+    assert actual["persisted_deliveries"] == [["trade", "email", "stocks_swing", "ACTIVE", 0]]
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_completed_daily_breakout_does_not_use_own_wick_as_previous_session_barrier(tmp_path, direction):
+    result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), direction,
+                             str(tmp_path), "breakout_close"],
+                            capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = next(line for line in result.stdout.splitlines() if line.startswith("NATIVE_PLAN_RESULT="))
+    actual = json.loads(line.split("=", 1)[1])
+    assert actual["structure_status"] == "ACCEPT", actual
+    assert actual["levels"]["native"] is True
+    assert actual["levels"]["estimated"] is False
+    assert actual["levels"]["rr_tp1"] >= 1.6
+    assert actual["suppression_reasons"] == [], actual
+    assert actual["final"] == {"ok": True}, actual
     assert actual["smtp_messages"] == 1, actual
     assert actual["delivery_outcome"] == "accepted"
     assert actual["persisted_deliveries"] == [["trade", "email", "stocks_swing", "ACTIVE", 0]]

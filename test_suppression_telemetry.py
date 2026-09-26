@@ -184,9 +184,13 @@ def test_free_form_sensitive_values_are_rejected_and_never_persisted(tmp_path):
     }
 
 
-def test_concurrent_increments_are_atomic(tmp_path):
+def test_concurrent_increments_are_atomic(tmp_path, monkeypatch):
     db = tmp_path / "suppression.sqlite"
     observed_at = 1_800_000_000.0
+    # Test atomic increments, not whether Windows can complete 40 durable
+    # writes inside the production best-effort contention budget. That budget
+    # and its drop accounting are verified independently below.
+    monkeypatch.setattr(telemetry, "_WRITE_LOCK_TIMEOUT_SECONDS", 5.0)
 
     def _write(_index):
         return telemetry.record_suppressions(
@@ -206,6 +210,27 @@ def test_concurrent_increments_are_atomic(tmp_path):
         db_path=str(db),
     )
     assert summary["total_count"] == 40
+
+
+def test_contended_write_keeps_production_budget_and_reports_drop(tmp_path, monkeypatch):
+    timeouts, drops = [], []
+
+    class BusyLock:
+        def acquire(self, *, timeout):
+            timeouts.append(timeout)
+            return False
+
+        def release(self):
+            pytest.fail("A lock which was not acquired must not be released")
+
+    monkeypatch.setattr(telemetry, "_LOCK", BusyLock())
+    monkeypatch.setattr(telemetry, "_record_dropped_write",
+                        lambda count, **kwargs: drops.append((count, kwargs)))
+    assert telemetry.record_suppressions(
+        "orb", {"final_quote_stale": 1}, db_path=str(tmp_path / "contended.sqlite")
+    ) == 0
+    assert timeouts == [0.35]
+    assert len(drops) == 1 and drops[0][0] == 1
 
 
 def test_multiprocess_upserts_preserve_each_reason_occurrence(tmp_path):
@@ -373,8 +398,15 @@ def test_stale_lockfile_after_process_exit_does_not_block_new_writer(tmp_path):
         target=_advisory_drop_lock_then_exit, args=(str(db),)
     )
     process.start()
-    process.join(timeout=5)
-    assert process.exitcode == 0
+    try:
+        # Spawn also imports the API/test module on Windows. This assertion
+        # checks release after process death, not interpreter startup speed.
+        process.join(timeout=30)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
     assert telemetry._drop_lock_path(
         telemetry._drop_journal_path(str(db))
     ).exists()

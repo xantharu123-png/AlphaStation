@@ -843,9 +843,9 @@ BI_CACHE_SHORT = "/tmp/bi_cache_short.json"
 BEAR_CACHE = "/tmp/bear_scanner_cache.json"
 BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
-# PDC/PWC labels no longer participate in structural barrier geometry. Old
-# plans must be recomputed, not merely re-labelled as the corrected version.
-STOCK_STRATEGY_CACHE_VERSION = 12
+# Daily-signal session references precede the signal bar. Old geometry must
+# be recomputed, not merely re-labelled as the corrected version.
+STOCK_STRATEGY_CACHE_VERSION = 13
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -19547,11 +19547,22 @@ def _level_timestamp_seconds(value: Any) -> Optional[float]:
 
 def _daily_level_bars(
     daily_bars: List[Dict[str, Any]],
+    *,
+    preserve_unfinished: bool = False,
 ) -> List[Dict[str, Any]]:
     """Adapt US-stock daily OHLCV to explicit regular-session timestamps."""
     adapted: List[Dict[str, Any]] = []
     for raw in daily_bars or []:
         if not isinstance(raw, dict):
+            continue
+        # A calendar close cannot override an explicitly unfinished provider
+        # observation. Do this before adapting away the source flags; even a
+        # conflicting positive alias must not promote an open candle.
+        explicitly_unfinished = any(
+            str(raw[key]).strip().lower() in {"false", "0", "no", "n", "open"}
+            for key in ("is_closed", "complete", "completed", "final") if key in raw
+        )
+        if explicitly_unfinished and not preserve_unfinished:
             continue
         open_time: Any = None
         close_time: Any = None
@@ -19612,6 +19623,9 @@ def _daily_level_bars(
             "low": raw.get("low", raw.get("l")),
             "close": raw.get("close", raw.get("c")),
             "volume": raw.get("volume", raw.get("v", 0)),
+            # Diagnostic consumers retain the row and exchange clock. Their
+            # normalizer still excludes it using this canonical negative flag.
+            **({"is_closed": False} if explicitly_unfinished else {}),
         })
     return adapted
 
@@ -19725,12 +19739,28 @@ def _build_stock_level_snapshot(
     as_of: Optional[datetime] = None,
     four_hour_bars: Optional[List[Dict[str, Any]]] = None,
     spread: Optional[float] = None,
+    signal_session: Optional[str] = None,
 ) -> Optional[StructureSnapshot]:
     """Build the shared causal D/W/4H structure snapshot for stock swings."""
     cutoff = as_of or datetime.now(timezone.utc)
     if cutoff.tzinfo is None:
         cutoff = cutoff.replace(tzinfo=timezone.utc)
     daily = _daily_level_bars(daily_bars)
+    session_reference_before = None
+    if signal_session is not None:
+        # Only an explicitly bound completed-daily scanner may select the
+        # preceding session. Never infer this exemption from a live quote.
+        try:
+            completed_daily = normalize_completed_bars(daily, timeframe="1D", as_of=cutoff)
+            signal_close = stock_swing.session_close(signal_session)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if (not completed_daily or signal_close != cutoff
+                or completed_daily[-1].closed_at != signal_close
+                or not math.isclose(completed_daily[-1].close, current_price,
+                                    rel_tol=1e-10, abs_tol=1e-8)):
+            return None
+        session_reference_before = completed_daily[-1].opened_at
     weekly = _completed_weekly_level_bars(daily_bars, as_of=cutoff)
     four_hour_candidates = _completed_four_hour_level_bars(four_hour_bars)
     completed_four_hour = normalize_completed_bars(
@@ -19789,6 +19819,7 @@ def _build_stock_level_snapshot(
             pivot_right=2,
             timestamp_mode="open",
             include_session_levels=True,
+            session_reference_before=session_reference_before,
         )
         # Validate direction while the data is still local.  Invalid direction
         # must not turn into an optimistic level fallback.
@@ -19812,6 +19843,7 @@ def _strategy_daily_history_metrics(
     spread: Optional[float] = None,
     four_hour_bars: Optional[List[Dict[str, Any]]] = None,
     include_structure: bool = True,
+    signal_session: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return swing-quality metrics from completed daily bars.
 
@@ -19918,6 +19950,7 @@ def _strategy_daily_history_metrics(
         as_of=cutoff_utc,
         four_hour_bars=four_hour_bars,
         spread=spread,
+        signal_session=signal_session,
     ) if include_structure else None
     level_structure: Optional[Dict[str, Any]] = None
     level_legacy: Optional[Dict[str, Any]] = None
@@ -20476,7 +20509,7 @@ def _stock_wyckoff_daily_input(bars):
         if not isinstance(raw, dict) or raw.get("close_time") is not None:
             result.append(raw)
             continue
-        adapted = _daily_level_bars([raw])
+        adapted = _daily_level_bars([raw], preserve_unfinished=True)
         result.append({**raw, **adapted[0]} if adapted else raw)
     return result
 
@@ -22888,6 +22921,8 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
                 as_of=analysis_as_of,
                 four_hour_bars=_level_4h_bars,
                 spread=(ask - bid) if ask > bid > 0 else None,
+                signal_session=(strategy_row.get("swing_analysis_session")
+                                if stock_swing.is_swing(strategy_row) else None),
             )
         if _level_snapshot is not None:
             _level_legacy = legacy_level_adapter(
@@ -23465,6 +23500,7 @@ def _strategy_scan_wrapper(
                         symbol=ticker,
                         direction=_history_direction,
                         spread=(ask - bid) if ask > bid > 0 else None,
+                        signal_session=t["swing_analysis_session"] if swing_daily_mode else None,
                     )
                     # RVOL and momentum gates use completed-bar metrics, not
                     # level zones. Defer the expensive D/W engine until those

@@ -10,8 +10,9 @@ import api
 @pytest.mark.parametrize("direction", ["long", "short"])
 @pytest.mark.parametrize("has_snapshot", [False, True])
 @pytest.mark.parametrize("has_plan", [False, True])
+@pytest.mark.parametrize("daily_signal", [False, True])
 def test_native_enrichment_preserves_exact_inputs_and_never_changes_rank(
-    monkeypatch, direction, has_snapshot, has_plan,
+    monkeypatch, direction, has_snapshot, has_plan, daily_signal,
 ):
     cutoff = datetime(2026, 9, 18, 20, 0, tzinfo=timezone.utc)
     history = [{"date": "2026-09-18", "close": 101.71234567}]
@@ -26,6 +27,8 @@ def test_native_enrichment_preserves_exact_inputs_and_never_changes_rank(
     row = {"ticker": "EXACT", "score": 87, "grade": "A", "base_score": 86,
            "base_grade": "A", "Change_Pct": 4.123, "Support_1": 97.123456789,
            "Resistance_1": 110.123456789}
+    if daily_signal:
+        row.update(api.stock_swing.metadata("2026-09-18", context["price"]))
     ranking = {key: row[key] for key in ("score", "grade", "base_score", "base_grade", "Change_Pct")}
     before = deepcopy(context)
     calls = []
@@ -48,7 +51,8 @@ def test_native_enrichment_preserves_exact_inputs_and_never_changes_rank(
         assert kwargs == {"symbol": "EXACT", "current_price": context["price"],
                           "direction": direction.upper(), "atr14": metrics["atr14"],
                           "as_of": cutoff, "four_hour_bars": execution,
-                          "spread": context["ask"] - context["bid"]}
+                          "spread": context["ask"] - context["bid"],
+                          "signal_session": "2026-09-18" if daily_signal else None}
         calls.append("structure")
         return snapshot
 

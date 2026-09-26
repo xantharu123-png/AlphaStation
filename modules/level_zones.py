@@ -1157,9 +1157,22 @@ def build_structure_snapshot(
     timestamp_mode: str = "open",
     external_evidence: Iterable[LevelEvidence] = (),
     include_session_levels: bool = True,
+    session_reference_before: Any = None,
 ) -> StructureSnapshot:
-    """Build one immutable snapshot from bars available at ``as_of``."""
+    """Build one immutable snapshot from bars available at ``as_of``.
+
+    A completed-daily signal can bind session references to its opening time:
+    PDH/PDL and PWH/PWL then precede that signal, rather than using its own
+    extrema as a new obstacle. All completed bars still confirm pivots and
+    breakouts. Live/chart callers retain the latest-completed-session default.
+    """
     cutoff = _coerce_datetime(as_of)
+    session_cutoff = (
+        _coerce_datetime(session_reference_before)
+        if session_reference_before is not None else None
+    )
+    if session_cutoff is not None and session_cutoff > cutoff:
+        raise ValueError("session reference boundary crosses snapshot as_of")
     price = _safe_float(current_price)
     if price is None or price <= 0:
         raise ValueError("current_price must be positive")
@@ -1197,8 +1210,12 @@ def build_structure_snapshot(
             right=max(1, int(pivot_right)),
         ))
         if include_session_levels and timeframe in ("1D", "1W"):
+            reference_bars = (
+                tuple(bar for bar in completed if bar.closed_at < session_cutoff)
+                if session_cutoff is not None else completed
+            )
             evidence.extend(_completed_session_evidence_from_completed(
-                completed,
+                reference_bars,
                 timeframe=timeframe,
                 cutoff=cutoff,
             ))
@@ -1278,6 +1295,8 @@ def build_structure_snapshot(
         ))
     zones = tuple(evaluated_zones)
     quality_flags: List[str] = []
+    if session_cutoff is not None:
+        quality_flags.append("session_levels_precede_signal_session")
     if not any(completed_counts.values()):
         quality_flags.append("no_completed_bars")
     if not zones:

@@ -50,6 +50,12 @@ The existing confirmed-close breakout rule still does not demand a retest.
 Removing genuine nearby session highs/lows would be a separate strategy-policy
 change, not this reference-label correction.
 
+Follow-up on 2026-09-26: completed-daily signal snapshots now bind these
+references to the session **preceding the signal**, while live snapshots keep
+their latest-completed-session default. See
+`DAILY_SIGNAL_MAIL_REPAIR_2026-09-26.md` for the reproduced self-barrier defect,
+the explicit clock binding and the unchanged genuine-barrier risk gates.
+
 Stock strategy cache generation advances from 11 to 12. Old geometry is
 rejected by result and new-reminder lookup routes; it is not silently stamped
 as repaired. Existing personal reminders keep their explicitly bound levels.
