@@ -2552,8 +2552,11 @@ function TradeReminderPoller() {
     })()));
 
     useEffect(() => {
+        let cancelled = false;
         const saveSeen = () => {
-            localStorage.setItem('tradeReminderSeen', JSON.stringify(Array.from(seenRef.current).slice(-100)));
+            // Completed reminders remain available on the server. Truncating the
+            // seen IDs would replay older app notifications after a page reload.
+            localStorage.setItem('tradeReminderSeen', JSON.stringify(Array.from(seenRef.current)));
         };
         const notify = (reminder) => {
             const { title, body: reason } = tradeReminderNotification(reminder);
@@ -2567,7 +2570,9 @@ function TradeReminderPoller() {
                 const res = await fetch(`${API}/api/trade-reminders?status=triggered&personal_only=true`);
                 if (!res.ok) return;
                 const data = await res.json();
+                if (cancelled) return;
                 (data.reminders || []).forEach(reminder => {
+                    if (!['browser', 'email_browser'].includes(String(reminder.channel || 'email_browser').trim().toLowerCase())) return;
                     if (!reminder.id || seenRef.current.has(reminder.id)) return;
                     seenRef.current.add(reminder.id);
                     notify(reminder);
@@ -2577,9 +2582,112 @@ function TradeReminderPoller() {
         };
         poll();
         const timer = setInterval(poll, 60000);
-        return () => clearInterval(timer);
+        return () => { cancelled = true; clearInterval(timer); };
     }, []);
     return null;
+}
+
+function tradeReminderExpiry(reminder) {
+    const value = reminder?.expires_at_iso || reminder?.expires_at;
+    return value ? new Date(typeof value === 'number' ? value * 1000 : value) : null;
+}
+
+function useActiveTradeReminders(ticker, assetType) {
+    const [reminders, setReminders] = useState([]);
+    const [error, setError] = useState('');
+    const [refreshKey, setRefreshKey] = useState(0);
+    useEffect(() => {
+        let cancelled = false;
+        let requestId = 0;
+        const normalize = value => assetType === 'crypto'
+            ? String(value || '').toUpperCase().replace(/USDT$/, '') : String(value || '').toUpperCase();
+        const load = async () => {
+            const currentRequest = ++requestId;
+            try {
+                const response = await fetch(`${API}/api/trade-reminders?status=active&personal_only=true`);
+                if (!response.ok) throw new Error('reminder_read_failed');
+                const payload = await response.json();
+                if (!Array.isArray(payload.reminders)) throw new Error('reminder_read_failed');
+                if (cancelled || currentRequest !== requestId) return;
+                setReminders(payload.reminders.filter(reminder => {
+                    const expiry = tradeReminderExpiry(reminder);
+                    return reminder.status === 'active' && normalize(reminder.ticker) === normalize(ticker)
+                        && reminder.asset_type === assetType
+                        && (!expiry || !Number.isFinite(expiry.getTime()) || expiry.getTime() > Date.now());
+                }));
+                setError('');
+            } catch (err) {
+                if (!cancelled && currentRequest === requestId) setError('Reminder-Status konnte nicht aktualisiert werden.');
+            }
+        };
+        load();
+        const timer = setInterval(load, 30000);
+        return () => { cancelled = true; clearInterval(timer); };
+    }, [ticker, assetType, refreshKey]);
+    // Never show a different instrument's reminders while its request is pending.
+    const visible = reminders.filter(reminder => reminder.asset_type === assetType
+        && (assetType === 'crypto' ? String(reminder.ticker).replace(/USDT$/, '') : reminder.ticker)
+            === (assetType === 'crypto' ? String(ticker).toUpperCase().replace(/USDT$/, '') : String(ticker).toUpperCase()));
+    return { reminders: visible, error, refresh: () => setRefreshKey(value => value + 1) };
+}
+
+function TradeReminderControls({ eligible = false, isStructure = false, condition = 'trigger', onConditionChange,
+    activeReminders = [], busy = false, unsupportedReason = '', error = '', onCreate, onCancel }) {
+    const [hours, setHours] = useState(isStructure ? 168 : 6);
+    const [mail, setMail] = useState(true);
+    const [app, setApp] = useState(true);
+    const channel = mail ? app ? 'email_browser' : 'email' : app ? 'browser' : null;
+    const durations = isStructure ? [
+        { hours: 24, label: '1 Tag' }, { hours: 72, label: '3 Tage' },
+        { hours: 168, label: '7 Tage' }, { hours: 336, label: '14 Tage' }, { hours: 720, label: '30 Tage' },
+    ] : [
+        { hours: 1, label: '1h' }, { hours: 3, label: '3h' }, { hours: 6, label: '6h' },
+        { hours: 12, label: '12h' }, { hours: 24, label: '1 Tag' },
+    ];
+    if (!eligible && !activeReminders.length && !unsupportedReason && !error) return null;
+    return <section className="mt-3 border-t border-white/60 pt-3 text-xs" aria-label="Reminder" data-testid="trade-reminder-controls">
+        <div className="font-semibold mb-2">Benachrichtigung</div>
+        {unsupportedReason && <div className="text-amber-900 mb-2" role="note" data-testid="reminder-unsupported">{unsupportedReason}</div>}
+        {activeReminders.map(reminder => {
+            const expiry = tradeReminderExpiry(reminder);
+            const expiryLabel = expiry && Number.isFinite(expiry.getTime())
+                ? expiry.toLocaleString('de-CH', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'unbekannt';
+            const channelLabel = reminder.channel === 'email' ? 'Mail' : reminder.channel === 'browser' ? 'App' : 'Mail + App';
+            return <div key={reminder.id} className="mb-2 flex items-center justify-between gap-2 rounded border border-emerald-200 bg-white/70 p-2">
+                <div className="min-w-0">
+                    <div className="font-semibold">{reminder.condition === 'retest' ? 'Rücktest' : reminder.condition === 'continuation' ? 'Fortsetzung' : 'Ausbruch'} · {channelLabel}</div>
+                    <div>Aktiv bis {expiryLabel}</div>
+                </div>
+                <button type="button" disabled={busy} onClick={() => !busy && onCancel?.(reminder.id)}
+                    aria-label={`Reminder löschen: ${reminder.condition === 'retest' ? 'Rücktest' : 'Ausbruch'}`}
+                    className="shrink-0 rounded border border-red-200 bg-white px-2 py-1 text-red-700 font-semibold disabled:opacity-50">Löschen</button>
+            </div>;
+        })}
+        {eligible && !unsupportedReason && <>
+            {isStructure ? <label className="block mb-2">Benachrichtigen, wenn
+                <select aria-label="Bedingung" value={condition} onChange={event => onConditionChange?.(event.target.value)} disabled={busy} className="block mt-1 w-full">
+                    <option value="trigger">1D-Ausbruch bestätigt</option>
+                    <option value="retest">1D-Rücktest bestätigt</option>
+                </select>
+            </label> : <div className="mb-2">{condition === 'retest' ? 'Rücktest' : condition === 'continuation' ? 'Fortsetzung' : 'Trigger'} bestätigt</div>}
+            <div className="flex flex-wrap items-end gap-3">
+                <label className="min-w-[100px] flex-1">Laufzeit
+                    <select aria-label="Laufzeit" value={hours} onChange={event => setHours(Number(event.target.value))} disabled={busy} className="block mt-1 w-full">
+                        {durations.map(option => <option key={option.hours} value={option.hours}>{option.label}</option>)}
+                    </select>
+                </label>
+                <div className="flex gap-3 py-1">
+                    <label className="flex items-center gap-1.5"><input type="checkbox" aria-label="Mail" checked={mail} onChange={event => setMail(event.target.checked)} disabled={busy} />Mail</label>
+                    <label className="flex items-center gap-1.5"><input type="checkbox" aria-label="App" checked={app} onChange={event => setApp(event.target.checked)} disabled={busy} />App</label>
+                </div>
+                <button type="button" disabled={busy || !channel} onClick={() => !busy && channel && onCreate?.(hours, channel)}
+                    className="rounded border border-sky-200 bg-white px-3 py-1.5 text-sky-800 font-semibold disabled:opacity-50">Reminder setzen</button>
+            </div>
+            {!channel && <div className="mt-1 text-amber-900" role="status">Mail oder App auswählen.</div>}
+            <div className="mt-2 text-[11px] opacity-75">Einmalig, danach automatisch beendet.</div>
+        </>}
+        {error && <div className="mt-2 text-red-700" role="alert">{error}</div>}
+    </section>;
 }
 
 // Custom Hooks
@@ -3047,29 +3155,13 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
 function LiveScanStatus({ active = false, partial = false, checked = null, total = null, detail = '', count = null, itemLabel = 'Treffer', control = null, progress = null }) {
     if (!active && !partial) return null;
     const paused = control?.state === 'paused' && control?.worker_alive === true;
-    const prog = scannerProgressValue(progress || (active && partial ? { checked, total, detail } : null));
-    const { hasProgress, percent } = prog;
     const currentResult = progress?.selected ? progress.currentResult : active && partial;
     const visibleCount = Number.isSafeInteger(count) && count >= 0 && count <= 1e9 ? count : null;
     return (
-        <div className="-mt-4 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2 text-xs text-blue-800">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-semibold">
-                    {paused ? 'Pausierter Zwischenstand:' : 'Live-Zwischenstand:'} {hasProgress ? `${prog.checked}/${prog.total} geprueft` : 'Fortschritt noch nicht bestaetigt'}
-                </span>
-                <span>{currentResult && visibleCount !== null ? `${visibleCount} ${itemLabel} im aktuellen Zwischenstand`
-                    : visibleCount > 0 ? `${visibleCount} ${itemLabel} aus gespeichertem Ergebnisstand` : 'Aktuelle Trefferzahl noch nicht bestaetigt'}</span>
-            </div>
-            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100">
-                {hasProgress ? (
-                    <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{width: `${percent}%`}}></div>
-                ) : (
-                    paused ? <div className="h-full rounded-full bg-slate-400" style={{width: '30%'}}></div>
-                        : <div className="scan-indeterminate-segment"></div>
-                )}
-            </div>
-            {prog.detail && <div className="mt-1 text-[11px] text-blue-600">{prog.detail}</div>}
-            <div className="mt-1 text-[10px] text-blue-500">Zwischenstand zur Vorpruefung; finale Freigaben und Alerts erst nach abgeschlossenem Scan.</div>
+        <div className="-mt-4 px-1 text-xs text-gray-500" role="status" data-testid="scan-result-summary">
+            {paused && <span>Pausiert · </span>}
+            <span>{currentResult && visibleCount !== null ? `${visibleCount} ${itemLabel} im aktuellen Zwischenstand`
+                : visibleCount > 0 ? `${visibleCount} ${itemLabel} aus gespeichertem Ergebnisstand` : 'Aktuelle Trefferzahl noch nicht bestaetigt'}</span>
         </div>
     );
 }
@@ -3809,7 +3901,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [timeframe, setTimeframe] = useState(() => isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData) ? '1D' : '4H');
     const [overlays, setOverlays] = useState(() => ({ ema: true, vwap: false, sr: false, fib: false, patterns: isWyckoffScannerSelection(scannerData), bb: false, vrvp: true, vol: false }));
     const [reminderBusy, setReminderBusy] = useState(false);
-    const [activeReminder, setActiveReminder] = useState(null);
     const [reminderConditionChoice, setReminderConditionChoice] = useState(null);
     const [personalPositions, setPersonalPositions] = useState([]);
     const [positionBusy, setPositionBusy] = useState(false);
@@ -3901,28 +3992,9 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     );
     const availableTimeframes = isCrypto && !hasCryptoIntradayChart ? ['1D'] : TIMEFRAMES;
 
-    useEffect(() => {
-        let cancelled = false;
-        const wantedTicker = String(ticker || '').toUpperCase().replace(/USDT$/, '');
-        setActiveReminder(null);
-        setReminderConditionChoice(null);
-        const loadActiveReminder = async () => {
-            try {
-                const res = await fetch(`${API}/api/trade-reminders?status=active&personal_only=true`);
-                if (!res.ok) return;
-                const payload = await res.json();
-                const match = (payload.reminders || []).find(reminder => (
-                    String(reminder.ticker || '').toUpperCase().replace(/USDT$/, '') === wantedTicker
-                    && String(reminder.asset_type || '').toLowerCase() === (isCrypto ? 'crypto' : 'stock')
-                ));
-                if (!cancelled) setActiveReminder(match || null);
-            } catch (err) {
-                if (!cancelled) setActiveReminder(null);
-            }
-        };
-        loadActiveReminder();
-        return () => { cancelled = true; };
-    }, [ticker, isCrypto]);
+    const reminderFeed = useActiveTradeReminders(ticker, isCrypto ? 'crypto' : 'stock');
+    const activeReminders = reminderFeed.reminders;
+    useEffect(() => { setReminderConditionChoice(null); }, [ticker, isCrypto]);
 
     useEffect(() => {
         let cancelled = false;
@@ -5081,32 +5153,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return lines.map(line => String(line || '').trim()).filter(Boolean).slice(0, 3);
     })();
     const showTriggerChecklist = isCrypto && reminderEligible && triggerChecklist.length > 0;
-    const reminderDurationOptions = isStructureReminder ? [
-        { hours: 168, label: '7 Tage' },
-        { hours: 336, label: '14 Tage' },
-        { hours: 720, label: '30 Tage' },
-    ] : [
-        { hours: 1, label: '1h' },
-        { hours: 3, label: '3h' },
-        { hours: 6, label: '6h' },
-        { hours: 12, label: '12h' },
-        { hours: 24, label: '1 Tag' },
-    ];
-    const reminderExpiryValue = activeReminder?.expires_at_iso || activeReminder?.expires_at;
-    const reminderExpiryDate = reminderExpiryValue
-        ? new Date(typeof reminderExpiryValue === 'number' ? reminderExpiryValue * 1000 : reminderExpiryValue)
-        : null;
-    const reminderExpiryLabel = reminderExpiryDate && !Number.isNaN(reminderExpiryDate.getTime())
-        ? reminderExpiryDate.toLocaleString('de-CH', {
-            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-        })
-        : '';
     const createTradeReminder = async (hours = 6, channel = 'email_browser') => {
+        if (reminderBusy || !['email', 'browser', 'email_browser'].includes(channel)) return;
         setReminderBusy(true);
         try {
-            if (channel.includes('browser') && 'Notification' in window && Notification.permission === 'default') {
-                try { await Notification.requestPermission(); } catch(e) {}
-            }
             const res = await fetch(`${API}/api/trade-reminders`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -5134,7 +5184,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht erstellt werden');
-            setActiveReminder(data.reminder || null);
+            reminderFeed.refresh();
             const durationLabel = hours >= 24 && hours % 24 === 0 ? `${hours / 24} ${hours === 24 ? 'Tag' : 'Tage'}` : `${hours}h`;
             if (window.addToast) window.addToast(`Reminder aktiv: ${ticker} fuer ${durationLabel}`, 'success');
         } catch (err) {
@@ -5143,15 +5193,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             setReminderBusy(false);
         }
     };
-    const cancelTradeReminder = async () => {
-        if (!activeReminder?.id) return;
+    const cancelTradeReminder = async (reminderId) => {
+        if (!reminderId || reminderBusy) return;
         setReminderBusy(true);
         try {
-            const res = await fetch(`${API}/api/trade-reminders/${activeReminder.id}`, { method: 'DELETE' });
+            const res = await fetch(`${API}/api/trade-reminders/${encodeURIComponent(reminderId)}`, { method: 'DELETE' });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Reminder konnte nicht beendet werden');
-            setActiveReminder(null);
-            if (window.addToast) window.addToast(`Reminder fuer ${ticker} beendet`, 'success');
+            reminderFeed.refresh();
+            if (window.addToast) window.addToast(`Reminder fuer ${ticker} gelöscht`, 'success');
         } catch (err) {
             if (window.addToast) window.addToast(err.message || 'Reminder Fehler', 'error');
         } finally {
@@ -5259,41 +5309,10 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         );
     };
     const renderReminderControls = () => {
-        if (!reminderEligible && !activeReminder && !reminderUnsupportedReason) return null;
-        return (
-            <div className="mt-3 border-t border-white/60 pt-2" data-testid="trade-reminder-controls">
-                {reminderUnsupportedReason ? <div className="text-xs text-amber-900" role="note" data-testid="reminder-unsupported">{reminderUnsupportedReason}. Kein neues Abo moeglich; bestehende Reminder koennen beendet werden.</div>
-                    : <><div className="font-semibold">Mail-Reminder bei bestaetigtem {isStructureReminder ? '1D-' : ''}{reminderCondition === 'retest' ? 'Retest' : 'Trigger'}</div>
-                <div className="text-xs opacity-75 mt-1 mb-2">{isStructureReminder
-                    ? 'Persoenlicher Strukturhinweis nach einer neu abgeschlossenen Tageskerze. Mail und In-App-Hinweis sind kein neues Handelssignal. Die native Zone wird auf dem Server geprueft; keine automatische Anmeldung.'
-                    : 'Pruefung jede Minute. Mail und Browser-Hinweis werden einmalig gesendet.'}</div></>}
-                {isStructureReminder && <label className="block text-xs mb-2">Benachrichtigen, wenn
-                    <select value={reminderCondition} onChange={event => setReminderConditionChoice(event.target.value)} className="block mt-1 w-full" disabled={reminderBusy}>
-                        <option value="trigger">1D-Ausbruch bestaetigt</option>
-                        <option value="retest">1D-Ruecktest bestaetigt</option>
-                    </select>
-                </label>}
-                {activeReminder && (
-                    <div className="mb-2 flex items-center gap-2 flex-wrap text-xs">
-                        <span className="font-semibold text-emerald-700">Aktiv bis {reminderExpiryLabel || '-'}</span>
-                        {activeReminder.timeframe && <span>{activeReminder.timeframe} · {activeReminder.condition === 'retest' ? 'Ruecktest' : 'Ausbruch'}</span>}
-                        {activeReminder.zone && <span>Zone {activeReminder.zone.lower}–{activeReminder.zone.upper}</span>}
-                        <button disabled={reminderBusy} onClick={cancelTradeReminder}
-                            className="px-2 py-1 rounded bg-white/80 border border-red-200 text-red-700 font-semibold hover:bg-red-50 disabled:opacity-50">
-                            Beenden
-                        </button>
-                    </div>
-                )}
-                {reminderEligible && <div className="flex gap-2 flex-wrap">
-                    {reminderDurationOptions.map(option => (
-                        <button key={option.hours} disabled={reminderBusy} onClick={() => createTradeReminder(option.hours, 'email_browser')}
-                            className="px-2 py-1 rounded bg-white/80 border border-sky-200 text-sky-800 font-semibold hover:bg-sky-50 disabled:opacity-50">
-                            {option.label} Mail + App
-                        </button>
-                    ))}
-                </div>}
-            </div>
-        );
+        return <TradeReminderControls key={`${ticker}:${isCrypto}:${isStructureReminder}`} eligible={reminderEligible}
+            isStructure={isStructureReminder} condition={reminderCondition} onConditionChange={setReminderConditionChoice}
+            activeReminders={activeReminders} busy={reminderBusy} unsupportedReason={reminderUnsupportedReason}
+            error={reminderFeed.error} onCreate={createTradeReminder} onCancel={cancelTradeReminder} />;
     };
     const modeLabel = sidebarMode === 'normal' ? 'Normal' : sidebarMode === 'wide' ? 'Breit' : 'Vollbild';
 
@@ -5340,12 +5359,102 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 </div>
 
-                {cd.selected_snapshot && (
-                    <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900" data-testid="selected-signal-snapshot">
-                        <div className="font-semibold">Ausgewählter Scannerplan · {cd.scanner} · {viewDirection}</div>
-                        <div className="mt-1">Datenstand: {cd.snapshot_at || 'nicht übermittelt'} · {cd.bi_indicator_contract_version || cd.BI_IndicatorContractVersion || 'Version nicht übermittelt'}</div>
-                        <div className="mt-1">Die Planlevels bleiben unverändert. Chart und Kurs zeigen die aktuelle Analyse, keine erneute Handelsfreigabe.</div>
+                {/* Timeframe Selector */}
+                <div className="flex gap-1 mb-2 flex-wrap">
+                    {availableTimeframes.map(tf => (
+                        <button key={tf} onClick={() => setTimeframe(tf)}
+                            className={`px-2 py-1 text-xs rounded ${timeframe === tf ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+                            {tf}
+                        </button>
+                    ))}
+                </div>
+                {isCrypto && chartData?.chart_note && (
+                    <div className="mb-3 text-[11px] text-gray-500">
+                        Chartquelle: <span className="font-semibold">{chartData.source || 'Crypto'}</span>
+                        {!hasCryptoIntradayChart && <span> - nur Daily-Kontext, kein Intraday-Entry</span>}
                     </div>
+                )}
+
+                {/* Overlay Toggles */}
+                <div className="flex gap-1 mb-3 flex-wrap">
+                    {[
+                        { key: 'ema', label: 'EMA', color: '#3b82f6' },
+                        { key: 'vwap', label: vwapDisplayLabel(chartData?.vwap_meta, 'HLC3-Proxy'), color: '#f97316' },
+                        { key: 'sr', label: 'S/R', color: '#fbbf24' },
+                        { key: 'fib', label: 'Fib', color: '#8b5cf6' },
+                        { key: 'bb', label: 'BB', color: '#9333ea' },
+                        { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
+                        { key: 'patterns', label: 'Patterns', color: '#10b981' },
+                        { key: 'vol', label: 'Vol', color: '#6b7280' },
+                    ].map(({ key, label, color }) => (
+                        <button key={key}
+                            onClick={() => setOverlays(prev => ({...prev, [key]: !prev[key]}))}
+                            className="px-2 py-1 text-xs rounded font-semibold"
+                            style={{
+                                background: overlays[key] ? color : `${color}22`,
+                                color: overlays[key] ? '#fff' : color,
+                                border: `1.5px solid ${overlays[key] ? color : `${color}55`}`,
+                                opacity: overlays[key] ? 1 : 0.6,
+                            }}>
+                            {label}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Chart */}
+                {chartData?.chart_warning && (
+                    <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        {chartData.chart_warning}
+                    </div>
+                )}
+                {chartData && chartData.candles && chartData.candles.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500 text-sm bg-gray-800 rounded-lg mb-4">
+                        {(chartData.error || '').includes('Versuch') ? (
+                            <div className="flex items-center justify-center gap-2">
+                                <div className="loading-spinner" style={{width:16,height:16,borderWidth:2}}></div>
+                                <span>{chartData.error}</span>
+                            </div>
+                        ) : (chartData.error || 'Keine Chart-Daten verfügbar')}
+                    </div>
+                ) : !chartData ? (
+                    <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
+                ) : null}
+                <div style={{ position: 'relative' }}>
+                    {/* V2.5: Expand-Button oben links im Chart */}
+                    {chartData && chartData.candles && chartData.candles.length > 0 && (
+                        <button onClick={() => {
+                            const halfScreen = Math.round(window.innerWidth * 0.5);
+                            if (customWidth && customWidth >= halfScreen - 50) {
+                                setCustomWidth(null); setSidebarMode('normal');
+                            } else {
+                                setCustomWidth(halfScreen); setSidebarMode('custom');
+                            }
+                        }}
+                        style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 10, background: 'rgba(30,30,50,0.8)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', color: '#ccc', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '4px', backdropFilter: 'blur(4px)' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.6)'; e.currentTarget.style.color = '#fff'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(30,30,50,0.8)'; e.currentTarget.style.color = '#ccc'; }}
+                        title={customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? 'Sidebar verkleinern' : 'Sidebar auf 50% erweitern'}>
+                            <span style={{ fontSize: '16px' }}>{customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? '⊟' : '⊞'}</span>
+                        </button>
+                    )}
+                    <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
+                </div>
+                {/* V2.4: Chart-Höhe Drag-Handle */}
+                {chartData && chartData.candles && chartData.candles.length > 0 && (
+                    <div onMouseDown={startHeightResize}
+                        style={{ height: '6px', cursor: 'row-resize', background: 'transparent', borderRadius: '0 0 8px 8px', marginBottom: '16px', transition: 'background 0.2s' }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(59,130,246,0.5)'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                        title="Chart-Höhe ziehen"
+                    ></div>
+                )}
+
+                {cd.selected_snapshot && (
+                    <details className="mb-3 text-xs text-gray-500" data-testid="selected-signal-snapshot">
+                        <summary className="cursor-pointer">Details zum Signal</summary>
+                        <div className="mt-2">{cd.scanner} · {viewDirection} · Datenstand: {cd.snapshot_at || 'nicht übermittelt'}</div>
+                        <div className="mt-1">Planwerte aus dem Scan; der Chart zeigt die ausgewählte Zeiteinheit.</div>
+                    </details>
                 )}
 
                 <BreakoutRetestWarning row={retestWarningRow} />
@@ -5541,95 +5650,6 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
-                {/* Timeframe Selector */}
-                <div className="flex gap-1 mb-2 flex-wrap">
-                    {availableTimeframes.map(tf => (
-                        <button key={tf} onClick={() => setTimeframe(tf)}
-                            className={`px-2 py-1 text-xs rounded ${timeframe === tf ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
-                            {tf}
-                        </button>
-                    ))}
-                </div>
-                {isCrypto && chartData?.chart_note && (
-                    <div className="mb-3 text-[11px] text-gray-500">
-                        Chartquelle: <span className="font-semibold">{chartData.source || 'Crypto'}</span>
-                        {!hasCryptoIntradayChart && <span> - nur Daily-Kontext, kein Intraday-Entry</span>}
-                    </div>
-                )}
-
-                {/* Overlay Toggles */}
-                <div className="flex gap-1 mb-3 flex-wrap">
-                    {[
-                        { key: 'ema', label: 'EMA', color: '#3b82f6' },
-                        { key: 'vwap', label: vwapDisplayLabel(chartData?.vwap_meta, 'HLC3-Proxy'), color: '#f97316' },
-                        { key: 'sr', label: 'S/R', color: '#fbbf24' },
-                        { key: 'fib', label: 'Fib', color: '#8b5cf6' },
-                        { key: 'bb', label: 'BB', color: '#9333ea' },
-                        { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
-                        { key: 'patterns', label: 'Patterns', color: '#10b981' },
-                        { key: 'vol', label: 'Vol', color: '#6b7280' },
-                    ].map(({ key, label, color }) => (
-                        <button key={key}
-                            onClick={() => setOverlays(prev => ({...prev, [key]: !prev[key]}))}
-                            className="px-2 py-1 text-xs rounded font-semibold"
-                            style={{
-                                background: overlays[key] ? color : `${color}22`,
-                                color: overlays[key] ? '#fff' : color,
-                                border: `1.5px solid ${overlays[key] ? color : `${color}55`}`,
-                                opacity: overlays[key] ? 1 : 0.6,
-                            }}>
-                            {label}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Chart */}
-                {chartData?.chart_warning && (
-                    <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                        {chartData.chart_warning}
-                    </div>
-                )}
-                {chartData && chartData.candles && chartData.candles.length === 0 ? (
-                    <div className="text-center py-8 text-gray-500 text-sm bg-gray-800 rounded-lg mb-4">
-                        {(chartData.error || '').includes('Versuch') ? (
-                            <div className="flex items-center justify-center gap-2">
-                                <div className="loading-spinner" style={{width:16,height:16,borderWidth:2}}></div>
-                                <span>{chartData.error}</span>
-                            </div>
-                        ) : (chartData.error || 'Keine Chart-Daten verfügbar')}
-                    </div>
-                ) : !chartData ? (
-                    <div className="flex justify-center py-8 mb-4"><div className="loading-spinner"></div></div>
-                ) : null}
-                <div style={{ position: 'relative' }}>
-                    {/* V2.5: Expand-Button oben links im Chart */}
-                    {chartData && chartData.candles && chartData.candles.length > 0 && (
-                        <button onClick={() => {
-                            const halfScreen = Math.round(window.innerWidth * 0.5);
-                            if (customWidth && customWidth >= halfScreen - 50) {
-                                setCustomWidth(null); setSidebarMode('normal');
-                            } else {
-                                setCustomWidth(halfScreen); setSidebarMode('custom');
-                            }
-                        }}
-                        style={{ position: 'absolute', top: '8px', left: '8px', zIndex: 10, background: 'rgba(30,30,50,0.8)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', color: '#ccc', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '4px', backdropFilter: 'blur(4px)' }}
-                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(59,130,246,0.6)'; e.currentTarget.style.color = '#fff'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(30,30,50,0.8)'; e.currentTarget.style.color = '#ccc'; }}
-                        title={customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? 'Sidebar verkleinern' : 'Sidebar auf 50% erweitern'}>
-                            <span style={{ fontSize: '16px' }}>{customWidth && customWidth >= Math.round(window.innerWidth * 0.5) - 50 ? '⊟' : '⊞'}</span>
-                        </button>
-                    )}
-                    <div ref={chartContainer} className="chart-container" style={{ borderRadius: '8px 8px 0 0', overflow: 'hidden', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
-                </div>
-                {/* V2.4: Chart-Höhe Drag-Handle */}
-                {chartData && chartData.candles && chartData.candles.length > 0 && (
-                    <div onMouseDown={startHeightResize}
-                        style={{ height: '6px', cursor: 'row-resize', background: 'transparent', borderRadius: '0 0 8px 8px', marginBottom: '16px', transition: 'background 0.2s' }}
-                        onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(59,130,246,0.5)'}
-                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                        title="Chart-Höhe ziehen"
-                    ></div>
-                )}
 
                 <CupPatternEvidence evidence={cupEvidence} onDaily={() => setTimeframe('1D')} />
                 <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.patterns}
@@ -5949,7 +5969,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
-                {!activeTradeSetup && !isCrypto && (reminderEligible || activeReminder) && <div className="border border-amber-200 bg-amber-50 p-3 rounded-lg mb-3 text-xs text-amber-900">
+                {!activeTradeSetup && (!isCrypto || (!tradeHealth && !marketContext)) && (reminderEligible || activeReminders.length > 0 || reminderFeed.error) && <div className="border border-amber-200 bg-amber-50 p-3 rounded-lg mb-3 text-xs text-amber-900">
                     {renderReminderControls()}
                 </div>}
                 </div>{/* End Content Grid */}

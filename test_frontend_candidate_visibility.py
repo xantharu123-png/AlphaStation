@@ -172,12 +172,20 @@ def test_shared_status_reaches_all_existing_stock_crypto_and_detail_warning_surf
 
 
 def test_personal_reminder_buttons_are_opt_in_long_lived_and_not_hidden_by_missing_trade_plan():
+    from test_reminder_controls_behavior import run_ui
+
     assert "const reminderEligible = isStructureReminder || Boolean(" in SOURCE
     assert "{ reminder_mode: 'structure_1d' }" in SOURCE
-    for duration in ("{ hours: 168, label: '7 Tage' }", "{ hours: 336, label: '14 Tage' }", "{ hours: 720, label: '30 Tage' }"):
-        assert duration in SOURCE
-    assert "!activeTradeSetup && !isCrypto && (reminderEligible || activeReminder)" in SOURCE
-    assert "onClick={() => createTradeReminder(option.hours, 'email_browser')}" in SOURCE
+    run_ui("""
+entry=components.Controls;const saved=[];
+render({eligible:true,isStructure:true,onCreate:(...v)=>saved.push(v)});
+assert.deepEqual(saved,[],'Opening a candidate must not create a reminder');
+select('Laufzeit','720');check('App',false);named('Reminder setzen','button').props.onClick();
+assert.deepEqual(saved,[[720,'email']]);
+render({eligible:false,isStructure:true,activeReminders:[{id:'existing',condition:'retest'}]});
+assert.ok(nodes(result).some(n=>n.type==='button'&&text(n)==='Löschen'));
+assert.ok(!nodes(result).some(n=>n.type==='button'&&text(n)==='Reminder setzen'));
+""")
     assert "if (nativePlanUnavailable) return null;" in SOURCE
     assert "const finalTradeable = !nativePlanUnavailable" in SOURCE
 

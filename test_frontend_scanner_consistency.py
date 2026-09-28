@@ -62,6 +62,13 @@ def test_running_old_result_is_clearly_distinguished_from_current_partial():
 
 
 def test_unknown_progress_is_bounded_and_respects_reduced_motion():
+    from test_frontend_progress_consistency import render
+
     assert '.scan-indeterminate-segment { width: 30%;' in SOURCE
-    assert SOURCE.count('className="scan-indeterminate-segment"') == 2
+    render("""
+const progress={selected:true,running:true};
+const main=components.ScanControl({onScan:()=>{},isScanning:true,progressOverride:progress});
+const summary=components.LiveScanStatus({active:true,progress});
+assert.equal(nodes([main,summary]).filter(n=>n.props.className==='scan-indeterminate-segment').length,1);
+""")
     assert '@media (prefers-reduced-motion: reduce)' in SOURCE

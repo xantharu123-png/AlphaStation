@@ -16,7 +16,12 @@ def test_bi_details_keep_selected_direction_snapshot_and_all_twenty_checks():
     assert "new URLSearchParams({ticker, direction: selectedDirection" in SOURCE
     assert "if (!controller.signal.aborted) setTickerData(payload)" in SOURCE
     assert "Warum dieses BI-Signal?" in SOURCE
-    assert "Die Planlevels bleiben unverändert" in SOURCE
+    sidebar = SOURCE[SOURCE.index("function DetailSidebar("):SOURCE.index("// Main App")]
+    details = re.search(r'<details\b[^>]*data-testid="selected-signal-snapshot"[^>]*>', sidebar)
+    assert details is not None
+    assert not re.search(r'\sopen(?:\s|=|>)', details.group())
+    assert sidebar.index('className="chart-container"') < details.start()
+    assert "Ausgewählter Scannerplan" not in sidebar
     assert "TP1: bestaetigte Zone · TP2: Projektion" in SOURCE
     assert "Aktuelle Detailabfrage" in SOURCE
     assert "Änderung unbekannt" in SOURCE

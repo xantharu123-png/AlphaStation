@@ -276,6 +276,44 @@ def test_invalid_duration_rejected(monkeypatch, tmp_path, hours):
     with pytest.raises(api.HTTPException): api.create_trade_reminder(request(api, duration_hours=hours))
 
 
+@pytest.mark.parametrize("channel", ["", "none", "app", "email_browser_extra"])
+def test_invalid_channel_never_silently_subscribes_to_both(monkeypatch, tmp_path, channel):
+    api = api_fixture(monkeypatch, tmp_path)
+    with pytest.raises(api.HTTPException) as error:
+        api.create_trade_reminder(request(api, channel=channel))
+    assert error.value.status_code == 400
+    assert api._load_trade_reminders() == []
+
+
+@pytest.mark.parametrize("days", [1, 3, 7, 14, 30])
+@pytest.mark.parametrize("channel", ["email", "browser", "email_browser"])
+def test_day_duration_and_channel_survive_creation_and_personal_list(monkeypatch, tmp_path, days, channel):
+    api = api_fixture(monkeypatch, tmp_path)
+    api.create_trade_reminder(request(api, duration_hours=days * 24, channel=channel))
+    listed = api.get_trade_reminders(status="active", personal_only=True)["reminders"]
+    assert len(listed) == 1
+    assert listed[0]["channel"] == channel
+    assert listed[0]["remaining_seconds"] == days * 86400
+
+
+@pytest.mark.parametrize("channel,expected_sends", [("browser", 0), ("email", 1), ("email_browser", 1)])
+def test_one_shot_leaves_active_list_but_preserves_notification_and_delivery(monkeypatch, tmp_path, channel, expected_sends):
+    api = api_fixture(monkeypatch, tmp_path)
+    created = api.create_trade_reminder(request(api, duration_hours=24, channel=channel))["reminder"]
+    evaluations, sends = [], []
+    monkeypatch.setattr(api, "_evaluate_trade_reminder", lambda row: evaluations.append(row["id"]) or
+                        {"triggered": True, "reason": "daily_retest_confirmed", "last_close": 103})
+    monkeypatch.setattr(api, "_load_users", lambda: {"users": {"user@example.test": {"email_alerts_enabled": True}}})
+    monkeypatch.setattr(api, "_send_email_alert", lambda *args, **kwargs: sends.append(kwargs) or True)
+    api._process_trade_reminders_once()
+    api._process_trade_reminders_once()
+    assert evaluations == [created["id"]]
+    assert len(sends) == expected_sends
+    assert api.get_trade_reminders(status="active", personal_only=True)["count"] == 0
+    assert api.get_trade_reminders(status="triggered", personal_only=True)["count"] == 1
+    assert api._load_trade_reminders()[0]["email_delivery_status"] == ("sent" if expected_sends else "not_requested")
+
+
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
 def test_missing_intermediate_session_or_explicit_unclosed_bar_blocks(direction):
     bars = path(direction) + [bar("2026-09-18", 103, 106, 102, 104, direction)]

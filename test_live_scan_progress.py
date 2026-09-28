@@ -21,9 +21,16 @@ def test_partial_penny_rows_are_display_only_until_final_revalidation():
 
 
 def test_frontend_renders_and_polls_live_scan_results():
+    from test_frontend_progress_consistency import render
+
     assert "function LiveScanStatus(" in FRONTEND_SOURCE
-    assert "Live-Zwischenstand:" in FRONTEND_SOURCE
-    assert "finale Freigaben und Alerts erst nach abgeschlossenem Scan" in FRONTEND_SOURCE
+    render("""
+const summary=components.LiveScanStatus({active:true,partial:true,checked:20,total:100,count:3});
+assert.match(text(summary),/3 Treffer im aktuellen Zwischenstand/);
+assert.ok(!nodes(summary).some(n=>n.props.style?.width),'Result summaries must not duplicate the progress bar');
+const saved=components.LiveScanStatus({active:true,partial:false,count:7,progress:{selected:true,currentResult:false}});
+assert.match(text(saved),/7 Treffer aus gespeichertem Ergebnisstand/);
+""")
     lifecycle = FRONTEND_SOURCE[
         FRONTEND_SOURCE.index("function useScannerFeed("):
         FRONTEND_SOURCE.index("function ScannerEvidence(")
@@ -45,5 +52,5 @@ def test_frontend_renders_and_polls_live_scan_results():
     assert "const feed = useScannerFeed({" in scanner_tab
     assert "const feed = useScannerFeed({" in bi_tab
     # BI uses the scheduler-bound ScanControl progress only; four other
-    # long-running scanners still render their dedicated live result panels.
+    # long-running scanners still render their compact live result summaries.
     assert FRONTEND_SOURCE.count("<LiveScanStatus") >= 4

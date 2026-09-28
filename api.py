@@ -29561,9 +29561,9 @@ def create_trade_reminder(
         raise HTTPException(status_code=400, detail="Ungueltige Reminder-Dauer")
     max_hours = _STRUCTURE_REMINDER_MAX_HOURS if mode == "structure_1d" else _TRADE_REMINDER_MAX_HOURS
     duration_hours = max(0.25, min(duration_number, max_hours))
-    channel = str(request.channel or "email_browser").lower()
+    channel = str(request.channel or "").strip().lower()
     if channel not in ("email", "browser", "email_browser"):
-        channel = "email_browser"
+        raise HTTPException(status_code=400, detail="Mail oder App auswaehlen")
     now = _reminder_now()
     zone = None
     if mode == "structure_1d":

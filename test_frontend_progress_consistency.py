@@ -192,17 +192,17 @@ def render(code):
     node_run(preamble + code)
 
 
-def test_both_shipped_surfaces_show_same_selected_runtime_progress_and_unknown_hits():
+def test_only_main_control_has_progress_bar_and_result_summary_keeps_old_hits_separate():
     progress = selected(options())
     render("""
 const progress=PROGRESS;
 const main=components.ScanControl({onScan:()=>{},isScanning:true,progressOverride:progress});
 const lower=components.LiveScanStatus({active:true,partial:false,checked:12590,total:12590,count:7,progress});
 assert.match(text(main),/7306 \\/ 12590 analysiert/);assert.match(text(main),/Trefferzahl noch nicht bestaetigt/);
-assert.match(text(lower),/7306\\/12590 geprueft/);assert.match(text(lower),/7 Treffer aus gespeichertem Ergebnisstand/);
+assert.match(text(lower),/7 Treffer aus gespeichertem Ergebnisstand/);
 assert.ok(!/undefined|NaN|Scan wird vorbereitet/.test(text(main)+text(lower)));
 assert.ok(nodes(main).some(n=>n.props.style?.width==='58%'));
-assert.ok(nodes(lower).some(n=>n.props.style?.width==='58%'));
+assert.ok(!nodes(lower).some(n=>n.props.style?.width||n.props.className?.includes('scan-indeterminate-segment')));
 """.replace("PROGRESS", json.dumps(progress)))
 
 
@@ -224,10 +224,11 @@ assert.ok(!/99|40 Treffer|99%/.test(text(main)));
 """)
 
 
-def test_live_status_does_not_coerce_null_checked_or_call_unknown_progress_preparation():
+def test_result_summary_has_no_second_unknown_progress_indicator():
     render("""
 const lower=components.LiveScanStatus({active:true,partial:true,checked:null,total:60,count:2});
-assert.match(text(lower),/Fortschritt noch nicht bestaetigt/);
+assert.match(text(lower),/2 Treffer im aktuellen Zwischenstand/);
+assert.ok(!nodes(lower).some(n=>n.props.className?.includes('scan-indeterminate-segment')));
 assert.ok(!/0\\/60|Scan wird vorbereitet/.test(text(lower)));
 """)
 

@@ -1,29 +1,25 @@
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parent
+"""Reminder UI contracts tested through real rendered controls, not copy matching."""
+from test_reminder_controls_behavior import run_ui
 
 
 def test_sidebar_exposes_consistent_trigger_and_retest_reminders():
-    source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-
-    assert "const explicitReminderWait" in source
-    assert "const hardReminderBlock" in source
-    assert "Mail-Reminder bei bestaetigtem" in source
-    assert "Pruefung jede Minute" in source
-    assert "renderReminderControls()" in source
-    assert "{ hours: 1, label: '1h' }" in source
-    assert "{ hours: 3, label: '3h' }" in source
-    assert "{ hours: 24, label: '1 Tag' }" in source
-    assert "finalWatchOnly ||" not in source[source.index("const hardReminderBlock"):source.index("const reminderCondition")]
+    run_ui("""
+entry=components.Controls;const saved=[];
+render({eligible:true,isStructure:false,condition:'retest',onCreate:(...args)=>saved.push(args)});
+assert.match(text(result),/Rücktest bestätigt/);
+assert.deepEqual(nodes(named('Laufzeit','select')).filter(n=>n.type==='option').map(n=>Number(n.props.value)),[1,3,6,12,24]);
+select('Laufzeit','3');check('App',false);named('Reminder setzen','button').props.onClick();
+assert.deepEqual(saved,[[3,'email']]);
+""")
 
 
 def test_sidebar_persists_and_can_cancel_active_reminders():
-    source = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-
-    assert "fetch(`${API}/api/trade-reminders?status=active&personal_only=true`)" in source
-    assert "fetch(`${API}/api/trade-reminders?status=triggered&personal_only=true`)" in source
-    assert "fetch(`${API}/api/trade-reminders/${activeReminder.id}`" in source
-    assert "typeof reminderExpiryValue === 'number' ? reminderExpiryValue * 1000" in source
-    assert "Aktiv bis" in source
-    assert "Beenden" in source
+    run_ui("""
+entry=components.Controls;const deleted=[];
+const props={eligible:false,busy:true,onCancel:id=>deleted.push(id),activeReminders:[
+ {id:'mine',condition:'retest',expires_at:1893456000,channel:'browser'}]};
+render(props);const button=nodes(result).find(n=>n.type==='button'&&text(n)==='Löschen');
+assert.equal(button.props.disabled,true);button.props.onClick();assert.deepEqual(deleted,[]);
+assert.match(text(result),/Aktiv bis/);assert.ok(!text(result).includes('unbekannt'));
+render({...props,busy:false});named('Löschen','button').props.onClick();assert.deepEqual(deleted,['mine']);
+""")
