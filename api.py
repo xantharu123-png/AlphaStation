@@ -845,7 +845,8 @@ BIOTECH_CACHE = "/tmp/alpha_biotech_cache.json"
 STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Daily-signal session references precede the signal bar. Old geometry must
 # be recomputed, not merely re-labelled as the corrected version.
-STOCK_STRATEGY_CACHE_VERSION = 13
+# Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
+STOCK_STRATEGY_CACHE_VERSION = 14
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""

@@ -148,7 +148,8 @@ const render=new Function('React',""" + json.dumps(wyckoff_pure) + """+Babel.tra
 const patterns=[""" + json.dumps(wyckoff_fixture()[0]) + """];
 assert.equal(render({patterns,timeframe:'4H',scannerRow:{scanner:'Momentum Breakout Long'}}),null);
 assert.equal(render({patterns,timeframe:'1D',scannerRow:{scanner:'Elliott Wave Muster'}}),null);
-for(const props of [{enabled:true},{scannerRow:{scanner:'Wyckoff Accumulation'}}]) {
+assert.equal(render({patterns,timeframe:'1D',enabled:false,scannerRow:{scanner:'Wyckoff Accumulation'}}),null);
+for(const props of [{enabled:true},{enabled:true,scannerRow:{scanner:'Wyckoff Accumulation'}}]) {
  const tree=render({patterns,timeframe:'1D',...props});
  assert.equal(tree.type,'details');assert.ok(!tree.props.open);assert.equal(tree.children[0].type,'summary');
  const summary=JSON.stringify(tree.children[0]);assert.ok(summary.length<220);assert.ok(!summary.includes('A1'));
@@ -224,7 +225,7 @@ def test_elliott_mobile_sidebar_fits_client_width_not_scrollbar_viewport():
 def test_leaving_wyckoff_scanner_does_not_keep_its_automatic_overlay_on_other_rows():
     from test_frontend_wyckoff_evidence import evaluate as wyckoff_evaluate
     result = wyckoff_evaluate('patternOverlaysAfterSelection({patterns:true,wyckoffSwings:true,sr:true}, {scanner:"Wyckoff Accumulation"}, {scanner:"Momentum Breakout Long"})')
-    assert result == {"patterns": False, "wyckoffSwings": False, "sr": True}
+    assert result == {"patterns": True, "wyckoff": False, "wyckoffSwings": False, "sr": True}
     assert wyckoff_evaluate('patternOverlaysAfterSelection({patterns:true}, {scanner:"Momentum Breakout Long"}, {scanner:"Cup and Handle Breakout"})') == {"patterns": True}
-    assert wyckoff_evaluate('patternOverlaysAfterSelection({patterns:false}, {}, {scanner:"Wyckoff Distribution"})') == {"patterns": True}
+    assert wyckoff_evaluate('patternOverlaysAfterSelection({patterns:false}, {}, {scanner:"Wyckoff Distribution"})') == {"patterns": False, "wyckoff": True}
     assert 'patternOverlaysAfterSelection(previous, previousRow, scannerData)' in SOURCE

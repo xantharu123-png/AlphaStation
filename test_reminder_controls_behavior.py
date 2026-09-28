@@ -110,7 +110,7 @@ assert.equal(notices.length,101,'Reload must not replay a previously displayed r
 
 
 def test_reminders_remain_deletable_in_every_sidebar_without_a_trade_plan():
-    source = SOURCE[SOURCE.index("function DetailSidebar("):SOURCE.index("// Main App")]
+    source = SOURCE[SOURCE.index("function sidebarPlanAssessment("):SOURCE.index("// Main App")]
     code = r"""
 const assert=require('node:assert/strict');const babel=require(BABEL);
 const compiled=babel.transform(SOURCE,{presets:['react'],sourceType:'script'}).code;

@@ -170,7 +170,7 @@ def test_new_wyckoff_row_gets_daily_chart_without_overriding_later_user_choice(f
     row = {field: "Wyckoff Accumulation"}
     assert evaluate("isWyckoffScannerSelection(" + json.dumps(row) + ")") is True
     assert "isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData) ? '1D' : '4H'" in SOURCE
-    assert "patterns: isWyckoffScannerSelection(scannerData)" in SOURCE
+    assert "patterns: false, wyckoff: isWyckoffScannerSelection(scannerData)" in SOURCE
     start = SOURCE.index("// Default only for a newly selected Cup row")
     effect = SOURCE[start:SOURCE.index("const TIMEFRAMES", start)]
     assert "}, [scannerData]);" in effect

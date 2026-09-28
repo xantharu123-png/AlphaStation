@@ -8,7 +8,7 @@ from modules.level_zones import confirmed_pivot_evidence
 
 
 PARAMETERS = {
-    "version": "wyckoff_v3_rules_2", "entry_policy": "confirmed_breakout_optional_retest",
+    "version": "wyckoff_v3_rules_3", "entry_policy": "confirmed_breakout_optional_retest",
     "pivot_left": 1, "pivot_right": 1,
     "minimum_swing_atr": .50, "major_swing_atr": 2.0,
     "separate_test_bars": 3, "countermove_range_fraction": .20,

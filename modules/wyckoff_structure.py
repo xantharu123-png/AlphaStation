@@ -254,7 +254,7 @@ def _direction(bars, direction, tf, evidence):
             return trigger
 
         last_test, decisive, sos, lps = st, None, None, None
-        pending_test, pending_decisive = None, None
+        pending_test, pending_decisive, pending_progress = None, None, None
         last_upper_test, last_spring_test = ar, None
         breakout_failed, skip_until = False, st_confirmed + 1
         for index in range(st_confirmed + 1, len(bars)):
@@ -272,22 +272,50 @@ def _direction(bars, direction, tf, evidence):
                     events.append(decisive)
                     row.update(phase="C", variant="without_spring", score=60)
                 pending_decisive = None
+            if pending_progress is not None and pending_progress["confirmed_at"] <= now:
+                if sos is None:
+                    events.append(pending_progress)
+                    row.update(phase="D", score=70)
+                pending_progress = None
             p = prices[index]
             if p["low"] < lower:
+                if sos is not None:
+                    block("range_failed", structure=True, failed_index=index)
+                    break
                 recovery = next((j for j in range(index, min(index + 4, len(bars)))
                                  if bars[j].volume > 0 and prices[j]["close"] > lower + width * .10), None)
                 if rvol[index] is None:
                     block("spring_volume_unavailable", "data_missing")
                     break
+                # Recovery may span several candles. Every completed breach
+                # inside that interval must satisfy the same spring rules;
+                # skipping to a later recovery must not hide an earlier failure.
+                if rvol[index] < .85 and lower - p["low"] <= width * .20:
+                    recovery_end = recovery if recovery is not None else min(index + 3, len(bars) - 1)
+                    for checked in range(index + 1, recovery_end + 1):
+                        if prices[checked]["low"] >= lower:
+                            continue
+                        if rvol[checked] is None:
+                            block("spring_volume_unavailable", "data_missing")
+                            break
+                        if rvol[checked] >= .85 or lower - prices[checked]["low"] > width * .20:
+                            block("range_failed", structure=True, failed_index=checked)
+                            break
+                        if iso(bars[checked].closed_at) in ambiguous:
+                            block("ambiguous_intrabar_order", "data_missing")
+                            break
+                    if row["structure_state"] == "failed" or row["entry_state"] == "data_missing":
+                        break
                 if (rvol[index] >= .85 or lower - p["low"] > width * .20 or recovery is None):
                     if recovery is None and index + 3 >= len(bars) and rvol[index] < .85 and lower - p["low"] <= width * .20:
                         row["structure_state"] = "unclear"
                         block("counter_boundary_recovery_pending", "no_trigger")
                     else:
-                        block("range_failed", structure=True, failed_index=index)
-                    break
-                if sos is not None:
-                    block("range_failed", structure=True, failed_index=index)
+                        # A missing recovery becomes failure only when its
+                        # deadline closes, not on the initially tolerable dip.
+                        failed_index = (index + 3 if recovery is None and rvol[index] < .85
+                                        and lower - p["low"] <= width * .20 else index)
+                        block("range_failed", structure=True, failed_index=failed_index)
                     break
                 if iso(bars[index].closed_at) in ambiguous:
                     block("ambiguous_intrabar_order", "data_missing")
@@ -340,10 +368,11 @@ def _direction(bars, direction, tf, evidence):
                     and lower + width * .4 <= p["low"] < upper
                     and p["low"] > sign * decisive["price"] + width * .1
                     and rvol[index] is not None and rvol[index] < 1.2
-                    and prices[index + 1]["close"] > p["close"]
+                    and prices[lows[index]["confirmation_index"]]["close"] > p["close"]
+                    and pending_progress is None
                     and not any(e["name"] in {"InRangeSOS", "InRangeSOW"} for e in events)):
-                event("InRangeSOS", index, index + 1, p["low"], "D")
-                row.update(phase="D", score=70)
+                pending_progress = event("InRangeSOS", index, lows[index]["confirmation_index"],
+                                         p["low"], "D", publish=False)
             if (sos is None and p["close"] > upper and p["close"] > p["open"]
                     and iso(bars[index].closed_at) > secondary["confirmed_at"]
                     and rvol[index] is not None and rvol[index] >= 1.5

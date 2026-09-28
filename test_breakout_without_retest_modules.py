@@ -296,5 +296,5 @@ def test_replay_four_role_identity_needs_explicit_breakout_mode(mode):
 
 def test_changed_entry_policy_is_bound_to_replay_parameters():
     from modules.wyckoff import PARAMETERS
-    assert PARAMETERS["version"] == "wyckoff_v3_rules_2"
+    assert PARAMETERS["version"] == "wyckoff_v3_rules_3"
     assert PARAMETERS["entry_policy"] == "confirmed_breakout_optional_retest"

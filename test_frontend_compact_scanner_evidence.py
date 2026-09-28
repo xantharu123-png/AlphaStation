@@ -88,7 +88,7 @@ const info={cached_at:'2026-09-25T12:52:52Z',checked:12610,total:12610,diagnosti
 const feed={info,diagnostics:info.diagnostics,results:[],hasLoaded:true,refresh:()=>{}};
 const tree=render({feed}), visible=text(tree), full=text(tree,false);
 assert.match(visible,/Keine freigegebenen Signale/);assert.match(visible,/1D · Schlusskurse 24.09.2026/);
-assert.match(visible,/Details/);assert.ok(visible.length<130);
+assert.match(visible,/Diagnose/);assert.ok(visible.length<130);
 for(const value of ['Pruefprotokoll','12610','1294','garantierte','Vor Freigabe']) {
  assert.ok(!visible.includes(value),value+' should be collapsed');assert.ok(full.includes(value),value+' must remain available');
 }

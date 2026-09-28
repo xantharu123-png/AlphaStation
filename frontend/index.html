@@ -686,9 +686,23 @@ function isWyckoffScannerSelection(row) {
 }
 
 function patternOverlaysAfterSelection(previous, previousRow, nextRow) {
-    if (isWyckoffScannerSelection(nextRow)) return { ...previous, patterns: true };
-    if (isWyckoffScannerSelection(previousRow)) return { ...previous, patterns: false, wyckoffSwings: false };
+    if (isWyckoffScannerSelection(nextRow)) return { ...previous, wyckoff: true };
+    if (isWyckoffScannerSelection(previousRow)) return { ...previous, wyckoff: false, wyckoffSwings: false };
     return previous;
+}
+
+function visibleChartPatterns(patterns, overlays = {}, direction = '') {
+    return (Array.isArray(patterns) ? patterns : []).filter(pattern => {
+        if (isWyckoffPattern(pattern)) {
+            // Failed historical ranges remain inspectable in the closed evidence
+            // panel, but must not clutter the current support/resistance chart.
+            return !!overlays.wyckoff && pattern.model === 'causal_wyckoff_v3'
+                && ['developing', 'confirmed', 'continuation'].includes(pattern.structure_state)
+                && (!direction || direction === 'NEUTRAL' || pattern.direction === direction);
+        }
+        return !!overlays.patterns && (!direction || direction === 'NEUTRAL'
+            || (direction === 'SHORT' ? pattern.type !== 'bullish' : pattern.type !== 'bearish'));
+    });
 }
 
 function wyckoffPatternColor(pattern) {
@@ -3346,11 +3360,9 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
 
 function ScannerVisibilitySummary({ rows }) {
     const counts = scannerVisibleRowsSummary(rows);
-    if (!counts) return null;
+    if (!counts || !counts.unclassified) return null;
     return <div className="text-xs border border-amber-200 bg-amber-50 text-amber-900 rounded-lg p-3" role="status" data-testid="scanner-visibility-summary">
-        Im angezeigten Ergebnisstand: {counts.released} freigegebene Signale · {counts.candidate_warning} Kandidaten mit Warnungen · {counts.context} Marktkontext
-        {counts.unclassified > 0 && <span> · {counts.unclassified} ohne aktuellen Sichtbarkeitsnachweis</span>}.
-        {' '}Zaehlt nur die aktuell angezeigten Zeilen, gegebenenfalls einen Zwischenstand; keine Aussage ueber Mailzustellung.
+        {counts.unclassified} Ergebnisse ohne aktuellen Sichtbarkeitsnachweis.
     </div>;
 }
 
@@ -3665,11 +3677,11 @@ function ElliottDetailSidebar({ ticker, scannerData, onClose }) {
 
 function WyckoffPatternEvidence({ patterns, timeframe, onDaily, scannerRow, direction, enabled = false, showInternalSwings = false, onToggleInternalSwings }) {
     const selectedWyckoff = isWyckoffScannerSelection(scannerRow);
-    if (!selectedWyckoff && !enabled) return null;
+    if (!enabled) return null;
     const rows = wyckoffDisplayRows(patterns, scannerRow, direction);
     if (!rows.length && !selectedWyckoff) return null;
     return <details className="mb-3 mt-3 rounded border border-slate-300 p-3 text-xs" aria-label="Wyckoff-Phasen und Ereignisse">
-        <summary className="cursor-pointer font-semibold">Wyckoff · {timeframe} · {rows.length} Strukturen · Details</summary>
+        <summary className="cursor-pointer font-semibold">Wyckoff · {timeframe} · Details</summary>
         <p className="mt-1">A–E sind Phasen; die Zahlen an Ereignissen zeigen nur deren zeitliche Reihenfolge, keine Elliott-Wellen und keine feste A1–A5-Regel. ST #1 / #2 bezeichnet wiederholte Tests. Swing-Zahlen gelten lokal je Strukturgrad und Richtung.</p>
         <p className="mt-1">Zeitrahmen: {timeframe}. Strukturgrad: grosse / interne Swings derselben Historie, kein Wechsel auf 1H. Aktien-Signale bleiben auf abgeschlossenen 1D-Sessions; 1W ist uebergeordneter Kontext, 1H eine getrennte Detailansicht.</p>
         {onToggleInternalSwings && <label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={showInternalSwings} onChange={onToggleInternalSwings} className="mt-0.5" />Interne Swings im Chart einblenden (inkl. gestricheltem, unbestaetigtem letzten Abschnitt)</label>}
@@ -3888,6 +3900,52 @@ function CupPatternEvidence({ evidence, onDaily }) {
     </section>;
 }
 
+function sidebarPlanAssessment({ row = {}, detail = {}, chartData, timeframe, ticker }) {
+    const number = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+    const scannerSetup = row.trade_setup || null;
+    const detailSetup = detail.trade_setup || null;
+    const plan = row.native_plan_status === 'unavailable' ? null
+        : row.selected_snapshot && scannerSetup ? scannerSetup
+        : detailSetup?.starter_plan ? detailSetup : scannerSetup || detailSetup;
+    const historicalHealth = plan === scannerSetup ? row.trade_health || null : detail.trade_health || null;
+    const historicalReasons = [...new Set([
+        ...(Array.isArray(historicalHealth?.exclusion_reasons) ? historicalHealth.exclusion_reasons : []),
+        ...(Array.isArray(historicalHealth?.warnings) ? historicalHealth.warnings : []),
+    ].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
+    const candles = Array.isArray(chartData?.candles) ? chartData.candles : [];
+    const candle = candles[candles.length - 1];
+    const sameChart = chartData?.ticker === ticker && chartData?.timeframe === timeframe;
+    const available = sameChart && chartData?.chart_freshness?.stale !== true
+        && number(candle?.time) !== null && number(candle?.close) !== null;
+    const price = available ? candle.close : null;
+    const previousClose = number(candles[candles.length - 2]?.close);
+    const changePct = available && previousClose !== null ? (price / previousClose - 1) * 100 : null;
+    const direction = String(plan?.direction || row.direction || '').toUpperCase();
+    const entry = number(plan?.entry ?? plan?.main_entry);
+    const stop = number(plan?.stop_loss ?? plan?.stop);
+    const tp1 = number(plan?.tp1), tp2 = number(plan?.tp2);
+    const long = direction === 'LONG';
+    const valid = [entry, stop, tp1, tp2].every(value => value !== null)
+        && (long ? stop < entry && entry < tp1 && tp1 < tp2
+            : direction === 'SHORT' && tp2 < tp1 && tp1 < entry && entry < stop);
+    const result = { plan, price, changePct, observedAt: available ? candle.time : null, timeframe,
+        historicalHealth, historicalReasons, healthScore: null, distanceR: null, rr: null,
+        state: 'price_unavailable', decision: 'WATCH_ONLY', label: 'Kursabgleich nicht verfügbar' };
+    if (!valid) return { ...result, state: 'invalid_plan', decision: 'NO_TRADE', label: 'Kein belastbarer Handelsplan' };
+    if (!available) return result;
+    const sign = long ? 1 : -1;
+    const risk = sign * (entry - stop);
+    result.distanceR = Math.round(sign * (price - entry) / risk * 100) / 100;
+    if (sign * (price - stop) <= 0) return { ...result, state: 'stop_breached', decision: 'NO_TRADE',
+        label: long ? 'Stopniveau unterschritten' : 'Stopniveau überschritten' };
+    if (sign * (price - tp1) >= 0) return { ...result, state: 'target_reached', decision: 'NO_TRADE', label: 'Erstes Ziel bereits erreicht' };
+    if (sign * (price - entry) < 0) return { ...result, state: 'entry_pending', decision: 'WAIT_FOR_TRIGGER', label: 'Einstieg noch nicht erreicht' };
+    result.rr = Math.round(((tp1 - price) + (tp2 - price)) / 2 / (price - stop) * 100) / 100;
+    // Price geometry alone cannot refresh volume, trend, trigger or liquidity
+    // evidence. Never carry the stored 98/100 forward as a new execution verdict.
+    return { ...result, state: 'levels_intact', label: 'Planlevel intakt · Einstieg neu prüfen' };
+}
+
 // DetailSidebar Component
 function DetailSidebar({ ticker, onClose, scannerData }) {
     const [tickerData, setTickerData] = useState(null);
@@ -3899,7 +3957,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const [customWidth, setCustomWidth] = useState(null);
     const [customHeight, setCustomHeight] = useState(null);
     const [timeframe, setTimeframe] = useState(() => isCupScannerSelection(scannerData) || isWyckoffScannerSelection(scannerData) ? '1D' : '4H');
-    const [overlays, setOverlays] = useState(() => ({ ema: true, vwap: false, sr: false, fib: false, patterns: isWyckoffScannerSelection(scannerData), bb: false, vrvp: true, vol: false }));
+    const [overlays, setOverlays] = useState(() => ({ ema: true, vwap: false, sr: false, fib: false, patterns: false, wyckoff: isWyckoffScannerSelection(scannerData), bb: false, vrvp: true, vol: false }));
     const [reminderBusy, setReminderBusy] = useState(false);
     const [reminderConditionChoice, setReminderConditionChoice] = useState(null);
     const [personalPositions, setPersonalPositions] = useState([]);
@@ -4258,6 +4316,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             if (candles.length > 0) candleSeries.current.setData(candles);
 
             const setupForChart = (() => {
+                if (scannerData?.native_plan_status === 'unavailable') return null;
                 const scannerSetup = scannerData?.trade_setup || null;
                 const detailSetup = tickerData?.trade_setup || null;
                 if (scannerData?.selected_snapshot && scannerSetup) return scannerSetup;
@@ -4492,7 +4551,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
             // Pattern and exact Cup-anchor markers share one combined update.
             const markers = [];
-            if (overlays.patterns && chartData.patterns) {
+            if ((overlays.patterns || overlays.wyckoff) && chartData.patterns) {
 
                 // V4.0: Pivot-Marker entfernt (nur Noise) — Pivots werden intern genutzt
 
@@ -4505,8 +4564,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 if (chartData.patterns.chart_patterns) {
                     const _usedTimes = new Set();
                     const _sevOrder = {'high': 0, 'medium': 1, 'low': 2};
-                    const _sorted = [...chartData.patterns.chart_patterns]
-                        .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
+                    const _sorted = visibleChartPatterns(chartData.patterns.chart_patterns, overlays, _viewDir)
                         .sort((a, b) => (_sevOrder[a.severity] || 2) - (_sevOrder[b.severity] || 2));
                     _sorted.forEach(p => {
                         if (isWyckoffPattern(p)) {
@@ -4560,7 +4618,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 }
 
                 // Harmonic pattern lines (gefiltert nach Richtung)
-                if (chartData.patterns.harmonic) {
+                if (overlays.patterns && chartData.patterns.harmonic) {
                     chartData.patterns.harmonic
                         .filter(h => !_viewDir || _viewDir === 'NEUTRAL' || h.direction === _viewDir)
                         .forEach(h => {
@@ -4701,7 +4759,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const sidebarCandidate = scannerCandidatePresentation(cd);
     const sidebarCompanyName = stockCompanyName({...d, ...cd, ticker});
     const quality = cd._quality || d._quality || null;
-    const tradeHealth = cd.trade_health || d.trade_health || null;
+    const stockPlan = !isCrypto ? sidebarPlanAssessment({ row: cd, detail: d, chartData, timeframe, ticker }) : null;
+    const tradeHealth = isCrypto ? cd.trade_health || d.trade_health || null : {
+        decision: stockPlan.decision, decision_label: stockPlan.label, health_score: null,
+        metrics: { current_price: stockPlan.price, live_rr: stockPlan.rr, distance_to_entry_r: stockPlan.distanceR },
+    };
     const marketContext = cd.market_context || d.market_context || tradeHealth?.market_context || quality?.market_context || null;
     const tradeHealthTone = nativePlanUnavailable || sidebarCandidate?.status === 'candidate_warning' ? 'border-amber-200 bg-amber-50 text-amber-900' : !tradeHealth ? '' :
         tradeHealth.decision === 'TRADEABLE' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' :
@@ -4745,13 +4807,15 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     );
     const stockQuoteChange = firstFiniteNumber(d.price) != null ? firstFiniteChange(d.change_1d) : firstFiniteChange(
         cd.change_pct, cd.ChangePct, cd.ChangePct1D, cd.change_percent, cd.ChangePercent, cd['Change %'], cd['Änderung%']);
-    const price = Number(_chartPrice ?? stockQuotePrice) || 0;
-    const change = _chartChange ?? stockQuoteChange;
-    const priceSourceLabel = _chartPrice ? `${chartData?.timeframe || timeframe} Chart` : firstFiniteNumber(d.price) != null ? 'Aktuelle Detailabfrage' : 'Scanner-Snapshot';
+    const price = Number(isCrypto ? _chartPrice ?? stockQuotePrice : stockPlan.price ?? stockQuotePrice) || 0;
+    const change = isCrypto ? _chartChange ?? stockQuoteChange
+        : stockPlan.price !== null ? stockPlan.changePct : stockQuoteChange;
+    const priceSourceLabel = (isCrypto ? _chartPrice : stockPlan.price) ? `${chartData?.timeframe || timeframe} Chart` : firstFiniteNumber(d.price) != null ? 'Aktuelle Detailabfrage' : 'Scanner-Snapshot';
     const changeClass = change == null ? 'text-gray-500' : change >= 0 ? 'color-positive' : 'color-negative';
     const signalColor = s => s === 'bullish' ? '#059669' : s === 'bearish' ? '#dc2626' : '#6b7280';
     const activeTradeSetup = (() => {
         if (nativePlanUnavailable) return null;
+        if (!isCrypto) return stockPlan.plan;
         const scannerSetup = cd.trade_setup || null;
         const detailSetup = d.trade_setup || null;
         if (cd.selected_snapshot && scannerSetup) return scannerSetup;
@@ -4761,7 +4825,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
     const starterPlan = activeTradeSetup?.starter_plan || null;
     const setupAction = activeTradeSetup?.trade_action || cd.trade_action || d.trade_action || '';
     const normalizedSetupAction = String(setupAction || '').toUpperCase();
-    const tradeSignal = String(cd.trade_signal || d.trade_signal || '').toUpperCase();
+    const tradeSignal = isCrypto ? String(cd.trade_signal || d.trade_signal || '').toUpperCase()
+        : stockPlan.decision === 'NO_TRADE' ? 'KEIN_EINSTIEG' : stockPlan.decision === 'WAIT_FOR_TRIGGER' ? 'TRIGGER_ABWARTEN' : 'PLAN_PRÜFEN';
     const finalTradeDecision = String(tradeHealth?.decision || '').toUpperCase();
     const finalNoTrade = finalTradeDecision === 'NO_TRADE';
     const finalWaitRetest = finalTradeDecision === 'WAIT_FOR_RETEST';
@@ -4785,8 +4850,8 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
         return 'BEOBACHTEN';
     })();
     const rawEntryStatus = activeTradeSetup?.entry_status || cd.entry_status || '';
-    const entryStatusDisplay = String(rawEntryStatus).toUpperCase() === 'BEOBACHTEN' ? '' : rawEntryStatus;
-    const setupActionLabel = activeTradeSetup?.action_label || cd.signal_label || cd.action_label || timingHeadline || tradeSignal || setupAction || 'Setup';
+    const entryStatusDisplay = !isCrypto || String(rawEntryStatus).toUpperCase() === 'BEOBACHTEN' ? '' : rawEntryStatus;
+    const setupActionLabel = !isCrypto ? stockPlan.label : activeTradeSetup?.action_label || cd.signal_label || cd.action_label || timingHeadline || tradeSignal || setupAction || 'Setup';
     const setupTone = (tradeSignal === 'JETZT_TRADEN' && finalTradeable)
         ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
         : (finalNoTrade || tradeSignal === 'NICHT_TRADEN' || normalizedSetupAction === 'NO_LONG_CHASE' || normalizedSetupAction === 'NO_TRADE')
@@ -5385,6 +5450,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         { key: 'bb', label: 'BB', color: '#9333ea' },
                         { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
                         { key: 'patterns', label: 'Patterns', color: '#10b981' },
+                        { key: 'wyckoff', label: 'Wyckoff', color: '#6366f1' },
                         { key: 'vol', label: 'Vol', color: '#6b7280' },
                     ].map(({ key, label, color }) => (
                         <button key={key}
@@ -5454,10 +5520,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                         <summary className="cursor-pointer">Details zum Signal</summary>
                         <div className="mt-2">{cd.scanner} · {viewDirection} · Datenstand: {cd.snapshot_at || 'nicht übermittelt'}</div>
                         <div className="mt-1">Planwerte aus dem Scan; der Chart zeigt die ausgewählte Zeiteinheit.</div>
+                        {!isCrypto && <BreakoutRetestWarning row={retestWarningRow} />}
                     </details>
                 )}
 
-                <BreakoutRetestWarning row={retestWarningRow} />
+                {(!cd.selected_snapshot || isCrypto) && <BreakoutRetestWarning row={retestWarningRow} />}
 
                 {Array.isArray(cd.bi_indicator_checks || cd.BI_IndicatorChecks) && (
                     <details className="mb-3 rounded-lg border border-gray-200 p-3 text-xs" data-testid="bi-indicator-evidence">
@@ -5516,43 +5583,23 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                 )}
 
-                {tradeHealth && !isCrypto && (
-                    <div className={`border p-3 rounded-lg mb-3 text-xs ${tradeHealthTone}`}>
-                        <div className="flex items-center justify-between gap-2 mb-2">
-                            <h4 className="font-semibold text-sm">Trade Health</h4>
-                            <span className="font-bold">{tradeHealth.decision_label || tradeHealth.decision} ({tradeHealth.health_score}/100)</span>
+                {stockPlan && (
+                    <div className={`border p-3 rounded-lg mb-3 text-xs ${tradeHealthTone}`} data-testid="sidebar-price-assessment">
+                        <div className="opacity-70 mb-1">Kursabgleich · {timeframe}</div>
+                        <div className="font-semibold">{stockPlan.label}</div>
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                            {stockPlan.distanceR !== null && <span>Abstand zum Einstieg: <b>{stockPlan.distanceR.toFixed(2)}R</b></span>}
+                            {stockPlan.rr !== null && <span>R:R ab Chartkurs: <b>{stockPlan.rr.toFixed(2)}</b></span>}
                         </div>
-                        <div className="grid grid-cols-3 gap-2">
-                            <div>
-                                <div className="opacity-70">Entry</div>
-                                <div className="font-semibold">{tradeHealth.entry_quality} {tradeHealth.entry_quality_score != null ? `${tradeHealth.entry_quality_score}/100` : ''}</div>
-                            </div>
-                            <div>
-                                <div className="opacity-70">Fakeout</div>
-                                <div className={`font-semibold ${riskTone(tradeHealth.fakeout_risk)}`}>{tradeHealth.fakeout_risk}</div>
-                            </div>
-                            <div>
-                                <div className="opacity-70">Chase</div>
-                                <div className={`font-semibold ${riskTone(tradeHealth.chase_risk)}`}>{tradeHealth.chase_risk}</div>
-                            </div>
-                        </div>
-                        {tradeHealth.metrics && (
-                            <div className="mt-2 grid grid-cols-2 gap-2 opacity-80">
-                                <div>Live R:R: <span className="font-semibold">{tradeHealth.metrics.live_rr != null ? tradeHealth.metrics.live_rr : '-'}</span></div>
-                                <div>Distanz: <span className="font-semibold">{tradeHealth.metrics.distance_to_entry_r != null ? `${tradeHealth.metrics.distance_to_entry_r}R` : '-'}</span></div>
-                            </div>
-                        )}
-                        {tradeHealth.exclusion_reasons && tradeHealth.exclusion_reasons.length > 0 && (
-                            <div className="mt-2 rounded border border-red-200 bg-white/60 p-2 text-red-800">
-                                {tradeHealth.exclusion_reasons.slice(0, 3).join(' | ')}
-                            </div>
-                        )}
-                        {tradeHealth.warnings && tradeHealth.warnings.length > 0 && (
-                            <div className="mt-2 opacity-90">{tradeHealth.warnings.slice(0, 4).join(' | ')}</div>
-                        )}
-                        {tradeHealth.positives && tradeHealth.positives.length > 0 && (
-                            <div className="mt-2 text-emerald-700">{tradeHealth.positives.slice(0, 3).join(' | ')}</div>
-                        )}
+                        <details className="mt-2 opacity-75">
+                            <summary className="cursor-pointer">Berechnungsbasis</summary>
+                            <div className="mt-1">{stockPlan.observedAt ? `Chartkerze ${new Date(stockPlan.observedAt * 1000).toLocaleString('de-CH')} · $${stockPlan.price.toFixed(2)}` : 'Kein passender aktueller Chartkurs verfügbar.'}</div>
+                            <div>Vergleich mit den gespeicherten Planleveln; keine erneute vollständige Signalprüfung. R:R vor Kosten, beide Ziele gleich gewichtet.</div>
+                            {stockPlan.historicalHealth && <div className="mt-1">Bewertung beim Scan: {stockPlan.historicalHealth.decision_label || stockPlan.historicalHealth.decision}{Number.isFinite(stockPlan.historicalHealth.health_score) ? ` · ${stockPlan.historicalHealth.health_score}/100` : ''}. Keine aktuelle Einstiegsfreigabe.</div>}
+                            {stockPlan.historicalReasons.length > 0 && <ul className="mt-1 list-disc pl-4">
+                                {stockPlan.historicalReasons.map(reason => <li key={reason}>{reason}</li>)}
+                            </ul>}
+                        </details>
                     </div>
                 )}
 
@@ -5652,14 +5699,14 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
 
 
                 <CupPatternEvidence evidence={cupEvidence} onDaily={() => setTimeframe('1D')} />
-                <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.patterns}
+                <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.wyckoff}
                     onDaily={() => setTimeframe('1D')} scannerRow={scannerData} direction={viewDirection}
-                    showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
+                    showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, wyckoff: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                 {/* Pattern Info */}
                 {/* V2.6b: Pattern-Badges nach Richtung gefiltert */}
                 {overlays.patterns && chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                     const _vd = viewDirection;
-                    const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
+                    const filtered = visibleChartPatterns(chartData.patterns.chart_patterns, { patterns: true }, _vd);
                     return filtered.length > 0 ? (
                     <div className="mb-3 text-xs">
                         {filtered.map((p, i) => (
@@ -5670,7 +5717,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     </div>
                     ) : null;
                 })()}
-                {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
+                {overlays.patterns && chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
                     const _vd = viewDirection;
                     const filtered = chartData.patterns.harmonic.filter(h => (!_vd || _vd === 'NEUTRAL' || h.direction === _vd) && (h.score || 0) >= 30);
                     return filtered.length > 0 ? (
@@ -5778,7 +5825,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 <div className="bg-gray-50 p-3 rounded-lg mb-3 text-xs">
                     <h4 className="font-semibold text-sm mb-2">Preis</h4>
                     <div className="grid grid-cols-3 gap-2">
-                        <div><span className="text-gray-500">1D</span> <span className={change >= 0 ? 'color-positive' : 'color-negative'}>{change}%</span></div>
+                        <div><span className="text-gray-500">1D</span> <span className={stockQuoteChange == null ? 'text-gray-500' : stockQuoteChange >= 0 ? 'color-positive' : 'color-negative'}>{stockQuoteChange == null ? '–' : `${stockQuoteChange.toFixed(2)}%`}</span></div>
                         <div><span className="text-gray-500">5D</span> <span className={d.change_5d == null ? 'text-gray-500' : d.change_5d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_5d == null ? '—' : `${d.change_5d}%`}</span></div>
                         <div><span className="text-gray-500">20D</span> <span className={d.change_20d == null ? 'text-gray-500' : d.change_20d >= 0 ? 'color-positive' : 'color-negative'}>{d.change_20d == null ? '—' : `${d.change_20d}%`}</span></div>
                         <div><span className="text-gray-500">Open</span> ${d.open}</div>
@@ -5889,7 +5936,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                     <div className={`border p-3 rounded-lg mb-3 text-xs ${setupTone}`}>
                         <div className="flex items-center justify-between gap-2 mb-2">
                             <h4 className={`font-semibold text-sm ${setupTitleTone}`}>{setupActionLabel} ({activeTradeSetup.direction})</h4>
-                            {activeTradeSetup.entry_status && <span className="text-[11px] font-bold px-2 py-1 rounded bg-white/70">{activeTradeSetup.entry_status}</span>}
+                            <span className="text-[11px] text-gray-500">Gespeicherter Plan</span>
                         </div>
                         {barrierPrice && (
                             <div className="mb-3 rounded border border-amber-300 bg-amber-100/80 p-2 text-amber-950">
@@ -5899,7 +5946,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                                 </div>
                                 <div className="mt-1 text-[11px]">
                                     {barrierAction}
-                                    {Number.isFinite(barrierDistance) ? ` (${barrierDistance.toFixed(2)}% entfernt)` : ''}
+                                    {Number.isFinite(barrierDistance) ? ` (Abstand am Planstand: ${barrierDistance.toFixed(2)}%)` : ''}
                                     {Number.isFinite(barrierDistanceR) ? ` / ${barrierDistanceR.toFixed(2)}R` : ''}
                                     {barrierSource ? ` | ${humanizeLevelSource(barrierSource)}` : ''}.
                                 </div>
@@ -5931,9 +5978,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                             <div><span className="text-gray-500">Stop Loss</span> <span className="font-semibold color-negative">{formatSidebarPrice(activeTradeSetup.stop_loss ?? activeTradeSetup.stop)}</span></div>
                             <div><span className="text-gray-500">TP1</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp1)}</span></div>
                             <div><span className="text-gray-500">TP2</span> <span className="font-semibold color-positive">{formatSidebarPrice(activeTradeSetup.tp2)}</span></div>
-                            <div><span className="text-gray-500">R:R</span> <span className="font-semibold">{activeTradeSetup.rr}x</span></div>
-                            {activeTradeSetup.live_rr != null && <div><span className="text-gray-500">Live R:R</span> <span className="font-semibold">{activeTradeSetup.live_rr}</span></div>}
-                            {activeTradeSetup.distance_to_entry_r != null && <div><span className="text-gray-500">Distanz</span> <span className="font-semibold">{activeTradeSetup.distance_to_entry_r}R</span></div>}
+                            <div><span className="text-gray-500">Plan-R:R ab Entry</span> <span className="font-semibold">{activeTradeSetup.rr}x</span></div>
                             {activeTradeSetup.risk != null && <div><span className="text-gray-500">Risk</span> <span className="font-semibold">{formatSidebarPrice(activeTradeSetup.risk)}</span></div>}
                         </div>
                         {(activeTradeSetup.rr_tp1 || activeTradeSetup.rr_tp2 || activeTradeSetup.model) && (
@@ -7536,20 +7581,21 @@ function ScannerEvidence({ feed, kind = 'strategy', running = false }) {
     const counts = kind === 'bi'
         ? [['Geprueft', feed.info?.checked], ['Universum', feed.info?.total], ['Cache-Zeilen', diag.raw_cache_rows], ['17/20 gueltig', diag.validated_scanner_signals], ['Sichtbar', diag.visible_scanner_signals]]
         : [['Universum', diag.universe_count], ['Geprueft', feed.info?.checked], ['Vor Freigabe', diag.raw_matches_before_special_filter], ['Sichtbar', diag.visible_results_after_signal_policy ?? diag.final_results]];
+    const quiet = ['ready', 'candidates'].includes(compact.tone) && !feed.blockedStart;
     const tone = ['error', 'warning', 'candidates', 'stale', 'missing'].includes(compact.tone) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700';
-    return <div className={`rounded-lg border p-3 text-sm ${tone}`} role="status" aria-live="polite">
+    return <div className={quiet ? 'text-xs text-gray-500' : `rounded-lg border p-3 text-sm ${tone}`} role="status" aria-live="polite">
         <div className="flex flex-wrap items-center justify-between gap-2" data-testid="scanner-status-summary">
-            <div className="font-medium" data-testid={feed.blockedStart ? 'scanner-start-blocked' : undefined}>{compact.text}</div>
+            {!quiet && <div className="font-medium" data-testid={feed.blockedStart ? 'scanner-start-blocked' : undefined}>{compact.text}</div>}
             {dataLabel && <span className="text-xs opacity-75">{dataLabel}</span>}
         </div>
         <details className="mt-2 text-xs" data-testid="scanner-diagnostics">
-        <summary className="cursor-pointer select-none opacity-75">Details</summary>
+        <summary className="cursor-pointer select-none opacity-75">Diagnose</summary>
         <div className="mt-3 space-y-2">
         {feed.blockedStart && <div>
             <div>{feed.blockedStart}</div>
             <div>Darunter steht der bisherige Scanstand, nicht das Ergebnis dieses Startversuchs.</div>
         </div>}
-        <div>{state.text}</div>
+        {!quiet && <div>{state.text}</div>}
         {diag.data_mode === 'completed_daily_swing' && <div className="mt-1 text-xs">
             Swing-Modus: abgeschlossene Tageskerzen. Analysestand {diag.analysis_as_of || 'unbekannt'}.
             Kein Echtzeitkurs und keine garantierte Einstiegsausführung.
@@ -13142,7 +13188,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
     const [chartData, setChartData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [timeframe, setTimeframe] = useState('4H');
-    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, bb: false, vrvp: true, vol: false });
+    const [overlays, setOverlays] = useState({ ema: true, vwap: false, sr: false, fib: false, patterns: false, wyckoff: false, bb: false, vrvp: true, vol: false });
     const [aiData, setAiData] = useState(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [showInfoPanel, setShowInfoPanel] = useState(true);
@@ -13435,7 +13481,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             }
 
             // Patterns
-            if (overlays.patterns && chartData.patterns) {
+            if ((overlays.patterns || overlays.wyckoff) && chartData.patterns) {
                 const markers = [];
                 const _viewDir = (tickerData?.confluence?.direction || '').toUpperCase();
 
@@ -13445,8 +13491,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     // V4: Marker-Dedup — nur 1 Marker pro Kerze (höchste Priorität gewinnt)
                     const _usedTimes2 = new Set();
                     const _sevOrder2 = {'high': 0, 'medium': 1, 'low': 2};
-                    const _sorted2 = [...chartData.patterns.chart_patterns]
-                        .filter(p => !_viewDir || _viewDir === 'NEUTRAL' || (_viewDir === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'))
+                    const _sorted2 = visibleChartPatterns(chartData.patterns.chart_patterns, overlays, _viewDir)
                         .sort((a, b) => (_sevOrder2[a.severity] || 2) - (_sevOrder2[b.severity] || 2));
                     _sorted2.forEach(p => {
                         if (isWyckoffPattern(p)) {
@@ -13497,7 +13542,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     });
                 }
 
-                if (chartData.patterns.harmonic) {
+                if (overlays.patterns && chartData.patterns.harmonic) {
                     chartData.patterns.harmonic
                         .filter(h => !_viewDir || _viewDir === 'NEUTRAL' || h.direction === _viewDir)
                         .forEach(h => {
@@ -13737,6 +13782,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                                 { key: 'bb', label: 'BB', color: '#9333ea' },
                                 { key: 'vrvp', label: 'VRVP', color: '#06b6d4' },
                                 { key: 'patterns', label: 'Patterns', color: '#10b981' },
+                                { key: 'wyckoff', label: 'Wyckoff', color: '#6366f1' },
                                 { key: 'vol', label: 'Vol', color: '#6b7280' },
                             ].map(({ key, label, color }) => (
                                 <button key={key}
@@ -13766,13 +13812,13 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                         <div ref={chartContainer} style={{ position: 'relative', display: chartData && chartData.candles && chartData.candles.length > 0 ? 'block' : 'none' }}></div>
                     </div>
 
-                    <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.patterns}
+                    <WyckoffPatternEvidence patterns={chartData?.patterns?.chart_patterns} timeframe={timeframe} enabled={!!overlays.wyckoff}
                         onDaily={() => setTimeframe('1D')} direction={(d.confluence?.direction || '').toUpperCase()}
-                        showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, patterns: true, wyckoffSwings: !previous.wyckoffSwings }))} />
+                        showInternalSwings={!!overlays.wyckoffSwings} onToggleInternalSwings={() => setOverlays(previous => ({ ...previous, wyckoff: true, wyckoffSwings: !previous.wyckoffSwings }))} />
                     {/* Pattern badges */}
                     {overlays.patterns && chartData?.patterns?.chart_patterns && chartData.patterns.chart_patterns.length > 0 && (() => {
                         const _vd = (d.confluence?.direction || '').toUpperCase();
-                        const filtered = chartData.patterns.chart_patterns.filter(p => !_vd || _vd === 'NEUTRAL' || (_vd === 'SHORT' ? p.type !== 'bullish' : p.type !== 'bearish'));
+                        const filtered = visibleChartPatterns(chartData.patterns.chart_patterns, { patterns: true }, _vd);
                         return filtered.length > 0 ? (
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
                             {filtered.map((p, i) => (
@@ -13789,7 +13835,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                     })()}
 
                     {/* Harmonic badges */}
-                    {chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
+                    {overlays.patterns && chartData?.patterns?.harmonic && chartData.patterns.harmonic.length > 0 && (() => {
                         const _vd = (d.confluence?.direction || '').toUpperCase();
                         const filtered = chartData.patterns.harmonic.filter(h => (!_vd || _vd === 'NEUTRAL' || h.direction === _vd) && (h.score || 0) >= 30);
                         return filtered.length > 0 ? (
