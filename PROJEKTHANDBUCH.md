@@ -1,5 +1,11 @@
 # Alpha Station — Projekthandbuch
 
+> **Aktuelle Übergabe vom 29.09.2026:** [TODO.md](TODO.md) zuerst lesen.
+> Code `5acd7cf` ist auf Hetzner per Health-Revision und Bundle bestätigt.
+> Die neue Scan-/Chart-Textkorrektur ist lokal geprüft; ihr Rollout bleibt offen.
+> Die nachfolgenden älteren Datums-/Commitangaben sind
+> historische Stände, nicht die aktuelle Aufgabenliste.
+
 **Stand:** 11. August 2026 · **Arbeitsbranch:** `main` · **Tests:** 1503/1503 gruen
 **Repository:** `C:\Projekt\TradingBot` → GitHub `xantharu123-png/AlphaStation`
 **Produktion:** `root@178.104.69.209`, `/home/tradingbot/app`

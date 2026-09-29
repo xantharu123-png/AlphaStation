@@ -268,7 +268,7 @@ def test_compact_short_uses_support_without_changing_release_contract():
     row["visibility_warnings"][0]["price"] = 123.45
     assert compact_candidate(row)["message"] == "Unterstützung bei 123.45 nah"
     row.update(visibility_status="released", visibility_is_trade_signal=True)
-    assert compact_candidate(row)["label"] == "Signal freigegeben"
+    assert compact_candidate(row)["label"] == "Im Scan freigegeben"
     row["visibility_is_trade_signal"] = False
     assert compact_candidate(row)["label"] == "Einstieg nicht freigegeben"
     row.update(visibility_status="context", visibility_is_trade_signal=True)
@@ -358,7 +358,29 @@ def test_retest_warning_shares_one_candidate_panel_without_changing_release(rele
     assert tree["visible"].count("Rücktest offen") == 1
     assert tree["warningCodes"].count("breakout_confirmed_without_retest") == 1
     assert tree["statuses"] == ["released" if released else "candidate_warning"]
-    assert ("Signal freigegeben" if released else "Einstieg nicht freigegeben") in tree["visible"]
+    assert ("Im Scan freigegeben" if released else "Einstieg nicht freigegeben") in tree["visible"]
+
+
+@pytest.mark.parametrize("compact", [True, False])
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_release_is_a_saved_scan_verdict_not_a_current_entry_claim(compact, direction):
+    from test_frontend_plan_price_basis import chart, evaluate as assess, row as plan_row
+
+    selected = plan_row(direction)
+    selected.update(visibility_status="released", visibility_is_trade_signal=True,
+                    stock_swing_mode="completed_daily_swing", stock_swing_contract_version=1,
+                    swing_analysis_session="2026-09-25")
+    if direction == "SHORT":
+        selected["trade_setup"].update(entry=40, stop_loss=42, tp1=36, tp2=34)
+    original = json.dumps(selected, sort_keys=True)
+    table = render_candidate(selected, compact)
+    sidebar = assess(selected, chart(40 if direction == "LONG" else 41))
+    assert "Im Scan freigegeben" in table["visible"]
+    assert table["statuses"] == ["released"]
+    assert sidebar["label"] == ("Chartkurs unter Entry" if direction == "LONG" else "Chartkurs über Entry")
+    assert sidebar["decision"] == "WATCH_ONLY"
+    assert json.dumps(selected, sort_keys=True) == original
+    assert "noch nicht erreicht" not in table["visible"] + sidebar["label"]
 
 
 def test_retest_without_visibility_keeps_only_evidence_backed_fallback_panel():

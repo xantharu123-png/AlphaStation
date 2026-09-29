@@ -3220,7 +3220,7 @@ function scannerCandidatePresentation(row = {}) {
     });
     return {
         status: released ? 'released' : context ? 'context' : 'candidate_warning',
-        label: released ? 'Freigegebenes Signal' : context ? 'Marktkontext · kein Handelssignal' : 'Kandidat mit Warnung · kein freigegebener Einstieg',
+        label: released ? 'Im Scan freigegeben' : context ? 'Marktkontext · kein Handelssignal' : 'Kandidat mit Warnung · kein freigegebener Einstieg',
         warnings,
     };
 }
@@ -3352,7 +3352,7 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
         message = message ? `${message} · Rücktest offen` : 'Rücktest offen';
     }
     return {
-        label: view.status === 'released' ? 'Signal freigegeben'
+        label: view.status === 'released' ? 'Im Scan freigegeben'
             : view.status === 'context' ? 'Marktkontext · kein Signal' : 'Einstieg nicht freigegeben',
         message,
     };
@@ -3936,10 +3936,14 @@ function sidebarPlanAssessment({ row = {}, detail = {}, chartData, timeframe, ti
     const sign = long ? 1 : -1;
     const risk = sign * (entry - stop);
     result.distanceR = Math.round(sign * (price - entry) / risk * 100) / 100;
+    // A single chart quote describes price relative to saved levels, not the
+    // historical trigger path or an actual entry/stop/target execution.
     if (sign * (price - stop) <= 0) return { ...result, state: 'stop_breached', decision: 'NO_TRADE',
-        label: long ? 'Stopniveau unterschritten' : 'Stopniveau überschritten' };
-    if (sign * (price - tp1) >= 0) return { ...result, state: 'target_reached', decision: 'NO_TRADE', label: 'Erstes Ziel bereits erreicht' };
-    if (sign * (price - entry) < 0) return { ...result, state: 'entry_pending', decision: 'WAIT_FOR_TRIGGER', label: 'Einstieg noch nicht erreicht' };
+        label: long ? 'Chartkurs am/unter Stop' : 'Chartkurs am/über Stop' };
+    if (sign * (price - tp1) >= 0) return { ...result, state: 'price_at_or_beyond_target', decision: 'NO_TRADE',
+        label: long ? 'Chartkurs am/über TP1' : 'Chartkurs am/unter TP1' };
+    if (sign * (price - entry) < 0) return { ...result, state: 'price_before_entry',
+        label: long ? 'Chartkurs unter Entry' : 'Chartkurs über Entry' };
     result.rr = Math.round(((tp1 - price) + (tp2 - price)) / 2 / (price - stop) * 100) / 100;
     // Price geometry alone cannot refresh volume, trend, trigger or liquidity
     // evidence. Never carry the stored 98/100 forward as a new execution verdict.
