@@ -111,8 +111,11 @@ def load_email_dedupe(
     path: str,
     now: Optional[float] = None,
     max_keep_seconds: int = _DEFAULT_MAX_KEEP_SECONDS,
+    *, read_only: bool = False,
 ) -> Dict[str, float]:
     timestamp = _timestamp(now)
+    if read_only:
+        return _load_unlocked(path, timestamp, max_keep_seconds)
     with _locked_store(path):
         return _load_unlocked(path, timestamp, max_keep_seconds)
 
@@ -154,8 +157,13 @@ def email_dedupe_remaining(
     key: str,
     ttl_seconds: int,
     now: Optional[float] = None,
+    *, read_only: bool = False,
 ) -> int:
     timestamp = _timestamp(now)
+    if read_only:
+        dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
+        previous = dedupe.get(str(key))
+        return 0 if previous is None else int(max(0, int(ttl_seconds) - (timestamp - previous)))
     with _locked_store(path):
         dedupe = _load_unlocked(path, timestamp, _DEFAULT_MAX_KEEP_SECONDS)
         previous = dedupe.get(str(key))

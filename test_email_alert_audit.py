@@ -100,7 +100,7 @@ def test_alert_audit_counts_alertable_and_suppressed(tmp_path):
     assert audit["suppression_counts"]["grade_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["rvol_below_alert_threshold"] == 1
     assert audit["suppression_counts"]["score_below_alert_threshold"] == 3
-    assert audit["mail_status"] == "SEND_NOW"
+    assert audit["mail_status"] == "PRECHECK_PASSED"
     assert audit["decision_counts"]["TRADE_NOW"] == 1
     top_by_reason = {item["reason"]: item for item in audit["suppression_top"]}
     assert top_by_reason["score_below_alert_threshold"]["count"] == 3
@@ -272,7 +272,7 @@ def test_email_alert_audit_summary_explains_blockers(tmp_path, monkeypatch):
     assert summary["scanner_statuses"][0]["status"] == "BLOCKED"
 
 
-def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
+def test_biotech_producer_adds_missing_trade_levels_before_read_audit(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda *args, **kwargs: ({"BIOA"}, "unit"))
     base = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -323,7 +323,11 @@ def test_biotech_audit_adds_missing_trade_levels(tmp_path, monkeypatch):
         }],
     }))
 
+    # Plan construction belongs to the scan producer, not an audit GET.
+    api._enrich_biotech_alert_trade_levels()
+    before_audit = cache_file.read_bytes()
     audit = api._build_alert_audit_for_cache("biotech", str(cache_file))
+    assert cache_file.read_bytes() == before_audit
 
     # The real invalidation now remains behind the support zone. This fixture
     # has a valid plan but insufficient mail R/R; enrichment must not force mail.

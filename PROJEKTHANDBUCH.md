@@ -1,8 +1,15 @@
 # Alpha Station — Projekthandbuch
 
-> **Aktuelle Übergabe vom 29.09.2026:** [TODO.md](TODO.md) zuerst lesen.
-> Code `5acd7cf` ist auf Hetzner per Health-Revision und Bundle bestätigt.
-> Die neue Scan-/Chart-Textkorrektur ist lokal geprüft; ihr Rollout bleibt offen.
+> **Aktuelle Übergabe vom 30.09.2026:** [TODO.md](TODO.md) zuerst lesen.
+> Neuer Auftrag: Gap Long/Short 02:00 und 12:00 Europe/Zurich (Mo–Fr)
+> plus mathematische und Maildiagnose-Korrekturen. Details und getrennte
+> Freigaben im [Gap-/Mail-Prüfbericht](docs/GAP_MOMENTUM_SCHEDULE_AUDIT_2026-09-30.md).
+> Code `b742bbe` einschließlich Scan-/Chart-Textkorrektur und Bundle `00c5288ac5f0`
+> sind der zuletzt bestätigte Hetzner-Stand. Das neue Gap-/Mail-Paket ist lokal
+> fertig geprüft (9.304 bestanden, 5 Plattform-Skips; Bundle `4379c5dca540`).
+> Veröffentlichung und neuer Produktions-Rollout bleiben getrennte Nachweise.
+> Aktuelle vollständige Scannerläufe und die Zuordnung der am 29.09. empfangenen
+> Mail bleiben offen. Anmeldung am 30.09. bestätigt; Swing-Mailkanal ist aktiv.
 > Die nachfolgenden älteren Datums-/Commitangaben sind
 > historische Stände, nicht die aktuelle Aufgabenliste.
 

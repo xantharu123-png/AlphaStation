@@ -21,6 +21,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable
 from pathlib import Path
+from contextlib import contextmanager
 
 # JWT via PyJWT
 try:
@@ -685,14 +686,49 @@ def _is_admin_master_login(email: str, password: str) -> bool:
     )
 
 
-def verify_token(token: str) -> Optional[Dict]:
+@contextmanager
+def _auth_connection_readonly():
+    """Read the initialized auth store without schema creation or plan writes."""
+    path = Path(AUTH_DB_PATH).resolve()
+    if not path.is_file():
+        raise sqlite3.OperationalError("auth database unavailable")
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        yield conn
+    finally:
+        conn.close()
+
+
+def _load_users_readonly() -> Dict:
+    """Snapshot existing users; never run a legacy import or persist changes."""
+    if not AUTH_DB_IS_SQLITE:
+        with open(AUTH_DB_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
+            raise ValueError("auth schema unavailable")
+        return data
+    with _auth_connection_readonly() as conn:
+        rows = conn.execute("SELECT email, data FROM users").fetchall()
+    users = {}
+    for row in rows:
+        user = json.loads(row["data"])
+        if not isinstance(user, dict):
+            raise ValueError("auth user schema unavailable")
+        users[str(row["email"]).strip().lower()] = user
+    return {"users": users}
+
+
+def verify_token(token: str, *, read_only: bool = False) -> Optional[Dict]:
     """Verify signature, account binding, token version and revocation state."""
     if not HAS_JWT:
         return None
     try:
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         email = str(payload.get("email") or "").strip().lower()
-        user = _load_users_with_legacy_retry(email).get("users", {}).get(email)
+        db = _load_users_readonly() if read_only else _load_users_with_legacy_retry(email)
+        user = db.get("users", {}).get(email)
         if not email or not isinstance(user, dict):
             return None
         if not hmac.compare_digest(
@@ -708,7 +744,7 @@ def verify_token(token: str) -> Optional[Dict]:
 
         jti = str(payload.get("jti") or "").strip()
         if jti and AUTH_DB_IS_SQLITE:
-            with _sqlite_conn() as conn:
+            with (_auth_connection_readonly() if read_only else _sqlite_conn()) as conn:
                 row = conn.execute(
                     "SELECT 1 FROM revoked_tokens WHERE jti = ?", (jti,)
                 ).fetchone()
@@ -719,6 +755,10 @@ def verify_token(token: str) -> Optional[Dict]:
         return None
     except pyjwt.InvalidTokenError:
         return None
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        if read_only:
+            return None
+        raise
 
 
 def _clear_manual_plan_window(user: Dict[str, Any]) -> bool:
@@ -774,9 +814,18 @@ def _expire_temporary_access(user: Dict[str, Any], email: str = "") -> bool:
 
 
 # ── User Registration & Login ──
-def _load_effective_users_atomic() -> Dict[str, Dict[str, Any]]:
+def _load_effective_users_atomic(*, read_only: bool = False) -> Dict[str, Dict[str, Any]]:
     """Load all users and expire temporary access in one write transaction."""
     with _AUTH_DB_LOCK:
+        if read_only:
+            users = _load_users_readonly().get("users", {})
+            effective = {}
+            for email, raw in users.items():
+                if isinstance(raw, dict):
+                    user = dict(raw)
+                    _expire_temporary_access(user, email)
+                    effective[email] = user
+            return effective
         if not AUTH_DB_IS_SQLITE:
             db = _load_users()
             users = db.get("users", {})
@@ -1959,7 +2008,7 @@ def _effective_mail_channels(user: Dict[str, Any]) -> Dict[str, bool]:
     return {key: stored.get(key, True) is not False for key in MAIL_CHANNELS}
 
 
-def mail_channel_enabled(email: str, channel: str) -> bool:
+def mail_channel_enabled(email: str, channel: str, *, read_only: bool = False) -> bool:
     """True, wenn der User den Kanal nicht explizit abgeschaltet hat.
 
     Default True: unbekannte Adressen, fehlende Settings und unbekannte
@@ -1974,8 +2023,10 @@ def mail_channel_enabled(email: str, channel: str) -> bool:
     if "@" not in address:
         return True
     try:
-        users = _load_effective_users_atomic()
+        users = _load_effective_users_atomic(read_only=True) if read_only else _load_effective_users_atomic()
     except Exception:
+        if read_only:
+            raise
         return True
     user = users.get(address)
     if not isinstance(user, dict):
@@ -1983,7 +2034,7 @@ def mail_channel_enabled(email: str, channel: str) -> bool:
     return _effective_mail_channels(user).get(channel, True)
 
 
-def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "", mail_class: str = "trade", mail_channel: str = "") -> List[str]:
+def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_horizon: str = "", mail_class: str = "trade", mail_channel: str = "", *, read_only: bool = False) -> List[str]:
     """Return unique alert recipients for active plans with email-alert access.
 
     AUDIT H-3: mail_class steuert das Abonnenten-Routing. "watch"-Mails
@@ -1993,7 +2044,7 @@ def get_email_alert_recipients(alert_type: str = "", frequency: str = "", trade_
     api._send_email_alert separat behandelt und bekommt alle Klassen.
     """
     recipients: List[str] = []
-    users = _load_effective_users_atomic()
+    users = _load_effective_users_atomic(read_only=True) if read_only else _load_effective_users_atomic()
     alert_type = str(alert_type or "").strip().lower()
     frequency = _normalize_narrative_email_frequency(frequency) if frequency else ""
     trade_horizon = _normalize_trade_horizon(trade_horizon) if trade_horizon else ""

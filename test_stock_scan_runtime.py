@@ -209,6 +209,8 @@ def test_slow_cup_cannot_hold_ready_siblings_or_discard_their_candidate_reserve(
     monkeypatch.setenv("ALPHA_RUNTIME_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(api.time, "sleep", lambda *a: None)
     cache, before, recorded = _mock_sweep(monkeypatch, tmp_path, {})
+    hourly_strategies = ("Momentum Breakout Long", "Cup and Handle Breakout")
+    assert tuple(api._AUTO_STOCK_ALERT_STRATEGIES) == hourly_strategies
     calls = []
     @runtime.bounded_leaf
     def leaf(name, **kwargs):
@@ -221,10 +223,11 @@ def test_slow_cup_cannot_hold_ready_siblings_or_discard_their_candidate_reserve(
     monkeypatch.setattr(api, "_strategy_scan_wrapper", leaf)
     with pytest.raises(ScannerDataError) as caught:
         api._stock_strategy_alert_sweep_wrapper()
-    assert calls == list(STRATEGIES)
+    assert calls == list(hourly_strategies)
     assert len(recorded["mail_calls"]) == 1
     rows = recorded["mail_calls"][0][1]
-    assert len(rows) == 120 and all(row["Strategy"] != STRATEGIES[-1] for row in rows)
+    assert len(rows) == 40 * (len(hourly_strategies) - 1)
+    assert all(row["Strategy"] == hourly_strategies[0] for row in rows)
     assert caught.value.diagnostics["strategy_results"][CODES[-1]]["error_code"] == "scan_timeout"
     assert caught.value.diagnostics["mail_status"] == "guarded"
     assert caught.value.diagnostics["coverage"] == "incomplete"

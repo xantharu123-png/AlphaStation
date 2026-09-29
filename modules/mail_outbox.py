@@ -83,6 +83,8 @@ __all__ = [
     "mark_uncertain",
     "process_outbox",
     "stats",
+    "readonly_stats",
+    "load_tracker_acceptance_pending_readonly",
 ]
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -410,6 +412,31 @@ def load_tracker_acceptance_pending(
             key=lambda item: (float(item.get("accepted_at") or 0), str(item.get("receipt"))),
         )
     except Exception:
+        return None
+
+
+def load_tracker_acceptance_pending_readonly(
+    *, db_path: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
+    """Read the atomically published journal without creating a lock or file."""
+    entries = _load_uncertain_registry_unlocked(
+        _tracker_acceptance_journal_path(db_path)
+    )
+    if entries is None:
+        return None
+    pending: List[Dict[str, Any]] = []
+    try:
+        for receipt, entry in entries.items():
+            if not isinstance(entry, dict):
+                return None
+            if str(entry.get("status") or "pending") != "pending":
+                continue
+            pending.append({"receipt": receipt, **entry})
+        return sorted(
+            pending,
+            key=lambda item: (float(item.get("accepted_at") or 0), str(item.get("receipt"))),
+        )
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -1221,5 +1248,92 @@ def stats(
                 counts["last_error"] = str(latest_error["last_error"] or "")
         counts["available"] = not bool(counts["error"])
     except Exception as exc:
+        counts["error"] = str(exc) or counts["error"]
+    return counts
+
+
+def readonly_stats(
+    *, now: Optional[float] = None, db_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Operator snapshot: never create/migrate/recover/expire an outbox.
+
+    Retry maintenance remains owned by the worker. Existing SQLite data is
+    queried with mode=ro; absent databases and schema failures are unavailable,
+    not a successfully checked empty queue. JSON journals use atomic snapshots.
+    """
+    now = float(now if now is not None else time.time())
+    counts: Dict[str, Any] = {
+        "enabled": outbox_enabled(), "available": False,
+        "pending": 0, "sending": 0, "delivering": 0, "queued": 0,
+        "sent": 0, "expired": 0, "dead": 0, "uncertain": 0, "total": 0,
+        "pending_with_errors": 0, "oldest_pending_age_seconds": None,
+        "oldest_pending_created_at": None,
+        "tracker_acceptance_pending_count": 0,
+        "tracker_acceptance_oldest_at": None,
+        "tracker_acceptance_available": True, "last_error": "", "error": "",
+    }
+    fallback = _load_uncertain_registry_unlocked(_uncertain_registry_path(db_path))
+    if fallback is None:
+        counts["error"] = "uncertain fallback registry unreadable"
+        fallback_count = 0
+    else:
+        fallback_count = len(fallback)
+        counts["uncertain"] = fallback_count
+        counts["total"] = fallback_count
+    accepted = load_tracker_acceptance_pending_readonly(db_path=db_path)
+    if accepted is None:
+        counts["tracker_acceptance_available"] = False
+    else:
+        counts["tracker_acceptance_pending_count"] = len(accepted)
+        times = []
+        for item in accepted:
+            try:
+                stamp = float(item.get("accepted_at"))
+                if math.isfinite(stamp) and stamp > 0:
+                    times.append(stamp)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if times:
+            counts["tracker_acceptance_oldest_at"] = min(times)
+    if not counts["enabled"]:
+        return counts
+    path = Path(_db_path(db_path)).resolve()
+    if not path.is_file():
+        counts["error"] = counts["error"] or "outbox database unavailable"
+        return counts
+    try:
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS n FROM mail_outbox GROUP BY status"
+            ).fetchall():
+                state = str(row["status"])
+                # Unknown states contribute to total, never overwrite metadata.
+                if state in {"pending", "sending", "delivering", "sent", "expired", "dead", "uncertain"}:
+                    counts[state] = int(row["n"]) + (fallback_count if state == "uncertain" else 0)
+                counts["total"] += int(row["n"])
+            counts["queued"] = counts["pending"] + counts["sending"] + counts["delivering"]
+            pending = conn.execute(
+                "SELECT MIN(created_at) AS oldest, "
+                "SUM(CASE WHEN last_error <> '' THEN 1 ELSE 0 END) AS with_errors "
+                "FROM mail_outbox WHERE status IN ('pending','sending','delivering')"
+            ).fetchone()
+            if pending is not None:
+                counts["pending_with_errors"] = int(pending["with_errors"] or 0)
+                if pending["oldest"] is not None:
+                    counts["oldest_pending_created_at"] = float(pending["oldest"])
+                    counts["oldest_pending_age_seconds"] = max(0, int(now - float(pending["oldest"])))
+            latest_error = conn.execute(
+                "SELECT last_error FROM mail_outbox WHERE last_error <> '' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if latest_error is not None:
+                counts["last_error"] = str(latest_error["last_error"] or "")
+        finally:
+            conn.close()
+        counts["available"] = not bool(counts["error"])
+    except (OSError, sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
         counts["error"] = str(exc) or counts["error"]
     return counts

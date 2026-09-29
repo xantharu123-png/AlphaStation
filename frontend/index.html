@@ -14021,6 +14021,8 @@ function AdminTab() {
     const [users, setUsers] = useState([]);
     const [stats, setStats] = useState(null);
     const [logs, setLogs] = useState([]);
+    const [mailAudit, setMailAudit] = useState(null);
+    const [mailError, setMailError] = useState('');
     const [coupons, setCoupons] = useState([]);
     const [tickets, setTickets] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -14047,6 +14049,7 @@ function AdminTab() {
         if (activePanel === 'users') fetchUsers();
         if (activePanel === 'stats') fetchStats();
         if (activePanel === 'logs') fetchLogs();
+        if (activePanel === 'mail') fetchMailAudit();
         if (activePanel === 'coupons') fetchCoupons();
         if (activePanel === 'tickets') fetchTickets();
     }, [activePanel]);
@@ -14076,6 +14079,26 @@ function AdminTab() {
             if (res.ok) { const d = await res.json(); setLogs(d.logs || []); }
         } catch(e) { console.error(e); }
         setLoading(false);
+    };
+
+    const fetchMailAudit = async () => {
+        setLoading(true);
+        setMailError('');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            const res = await fetch(`${API}/api/email-alert-audit`, { headers, signal: controller.signal });
+            if (!res.ok) throw new Error('audit_unavailable');
+            const data = await res.json();
+            if (data.status !== 'ok' || !data.delivery) throw new Error('audit_unavailable');
+            setMailAudit(data);
+        } catch(e) {
+            setMailAudit(null);
+            setMailError('Mailstatus derzeit nicht abrufbar.');
+        } finally {
+            clearTimeout(timeout);
+            setLoading(false);
+        }
     };
 
     const fetchCoupons = async () => {
@@ -14166,6 +14189,7 @@ function AdminTab() {
         { id: 'coupons', label: 'Gutscheine', icon: '🎟️' },
         { id: 'tickets', label: 'Tickets', icon: '🎫' },
         { id: 'logs', label: 'System Logs', icon: '📋' },
+        { id: 'mail', label: 'Mailversand', icon: '✉️' },
     ];
 
     const planColors = { trial: '#f59e0b', expired: '#6b7280', basic: '#3b82f6', pro: '#8b5cf6', elite: '#f59e0b' };
@@ -14179,6 +14203,10 @@ function AdminTab() {
 
     const cardStyle = { background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: 12, padding: 20 };
     const badgeStyle = (color) => ({ display: 'inline-block', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700, background: `${color}22`, color, border: `1px solid ${color}44` });
+    const mailNumber = (value) => Number.isFinite(value) ? value : '—';
+    const mailAccepted = (pipeline) => Number.isFinite(pipeline?.sent) && Number.isFinite(pipeline?.partial) ? pipeline.sent + pipeline.partial : null;
+    const mailScannerNames = {bi_long:'BI Long',bi_short:'BI Short',biotech:'Biotech',bear:'Bear',orb:'ORB',new_listing:'New Listing',early_movers:'Early Movers',strategy_scan:'Aktienstrategien',strat_gap_momentum_long:'Gap Momentum Long',strat_gap_momentum_short:'Gap Momentum Short'};
+    const mailEventNames = {sent:'SMTP angenommen',partial:'Teilweise angenommen',skipped:'Ausgelassen',error:'Versandfehler',outbox_queued:'Warteschlange',outbox_skipped:'Nicht zwischengespeichert'};
 
     return (
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
@@ -14320,6 +14348,44 @@ function AdminTab() {
                         </>
                     )}
                 </div>
+            )}
+
+            {/* Admin-only operational evidence; never an extra scanner warning block. */}
+            {activePanel === 'mail' && (
+                <section aria-label="Mailversand">
+                    <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:16}}>
+                        <button onClick={fetchMailAudit} disabled={loading} className="button" style={{padding:'10px 20px'}}>Aktualisieren</button>
+                        <span style={{fontSize:12,color:'var(--text-muted)'}}>{loading ? 'Laden…' : mailAudit?.timestamp ? new Date(mailAudit.timestamp).toLocaleString('de-CH') : ''}</span>
+                    </div>
+                    {mailError && <div role="alert" style={{...cardStyle,color:'#b45309'}}>{mailError}</div>}
+                    {mailAudit && <>
+                        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:16}}>
+                            {[
+                                ['Swing-Empfänger',mailAudit.delivery.recipient_counts?.stocks_swing],
+                                ['SMTP-Annahmen',mailAccepted(mailAudit.delivery.pipeline)],
+                                ['Ausgelassen',mailAudit.delivery.pipeline?.skipped],
+                                ['Versandfehler',mailAudit.delivery.pipeline?.errors],
+                                ['Warteschlange',mailAudit.delivery.pipeline?.outbox?.available ? mailAudit.delivery.pipeline.outbox.pending : null],
+                            ].map(([label,value]) => <div key={label} style={cardStyle}><strong style={{fontSize:24}}>{mailNumber(value)}</strong><div style={{fontSize:12,color:'var(--text-muted)'}}>{label}</div></div>)}
+                        </div>
+                        <div style={{fontSize:12,color:'var(--text-muted)',marginBottom:16}}>Versandentscheidungen: letzte maximal 50 seit API-Start, höchstens 24 Stunden. SMTP-Annahme ist keine Bestätigung im Postfach.</div>
+                        {mailAudit.delivery.pipeline?.partial > 0 && <div style={{fontSize:12,color:'#b45309',marginBottom:16}}>Davon {mailAudit.delivery.pipeline.partial} nur teilweise angenommen.</div>}
+                        <div style={{...cardStyle,marginBottom:16}}>
+                            <h3 style={{margin:'0 0 12px',fontSize:15}}>Letzte Versandentscheidungen</h3>
+                            {(mailAudit.delivery.recent_decisions || []).length === 0 ? <span style={{color:'var(--text-muted)'}}>Noch keine protokollierte Versandentscheidung.</span> :
+                                <div style={{overflowX:'auto'}}><table style={{width:'100%',fontSize:12}}><thead><tr><th>Zeit</th><th>Status</th><th>Grund</th></tr></thead><tbody>
+                                    {mailAudit.delivery.recent_decisions.map((event,i) => <tr key={i}><td style={{whiteSpace:'nowrap'}}>{event.timestamp ? new Date(event.timestamp).toLocaleString('de-CH') : '—'}</td><td>{mailEventNames[event.status] || 'Weitere Entscheidung'}</td><td>{(event.reasons || []).map(reason => reason.label).join(' · ') || '—'}</td></tr>)}
+                                </tbody></table></div>}
+                        </div>
+                        <details style={cardStyle}>
+                            <summary style={{cursor:'pointer',fontWeight:600}}>Scanner-Vorprüfung</summary>
+                            <div style={{fontSize:12,color:'var(--text-muted)',margin:'12px 0'}}>Gespeicherte Setups, keine Versand- oder Zustellfreigabe.</div>
+                            <div style={{overflowX:'auto'}}><table style={{width:'100%',fontSize:12}}><thead><tr><th>Scanner</th><th>Geprüft</th><th>Vorprüfung bestanden</th><th>Status</th></tr></thead><tbody>
+                                {(mailAudit.summary?.scanner_statuses || []).map(scan => <tr key={scan.scanner}><td>{mailScannerNames[scan.scanner] || scan.scanner}</td><td>{mailNumber(scan.rows_checked)}</td><td>{mailNumber(scan.alertable_now_count)}</td><td>{scan.label}</td></tr>)}
+                            </tbody></table></div>
+                        </details>
+                    </>}
+                </section>
             )}
 
             {/* ═══ COUPONS PANEL ═══ */}

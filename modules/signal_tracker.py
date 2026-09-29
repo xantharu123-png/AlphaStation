@@ -3161,7 +3161,22 @@ def finalize_alert_delivery(
     return result
 
 
-def load_pending_accepted_deliveries() -> List[Dict[str, Any]]:
+@contextmanager
+def _diagnostic_readonly_connection(path: str):
+    """Observe existing durable state without creating/migrating a database."""
+    db_path = Path(path).resolve()
+    if not db_path.is_file():
+        raise sqlite3.OperationalError("diagnostic database unavailable")
+    conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        yield conn
+    finally:
+        conn.close()
+
+
+def load_pending_accepted_deliveries(*, read_only: bool = False) -> List[Dict[str, Any]]:
     """Return durable accepted SMTP intents whose activation needs retry.
 
     Main-DB ACCEPTED_PENDING rows and independent-journal PENDING rows are
@@ -3171,7 +3186,7 @@ def load_pending_accepted_deliveries() -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     try:
         with _DB_LOCK:
-            with _db_connection() as conn:
+            with (_diagnostic_readonly_connection(_db_path()) if read_only else _db_connection()) as conn:
                 rows = [
                     dict(row)
                     for row in conn.execute(
@@ -3208,7 +3223,7 @@ def load_pending_accepted_deliveries() -> List[Dict[str, Any]]:
         logger.warning("Akzeptierte Alert-Zustellungen konnten nicht geladen werden: %s", exc)
     try:
         with _DELIVERY_JOURNAL_LOCK:
-            with _delivery_journal_connection() as conn:
+            with (_diagnostic_readonly_connection(_delivery_journal_path()) if read_only else _delivery_journal_connection()) as conn:
                 journal_rows = [
                     dict(row)
                     for row in conn.execute(
@@ -3269,7 +3284,7 @@ def reconcile_pending_accepted_deliveries(limit: int = 100) -> List[Dict[str, An
     return results
 
 
-def load_delivery_acceptance_health() -> Dict[str, Any]:
+def load_delivery_acceptance_health(*, read_only: bool = False) -> Dict[str, Any]:
     """Expose pending journal backlog for readiness/health reporting."""
     health: Dict[str, Any] = {
         "status": "ok",
@@ -3284,7 +3299,7 @@ def load_delivery_acceptance_health() -> Dict[str, Any]:
     }
     try:
         with _DELIVERY_JOURNAL_LOCK:
-            with _delivery_journal_connection() as conn:
+            with (_diagnostic_readonly_connection(_delivery_journal_path()) if read_only else _delivery_journal_connection()) as conn:
                 counts = {
                     str(row["state"]): int(row["count"])
                     for row in conn.execute(
@@ -3302,7 +3317,7 @@ def load_delivery_acceptance_health() -> Dict[str, Any]:
         legacy_cohort_check_available = True
         try:
             with _DB_LOCK:
-                with _db_connection() as conn:
+                with (_diagnostic_readonly_connection(_db_path()) if read_only else _db_connection()) as conn:
                     legacy_open_cohort_unknown_count = int(
                         conn.execute(
                             "SELECT COUNT(*) FROM signals "

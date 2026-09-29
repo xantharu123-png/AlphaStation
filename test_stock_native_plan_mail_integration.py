@@ -15,7 +15,7 @@ import sys
 import pytest
 
 
-def _probe(direction, directory, scenario="barrier"):
+def _probe(direction, directory, scenario="barrier", repeat_after_hours=None):
     """Import the application only after isolating state and blocking I/O."""
     from datetime import datetime, timedelta, timezone
     import smtplib
@@ -69,7 +69,8 @@ def _probe(direction, directory, scenario="barrier"):
         import api
         from modules import stock_swing_contract as swing
 
-        now = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 18, 0 if repeat_after_hours is not None else 10,
+                       0, tzinfo=timezone.utc)
 
         class Clock(datetime):
             @classmethod
@@ -173,6 +174,7 @@ def _probe(direction, directory, scenario="barrier"):
             smtp_messages = []
             delivery_outcome = None
             persisted_deliveries = []
+            repeated_attempt = None
             if scenario in {"reclaimed", "breakout_close"}:
                 from modules import regime_filter
 
@@ -208,6 +210,21 @@ def _probe(direction, directory, scenario="barrier"):
                         patch.object(regime_filter, "DEFAULT_STATE_PATH", target / "regime.json"):
                     api._send_strategy_scan_alerts("Gap Momentum " + direction.title(), rows, "stocks")
                     delivery_outcome = api._last_delivery_outcome()
+                    if repeat_after_hours is not None:
+                        now += timedelta(hours=repeat_after_hours)
+                        second_rows = api._strategy_scan_wrapper("Gap Momentum " + direction.title(),
+                            send_email=False, publish_generic_cache=False)
+                        assert len(second_rows) == 1
+                        second_state = api._classify_alert_candidate("stock_strategy", second_rows[0], now.timestamp())
+                        repeated_attempt = {
+                            "session": second_rows[0].get("swing_analysis_session"),
+                            "levels": api._alert_trade_levels(second_rows[0]),
+                            "cooldown_remaining": second_state.get("persistent_dedupe_remaining_seconds"),
+                            "alertable_now": second_state["alertable_now"],
+                            "open_equivalent": api._has_open_equivalent_trade_safe("stock_strategy", second_rows[0]),
+                        }
+                        api._send_strategy_scan_alerts("Gap Momentum " + direction.title(), second_rows, "stocks")
+                        repeated_attempt["last_decision"] = api._EMAIL_SEND_LOG[-1].get("reason")
                 # SMTP acceptance alone could also mean a downgraded WATCH.
                 # Assert the actual durable delivery class after finalization.
                 import sqlite3
@@ -233,6 +250,7 @@ def _probe(direction, directory, scenario="barrier"):
                 "validated_price_mode": (final.get("candidate") or {}).get("price_mode"),
                 "smtp_messages": len(smtp_messages), "delivery_outcome": delivery_outcome,
                 "persisted_deliveries": persisted_deliveries,
+                "repeated_attempt": repeated_attempt,
             }))
 
 
@@ -371,4 +389,5 @@ def test_reference_close_beside_actual_session_extreme_stays_blocking(direction)
 
 
 if __name__ == "__main__":
-    _probe(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "barrier")
+    _probe(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "barrier",
+           int(sys.argv[4]) if len(sys.argv) > 4 else None)

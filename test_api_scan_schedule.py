@@ -63,6 +63,7 @@ def scheduler(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "time", SimpleNamespace(time=lambda: state["now"].timestamp(),
                                                    monotonic=lambda: state["now"].timestamp(), sleep=sleep))
     monkeypatch.setattr(api, "_scan_status", statuses)
+    monkeypatch.setattr(api, "_GAP_SCAN_SCHEDULE_STORE", api.gap_scan_schedule.GapScheduleStore(tmp_path / "gap-clock.json"))
     monkeypatch.setattr(api, "_scan_threads", {})
     monkeypatch.setattr(api, "_scan_resume_restarts", {})
     monkeypatch.setattr(api, "_scheduler_running", True)
@@ -88,7 +89,9 @@ def test_weekend_startup_and_interval_skip_only_explicit_stock_jobs(scheduler):
     for name in api._scan_status:
         if calendar.is_stock_scan(name):
             assert api._scan_status[name]["last_run"] is None
-            assert api._scan_status[name]["next_run"] == "2026-09-21T04:00:00+00:00"
+            expected = ("2026-09-21T00:00:00+00:00" if api.gap_scan_schedule.is_gap_scan(name)
+                        else "2026-09-21T04:00:00+00:00")
+            assert api._scan_status[name]["next_run"] == expected
 
 
 def test_weekend_skips_never_refresh_or_replace_previous_successful_cache(scheduler):

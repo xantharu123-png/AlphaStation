@@ -99,7 +99,7 @@ except ImportError as _auth_err:
 import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 from modules import stock_scan_runtime
-from modules import scan_control, scan_control_policy, scan_schedule
+from modules import scan_control, scan_control_policy, scan_schedule, gap_scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.pattern_context import is_elliott_pattern_context
 ELLIOTT_STRATEGY = "Elliott Wave Muster"
@@ -466,8 +466,6 @@ STOCK_STRATEGY_ORDER = [
 
 _AUTO_STOCK_ALERT_STRATEGIES = [
     "Momentum Breakout Long",
-    "Gap Momentum Long",
-    "Gap Momentum Short",
     # Hourly discovery owner for durable next-session Cup watches.  The
     # separate five-minute monitor evaluates only this small persisted queue.
     "Cup and Handle Breakout",
@@ -770,6 +768,13 @@ NON_STOCK_ETP_KEYWORDS = {
     "ULTRA", "ULTRAPRO", "BULL", "BEAR", "DAILY TARGET", "TRADR", "T-REX",
     "DIREXION", "PROSHARES", "GRANITESHARES", "YIELDMAX", "ROUNDHILL", "DEFIANCE",
     "REX SHARES", "MICROSECTORS", "VOLATILITY SHARES", "WARRANT", "RIGHT", "UNIT",
+    # Explicit instrument phrases also reject debt mislabelled as CS by a
+    # provider. Plain company words such as Bond, Notes or Senior remain valid.
+    "SENIOR NOTE", "SENIOR NOTES", "SUBORDINATED NOTE", "SUBORDINATED NOTES",
+    "CONVERTIBLE NOTE", "CONVERTIBLE NOTES", "SECURED NOTE", "SECURED NOTES",
+    "UNSECURED NOTE", "UNSECURED NOTES", "NOTES DUE", "NOTE DUE",
+    "SENIOR BONDS", "SUBORDINATED BONDS", "BONDS DUE", "BOND DUE",
+    "DEBENTURE", "DEBENTURES", "DEBT SECURITIES",
 }
 
 STOCK_SCANNER_ALLOWED_REFERENCE_TYPES = {"CS", "ADRC", "ADRP"}
@@ -846,7 +851,7 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Daily-signal session references precede the signal bar. Old geometry must
 # be recomputed, not merely re-labelled as the corrected version.
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
-STOCK_STRATEGY_CACHE_VERSION = 14
+STOCK_STRATEGY_CACHE_VERSION = 15
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -922,6 +927,12 @@ def _stock_alert_asset_exclusion_reason(
         return cheap_reason
     if "." in tk or "/" in tk:
         return "non-standard ticker class"
+    cached_names = _COMMON_STOCK_UNIVERSE_MEM.get("names") or {}
+    cached_name = cached_names.get(tk, "") if isinstance(cached_names, dict) else ""
+    if _name_has_non_stock_product_keyword(cached_name):
+        # A previously admitted ticker cannot override explicit contradictory
+        # instrument evidence preserved in the reference-name cache.
+        return "non-stock product keyword"
     if common_stock_universe is not None:
         if tk not in common_stock_universe:
             return f"not in common-stock universe ({universe_source or 'unknown source'})"
@@ -1274,8 +1285,36 @@ def _adr_ticker_set() -> set[str]:
     return set()
 
 
-def _common_stock_guard_status() -> Dict[str, Any]:
-    tickers, source = _load_common_stock_universe()
+def _load_common_stock_universe_cached(max_age_seconds: int = 24 * 3600):
+    """Read-only admission evidence; never refresh a provider or publish a cache."""
+    now = time.time()
+    if (_COMMON_STOCK_UNIVERSE_MEM.get("tickers") is not None
+            and now - float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at") or 0) <= max_age_seconds):
+        names = _COMMON_STOCK_UNIVERSE_MEM.get("names") or {}
+        return {
+            str(ticker).upper().strip()
+            for ticker in _COMMON_STOCK_UNIVERSE_MEM["tickers"]
+            if not _name_has_non_stock_product_keyword(names.get(str(ticker).upper().strip(), ""))
+        }, "memory_cached"
+    try:
+        with open(COMMON_STOCK_UNIVERSE_CACHE, "r", encoding="utf-8") as handle:
+            cache = json.load(handle)
+        stamp = float(cache.get("cached_at") or 0)
+        names = cache.get("names") or {}
+        if not stamp or not math.isfinite(stamp) or now - stamp > max_age_seconds:
+            return None, "cached_reference_stale"
+        if not isinstance(cache.get("tickers"), list) or not isinstance(names, dict):
+            return None, "cached_reference_invalid"
+        return {
+            str(ticker).upper().strip() for ticker in cache["tickers"]
+            if str(ticker).strip() and not _name_has_non_stock_product_keyword(names.get(str(ticker).upper().strip(), ""))
+        }, "file_cached"
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None, "cached_reference_unavailable"
+
+
+def _common_stock_guard_status(*, read_only: bool = False) -> Dict[str, Any]:
+    tickers, source = _load_common_stock_universe_cached() if read_only else _load_common_stock_universe()
     mem_loaded_at = float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0)
     age_seconds = int(max(0, time.time() - mem_loaded_at)) if mem_loaded_at else None
     return {
@@ -2356,6 +2395,32 @@ print(f"[Init] POLYGON_KEY: {'gesetzt' if POLYGON_KEY else 'FEHLT!'}")
 print(f"[Init] Email alerts: {'AKTIV' if _SECRETS.get('GMAIL_USER') and _SECRETS.get('GMAIL_APP_PASSWORD') else 'INAKTIV (GMAIL_USER/GMAIL_APP_PASSWORD fehlt)'}")
 
 
+def _readonly_diagnostic_call(function, *args, **kwargs):
+    """Use explicit read-only paths; tiny test doubles retain their signature."""
+    from inspect import signature
+    if "read_only" in signature(function).parameters:
+        kwargs["read_only"] = True
+    return function(*args, **kwargs)
+
+
+def _readonly_mail_outbox_stats() -> Dict[str, Any]:
+    """Never fall back to the real outbox's mutating maintenance accessor."""
+    from types import ModuleType
+    unavailable = {"enabled": False, "available": False, "error": "module unavailable"}
+    if _mail_outbox is None:
+        return unavailable
+    accessor = getattr(_mail_outbox, "readonly_stats", None)
+    if not callable(accessor) and not isinstance(_mail_outbox, ModuleType):
+        # Older fixture doubles expose stats only; production modules may not.
+        accessor = getattr(_mail_outbox, "stats", None)
+    if not callable(accessor):
+        return unavailable
+    try:
+        return accessor()
+    except Exception as exc:
+        return {**unavailable, "error": type(exc).__name__}
+
+
 def _email_alert_status() -> Dict[str, Any]:
     gmail_user = _SECRETS.get("GMAIL_USER", "")
     gmail_pass = _SECRETS.get("GMAIL_APP_PASSWORD", "")
@@ -2363,7 +2428,7 @@ def _email_alert_status() -> Dict[str, Any]:
     platform_recipients = []
     if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
         try:
-            platform_recipients = get_email_alert_recipients()
+            platform_recipients = _readonly_diagnostic_call(get_email_alert_recipients)
         except Exception:
             platform_recipients = []
     configured_recipients = [addr for addr in str(alert_to).split(",") if addr.strip()]
@@ -2379,7 +2444,7 @@ def _email_alert_status() -> Dict[str, Any]:
     }
     if _mail_outbox is not None:
         try:
-            outbox_status = _mail_outbox.stats()
+            outbox_status = _readonly_mail_outbox_stats()
         except Exception as exc:
             outbox_status["error"] = str(exc)
     return {
@@ -2392,7 +2457,7 @@ def _email_alert_status() -> Dict[str, Any]:
         "subscriber_recipient_count": len(platform_recipients),
         "send_to_subscribers": ALERT_SEND_TO_SUBSCRIBERS,
         "default_trade_horizon": _normalize_trade_horizon_value(_DEFAULT_TRADE_HORIZON),
-        "narrative_pulse": _narrative_pulse_email_status(),
+        "narrative_pulse": _readonly_diagnostic_call(_narrative_pulse_email_status),
         "crypto_armed_watch_mails_enabled": _EARLY_MOVER_SEND_ARMED_EMAILS,
         "new_listing_dump_watch_mails_enabled": _NEW_LISTING_SEND_DUMP_WATCH_EMAILS,
         "startup_cooldown_remaining_seconds": startup_remaining,
@@ -2405,7 +2470,7 @@ def _email_alert_status() -> Dict[str, Any]:
             "early_mover_armed_digest": _EARLY_MOVER_ARMED_DIGEST_DEDUPE_SEC,
         },
         "min_alert_score": _ALERT_MIN_SCORE,
-        "dedupe": _email_dedupe_status(),
+        "dedupe": _email_dedupe_status(read_only=True),
         "outbox": outbox_status,
         "required_keys": ["GMAIL_USER", "GMAIL_APP_PASSWORD"],
         "optional_keys": ["ALERT_EMAIL"],
@@ -2537,13 +2602,20 @@ def _record_suppression_counts(scanner: str, reasons: Any) -> int:
         return 0
 
 
+def _safe_email_event_status(value: Any) -> str:
+    status = str(value or "").lower()
+    return status if status in {
+        "sent", "partial", "skipped", "error", "outbox_queued", "outbox_skipped"
+    } else "unknown"
+
+
 def _public_email_event(event: Any) -> Optional[Dict[str, Any]]:
     """Return non-sensitive process telemetry for the non-admin health route."""
     if not isinstance(event, dict):
         return None
     return {
         "timestamp": event.get("timestamp"),
-        "status": str(event.get("status") or "unknown")[:40],
+        "status": _safe_email_event_status(event.get("status")),
         "has_reason": bool(event.get("reason")),
     }
 
@@ -2601,28 +2673,34 @@ def _public_email_alert_status(status: Any) -> Dict[str, Any]:
 def _public_tracker_acceptance_status(status: Any) -> Dict[str, Any]:
     """Expose delivery-coherence counters without DB paths or raw errors."""
     raw = status if isinstance(status, dict) else {}
+    state = str(raw.get("status") or "unavailable")
+    state = state if state in {"ok", "degraded", "error"} else "unavailable"
+    available = state in {"ok", "degraded"}
+    fallback_available = bool(raw.get("fallback_journal_available", False))
+    def counter(key, known=True):
+        if not known or raw.get(key) is None:
+            return None
+        try:
+            return max(0, int(raw[key]))
+        except (TypeError, ValueError, OverflowError):
+            return None
     return {
-        "status": str(raw.get("status") or "unavailable")[:24],
-        "available": str(raw.get("status") or "") != "error",
-        "tracker_pending": bool(raw.get("tracker_pending")),
-        "pending_count": int(raw.get("pending_count") or 0),
-        "reconciled_count": int(raw.get("reconciled_count") or 0),
-        "legacy_open_cohort_unknown_count": int(
-            raw.get("legacy_open_cohort_unknown_count") or 0
+        "status": state,
+        "available": available,
+        "tracker_pending": bool(raw.get("tracker_pending")) or not available,
+        "pending_count": counter("pending_count", available),
+        "known_pending_count": counter("known_pending_count"),
+        "reconciled_count": counter("reconciled_count", available),
+        "legacy_open_cohort_unknown_count": counter(
+            "legacy_open_cohort_unknown_count", bool(raw.get("legacy_cohort_check_available", available))
         ),
         "legacy_cohort_check_available": bool(
-            raw.get("legacy_cohort_check_available", True)
+            raw.get("legacy_cohort_check_available", available)
         ),
         "oldest_pending_at": raw.get("oldest_pending_at"),
-        "tracker_journal_pending_count": int(
-            raw.get("tracker_journal_pending_count") or 0
-        ),
-        "fallback_journal_pending_count": int(
-            raw.get("fallback_journal_pending_count") or 0
-        ),
-        "fallback_journal_available": bool(
-            raw.get("fallback_journal_available", False)
-        ),
+        "tracker_journal_pending_count": counter("tracker_journal_pending_count", available),
+        "fallback_journal_pending_count": counter("fallback_journal_pending_count", fallback_available),
+        "fallback_journal_available": fallback_available,
         "has_error": bool(raw.get("last_error")),
     }
 
@@ -2696,7 +2774,7 @@ def _email_pipeline_summary(
     }
     if _mail_outbox is not None:
         try:
-            outbox_status = _mail_outbox.stats()
+            outbox_status = _readonly_mail_outbox_stats()
         except Exception as exc:
             outbox_status["error"] = str(exc)
     tracker_acceptance = {
@@ -2707,10 +2785,11 @@ def _email_pipeline_summary(
     }
     if callable(load_delivery_acceptance_health):
         try:
-            tracker_acceptance = load_delivery_acceptance_health()
+            tracker_acceptance = _readonly_diagnostic_call(load_delivery_acceptance_health)
         except Exception as exc:
             tracker_acceptance["last_error"] = type(exc).__name__
     tracker_pending_count = int(tracker_acceptance.get("pending_count") or 0)
+    tracker_health_available = tracker_acceptance.get("status") in {"ok", "degraded"}
     tracker_acceptance["tracker_journal_pending_count"] = tracker_pending_count
 
     # A successful SMTP DATA command can be journaled in mail_outbox when the
@@ -2722,7 +2801,7 @@ def _email_pipeline_summary(
     tracker_loader_ok = False
     if callable(load_pending_accepted_deliveries):
         try:
-            tracker_rows = load_pending_accepted_deliveries()
+            tracker_rows = _readonly_diagnostic_call(load_pending_accepted_deliveries)
             tracker_loader_ok = isinstance(tracker_rows, list)
             tracker_intents = {
                 str(row.get("intent_key") or "").strip()
@@ -2738,9 +2817,11 @@ def _email_pipeline_summary(
     fallback_oldest = outbox_status.get("tracker_acceptance_oldest_at")
     fallback_available = outbox_status.get("tracker_acceptance_available")
     fallback_intents = set()
-    fallback_loader = getattr(
-        _mail_outbox, "load_tracker_acceptance_pending", None
-    )
+    fallback_loader = getattr(_mail_outbox, "load_tracker_acceptance_pending_readonly", None)
+    if not callable(fallback_loader):
+        from types import ModuleType
+        if _mail_outbox is not None and not isinstance(_mail_outbox, ModuleType):
+            fallback_loader = getattr(_mail_outbox, "load_tracker_acceptance_pending", None)
     if callable(fallback_loader):
         try:
             fallback_rows = fallback_loader()
@@ -2758,7 +2839,7 @@ def _email_pipeline_summary(
     elif fallback_available is None:
         # Compatibility with test doubles/older modules that predate the
         # fallback journal. Do not turn unrelated health fixtures critical.
-        fallback_available = True
+        fallback_available = _mail_outbox is not None
 
     if tracker_loader_ok and fallback_available:
         known_tracker_count = len(tracker_intents)
@@ -2772,7 +2853,16 @@ def _email_pipeline_summary(
     tracker_acceptance["fallback_journal_pending_count"] = fallback_count
     tracker_acceptance["fallback_journal_available"] = bool(fallback_available)
     tracker_acceptance["pending_count"] = combined_pending_count
-    tracker_acceptance["tracker_pending"] = bool(combined_pending_count)
+    tracker_acceptance["known_pending_count"] = max(
+        len(tracker_intents | fallback_intents),
+        fallback_count if fallback_available else 0,
+        tracker_pending_count if tracker_health_available else 0,
+    )
+    tracker_acceptance["tracker_pending"] = bool(combined_pending_count) or not tracker_health_available
+    if not tracker_health_available or not tracker_loader_ok:
+        tracker_acceptance["status"] = "error"
+        tracker_acceptance["tracker_pending"] = True
+        tracker_acceptance["last_error"] = tracker_acceptance.get("last_error") or "tracker_acceptance_read_unavailable"
     if combined_pending_count and tracker_acceptance.get("status") == "ok":
         tracker_acceptance["status"] = "degraded"
     if fallback_available is False:
@@ -2782,6 +2872,10 @@ def _email_pipeline_summary(
             tracker_acceptance.get("last_error")
             or "cross_db_acceptance_journal_unavailable"
         )
+    if tracker_acceptance.get("status") == "error":
+        # A known fallback lower bound is useful, but does not establish the
+        # total backlog while either durable source cannot be observed.
+        tracker_acceptance["pending_count"] = None
 
     def _health_timestamp_seconds(value):
         if isinstance(value, (int, float)):
@@ -2809,6 +2903,8 @@ def _email_pipeline_summary(
         "events_recorded_since_start": len(events),
         "recent_event_count": len(recent),
         "sent": counts.get("sent", 0),
+        "partial": counts.get("partial", 0),
+        "smtp_accepted_events": counts.get("sent", 0) + counts.get("partial", 0),
         "skipped": counts.get("skipped", 0),
         "errors": counts.get("error", 0),
         "queued_since_start": counts.get("outbox_queued", 0),
@@ -3004,9 +3100,9 @@ def _email_dedupe_ttl_for_key(key: str) -> int:
     return _EMAIL_COOLDOWN_SEC
 
 
-def _email_dedupe_status(now: Optional[float] = None) -> Dict[str, Any]:
+def _email_dedupe_status(now: Optional[float] = None, *, read_only: bool = False) -> Dict[str, Any]:
     now = now or time.time()
-    dedupe = _load_email_dedupe(now=now)
+    dedupe = _shared_load_email_dedupe(_EMAIL_DEDUPE_FILE, now=now, read_only=True) if read_only else _load_email_dedupe(now=now)
     recent = []
     for key, ts in sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:20]:
         ttl = _email_dedupe_ttl_for_key(key)
@@ -3040,9 +3136,10 @@ def _email_dedupe_active(key: str, ttl_seconds: int, now: Optional[float] = None
         return False
 
 
-def _email_dedupe_remaining(key: str, ttl_seconds: int, now: Optional[float] = None) -> int:
+def _email_dedupe_remaining(key: str, ttl_seconds: int, now: Optional[float] = None, *, read_only: bool = False) -> int:
     try:
-        return _shared_email_dedupe_remaining(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now)
+        return (_shared_email_dedupe_remaining(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now, read_only=True)
+                if read_only else _shared_email_dedupe_remaining(_EMAIL_DEDUPE_FILE, key, ttl_seconds, now=now))
     except Exception as exc:
         print(f"[Alert] Dedupe-Restzeit konnte nicht gelesen werden: {exc}")
         return 0
@@ -3052,10 +3149,11 @@ def _bearish_stock_alert_key(ticker: str) -> str:
     return f"bearish_stock_{str(ticker or '').strip().upper()}"
 
 
-def _bearish_stock_alert_remaining(ticker: str, now: Optional[float] = None) -> int:
+def _bearish_stock_alert_remaining(ticker: str, now: Optional[float] = None, *, read_only: bool = False) -> int:
     if not ticker:
         return 0
-    return _email_dedupe_remaining(_bearish_stock_alert_key(ticker), _BEARISH_STOCK_ALERT_DEDUPE_SEC, now)
+    return (_email_dedupe_remaining(_bearish_stock_alert_key(ticker), _BEARISH_STOCK_ALERT_DEDUPE_SEC, now, read_only=True)
+            if read_only else _email_dedupe_remaining(_bearish_stock_alert_key(ticker), _BEARISH_STOCK_ALERT_DEDUPE_SEC, now))
 
 
 def _mark_bearish_stock_alert(ticker: str, now: Optional[float] = None) -> None:
@@ -9419,7 +9517,7 @@ def _bear_crash_alert_ok(row: Dict[str, Any]) -> bool:
     return not _bear_crash_rule_reasons(row)
 
 
-def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = None, *, cache_only: bool = False) -> Dict[str, Any]:
     now = now or time.time()
     ticker = _extract_alert_ticker(row)
     grade = _extract_alert_grade(row)
@@ -9431,7 +9529,9 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
         reasons.append("missing_ticker")
     asset_exclusion_reason = None
     if ticker:
-        common_stock_universe, common_stock_source = _load_common_stock_universe()
+        common_stock_universe, common_stock_source = _load_common_stock_universe_cached() if cache_only else _load_common_stock_universe()
+        if cache_only and common_stock_universe is None:
+            raise RuntimeError("audit_common_stock_basis_unavailable")
         asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
             ticker,
             common_stock_universe=common_stock_universe,
@@ -9458,7 +9558,8 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
     reasons.extend(_alert_trade_health_reasons(row, "bear"))
 
     dedupe_key = f"crash_stock_{datetime.now().strftime('%Y%m%d')}_{ticker}" if ticker else ""
-    dedupe_remaining = _email_dedupe_remaining(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now) if dedupe_key else 0
+    dedupe_remaining = (_email_dedupe_remaining(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now, read_only=True)
+                        if cache_only else _email_dedupe_remaining(dedupe_key, _CRASH_ALERT_DEDUPE_SEC, now)) if dedupe_key else 0
     if dedupe_remaining > 0:
         reasons.append("persistent_dedupe_active")
 
@@ -10017,7 +10118,7 @@ def _elliott_display_row(row):
     return {key: deepcopy(value) for key, value in row.items() if key in keys}
 
 
-def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None, *, cache_only: bool = False) -> Dict[str, Any]:
     if is_elliott_pattern_context(row, strategy=scanner_name):
         return _elliott_context_trade_state(row)
     now = now or time.time()
@@ -10079,7 +10180,9 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("missing_ticker")
     asset_exclusion_reason = None
     if ticker and scanner_name in _STOCK_EMAIL_ASSET_GUARD_SCANNERS:
-        common_stock_universe, common_stock_source = _load_common_stock_universe()
+        common_stock_universe, common_stock_source = _load_common_stock_universe_cached() if cache_only else _load_common_stock_universe()
+        if cache_only and common_stock_universe is None:
+            raise RuntimeError("audit_common_stock_basis_unavailable")
         asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
             ticker,
             common_stock_universe=common_stock_universe,
@@ -10233,10 +10336,12 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     cooldown_remaining = max(0, int(cooldown_ttl - (now - cooldown_last))) if cooldown_last else 0
     if cooldown_remaining > 0:
         reasons.append("cooldown_active")
-    dedupe_remaining = _email_dedupe_remaining(cooldown_key, cooldown_ttl, now) if cooldown_key else 0
+    dedupe_remaining = (_email_dedupe_remaining(cooldown_key, cooldown_ttl, now, read_only=True)
+                        if cache_only else _email_dedupe_remaining(cooldown_key, cooldown_ttl, now)) if cooldown_key else 0
     if dedupe_remaining > 0:
         reasons.append("persistent_dedupe_active")
-    bearish_remaining = _bearish_stock_alert_remaining(ticker, now) if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS else 0
+    bearish_remaining = (_bearish_stock_alert_remaining(ticker, now, read_only=True)
+                         if cache_only else _bearish_stock_alert_remaining(ticker, now)) if scanner_name in _BEARISH_STOCK_ALERT_SCANNERS else 0
     if bearish_remaining > 0:
         reasons.append("bearish_ticker_already_alerted")
 
@@ -10336,7 +10441,7 @@ def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: O
     }
 
 
-def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> List[Dict[str, Any]]:
+def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str, *, exclude_dedicated_gap: bool = False) -> List[Dict[str, Any]]:
     rows, _ = load_cache_file(cache_file, max_age_hours=24)
     if scanner_name == "orb":
         flat = []
@@ -10362,13 +10467,20 @@ def _extract_cache_rows_for_alert_audit(scanner_name: str, cache_file: str) -> L
         ]
     if scanner_name == "early_movers":
         return _flatten_early_mover_rows(rows)
-    return [r for r in rows if isinstance(r, dict)]
+    flat = [r for r in rows if isinstance(r, dict)]
+    if exclude_dedicated_gap and scanner_name == "strategy_scan":
+        gap_keys = {_normalize_strategy_key("Gap Momentum Long"), _normalize_strategy_key("Gap Momentum Short")}
+        flat = [row for row in flat if not any(
+            _normalize_strategy_key(row.get(key) or "") in gap_keys for key in ("strategy", "Strategy")
+        )]
+    return flat
 
 
-def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str, Any]:
-    if scanner_name == "biotech":
-        _enrich_biotech_alert_trade_levels()
-    rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file)
+def _build_alert_audit_for_cache(scanner_name: str, cache_file: str, *, read_only: bool = False) -> Dict[str, Any]:
+    # Cache inspection must not rebuild/publish Biotech plans. Their producer
+    # owns that mutation; an operator reading diagnostics must not change the
+    # evidence subsequently used by an actual send decision.
+    rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file, exclude_dedicated_gap=read_only)
     rows = _filter_bi_signal_rows(scanner_name, rows)
     now = time.time()
     grade_counts: Dict[str, int] = {}
@@ -10382,9 +10494,9 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
     armed_reason_counts: Dict[str, int] = {}
     armed_alertable = []
     for row in rows:
-        if scanner_name in _STOCK_ALERT_SCANNERS:
+        if scanner_name in _STOCK_ALERT_SCANNERS and not read_only:
             row = _enrich_stock_alert_5m_state(scanner_name, row)
-        state = _classify_alert_candidate(scanner_name, row, now)
+        state = _classify_alert_candidate(scanner_name, row, now, cache_only=True) if read_only else _classify_alert_candidate(scanner_name, row, now)
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
         decision = state.get("decision") or "UNKNOWN"
         decision_counts[decision] = decision_counts.get(decision, 0) + 1
@@ -10395,7 +10507,7 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
         for reason in state["suppression_reasons"]:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
         if scanner_name == "bear":
-            crash_state = _classify_crash_alert_candidate(row, now)
+            crash_state = _classify_crash_alert_candidate(row, now, cache_only=True) if read_only else _classify_crash_alert_candidate(row, now)
             crash_decision = crash_state.get("decision") or "UNKNOWN"
             crash_decision_counts[crash_decision] = crash_decision_counts.get(crash_decision, 0) + 1
             if crash_state["alertable_now"]:
@@ -10448,8 +10560,11 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
         "alertable_now_count": len(alertable),
         "alertable_preview": alertable[:10],
         "watch_preview": watch_preview,
-        "mail_status": "SEND_NOW" if alertable else "NO_MAIL",
-        "mail_status_label": "Mail wuerde jetzt rausgehen" if alertable else "Keine Mail: Gates blockieren oder nur Watch",
+        "mail_status": "PRECHECK_PASSED" if alertable else "PRECHECK_BLOCKED",
+        "mail_status_label": "Cache-Vorpruefung bestanden; finale Versandpruefung offen" if alertable else "Cache-Vorpruefung: Gates blockieren oder nur Watch",
+        "evidence_scope": "cache_precheck",
+        "delivery_evaluated": False,
+        "precheck_passed_count": len(alertable),
         "suppression_counts": reason_counts,
         "suppression_top": _top_alert_reasons(reason_counts),
         "suppression_human": _format_alert_suppression_summary(reason_counts, grade_counts),
@@ -10461,8 +10576,8 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str) -> Dict[str
             "crash_decision_counts": crash_decision_counts,
             "crash_suppression_counts": crash_reason_counts,
             "crash_suppression_top": _top_alert_reasons(crash_reason_counts),
-            "crash_mail_status": "SEND_NOW" if crash_alertable else "NO_MAIL",
-            "crash_mail_status_label": "Crash-Mail wuerde jetzt rausgehen" if crash_alertable else "Keine Crash-Mail: Gates blockieren oder Dedupe aktiv",
+            "crash_mail_status": "PRECHECK_PASSED" if crash_alertable else "PRECHECK_BLOCKED",
+            "crash_mail_status_label": "Crash-Cache-Vorpruefung bestanden; finale Versandpruefung offen" if crash_alertable else "Crash-Cache-Vorpruefung: Gates blockieren oder Dedupe aktiv",
         })
     if scanner_name == "early_movers":
         armed_mail_enabled = bool(_EARLY_MOVER_SEND_ARMED_EMAILS)
@@ -10520,10 +10635,12 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
     total_armed_alertable = 0
     aggregate_reasons: Dict[str, int] = {}
     scanner_statuses = []
+    audit_error_count = 0
     for name, audit in scanners.items():
         if not isinstance(audit, dict):
             continue
         if audit.get("error"):
+            audit_error_count += 1
             scanner_statuses.append({
                 "scanner": name,
                 "status": "ERROR",
@@ -10544,8 +10661,8 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
                 for reason, count in counts.items():
                     aggregate_reasons[reason] = aggregate_reasons.get(reason, 0) + int(count or 0)
         if alertable or crash_alertable:
-            status = "SEND_NOW"
-            label = f"{alertable + crash_alertable} Mail-Kandidat(en) jetzt"
+            status = "PRECHECK_PASSED"
+            label = f"{alertable + crash_alertable} Kandidat(en) bestehen die Cache-Vorpruefung"
         elif armed_alertable:
             status = "ARMED_READY"
             label = f"{armed_alertable} Explosion-Armed Kandidat(en); kein Market-Buy, Orderbook-Check im Sendelauf"
@@ -10573,21 +10690,27 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
     if not configured:
         overall = "EMAIL_NOT_CONFIGURED"
         next_step = "GMAIL_USER/GMAIL_APP_PASSWORD/ALERT_EMAIL pruefen."
+    elif email_status.get("recipient_configured") is False:
+        overall = "NO_ELIGIBLE_RECIPIENTS"
+        next_step = "Kein Empfaenger konfiguriert; Empfaenger und Mail-Kanalauswahl pruefen."
     elif startup_cooldown > 0:
         overall = "STARTUP_COOLDOWN"
         next_step = f"Noch {startup_cooldown}s Startup-Cooldown nach Restart."
+    elif audit_error_count:
+        overall = "AUDIT_INCOMPLETE"
+        next_step = "Mindestens ein Cache konnte nicht geprueft werden; dessen Audit-Fehler klaeren."
     elif total_alertable + total_crash_alertable > 0:
-        overall = "MAIL_READY"
-        next_step = "Mindestens ein Kandidat besteht alle Gates; Mail sollte beim naechsten Alert-Lauf kommen."
+        overall = "PRECHECK_PASSED"
+        next_step = "Cache-Vorpruefung bestanden. Finale Markt-/Planpruefung, Empfaengerfreigabe und Versand sind noch offen."
     elif total_armed_alertable > 0:
         overall = "ARMED_READY"
-        next_step = "Crypto Armed-Kandidaten vorhanden; Mail kommt, wenn Armed-Digest-Dedupe und Orderbook-Check frei sind."
+        next_step = "Crypto Armed-Kandidaten in der Cache-Vorpruefung; endgueltige Auswahl und Versand noch offen."
     elif total_rows == 0:
         overall = "NO_CANDIDATES"
         next_step = "Scanner-Caches enthalten aktuell keine Kandidaten fuer Mail-Audit."
     else:
         overall = "ALL_BLOCKED_BY_GATES"
-        next_step = "Keine Mail ist korrekt: Score/Grade/Timing/R:R/Trade-Health/Dedupe blockt aktuell."
+        next_step = "Aktuelle Cache-Kandidaten scheitern an Score/Grade/Timing/R:R/Trade-Health/Dedupe; dies beschreibt keinen SMTP-Versuch."
 
     return {
         "overall_status": overall,
@@ -10598,6 +10721,9 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
         "total_armed_alertable_now": total_armed_alertable,
         "top_blockers": _top_alert_reasons(aggregate_reasons, max_items=10),
         "scanner_statuses": scanner_statuses,
+        "audit_error_count": audit_error_count,
+        "evidence_scope": "cache_precheck",
+        "delivery_evaluated": False,
     }
 
 
@@ -10935,6 +11061,7 @@ def _resolve_email_alert_recipients(
     trade_horizon: str = "swing",
     mail_class: str = "trade",
     mail_channel: str = "",
+    read_only: bool = False,
 ) -> List[str]:
     """Resolve the exact opt-in recipient set without sending or exposing it."""
     gmail_user = _SECRETS.get("GMAIL_USER", "")
@@ -10961,7 +11088,7 @@ def _resolve_email_alert_recipients(
             operator_recipients = [
                 addr
                 for addr in operator_recipients
-                if mail_channel_enabled(addr, mail_channel)
+                if (_readonly_diagnostic_call(mail_channel_enabled, addr, mail_channel) if read_only else mail_channel_enabled(addr, mail_channel))
             ]
         recipients = (
             operator_recipients
@@ -10971,13 +11098,16 @@ def _resolve_email_alert_recipients(
         if ALERT_SEND_TO_SUBSCRIBERS and HAS_AUTH:
             try:
                 recipients.extend(
-                    get_email_alert_recipients(
+                    (_readonly_diagnostic_call if read_only else lambda function, **kwargs: function(**kwargs))(
+                        get_email_alert_recipients,
                         trade_horizon=trade_horizon,
                         mail_class=mail_class,
                         mail_channel=mail_channel,
                     )
                 )
             except Exception as exc:
+                if read_only:
+                    raise
                 try:
                     print(
                         "[Alert] Subscriber recipient resolution failed: "
@@ -15623,6 +15753,8 @@ def _sanitize_biotech_public_results(results: list) -> list:
 SCAN_DATA_SOURCES = {
     "quote_capability": "Bounded Polygon snapshot + 1m aggregate + raw-trade control probe",
     "strategy_scan": "Polygon snapshots + strategy engine",
+    "strat_gap_momentum_long": "Polygon completed 1D US sessions + Gap Momentum Long swing scanner",
+    "strat_gap_momentum_short": "Polygon completed 1D US sessions + Gap Momentum Short swing scanner",
     "cup_handle_watch": "Persisted prior-session Cup patterns + completed Polygon 5m trigger checks",
     "stock_strategy": "Polygon snapshots + strategy engine",
     "bi_long": "Polygon snapshots + BI scanner",
@@ -19908,7 +20040,9 @@ def _strategy_daily_history_metrics(
     ) or 0.0
     volume_fraction = _us_equity_expected_volume_fraction(now_utc)
     raw_rvol20 = completed_bar_rvol(day_volume, vols20, lookback=20, minimum_periods=10)
-    rvol20 = min(round(project_partial_rvol(raw_rvol20, volume_fraction), 2), 50.0)
+    # Selection and scoring use the actual ratio. Rounding 1.496 to 1.50
+    # before a 1.5 floor would manufacture qualifying volume evidence.
+    rvol20 = min(project_partial_rvol(raw_rvol20, volume_fraction), 50.0)
     projected_day_volume = (
         float(day_volume or 0) / max(volume_fraction, 0.01)
         if volume_fraction < 1.0
@@ -20014,7 +20148,7 @@ def _strategy_daily_history_metrics(
         "avg_vol20": avg_vol20,
         "median_dollar_vol20": median_dollar_vol20,
         "rvol20": rvol20,
-        "rvol20_raw": round(raw_rvol20, 2),
+        "rvol20_raw": raw_rvol20,
         "rvol_source": rvol_source,
         "expected_volume_fraction": round(volume_fraction, 4),
         "projected_day_volume": round(projected_day_volume),
@@ -23626,6 +23760,10 @@ def _strategy_scan_wrapper(
                     _ema50_metric = _alert_float(history_metrics.get("ema50"))
                     if _is_momentum_contract:
                         _momentum_breakout_type = _momentum_selection["breakout_type"]
+                    elif _normalize_strategy_key(strategy_name) == _normalize_strategy_key("Gap Momentum Long"):
+                        _momentum_breakout_type = "GAP_UP_MOMENTUM"
+                    elif _normalize_strategy_key(strategy_name) == _normalize_strategy_key("Gap Momentum Short"):
+                        _momentum_breakout_type = "GAP_DOWN_MOMENTUM"
                     elif _breakout20 is not None and _breakout20 >= -0.25:
                         _momentum_breakout_type = "20D_HIGH_BREAKOUT"
                     elif _breakout10 is not None and _breakout10 >= -0.15:
@@ -23684,9 +23822,9 @@ def _strategy_scan_wrapper(
                     # A trend reclaim can be useful as a watch/retest candidate,
                     # but it is not a clean momentum breakout. Keep it out of
                     # S/A breakout mails and top-ranked "breakout" rows.
-                    if _momentum_breakout_type == "TREND_RECLAIM":
+                    if _is_momentum_contract and _momentum_breakout_type == "TREND_RECLAIM":
                         _strat_score = min(_strat_score, 79)
-                    elif _momentum_breakout_type == "RANGE_BREAKOUT":
+                    elif _is_momentum_contract and _momentum_breakout_type == "RANGE_BREAKOUT":
                         _near_real_high = (
                             (_breakout10 is not None and _breakout10 >= -1.0)
                             or (_breakout20 is not None and _breakout20 >= -2.0)
@@ -26209,6 +26347,11 @@ _scan_status = {
     "orb": {"running": False, "last_run": None, "next_run": None, "interval_min": 5},
     "turtle": {"running": False, "last_run": None, "next_run": None, "interval_min": 30},
     "strategy_scan": {"running": False, "last_run": None, "next_run": None, "interval_min": 60},
+    # Fixed Swiss wall-clock jobs are not interval/startup discovery workers.
+    "strat_gap_momentum_long": {"running": False, "last_run": None, "next_run": None,
+                                "interval_min": 0, "schedule_name": "strat_gap_momentum_long"},
+    "strat_gap_momentum_short": {"running": False, "last_run": None, "next_run": None,
+                                 "interval_min": 0, "schedule_name": "strat_gap_momentum_short"},
     "cup_handle_watch": {"running": False, "last_run": None, "next_run": None, "interval_min": _CUP_HANDLE_WATCH_MONITOR_INTERVAL_MIN},
     "quote_capability": {"running": False, "last_run": None, "next_run": None, "interval_min": 15},
 }
@@ -26236,6 +26379,8 @@ SCAN_CACHE_MAP = {
     "orb": "/tmp/orb_scan_results.json",
     "turtle": "/tmp/turtle_scan_cache.json",
     "strategy_scan": "/tmp/strategy_scan_cache.json",
+    "strat_gap_momentum_long": _strategy_cache_path("Gap Momentum Long"),
+    "strat_gap_momentum_short": _strategy_cache_path("Gap Momentum Short"),
 }
 _scan_lock = threading.Lock()
 _cache_lock = threading.Lock()
@@ -26247,6 +26392,107 @@ def _is_stock_strategy_worker(name):
 
 
 _scan_resume_restarts: Dict[str, Dict[str, Any]] = {}
+_GAP_SCAN_SCHEDULE_STORE = gap_scan_schedule.GapScheduleStore(
+    Path(os.environ.get("ALPHA_DATA_DIR", Path(__file__).parent / "data_cache"))
+    / "gap_scan_schedule.json"
+)
+
+
+def _automatic_scan_allowed(name, now=None):
+    """Gap uses the user's Swiss calendar; existing jobs retain New York."""
+    if gap_scan_schedule.is_gap_scan(name):
+        return gap_scan_schedule.automatic_scan_allowed(name, time.time() if now is None else now)
+    return (scan_schedule.automatic_scan_allowed(name) if now is None
+            else scan_schedule.automatic_scan_allowed(name, now))
+
+
+def _gap_schedule_snapshot(name, now=None):
+    """The durable slot, never a cache timestamp, owns the next automatic run."""
+    clock = time.time() if now is None else now
+    try:
+        due = _GAP_SCAN_SCHEDULE_STORE.next_due(name, clock)
+        return gap_scan_schedule.schedule_snapshot(name, due, clock)
+    except (ValueError, OSError):
+        return {"automatic_paused": True, "reason": "gap_schedule_unavailable",
+                "timezone": gap_scan_schedule.TIMEZONE, "schedule_type": "fixed_local_times",
+                "local_times": list(gap_scan_schedule.LOCAL_TIMES), "weekdays": [0, 1, 2, 3, 4],
+                "scheduled_at": None, "next_eligible_at": None, "slot_id": None}
+
+
+def _refresh_gap_next_run(name, now=None):
+    schedule = _gap_schedule_snapshot(name, now)
+    with _scan_lock:
+        if name in _scan_status:
+            _scan_status[name]["next_run"] = schedule["scheduled_at"]
+            if schedule["reason"] == "gap_schedule_unavailable":
+                _scan_status[name]["last_error"] = "gap_schedule_unavailable"
+    return schedule
+
+
+def _scan_automatic_resume_allowed(name):
+    """Resuming a parked Gap worker uses the new slot, not another fresh run."""
+    if not gap_scan_schedule.is_gap_scan(name):
+        return _automatic_scan_allowed(name)
+    now = time.time()
+    if not _automatic_scan_allowed(name, now):
+        return False
+    try:
+        slot = _GAP_SCAN_SCHEDULE_STORE.pending_slot(name, now)
+        if slot is None or not _GAP_SCAN_SCHEDULE_STORE.claim(name, slot, now):
+            return False
+        _refresh_gap_next_run(name, now)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _run_due_gap_scans(now=None):
+    """Reserve each due fixed slot before worker admission; release contention."""
+    now = time.time() if now is None else now
+    for name, strategy in (("strat_gap_momentum_long", "Gap Momentum Long"),
+                           ("strat_gap_momentum_short", "Gap Momentum Short")):
+        _scan_watchdog_check(name, now)
+        _refresh_gap_next_run(name, now)
+        if (_api_scheduler_should_skip(name) or not _automatic_scan_allowed(name, now)
+                or name in _scan_resume_restarts):
+            continue
+        with _scan_lock:
+            state = _scan_status.get(name) or {}
+            worker = _scan_threads.get(name)
+            if state.get("running") or worker is not None and worker.is_alive():
+                continue  # A parked/resuming owner claims through its controller.
+        try:
+            slot = _GAP_SCAN_SCHEDULE_STORE.pending_slot(name, now)
+            if slot is None or not _GAP_SCAN_SCHEDULE_STORE.claim(name, slot, now):
+                continue
+            try:
+                started = _run_scan_safe(name, lambda strategy=strategy: _strategy_scan_wrapper(
+                    strategy, publish_generic_cache=False))
+            except Exception:
+                _GAP_SCAN_SCHEDULE_STORE.unclaim(name, slot, now)
+                raise
+            if not started:
+                _GAP_SCAN_SCHEDULE_STORE.unclaim(name, slot, now)
+        except Exception as exc:
+            # Invalid/unwritable durable state must not fall back to an hourly run.
+            print(f"[Scheduler] {name}: gap_schedule_unavailable ({type(exc).__name__})", flush=True)
+            with _scan_lock:
+                _scan_status[name]["last_error"] = "gap_schedule_unavailable"
+        _refresh_gap_next_run(name, now)
+
+
+def _gap_automatic_slot_pending(now=None):
+    """Keep interval-heavy jobs from repeatedly winning a pending Gap slot."""
+    now = time.time() if now is None else now
+    for name in sorted(gap_scan_schedule.SCAN_NAMES):
+        if _api_scheduler_should_skip(name) or not _automatic_scan_allowed(name, now):
+            continue
+        try:
+            if _GAP_SCAN_SCHEDULE_STORE.pending_slot(name, now) is not None:
+                return True
+        except (ValueError, OSError):
+            continue  # A damaged Gap ledger cannot disable unrelated scanners.
+    return False
 
 
 def _scan_control_supported(name):
@@ -26274,7 +26520,9 @@ def _scan_control_data_token(name):
             from modules.scanners import _bi_config_load
             settings = {"strategies": STRATEGIES, "bi": _bi_config_load()}
         config = json.dumps(settings, sort_keys=True, default=str, allow_nan=False)
-        return ("daily", now.astimezone(ZoneInfo("America/New_York")).date().isoformat(),
+        control_day = (session if gap_scan_schedule.is_gap_scan(name)
+                       else now.astimezone(ZoneInfo("America/New_York")).date().isoformat())
+        return ("daily", control_day,
                 session, BUILD_REVISION, STOCK_STRATEGY_CACHE_VERSION,
                 hashlib.sha256(config.encode()).hexdigest())
     except Exception:
@@ -26287,6 +26535,8 @@ def _scan_control_point(*, finishing=False):
 
 
 def _scan_schedule_for(name, status=None):
+    if gap_scan_schedule.is_gap_scan(name):
+        return _gap_schedule_snapshot(name)
     status = status if isinstance(status, dict) else {}
     try:
         # Existing scheduler strings use host-local datetime.now/fromtimestamp.
@@ -26298,6 +26548,8 @@ def _scan_schedule_for(name, status=None):
 
 def _scan_resume_at(name, status, now=None):
     now = time.time() if now is None else now
+    if gap_scan_schedule.is_gap_scan(name):
+        return gap_scan_schedule.next_slot(now)
     schedule_name = "strategy_scan" if _is_stock_strategy_worker(name) else name
     interval = max(60.0, _effective_scan_interval_min(schedule_name) * 60)
     try:
@@ -26346,7 +26598,7 @@ def _drain_scan_resume_restarts():
     with _scan_lock:
         pending = list(_scan_resume_restarts.items())
     for name, request in pending:
-        if request["automatic"] and not scan_schedule.automatic_scan_allowed(name):
+        if request["automatic"] and not _automatic_scan_allowed(name):
             continue
         with _scan_lock:
             state = _scan_status.get(name) or {}
@@ -26356,7 +26608,37 @@ def _drain_scan_resume_restarts():
             thread = request["thread"]
             if thread.is_alive() or state.get("running"):
                 continue
-        if _run_scan_safe(name, request["func"], expected_previous_run_id=request["run_id"]):
+        claimed_slot = None
+        if request["automatic"] and gap_scan_schedule.is_gap_scan(name):
+            # An epoch restart belongs to its consumed resume slot only while
+            # that is still today's current slot. A weekend/backlog restart
+            # must wait for and reserve the next configured Swiss admission.
+            now = time.time()
+            try:
+                job = _GAP_SCAN_SCHEDULE_STORE.snapshot(now)["jobs"][name]
+                attempted = job.get("last_attempt_slot")
+                current = gap_scan_schedule.latest_slot(now)
+                already_admitted = (job.get("last_attempt_phase") == "reserved"
+                                    and attempted == current
+                                    and gap_scan_schedule.due_slot(attempted, now) == attempted)
+                if not already_admitted:
+                    claimed_slot = _GAP_SCAN_SCHEDULE_STORE.pending_slot(name, now)
+                    if claimed_slot is None or not _GAP_SCAN_SCHEDULE_STORE.claim(name, claimed_slot, now):
+                        continue
+            except (ValueError, OSError):
+                continue
+        try:
+            started = _run_scan_safe(name, request["func"], expected_previous_run_id=request["run_id"])
+        except Exception as exc:
+            if claimed_slot is not None:
+                _GAP_SCAN_SCHEDULE_STORE.unclaim(name, claimed_slot, time.time())
+            print(f"[Scheduler] {name}: resume admission failed ({type(exc).__name__})", flush=True)
+            continue
+        if not started and claimed_slot is not None:
+            _GAP_SCAN_SCHEDULE_STORE.unclaim(name, claimed_slot, time.time())
+        if gap_scan_schedule.is_gap_scan(name):
+            _refresh_gap_next_run(name)
+        if started:
             with _scan_lock:
                 if _scan_resume_restarts.get(name) is request:
                     _scan_resume_restarts.pop(name, None)
@@ -26426,7 +26708,7 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
                 f"Scan laeuft seit {runtime['runtime_seconds']}s; "
                 f"Zeitbudget {runtime['timeout_minutes']}min ueberschritten"
             )
-        elif payload["cache_health"] in {"missing", "stale", "not_tracked"} and not scan_schedule.automatic_scan_allowed(scan_name):
+        elif payload["cache_health"] in {"missing", "stale", "not_tracked"} and not _automatic_scan_allowed(scan_name):
             payload["cache_health"] = "scheduled_pause"
         return payload
 
@@ -26455,7 +26737,18 @@ def _scan_cache_health(scan_name: str, scan_state: Dict[str, Any]) -> Dict[str, 
         age_seconds = int(max(0, time.time() - os.path.getmtime(cache_path)))
         interval_seconds = max(60, int(scan_state.get("interval_min", 0) or 0) * 60)
         stale_after = max(interval_seconds * 2, interval_seconds + 15 * 60)
-        stale = age_seconds > stale_after
+        if gap_scan_schedule.is_gap_scan(scan_name):
+            # Twice-daily/weekend discovery is not a one-minute interval scan.
+            try:
+                job = _GAP_SCAN_SCHEDULE_STORE.snapshot(time.time())["jobs"][scan_name]
+                attempted = job.get("last_attempt_slot")
+                stale = (job.get("last_attempt_phase") == "reserved"
+                         and attempted is not None and os.path.getmtime(cache_path) < attempted)
+            except (ValueError, OSError):
+                runtime_error = "gap_schedule_unavailable"
+                stale = True
+        else:
+            stale = age_seconds > stale_after
         return _with_runtime({
             "cache_file": cache_file,
             "cache_exists": True,
@@ -26594,6 +26887,8 @@ _SCAN_TIMEOUTS = {
     # ~2 Min Marge → 35 Min (P95 + ~50 % Puffer). Intervall seit 31.07. 60 Min
     # (Swing-Horizont: 30-Min-Takt brachte keinen Informationsgewinn).
     "strategy_scan": 35,
+    "strat_gap_momentum_long": 35,
+    "strat_gap_momentum_short": 35,
     "quote_capability": 1,
 }
 
@@ -26936,7 +27231,7 @@ def _run_scan_safe(name, func, timeout_min=None, *, expected_previous_run_id=Non
             scan_control.register(
                 name, run_id, data_token=data_token,
                 current_data_token=lambda: _scan_control_data_token(name),
-                auto_allowed=lambda: scan_schedule.automatic_scan_allowed(name),
+                auto_allowed=lambda: _scan_automatic_resume_allowed(name),
             )
         _scan_status[name]["running"] = True
         _scan_status[name]["_started_at"] = time.time()
@@ -27001,8 +27296,11 @@ def _run_scan_safe(name, func, timeout_min=None, *, expected_previous_run_id=Non
                             # attempt and must not trigger an immediate rerun.
                             state["_resume_completed_at"] = time.time()
                             schedule_key = "strategy_scan" if _is_stock_strategy_worker(name) else name
-                            due = time.time() + _effective_scan_interval_min(schedule_key) * 60
-                            state["next_run"] = datetime.fromtimestamp(due).isoformat()
+                            if gap_scan_schedule.is_gap_scan(name):
+                                state["next_run"] = _gap_schedule_snapshot(name)["scheduled_at"]
+                            else:
+                                due = time.time() + _effective_scan_interval_min(schedule_key) * 60
+                                state["next_run"] = datetime.fromtimestamp(due).isoformat()
                         state.pop("last_error", None)
                         # Completion ends the incident even when SMTP fails.
                         # Retry delivery separately: never resurrect a healthy
@@ -27107,9 +27405,14 @@ def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = Non
 
 
 def _scheduler_loop():
-    """Background loop that triggers all scans at their defined intervals."""
+    """Interval scans plus durable, fixed Swiss Gap Momentum admissions."""
     global _scheduler_running
     print("[Scheduler] Starting automatic background scans...")
+
+    # Initialize a missing ledger at the next configured slot, independently
+    # of cache age. A restart cannot create an extra Gap startup scan.
+    for gap_name in sorted(gap_scan_schedule.SCAN_NAMES):
+        _refresh_gap_next_run(gap_name)
 
     # Initial delay to let server fully start
     time.sleep(5)
@@ -27158,7 +27461,7 @@ def _scheduler_loop():
         scan_tasks = [(name, func) for name, func in scan_tasks if name not in _bg_owned_skips]
         print("[Scheduler] Scan-Ownership: bi_long/bi_short/biotech laufen bei "
               "tradingbot-bg; new_listing bleibt API-owned (API_SCAN_SKIP_BG_OWNED=0 zum Übersteuern)")
-    _heavy_names = {name for name, _ in heavy_scans}
+    _heavy_names = {name for name, _ in heavy_scans} | gap_scan_schedule.SCAN_NAMES
 
     # ── Smart Startup: Nur Scans starten die keinen frischen Cache haben ──
     last_run_times = {}
@@ -27166,7 +27469,8 @@ def _scheduler_loop():
         if not _scheduler_running:
             break
         _drain_scan_resume_restarts()
-        if not scan_schedule.automatic_scan_allowed(name):
+        _run_due_gap_scans()  # Fixed slots win admission before interval jobs.
+        if not _automatic_scan_allowed(name):
             with _scan_lock:
                 _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
             continue
@@ -27196,7 +27500,9 @@ def _scheduler_loop():
                         print("[Scheduler] market_context: crash_monitor wartet zu lange, nutze letzten Cache")
                         break
                     time.sleep(3)
-            started = scan_schedule.automatic_scan_allowed(name) and _run_scan_safe(name, func)
+            if name in _heavy_names and _gap_automatic_slot_pending():
+                continue
+            started = _automatic_scan_allowed(name) and _run_scan_safe(name, func)
             if started:
                 last_run_times[name] = time.time()
                 with _scan_lock:
@@ -27211,6 +27517,7 @@ def _scheduler_loop():
                 while _scan_status[name]["running"] and _scheduler_running:
                     time.sleep(10)
                     _drain_scan_resume_restarts()
+                    _run_due_gap_scans()
                     if _scan_is_parked(name):
                         break  # Keep ownership, let light jobs proceed.
                     _wait_sec = int(time.time() - _wait_start)
@@ -27228,6 +27535,7 @@ def _scheduler_loop():
 
     while _scheduler_running:
         _drain_scan_resume_restarts()
+        _run_due_gap_scans()
         now = time.time()
         for name, func in scan_tasks:
             if not _scheduler_running:
@@ -27245,7 +27553,7 @@ def _scheduler_loop():
             # _scan_watchdog_check. Ein isolierter Thread wird nie dupliziert.
             _scan_watchdog_check(name, now)
 
-            if not scan_schedule.automatic_scan_allowed(name):
+            if not _automatic_scan_allowed(name):
                 with _scan_lock:
                     _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
                 continue
@@ -27255,6 +27563,9 @@ def _scheduler_loop():
                     continue
                 # V2.2: Schwere Scans nicht starten wenn ein anderer schwerer läuft
                 if name in _heavy_names:
+                    _run_due_gap_scans()
+                    if _gap_automatic_slot_pending():
+                        continue
                     _other_heavy_running = False
                     with _scan_lock:
                         for _hn in _heavy_names:
@@ -27264,7 +27575,7 @@ def _scheduler_loop():
                     if _other_heavy_running:
                         continue  # Nächstes Mal probieren
                 print(f"[Scheduler] Running: {name} (interval: {_scan_status[name]['interval_min']}min)")
-                started = scan_schedule.automatic_scan_allowed(name) and _run_scan_safe(name, func)
+                started = _automatic_scan_allowed(name) and _run_scan_safe(name, func)
                 if started:
                     last_run_times[name] = time.time()
                     with _scan_lock:
@@ -27562,6 +27873,19 @@ async def commerce_auth_gate(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
     path = request.url.path
+    if request.method == "GET" and path == "/api/email-alert-audit":
+        # This operator GET must not trigger legacy auth migration, account
+        # expiry writes or commerce feature checks before its own read-only
+        # handler runs. It stays admin-only regardless of the optional gate.
+        if not HAS_AUTH:
+            return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
+        token = _token_from_authorization(request.headers.get("authorization"))
+        payload = _readonly_diagnostic_call(verify_token, token) if token else None
+        if not payload:
+            return JSONResponse(status_code=401, content={"detail": "Admin login required"})
+        if str(payload.get("email", "")).strip().lower() not in ADMIN_EMAILS:
+            return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+        return await call_next(request)
     if path in _LOOPBACK_OR_ADMIN_API_PATHS:
         client_host = str(request.client.host if request.client else "").strip().lower()
         if client_host in _LOOPBACK_HOSTS:
@@ -28783,7 +29107,9 @@ def _effective_scan_timing(
     last_ts = max(candidates) if candidates else None
 
     next_ts = _parse_ts(status.get("next_run"))
-    if next_ts is None or next_ts <= now_ts:
+    if gap_scan_schedule.is_gap_scan(status.get("schedule_name")):
+        next_ts = _parse_ts(_gap_schedule_snapshot(status["schedule_name"], now_ts)["scheduled_at"])
+    elif next_ts is None or next_ts <= now_ts:
         next_ts = (last_ts + interval_sec) if last_ts is not None else None
 
     last_iso = (
@@ -28792,7 +29118,9 @@ def _effective_scan_timing(
         else status.get("last_run")
     )
     next_iso = (
-        datetime.fromtimestamp(next_ts).isoformat()
+        (datetime.fromtimestamp(next_ts, timezone.utc)
+         if gap_scan_schedule.is_gap_scan(status.get("schedule_name"))
+         else datetime.fromtimestamp(next_ts)).isoformat()
         if next_ts is not None
         else status.get("next_run")
     )
@@ -29426,10 +29754,70 @@ def get_email_alert_status(authorization: Optional[str] = Header(None)):
     }
 
 
+def _admin_mail_delivery_status() -> Dict[str, Any]:
+    """Bounded, read-only receipts and reviewed reasons, without addresses."""
+    pipeline = _email_pipeline_summary(public=True)
+    with _EMAIL_SEND_LOG_LOCK:
+        events = [dict(event) for event in _EMAIL_SEND_LOG[-50:]]
+    reviewed = {
+        **_ALERT_SUPPRESSION_LABELS,
+        "startup_cooldown": "Startpause nach Neustart",
+        "missing_gmail_config": "Mailzugang nicht konfiguriert",
+        "no_recipients": "Keine berechtigten Empfaenger",
+        "no_eligible_recipients": "Keine berechtigten Empfaenger",
+        "blocked_etf_content": "Nicht zulaessiges Finanzprodukt",
+        "unclassified_code_reason": "Weiterer Versandgrund; im Betreiberprotokoll pruefen",
+    }
+    decisions = []
+    now = datetime.now(timezone.utc)
+    window_seconds = 24 * 3600
+    for event in reversed(events):
+        try:
+            stamp = datetime.fromisoformat(str(event.get("timestamp") or "").replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (now - stamp.astimezone(timezone.utc)).total_seconds()
+            if age < 0 or age > window_seconds:
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        raw = str(event.get("reason") or "")
+        # Only reviewed identifiers may leave the event journal. Raw SMTP
+        # exceptions/subjects can contain recipients or private provider URLs.
+        codes = [code for code in reviewed if re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(code) + r"(?![A-Za-z0-9_])", raw
+        )]
+        if raw and not codes:
+            stable = _stable_suppression_reason(raw)
+            codes = [stable if stable in reviewed else "unclassified_code_reason"]
+        decisions.append({
+            "timestamp": stamp.astimezone(timezone.utc).isoformat(),
+            "status": _safe_email_event_status(event.get("status")),
+            "reasons": [{"code": code, "label": reviewed[code]} for code in codes[:4]],
+        })
+    recipients = {}
+    for channel, horizon in (("stocks_swing", "swing"), ("stocks_intraday", "intraday")):
+        try:
+            recipients[channel] = len(_readonly_diagnostic_call(_resolve_email_alert_recipients,
+                trade_horizon=horizon, mail_class="swing_trade" if horizon == "swing" else "trade",
+                mail_channel=channel,
+            ))
+        except Exception:
+            recipients[channel] = None
+    return {
+        "pipeline": pipeline,
+        "recipient_counts": recipients,
+        "recent_decisions": decisions,
+        "process_event_limit": 50,
+        "window_seconds": window_seconds,
+        "smtp_acceptance_is_inbox_delivery": False,
+    }
+
+
 @app.get("/api/email-alert-audit")
 def get_email_alert_audit(authorization: Optional[str] = Header(None)):
-    """Show which scanner results are currently email-alert eligible."""
-    _require_admin(authorization)
+    """Read cache prechecks and actual delivery evidence; never send an alert."""
+    _readonly_diagnostic_call(_require_admin, authorization)
     cache_targets = {
         "bi_long": BI_CACHE_LONG,
         "bi_short": BI_CACHE_SHORT,
@@ -29439,20 +29827,26 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
         "new_listing": NEW_LISTING_CACHE,
         "early_movers": EARLY_MOVERS_CACHE,
         "strategy_scan": STRATEGY_SCAN_CACHE,
+        "strat_gap_momentum_long": _strategy_cache_path("Gap Momentum Long"),
+        "strat_gap_momentum_short": _strategy_cache_path("Gap Momentum Short"),
     }
     scanners = {}
     for name, path in cache_targets.items():
         try:
-            scanners[name] = _build_alert_audit_for_cache(name, path)
+            audit_name = "stock_strategy" if name.startswith("strat_gap_momentum_") else name
+            scanners[name] = _readonly_diagnostic_call(_build_alert_audit_for_cache, audit_name, path)
+            scanners[name]["scanner"] = name
         except Exception as exc:
             print(f"[Email Audit] {name}: {_sanitized_exception_text(exc)}")
             scanners[name] = {"scanner": name, "error": "audit_unavailable", "cache_file": os.path.basename(path)}
 
+    delivery = _admin_mail_delivery_status()
     return {
         "status": "ok",
         "summary": _summarize_email_alert_audit(scanners),
-        "email_alerts": _email_alert_status(),
-        "common_stock_guard": _common_stock_guard_status(),
+        "email_alerts": _public_email_alert_status(_email_alert_status()),
+        "delivery": delivery,
+        "common_stock_guard": _readonly_diagnostic_call(_common_stock_guard_status),
         "policy": {
             "top_grades": sorted(_ALERT_TOP_GRADES),
             "cooldown_seconds": _EMAIL_COOLDOWN_SEC,
@@ -29466,14 +29860,14 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
             "note": "Alerts are defensive: S/A/A+ only; warning candidates can be visible in the app but do not receive scanner trade-mail permission. Personal structure reminders are separate opt-in information. Crash-level bearish stocks suppress duplicate Bear/BI-Short mails. Pump-&-Dump mails require a real New-Listing source, valid listing-age window, active SHORT-now timing, Safety OK, unmissed targets, minimum R:R and a fresh micro-crack trigger. Early-Mover crypto mails are long-only and require confirmed closed 5m execution, BTC tailwind, fresh data, TP1 not missed, live R:R and a weak-link trade score. Explosion-Armed/watch mails are hard-disabled.",
         },
         "coverage": {
-            "automatic_api_scheduler": ["quote_capability", "bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan", "cup_handle_watch"],
+            "automatic_api_scheduler": ["quote_capability", "bi_long", "bi_short", "biotech", "bear", "orb", "new_listing", "early_movers", "strategy_scan", "strat_gap_momentum_long", "strat_gap_momentum_short", "cup_handle_watch"],
             "manual_scan_alerts": ["stock_strategy"],
             "watch_only_crypto_no_trade_email": ["crypto_strategy", "btc_divergenz"],
             "informational_no_trade_email": ["btc_divergenz", "money_flow", "crash_monitor"],
             "display_radar_no_trade_email": ["volume_spikes"],
         },
         "scanners": scanners,
-        "recent_email_events": list(_EMAIL_SEND_LOG[-20:]),
+        "recent_email_events": delivery["recent_decisions"],
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -29839,6 +30233,7 @@ def get_scan_status():
         }
         for name, status in _scan_status.items():
             cache_health = _scan_cache_health(name, status)
+            public_schedule = _scan_schedule_for(name, status)
             health_counts[cache_health.get("cache_health", "not_tracked")] = (
                 health_counts.get(cache_health.get("cache_health", "not_tracked"), 0) + 1
             )
@@ -29848,10 +30243,11 @@ def get_scan_status():
                 "attempt_diagnostics": status.get("last_attempt_diagnostics"),
                 "last_run": status["last_run"],
                 "last_attempt_at": status.get("last_attempt_at"),
-                "next_run": status["next_run"],
+                "next_run": (public_schedule["scheduled_at"] if gap_scan_schedule.is_gap_scan(name)
+                             else status["next_run"]),
                 "interval_min": status["interval_min"],
                 "control": _scan_control_snapshot(name, status),
-                "schedule": _scan_schedule_for(name, status),
+                "schedule": public_schedule,
                 **cache_health,
             }
             # Add runtime info for running scans
@@ -36095,7 +36491,7 @@ def _narrative_pulse_cache_status() -> Dict[str, Any]:
     }
 
 
-def _narrative_pulse_email_status(now: Optional[float] = None) -> Dict[str, Any]:
+def _narrative_pulse_email_status(now: Optional[float] = None, *, read_only: bool = False) -> Dict[str, Any]:
     now = now or time.time()
     utc_now = datetime.now(timezone.utc)
     global_frequency = _narrative_pulse_global_frequency()
@@ -36103,11 +36499,12 @@ def _narrative_pulse_email_status(now: Optional[float] = None) -> Dict[str, Any]
     frequencies = {}
     total_recipients = set()
     for frequency, cfg in NARRATIVE_PULSE_FREQUENCIES.items():
-        recipients = _narrative_pulse_recipients(frequency)
+        recipients = _readonly_diagnostic_call(_narrative_pulse_recipients, frequency) if read_only else _narrative_pulse_recipients(frequency)
         total_recipients.update(recipients)
         bucket = _narrative_pulse_bucket(frequency, utc_now)
         dedupe_key = f"narrative_pulse_{frequency}_{bucket}"
-        remaining = _email_dedupe_remaining(dedupe_key, int(cfg["ttl"]), now=now)
+        remaining = (_email_dedupe_remaining(dedupe_key, int(cfg["ttl"]), now=now, read_only=True)
+                     if read_only else _email_dedupe_remaining(dedupe_key, int(cfg["ttl"]), now=now))
         frequencies[frequency] = {
             "label": cfg["label"],
             "recipient_count": len(recipients),
@@ -36140,12 +36537,12 @@ def _narrative_pulse_email_status(now: Optional[float] = None) -> Dict[str, Any]
     }
 
 
-def _narrative_pulse_recipients(frequency: str) -> List[str]:
+def _narrative_pulse_recipients(frequency: str, *, read_only: bool = False) -> List[str]:
     frequency = _normalize_narrative_pulse_frequency(frequency)
     recipients: List[str] = []
     try:
         if HAS_AUTH and ALERT_SEND_TO_SUBSCRIBERS:
-            recipients.extend(get_email_alert_recipients("narrative_pulse", frequency))
+            recipients.extend(_readonly_diagnostic_call(get_email_alert_recipients, "narrative_pulse", frequency) if read_only else get_email_alert_recipients("narrative_pulse", frequency))
     except Exception as exc:
         print(f"[Narrative] Recipient filter failed: {exc}")
     if frequency != "off" and _narrative_pulse_global_frequency() == frequency:
@@ -45864,7 +46261,7 @@ def autotrader_clear_positions(authorization: Optional[str] = Header(None)):
 
 # ── Admin System ──
 
-def _require_admin(authorization: Optional[str]):
+def _require_admin(authorization: Optional[str], *, read_only: bool = False):
     """
     Helper: Extract token, verify it, check admin status.
     Returns (payload, email) on success, raises HTTPException(403) if not admin.
@@ -45878,7 +46275,7 @@ def _require_admin(authorization: Optional[str]):
         raise HTTPException(status_code=403, detail="Invalid Authorization header format")
 
     token = parts[1]
-    payload = verify_token(token)
+    payload = _readonly_diagnostic_call(verify_token, token) if read_only else verify_token(token)
     if not payload:
         raise HTTPException(status_code=403, detail="Invalid or expired token")
 
