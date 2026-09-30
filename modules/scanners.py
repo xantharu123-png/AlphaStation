@@ -17,7 +17,7 @@ import tempfile
 import uuid
 import datetime as dt
 from modules import stock_swing_contract as stock_swing
-from modules import scan_control
+from modules import scan_control, scan_progress
 from modules.stock_symbols import valid_stock_symbol
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1114,7 +1114,8 @@ def _bi_progress_write(direction, status, checked=0, total=0, hits=0, no_data=0,
             "top_score": top_score,
             "avg_score": avg_score,
             "detail": detail,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            **scan_progress.identity(f"bi_{direction}"),
         }
         if diagnostics is not None:
             progress["diagnostics"] = diagnostics
@@ -2035,13 +2036,25 @@ def _biotech_config_save(config):
 
 
 def _biotech_progress_write(status, **kwargs):
+    tmp_path = None
     try:
         data = {"status": status, "timestamp": time.time()}
         data.update(kwargs)
-        with open(_biotech_progress_file(), "w") as f:
+        data.update(scan_progress.identity("biotech"))
+        path = _biotech_progress_file()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(path) or ".",
+                                         prefix=".biotech-progress-", suffix=".tmp", delete=False) as f:
+            tmp_path = f.name
             json.dump(data, f)
+        os.replace(tmp_path, path)
     except Exception:
         pass
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _biotech_progress_read():

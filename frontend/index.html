@@ -6948,10 +6948,17 @@ function scannerSelectedProgress({ info = null, schedulerState = null, scanKey =
     const currentResult = info?.partial === true && info?.scan_running === true && !!resultRun
         && attempt !== null && cached !== null && cached >= attempt;
     const pattern = currentResult ? scannerPatternProgress(info, count, true) : null;
-    // BI file progress lacks a run identity/timestamp in the API. Use its
-    // current partial response, never a leftover file from an earlier worker.
-    const runtime = stockRuntime && schedulerState?.running === true && !!schedulerRun
-        && raw?.running === true && runtimeStrategy === expectedStrategy ? raw : null;
+    // File counters are independent of result rows: BI must show its progress
+    // even before the first 17/20 hit, but never borrow a previous run's file.
+    const epoch = value => typeof value === 'number' && Number.isFinite(value) && value > 0;
+    const ownedFile = ['bi_long', 'bi_short', 'biotech'].includes(scanKey)
+        && schedulerControl?.worker_alive === true && raw?.progress_version === 1
+        && raw?.run_id === schedulerRun && raw?.owner_scan_key === scanKey
+        && ['scanning', 'running', 'done'].includes(raw?.status)
+        && [raw?.timestamp, raw?.run_started_at, raw?.observed_at].every(epoch)
+        && raw.timestamp >= raw.run_started_at && raw.timestamp <= raw.observed_at + 5;
+    const runtime = schedulerState?.running === true && !!schedulerRun && raw?.running === true
+        && ((stockRuntime && runtimeStrategy === expectedStrategy) || ownedFile) ? raw : null;
     const partial = currentResult ? { checked: info.checked, total: info.total, detail: info.progress_detail } : null;
     const chosen = pattern || (scannerProgressValue(runtime).hasProgress ? runtime : partial);
     const progress = scannerProgressValue(chosen);
@@ -7956,8 +7963,6 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
 
             <div className="flex flex-wrap items-center justify-end gap-3 px-1 text-xs text-gray-400">
                 <span>{biSnapshotCountLabel({ info: liveInfo, loading: feed.loading, hasLoaded: feed.hasLoaded, count: results.length })}</span>
-                {selectedProgress.running && <span>Scan laeuft: {selectedProgress.hasProgress
-                    ? `${selectedProgress.checked}/${selectedProgress.total} geprueft` : 'Fortschritt noch nicht bestaetigt'}</span>}
             </div>
 
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">

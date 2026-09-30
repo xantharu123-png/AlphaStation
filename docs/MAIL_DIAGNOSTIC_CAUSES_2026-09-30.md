@@ -102,6 +102,8 @@ blocked external network/SMTP. It emits the existing eager-`anyio` pytest warnin
 
 Production was verified healthy on `716f2ebd1e0c` during this continuation.
 That is the earlier Biotech/startup correction, not this new diagnostic patch.
+The next account continuation verified `d06b8af58f35` live at 17:49 UTC on
+30 September: the operator has now deployed this diagnostic correction too.
 Successful code tests are not a production SMTP acceptance or an inbox receipt.
 Existing stored candidate annotations may retain their old reasons until a
 new scan or normal result re-evaluation. No old trading mail is replayed.
@@ -113,3 +115,5 @@ are written only after a hit, so they cannot provide progress for a no-hit run.
 Repairing that contract requires run-bound progress through producer, API and
 UI; it is recorded separately in the local TODO, not patched during the frozen
 mail acceptance run. A running status alone is not a completed scan.
+The subsequent local repair and its separate live-delivery boundary are in
+[BI progress tied to the current scan](BI_PROGRESS_RUN_BINDING_2026-09-30.md).

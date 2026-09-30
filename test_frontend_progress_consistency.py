@@ -237,6 +237,7 @@ def test_scanner_and_bi_callsites_consume_the_shared_selected_progress():
     scanner = SOURCE[SOURCE.index("function ScannerTab("):SOURCE.index("function BIScannerTab(")]
     bi = SOURCE[SOURCE.index("function BIScannerTab("):SOURCE.index("function BiotechTab(")]
     assert "progressOverride={selectedProgress}" in scanner and "progress={selectedProgress}" in scanner
-    assert "progressOverride={selectedProgress}" in bi and "selectedProgress.checked" in bi
+    assert "progressOverride={selectedProgress}" in bi
+    assert "Scan laeuft: {selectedProgress.hasProgress" not in bi
     assert "patternProgress?.checked ?? scanInfo?.checked" not in scanner
     assert "diagnostics.checked || 0" not in bi

@@ -105,7 +105,7 @@ from modules.mail_diagnostics import (
     read_diagnostic_reference,
     transport_diagnostic_code,
 )
-from modules import scan_control, scan_control_policy, scan_schedule, gap_scan_schedule
+from modules import scan_control, scan_control_policy, scan_schedule, gap_scan_schedule, scan_progress
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.pattern_context import is_elliott_pattern_context
 ELLIOTT_STRATEGY = "Elliott Wave Muster"
@@ -30394,6 +30394,7 @@ def get_scan_status():
     """Get status of all background scans (running, last_run, next_run) + progress."""
     with _scan_lock:
         scans_copy = {}
+        progress_starts = {}
         health_counts = {
             "ok": 0,
             "running": 0,
@@ -30404,6 +30405,7 @@ def get_scan_status():
             "not_tracked": 0,
         }
         for name, status in _scan_status.items():
+            progress_starts[name] = status.get("_started_at")
             cache_health = _scan_cache_health(name, status)
             public_schedule = _scan_schedule_for(name, status)
             health_counts[cache_health.get("cache_health", "not_tracked")] = (
@@ -30439,15 +30441,10 @@ def get_scan_status():
                               ("bi_short", lambda: _bi_progress_read("short")),
                               ("biotech", _biotech_progress_read)]:
         try:
-            prog = reader()
-            if prog and isinstance(prog, dict):
-                scans_copy[scan_key]["progress"] = {
-                    "checked": prog.get("checked", 0),
-                    "total": prog.get("total", 0),
-                    "hits": prog.get("hits", 0),
-                    "detail": prog.get("detail", ""),
-                    "status": prog.get("status", ""),
-                }
+            prog = scan_progress.current_progress(reader(), scan_key, scans_copy.get(scan_key),
+                started_at=progress_starts.get(scan_key), now=time.time())
+            if prog is not None:
+                scans_copy[scan_key]["progress"] = prog
         except Exception:
             pass
 
