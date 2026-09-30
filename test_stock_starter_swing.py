@@ -60,6 +60,18 @@ def payload(session, close=100):
     ]}
 
 
+def matching_swing_history(observation):
+    """Keep the separately mocked history coherent with its bulk observation."""
+    previous_session = swing.completed_sessions(NOW, 2)[1]
+    previous_close = observation["prevDay"]["c"]
+    return [dict(date=previous_session, open=previous_close, high=previous_close+1,
+                 low=previous_close-1, close=previous_close, volume=observation["prevDay"]["v"]),
+            dict(date=observation["swing_analysis_session"], **{
+                long: observation["day"][short] for short, long in
+                (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"), ("v", "volume"))
+            })]
+
+
 def test_bulk_feed_has_real_dated_close_no_last_trade(monkeypatch):
     monkeypatch.delenv("STOCK_SWING_DATA_MODE", raising=False)
     monkeypatch.setattr(swing, "completed_sessions", lambda *a: ["2026-09-14", "2026-09-11"])
@@ -107,6 +119,7 @@ def test_scanner_publishes_daily_plan_without_any_live_quote_or_5m(monkeypatch):
     bar.update(o=98, h=102, l=96)
     feed = swing.universe(swing.parse_grouped(data, session), {"TEST": {"c": 98, "v": 1_000_000}}, session)
     monkeypatch.setattr(api, "_fetch_strategy_snapshot_universe", lambda *a: feed)
+    monkeypatch.setattr(api, "_fetch_strategy_daily_history", lambda *a: matching_swing_history(feed[0]))
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *a, **k: pytest.fail("no 5m in swing"))
     rows = api._strategy_scan_wrapper(NAME, send_email=False)
     assert len(rows) == 1

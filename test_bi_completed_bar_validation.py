@@ -171,6 +171,12 @@ def test_actual_scan_excludes_bad_completed_series_and_publishes_independent_val
         monkeypatch, tmp_path, _result(17), "short", [{"results": bad}, {"results": raw}],
     )
     monkeypatch.setenv("STOCK_SWING_DATA_MODE", "starter_swing" if swing_mode else "realtime")
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            now = datetime(2026, 9, 23, 18, tzinfo=timezone.utc)
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    monkeypatch.setattr(scanners, "datetime", Clock)
     scanners._bi_background_scan("fixture", "short", tickers)
     cache = json.loads(final.read_text())
     diagnostics = cache["diagnostics"]
@@ -198,11 +204,17 @@ def test_live_path_still_requires_valid_uncompleted_prices():
     {"status": "OK", "results": [], "resultsCount": 0},
 ])
 def test_completed_swing_empty_history_does_not_break_excluded_bar_count(monkeypatch, tmp_path, empty):
-    raw = _to_polygon(_flat_bars())
+    raw = _to_polygon(_attach_ts(_flat_bars(), end_day=date(2026, 9, 22)))
     scanners, tickers, final, _, _, analyses, _ = _lifecycle(
         monkeypatch, tmp_path, _result(17), "long", [empty, {"results": raw}],
     )
     monkeypatch.setenv("STOCK_SWING_DATA_MODE", "starter_swing")
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            now = datetime(2026, 9, 23, 18, tzinfo=timezone.utc)
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    monkeypatch.setattr(scanners, "datetime", Clock)
     scanners._bi_background_scan("fixture", "long", tickers)
     result = json.loads(final.read_text())
     assert len(analyses) == 1 and result["diagnostics"]["coverage"] == "complete"

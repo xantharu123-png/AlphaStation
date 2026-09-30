@@ -16,7 +16,7 @@ BI_DATA_ERROR_REASONS = frozenset({
     "invalid_results_type", "invalid_result_count", "invalid_query_count",
     "result_count_mismatch", "contradictory_empty_response", "unexpected_pagination",
     "invalid_bar_type", "invalid_bar_value", "invalid_bar_geometry",
-    "invalid_bar_timestamp", "invalid_data_conversion",
+    "invalid_bar_timestamp", "invalid_data_conversion", "stale_daily_history",
 })
 BI_ISOLATABLE_BAR_ERRORS = frozenset({
     "invalid_bar_type", "invalid_bar_value", "invalid_bar_geometry",

@@ -118,13 +118,14 @@ def test_daily_score_passing_but_status_not_confirmed_is_not_score_shortfall():
 
 def test_wrapper_publishes_exact_daily_quality_without_fetching_live_confirmation(monkeypatch):
     from test_stock_momentum_confirmed_contract import _wrapper_fixture,NOW,NAME
-    from test_stock_starter_swing import payload
+    from test_stock_starter_swing import payload, matching_swing_history
     written=_wrapper_fixture(monkeypatch)
     session=swing.completed_sessions(NOW,1)[0]
     data=payload(session,102.)
     data["results"][0].update(o=98.,h=102.,l=96.)
     feed=swing.universe(swing.parse_grouped(data,session),{"TEST":{"c":98.,"v":1_000_000}},session)
     monkeypatch.setattr(api,"_fetch_strategy_snapshot_universe",lambda *a:feed)
+    monkeypatch.setattr(api,"_fetch_strategy_daily_history",lambda *a:matching_swing_history(feed[0]))
     monkeypatch.setattr(api,"_fetch_recent_stock_5m_bars",lambda *a,**k:pytest.fail("no live confirmation in daily mode"))
     rows=api._strategy_scan_wrapper(NAME,send_email=False)
     assert len(rows)==1 and written

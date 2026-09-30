@@ -68,7 +68,7 @@ DATA_ERROR_REASONS = frozenset("""
 invalid_payload provider_status invalid_json missing_results invalid_results_type
 invalid_result_count invalid_query_count result_count_mismatch contradictory_empty_response
 unexpected_pagination invalid_bar_type invalid_bar_value invalid_bar_geometry
-invalid_bar_timestamp invalid_data_conversion
+invalid_bar_timestamp invalid_data_conversion stale_daily_history
 """.split())
 TRANSPORT_ERROR_REASONS = frozenset("""
 timeout connection_failure tls_failure http_unauthorized http_rate_limited
@@ -77,7 +77,10 @@ malformed_json unexpected_failure
 """.split())
 REJECTION_CODES = DATA_FAILURE_CODES | frozenset("""
 insufficient_daily_history insufficient_completed_history insufficient_dollar_liquidity
-empty_daily_history invalid_daily_history
+empty_daily_history invalid_daily_history stale_daily_history
+daily_reference:history_not_current daily_reference:previous_session_missing
+daily_reference:invalid_reference_value daily_reference:reference_price_mismatch
+daily_reference:reference_volume_mismatch
 rvol_anomaly spac_nav already_broke_out cumulative_pump indicator_or_hard_gate_contract
 invalid_symbol_or_missing_prev_close missing_price_or_prev_close change_filter
 price_filter close_position_filter gap_filter dollar_volume_filter vortag_filter
@@ -171,7 +174,7 @@ CONFLUENCE_HARD_GATES = frozenset({
     "last_bar_pump", "range_breakdown", "recent_bearish_pressure",
     "recent_bullish_pressure", "unknown",
 })
-CONFLUENCE_CONTRACTS = frozenset({"stock-bi-20-v2", "stock-bi-20-v3"})
+CONFLUENCE_CONTRACTS = frozenset({"stock-bi-20-v2", "stock-bi-20-v3", "stock-bi-20-v4"})
 BI_CACHE_SCANNERS = {
     "bi_cache_long.json": "bi_long", "bi_cache_long.json.partial": "bi_long",
     "bi_cache_short.json": "bi_short", "bi_cache_short.json.partial": "bi_short",
@@ -378,6 +381,7 @@ intraday_unconfirmed_pattern
 invalid_structure_plan
 invalid_trade_geometry
 invalid_trade_plan
+bi_plan_not_released
 latest_5m_green_reclaim
 latest_5m_red_fade
 listing_age_not_tradeable

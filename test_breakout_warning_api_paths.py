@@ -9,7 +9,7 @@ from modules.breakout_warnings import apply_breakout_warning, breakout_warning_f
 from modules import stock_swing_contract as swing
 from test_cup_handle_audit_fixes import _mk_candidate, _mock_mail_env
 from test_stock_momentum_confirmed_contract import _wrapper_fixture, NOW, NAME
-from test_stock_starter_swing import payload
+from test_stock_starter_swing import payload, matching_swing_history
 
 
 def _crypto_row(action):
@@ -109,6 +109,7 @@ def test_full_daily_swing_scan_emits_warning_without_realtime_request(monkeypatc
     data["results"][0].update(o=98, h=102, l=96)
     feed = swing.universe(swing.parse_grouped(data, session), {"TEST": {"c": 98, "v": 1_000_000}}, session)
     monkeypatch.setattr(api, "_fetch_strategy_snapshot_universe", lambda *a: feed)
+    monkeypatch.setattr(api, "_fetch_strategy_daily_history", lambda *a: matching_swing_history(feed[0]))
     monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars", lambda *a, **k: pytest.fail("no live dependency"))
     rows = api._strategy_scan_wrapper(NAME, send_email=False)
     assert len(rows) == 1

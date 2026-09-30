@@ -54,7 +54,8 @@ def evaluate_daily_momentum(bars, signal_idx):
                                   lookback=20, minimum_periods=10)
     if raw_rvol is None:
         return None
-    rvol = min(round(raw_rvol, 2), 50.0)
+    # Match the live completed-daily selector: round only for display.
+    rvol = min(raw_rvol, 50.0)
     profile_values = {"Preis": price, "Change %": change, "RVOL": rvol, "Close Position": close_pos}
     if any(not bounds[0] <= profile_values[key] <= bounds[1]
            for key, bounds in MOMENTUM_SCAN_FILTERS.items()):
@@ -69,7 +70,7 @@ def evaluate_daily_momentum(bars, signal_idx):
         "high_10d": max(float(row["high"]) for row in prior[-10:]),
         "high_20d": max(float(row["high"]) for row in prior[-20:]),
         "ema20": ema(20), "ema50": ema(50),
-        "rsi14": calculate_rsi_from_bars(prefix[-40:], 14),
+        "rsi14": calculate_rsi_from_bars(prefix[-40:], 14, raw=True),
         # Five close-to-close intervals exclude today's numerator from the
         # baseline, exactly like the live completed-daily history adapter.
         "change_5d": (price / float(prior[-5]["close"]) - 1) * 100,

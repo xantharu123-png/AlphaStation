@@ -263,7 +263,7 @@ def test_bi_failed_second_page_is_not_partial_universe_success(monkeypatch, tmp_
     assert final.read_bytes() == before
 
 
-@pytest.mark.parametrize("reference_rows", [[], [{"ticker": "WARRANTW"}]])
+@pytest.mark.parametrize("reference_rows", [[], [{"ticker": "WARRANTW", "type": "WARRANT"}]])
 def test_bi_empty_validated_broad_universe_never_falls_back_to_movers(monkeypatch, tmp_path, reference_rows):
     final, before = bi_io(monkeypatch, tmp_path, None)
     calls = []

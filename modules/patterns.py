@@ -861,7 +861,7 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 # payload contract; append a new version instead of silently renaming them.
 BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v3"
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v4"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
@@ -1495,15 +1495,15 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # ===================================================================
     s7_detail_start = len(details)
     s7_score_before = score
-    adx, adx_prev = calculate_adx(bars)
+    adx, adx_prev = calculate_adx(bars, raw=not crypto_mode)
     s7_available = adx is not None and adx_prev is not None
     s7_passed = bool(s7_available and adx < 25 and adx > adx_prev)
 
     if adx is not None:
-        if adx < 20 and adx_prev and adx > adx_prev:
+        if adx < 20 and s7_passed:
             score += 14; sm_fires += 1; sm_hits += 1
             details.append(f" ADX Wende: {adx_prev:.0f}→{adx:.0f} (unter 20 + steigend = Breakout!)")
-        elif adx < 25 and adx_prev and adx > adx_prev:
+        elif adx < 25 and s7_passed:
             score += 9; sm_hits += 1
             details.append(f" ADX steigend: {adx_prev:.0f}→{adx:.0f}")
         elif adx < 20:
@@ -1602,7 +1602,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # AUDIT: Overlaps with Stochastic (Signal 14) — avoid double-counting momentum
     # FIX 4: Score RSI but will take max(rsi_points, stoch_points) to avoid dedup
     # ===================================================================
-    rsi = calculate_rsi_from_bars(bars)
+    rsi = calculate_rsi_from_bars(bars, raw=not crypto_mode)
     rsi_points = 0  # Will be used in FIX 4 dedup logic
     rsi_detail = ""
 
@@ -1864,7 +1864,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
     # %K/%D Kreuzung in Extremzonen = starkes Timing-Signal
     # FIX 4: Score Stochastic but will take max(rsi_points, stoch_points) to avoid dedup
     # ===================================================================
-    stoch_k, stoch_d = calculate_stochastic(bars)
+    stoch_k, stoch_d = calculate_stochastic(bars, raw=not crypto_mode)
     stoch_points = 0  # Will be used in FIX 4 dedup logic
     stoch_detail = ""
 

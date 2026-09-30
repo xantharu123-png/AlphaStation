@@ -824,3 +824,21 @@ Vom Nutzer explizit geaenderter Anzeigevertrag; Referenz:
   Schlusskurs; keine blosse Preisnaehe und keine clientseitige Bestaetigung.
   Info-Mail und App-Hinweis sind kein neues Handelssignal. Vor Serverneustart
   bestehende Reminder im alten PrivateTmp pruefen und sicher erhalten.
+
+## 20. Gap-/BI-Berechnungsreparatur, 30.09.2026
+
+Referenz: `docs/GAP_BI_CALCULATION_REPAIR_2026-09-30.md`.
+
+- Aktien-BI v4 korrigiert den ADX-Startwert und entscheidet ADX/RSI/Stochastic
+  mit ungerundeten Werten. Schwellen und 17/20-Vertrag werden nicht gelockert.
+- Veraltete Einzelhistorien werden vor Analyse ausgeschlossen und diagnostiziert.
+  Referenzbestaetigte Aktienklassen bleiben unabhaengig von einem Punkt oder
+  einem langen Symbol zugelassen; ungepruefte Mover erweitern das Universum nicht.
+- Reine nachgelagerte Planwarnungen behalten qualifizierte Kandidaten in der App.
+  `BI_PlanAccepted=False` blockiert weiterhin Mail und Signal-Tracking.
+  Warnkandidaten duerfen gueltige Plaene nicht aus dem Rohpool verdraengen.
+- Abgeschlossene 1D-Strategien vergleichen Sammelfeed und Einzelhistorie fuer
+  dieselbe Sitzung, OHLCV sowie den vorherigen Sitzungsschluss. Widersprueche
+  sind Datenfehler, kein Warnkandidat und kein fehlerfreier Nulltreffer-Lauf.
+- Cacheversion 16 / BI `stock-bi-20-v4` erzwingen neue Berechnungen. Lokale
+  Gegenproben und isolierter Versandtest sind kein Produktions-Rollout.

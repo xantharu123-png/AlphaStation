@@ -1,11 +1,37 @@
 # Aktuelle Aufgaben / Übergabe
 
-Stand: **30.09.2026**, nach der Betriebsnachprüfung vom 29./30.09.
+Stand: **30.09.2026**, Gap-/BI-Reparatur und erneute Gegenprüfung.
 Workspace: `C:\Projekt\TradingBot`, Branch `main`.
-Aktueller neuer Auftrag: Gap Momentum Long/Short **02:00 und 12:00
+Aktueller Anschlussauftrag: alle sieben Gap-/BI-Auditbefunde und verwandte
+Rechenfehler beheben. Lokale Abnahme abgeschlossen: **9.385 Tests bestanden,
+5 Plattform-Skips**, davon 80 neue Regressionstests. Desktop/Mobil, Syntax und
+Bundle geprueft. [Reparaturbericht](docs/GAP_BI_CALCULATION_REPAIR_2026-09-30.md).
+BI-Regelversion **v4**, Aktienstrategie-Cache **16**; 17/20 unveraendert.
+
+## Aktuelle Gap-/BI-Reparatur
+
+- [x] ADX-Initialisierung, ungerundete ADX-/RSI-/Stochastic-Entscheidung,
+  Null-ADX und korrekt zusammengesetzte Zwei-Tages-Rendite.
+- [x] Gleiche Sitzung/OHLCV-Basis fuer Gap und gemeinsamen 1D-Strategiepfad;
+  Einzelausschluss, Fehlercluster und Erhaltung alter Final-Caches getestet.
+- [x] BI nur aus referenzgeprueftem CS-Universum; bestaetigte Anteilsklassen
+  nicht per Punkt/Suffix ausschliessen. Veraltete Historien getrennt zaehlen.
+- [x] Bekannte Planwarnungen nach 17/20 sichtbar erhalten; unabhaengige
+  Mail-/Tracking-Sperre und kein Verdraengen gueltiger Plaene durch Warnkandidaten.
+- [x] Gegenproben in regulaere Tests uebernommen; feste Diagnosegruende
+  und Export angepasst. Daten-/unbekannte Fehler bleiben ausgeschlossen.
+- [x] Abschliessenden eingefrorenen Gesamtlauf dokumentiert: 9.385 bestanden,
+  0 Fehler, 5 Plattform-Skips. SHA256 aller 22 Python-Dateien unveraendert.
+- [x] Reparaturpaket fuer Commit/Push abgenommen; keine privaten Exporte
+  oder Browserartefakte Bestandteil des Pakets. Veroeffentlichung siehe Git-Verlauf.
+- [ ] Rollout, neue vollstaendige Gap-/BI-Laeufe und reale Mailzustellung pruefen.
+
+## Vorheriges Gap-/Mail-Paket
+
+Vorgaengerauftrag: Gap Momentum Long/Short **02:00 und 12:00
 Europe/Zurich, Montag–Freitag**, mathematischer Audit und Abschluss der
 Maildiagnose. [Neuer Prüfbericht](docs/GAP_MOMENTUM_SCHEDULE_AUDIT_2026-09-30.md).
-Dieses neue Paket ist lokal umgesetzt und unabhängig nachgeprüft:
+Dieses Vorgaengerpaket (`f16a1cc`) ist lokal umgesetzt und unabhängig nachgeprüft:
 **9.304 Tests bestanden, 5 Plattform-Skips**. Zur Veröffentlichung freigegeben;
 der Produktions-Rollout ist noch nicht erledigt.
 Die folgende Live-Revision ist der vorherige Serverstand, nicht der neue Zeitplan.

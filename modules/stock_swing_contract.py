@@ -138,6 +138,34 @@ def universe(current, previous, session):
             for ticker, bar in current.items()]
 
 
+def history_observation_error(history, observation, *, previous_session):
+    """Join bulk and individual adjusted history before scoring.
+
+    Same dates alone do not make provider responses coherent. The caller
+    supplies the preceding exchange session, not calendar day minus one.
+    """
+    session = observation.get("swing_analysis_session")
+    current = [bar for bar in history if bar.get("date") == session]
+    previous = [bar for bar in history if bar.get("date") == previous_session]
+    if len(current) != 1:
+        return "history_not_current"
+    if len(previous) != 1:
+        return "previous_session_missing"
+    for source, bar, fields in (
+        (observation.get("day") or {}, current[0], (("o", "open"), ("h", "high"),
+         ("l", "low"), ("c", "close"), ("v", "volume"))),
+        (observation.get("prevDay") or {}, previous[0], (("c", "close"),)),
+    ):
+        for short, long in fields:
+            reference, actual = number(source.get(short)), number(bar.get(long))
+            if reference is None or actual is None or min(reference, actual) <= 0:
+                return "invalid_reference_value"
+            if not math.isclose(reference, actual, rel_tol=1e-6,
+                                abs_tol=1.0 if short == "v" else 1e-4):
+                return "reference_volume_mismatch" if short == "v" else "reference_price_mismatch"
+    return None
+
+
 def delayed_market_watermark(as_of):
     """Latest complete regular-session minute available with Starter delay."""
     available = (as_of - timedelta(seconds=DELAY_SECONDS)).replace(second=0, microsecond=0)

@@ -223,6 +223,7 @@ ALLOWED_SUPPRESSION_REASONS = frozenset({
     "estimated_trade_plan",
     "entry_quality_watch_only",
     "invalid_trade_plan",
+    "bi_plan_not_released",
     "near_binary_event",
     "trade_health_chase_risk",
     "trade_health_fakeout_risk",

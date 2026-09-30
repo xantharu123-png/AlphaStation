@@ -214,7 +214,10 @@ def test_h2_long_extension_reject(monkeypatch, capsys):
         analyze_result=(True, 70, 188, ["ok"], "high", "B", 2, 2),  # kein range_days → Fallback 15
     )
     scanners._bi_background_scan("k", direction="long", candidates=["TEST"])
-    assert saved["results"] == [], "Entry 7% ueber Kurs muss verworfen werden"
+    assert len(saved["results"]) == 1
+    assert saved["results"][0]["BI_PlanAccepted"] is False
+    assert saved["results"][0]["native_plan_reason"] == "entry_too_extended"
+    assert saved["results"][0]["visibility_is_trade_signal"] is False
     assert "entry_too_extended" in capsys.readouterr().out
 
 
@@ -261,7 +264,10 @@ def test_h2_short_extension_reject_and_control(monkeypatch, capsys):
         analyze_result=(True, 70, 188, [" Solide Konsolidierung: 10 Tage"], "high", "B", 2, 2),
     )
     scanners._bi_background_scan("k", direction="short", candidates=["TEST"])
-    assert saved["results"] == [], "Kurs 8% unter Range-Low muss verworfen werden"
+    assert len(saved["results"]) == 1
+    assert saved["results"][0]["BI_PlanAccepted"] is False
+    assert saved["results"][0]["native_plan_reason"] == "entry_too_extended"
+    assert saved["results"][0]["visibility_is_trade_signal"] is False
     assert "entry_too_extended" in capsys.readouterr().out
 
     saved2 = _patch_scan_io(
@@ -310,7 +316,10 @@ def test_h2_short_tp_formula_guarantees_geometry(monkeypatch):
     assert tp1 <= round(entry - 0.5 * risk, 2) + 0.011
     assert g["res"]["valid"], "Levels muessen geometrisch gueltig sein"
     # R:R 0.5 < 1.2 → Scanner verwirft den Kandidaten (kein Fantasie-Ziel im Cache)
-    assert saved["results"] == []
+    assert len(saved["results"]) == 1
+    assert saved["results"][0]["BI_PlanAccepted"] is False
+    assert saved["results"][0]["native_plan_reason"] == "invalid_geometry_or_rr"
+    assert saved["results"][0]["visibility_is_trade_signal"] is False
 
 
 def test_autotrader_long_geometry_is_signed_and_rejects_inverted_levels():
@@ -385,6 +394,10 @@ def test_h2_geometry_mini_fuzz_500_both_directions(monkeypatch):
         assert len(geo_log) >= 50, f"zu wenige Level-Bewertungen ({direction}): {len(geo_log)}"
         assert saved["results"], f"keine Treffer im Mini-Fuzz ({direction})"
         for row in saved["results"]:
+            if row["BI_PlanAccepted"] is False:
+                assert row["visibility_is_trade_signal"] is False
+                assert row["native_plan_status"] == "unavailable"
+                continue
             g = real_trade_geometry(row["Entry"], row["StopLoss"], row["TP1"], row["TP2"],
                                     direction.upper())
             assert g["valid"], f"{direction} Geometrie-Verletzung: {row['Ticker']} {g['errors']}"

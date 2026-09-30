@@ -106,6 +106,7 @@ ELLIOTT_STRATEGY = "Elliott Wave Muster"
 from modules.wyckoff_contract import validate_entry_trigger as validate_wyckoff_entry_trigger
 from modules.breakout_warnings import apply_breakout_warning, breakout_warning_fields
 from modules import scanner_visibility
+from modules.stock_symbols import valid_stock_symbol
 from modules.cup_shape import validate_cup_shape
 from modules.cup_signal_contract import (
     CUP_PATTERN_CONTRACT_VERSION,
@@ -851,7 +852,7 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Daily-signal session references precede the signal bar. Old geometry must
 # be recomputed, not merely re-labelled as the corrected version.
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
-STOCK_STRATEGY_CACHE_VERSION = 15
+STOCK_STRATEGY_CACHE_VERSION = 16
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -925,7 +926,7 @@ def _stock_alert_asset_exclusion_reason(
     cheap_reason = _looks_like_non_stock_etp_symbol(tk)
     if cheap_reason:
         return cheap_reason
-    if "." in tk or "/" in tk:
+    if not valid_stock_symbol(tk):
         return "non-standard ticker class"
     cached_names = _COMMON_STOCK_UNIVERSE_MEM.get("names") or {}
     cached_name = cached_names.get(tk, "") if isinstance(cached_names, dict) else ""
@@ -937,7 +938,7 @@ def _stock_alert_asset_exclusion_reason(
         if tk not in common_stock_universe:
             return f"not in common-stock universe ({universe_source or 'unknown source'})"
         return None
-    if require_reference:
+    if require_reference or "." in tk:
         is_stock, reason = _is_orb_common_stock_candidate(tk)
         if not is_stock:
             return reason
@@ -2941,6 +2942,7 @@ _ALERT_SUPPRESSION_LABELS = {
     "momentum_mail_blocked_thin_baseline_liquidity": "Momentum-Mail: normale 20T-Dollar-Liquiditaet zu duenn",
     "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
     "invalid_trade_plan": "Entry/Stop/TP ungueltig",
+    "bi_plan_not_released": "Handelsplan noch nicht freigegeben",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
     "trade_rr_below_threshold": "R:R unter Mindestwert",
     "trade_missing_entry": "Entry fehlt",
@@ -9871,6 +9873,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "non_common_stock_product",
         "estimated_trade_plan",
         "invalid_trade_plan",
+        "bi_plan_not_released",
         "trade_rr_below_threshold",
         "trade_health_no_trade",
         "trade_health_chase_risk",
@@ -10129,6 +10132,9 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     raw_score = score
     rvol = _extract_alert_rvol(row)
     reasons = []
+    if scanner_name in _BI_SIGNAL_SCANNERS and row.get("BI_PlanAccepted") is False:
+        # A visible 17/20 setup does not override the producer's plan rejection.
+        reasons.append("bi_plan_not_released")
     if scanner_name in {"stock_strategy", "strategy_scan"}:
         cup_reason = _cup_signal_contract_reason(row)
         if cup_reason:
@@ -10211,6 +10217,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "score_below_alert_threshold",
         "rvol_below_alert_threshold",
         "wyckoff_contract_invalid",
+        "bi_plan_not_released",
     }
     cup_contract_blocked = any(reason.startswith("cup_contract_") for reason in reasons)
     base_actionable = not cup_contract_blocked and not any(reason in reasons for reason in base_blockers)
@@ -10962,6 +10969,8 @@ def _safe_record_alert_signals(
     if not record_alert_signals or not rows:
         return
     rows = _filter_bi_signal_rows(scanner_name, rows)
+    if scanner_name in _BI_SIGNAL_SCANNERS:
+        rows = [row for row in rows if row.get("BI_PlanAccepted") is not False]
     if scanner_name in _BI_SIGNAL_SCANNERS and not rows:
         return
     delivery_required = str(mail_class or "").strip().lower() in {"trade", "swing_trade"}
@@ -13129,6 +13138,8 @@ def _revalidate_stock_swing_plan(row, *, now_ts, scanner_name):
         return {"ok": False, "reason": "swing_daily_reference_invalid_or_stale"}
     if scanner_name in _BI_SIGNAL_SCANNERS and not _filter_bi_signal_rows(scanner_name, [row]):
         return {"ok": False, "reason": "bi_indicator_contract_not_met"}
+    if scanner_name in _BI_SIGNAL_SCANNERS and row.get("BI_PlanAccepted") is False:
+        return {"ok": False, "reason": "bi_plan_not_released"}
     levels = _alert_trade_levels(row)
     if not levels.get("valid") or levels.get("estimated") or not _alert_trade_plan_ok(row):
         return {"ok": False, "reason": "swing_trade_plan_invalid"}
@@ -20126,7 +20137,7 @@ def _strategy_daily_history_metrics(
         ema50 = next((v for v in reversed(ema50_series) if v is not None), None)
         ema200 = next((v for v in reversed(ema200_series) if v is not None), None)
 
-    rsi14 = calculate_rsi_from_bars(active_bars[-40:], 14) if len(active_bars) >= 15 else None
+    rsi14 = calculate_rsi_from_bars(active_bars[-40:], 14, raw=True) if len(active_bars) >= 15 else None
 
     def _change_from_completed(days_back: int) -> Optional[float]:
         if len(baseline_completed) < days_back:
@@ -22718,6 +22729,9 @@ reversal_ad_gate raw_matches_before_special_filter final_results
 _STOCK_ATTEMPT_REJECTIONS = _STOCK_ATTEMPT_STAGES | frozenset(ScannerDataError.CODES) | frozenset("""
 invalid_symbol_or_missing_prev_close missing_price_or_prev_close exception
 empty_daily_history invalid_daily_history insufficient_daily_history
+daily_reference:history_not_current daily_reference:previous_session_missing
+daily_reference:invalid_reference_value daily_reference:reference_price_mismatch
+daily_reference:reference_volume_mismatch
 asset:not_common_stock elliott:history_not_current elliott:no_pattern elliott:reference_price_mismatch
 premarket_dollar_volume_filter premarket_missing_quote premarket_spread_guard premarket_extension_guard
 momentum:not_enough_daily_history momentum:invalid_momentum_inputs momentum:daily_momentum_too_small
@@ -23370,6 +23384,7 @@ def _strategy_scan_wrapper(
             premarket_mode = False
             _use_extended_prices = False
             stock_scan_runtime.current()["analysis_session"] = _all_snapshot_tickers[0]["swing_analysis_session"]
+        previous_swing_session = stock_swing.completed_sessions(scan_now_utc, 2)[1] if swing_daily_mode else None
         session_volume_fraction = _us_equity_expected_volume_fraction(scan_now_utc)
         if swing_daily_mode:
             session_volume_fraction = 1.0
@@ -23478,7 +23493,7 @@ def _strategy_scan_wrapper(
                     ticker = str(t.get("ticker", "")).upper().strip()
                     day = t.get("day", {}) or {}
                     prev = t.get("prevDay", {}) or {}
-                    if not ticker or "." in ticker or "/" in ticker or not prev.get("c"):
+                    if not valid_stock_symbol(ticker) or not prev.get("c"):
                         _reject("invalid_symbol_or_missing_prev_close")
                         continue
                     _stage("valid_symbol_and_prev_close")
@@ -23603,6 +23618,19 @@ def _strategy_scan_wrapper(
                         scan_diag["empty_history_symbols"] = int(scan_diag.get("empty_history_symbols", 0)) + 1
                         _reject("empty_daily_history")
                         continue
+                    if swing_daily_mode:
+                        reference_error = stock_swing.history_observation_error(
+                            [{**bar, "date": _daily_bar_date_str(bar)} for bar in daily_bars],
+                            t, previous_session=previous_swing_session,
+                        )
+                        if reference_error:
+                            _reject("daily_reference:" + reference_error)
+                            scan_diag["excluded_data_symbols"] = int(scan_diag.get("excluded_data_symbols", 0)) + 1
+                            if scan_diag["excluded_data_symbols"] > 20:
+                                # Widespread disagreement may be a provider
+                                # incident: preserve the last good final cache.
+                                raise ScannerDataError("scan_data_invalid", scan_diag)
+                            continue
                     _wyckoff_evidence = None
                     if _is_wyckoff:
                         _stage("wyckoff_analyzed")

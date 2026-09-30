@@ -17,6 +17,7 @@ import uuid
 import datetime as dt
 from modules import stock_swing_contract as stock_swing
 from modules import scan_control
+from modules.stock_symbols import valid_stock_symbol
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -1357,16 +1358,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         t = r.get("ticker", "")
                         if not t or t in seen:
                             continue
-                        # ── Vorfilter: Schrott-Ticker aussortieren ──
-                        # >4 Zeichen oder "." = Warrants, Units, Preferred, Bonds
-                        # Suffixe: W=Warrant, U=Unit, R=Rights, H=When-Issued (ADAMH)
-                        # Ausnahmen: bekannte 5-Buchstaben-Aktien werden NICHT gefiltert
-                        # weil wir type=CS abfragen — aber Sonder-Suffixe trotzdem raus
-                        if "." in t:
-                            continue
-                        if len(t) >= 5 and t[-1] in ("W", "U", "R", "H"):
-                            continue  # ADAMH, AACQW, etc.
-                        if len(t) > 5:
+                        # The complete reference query is type=CS. Explicit
+                        # contrary metadata overrides it; punctuation does not.
+                        if not valid_stock_symbol(t) or r.get("type", "CS") != "CS":
                             continue
                         seen.add(t)
                         candidates.append(t)
@@ -1381,29 +1375,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if not candidates:
                     _data_error("scan_data_unavailable")
 
-                # 2. Gainers/Losers als Bonus (aktuelle Mover)
-                for endpoint in ["gainers", "losers"]:
-                    if _bi_should_stop(direction):
-                        raise BITransportStopped()
-                    try:
-                        gurl = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{endpoint}"
-                        resp = rate_limited_get(gurl, params={"apiKey": poly_key}, timeout=15)
-                        if resp.status_code == 200:
-                            for t in resp.json().get("tickers", []):
-                                ticker = t.get("ticker", "")
-                                if not ticker or ticker in seen:
-                                    continue
-                                # Gleicher Vorfilter wie Universe
-                                if "." in ticker:
-                                    continue
-                                if len(ticker) >= 5 and ticker[-1] in ("W", "U", "R", "H"):
-                                    continue
-                                if len(ticker) > 5:
-                                    continue
-                                seen.add(ticker)
-                                candidates.append(ticker)
-                    except Exception:
-                        pass
+                # The fully paginated CS universe already contains every
+                # eligible mover. Snapshot gainers/losers add no verified
+                # equity and previously bypassed reference admission entirely.
 
                 _bi_progress_write(direction, "scanning",
                                    detail=f"{len(candidates)} Kandidaten — starte Analyse", diagnostics=funnel)
@@ -1561,6 +1535,15 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     _session_bars = [b for b in all_bars if b["date"] <= latest_session
                                      and stock_swing.session_close(b["date"]) is not None]
                     all_bars = _session_bars
+                    if not _session_bars or _session_bars[-1]["date"] != latest_session:
+                        # A dated but stale series is an explicit exclusion,
+                        # not a fresh 17/20 candidate rejected only by mail.
+                        funnel["valid_data_symbols"] -= 1
+                        _record_data_error("stale_daily_history", field="t", position="last")
+                        funnel["excluded_data_symbols"] += 1
+                        no_data_count += 1
+                        _reject("stale_daily_history")
+                        continue
                 # 50 abgeschlossene Tageskerzen halten die 20 BI-Indikatoren auf
                 # demselben Datenfenster wie AutoTrader/Backtest. Insbesondere
                 # benoetigt der MACD drei Histogrammwerte (mindestens 36 Bars),
@@ -1656,9 +1639,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                 if direction == "long":
                     _pp_closes = [b["close"] for b in _session_bars[-30:]]
                     if len(_pp_closes) >= 10:
-                        _pp_d1 = (_pp_closes[-1] - _pp_closes[-2]) / max(1e-9, _pp_closes[-2]) * 100
-                        _pp_d2 = (_pp_closes[-2] - _pp_closes[-3]) / max(1e-9, _pp_closes[-3]) * 100
-                        _pp_cum2 = _pp_d1 + _pp_d2
+                        _pp_cum2 = (_pp_closes[-1] / _pp_closes[-3] - 1) * 100
                         _pp_prev = [
                             abs(_pp_closes[i] - _pp_closes[i - 1]) / max(1e-9, _pp_closes[i - 1]) * 100
                             for i in range(1, len(_pp_closes) - 2)
@@ -1740,7 +1721,18 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         print(f"[BI {direction}] Suppressed {ticker}: entry_too_extended")
                     else:
                         rr_fail += 1
-                    continue
+                    # Retain only known plan/timing warnings after the primary
+                    # 17/20 contract, never bad data or an unknown failure.
+                    if reason not in {"range_too_narrow", "atr_too_small", "entry_too_extended",
+                                      "structural_barrier_blocked", "invalid_geometry_or_rr"}:
+                        continue
+                    candidate.update(
+                        native_plan_status="unavailable", native_plan_reason=reason,
+                        scanner_suppression_reasons=["bi_plan_not_released"],
+                        trade_action="NOT_RELEASED", visibility_status="candidate_warning",
+                        visibility_is_trade_signal=False,
+                    )
+                candidate["BI_PlanAccepted"] = plan.get("accepted") is True
 
                 grade_map = {"S": "S — ELITE", "A": "A — STARK", "B": "B — SOLIDE", "C": "C — BASIS", "D": "D — SCHWACH"}
                 candidate.update({
@@ -1754,7 +1746,8 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     key: plan.get(key) for key in (
                         "Entry", "StopLoss", "TP1", "TP2", "RiskReward", "RangeHigh", "RangeLow",
                         "level_model", "stop_source", "tp1_source", "tp2_source", "vrvp_applied",
-                        "entry_method", "plan_version",
+                        "entry_method", "plan_version", "barrier_gate_active", "structure_status",
+                        "target_quality", "tp1_is_projection", "nearest_barrier",
                     )
                 })
                 candidate["trade_setup"] = {key: value for key, value in plan.items() if key != "geometry"}
@@ -1919,7 +1912,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 # V2.2: Live-Zwischenergebnisse speichern — alle 5 neuen Treffer
                 if len(results) % 5 == 0 or len(results) == 1:
-                    _live = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+                    _live = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)
                     _bi_cache_save(
                         _live,
                         direction=direction,
@@ -1929,7 +1922,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                         detail=f"Zwischenstand: {checked}/{total} analysiert",
                         diagnostics=funnel,
                     )
-                    print(f"[BI {direction}] Live-Update: {len(_live)} BI-Signale bei {checked}/{total}")
+                    print(f"[BI {direction}] Live-Update: {len(_live)} BI-Kandidaten bei {checked}/{total}")
             except Exception as e:
                 if analysis_result_returned and not analysis_observed:
                     # Malformed analyzer returns still count as observations;
@@ -1950,7 +1943,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
         if (analysis_errors or checked != total
                 or funnel["data_failures"] != funnel["excluded_data_symbols"]):
             raise ScannerDataError("scan_data_incomplete", funnel)
-        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)[:50]
+        # Do not let high-scoring warning candidates crowd out valid plans
+        # before the independent mail selector gets to inspect them.
+        results = sorted(results, key=lambda x: x.get("BI_Score", 0), reverse=True)
         funnel["coverage"] = "complete_with_exclusions" if funnel["excluded_data_symbols"] else "complete"
         funnel["final_results"] = len(results)
         _bi_cache_save(
@@ -1974,7 +1969,7 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
                     f"{score_count} analysiert (Ø Score {avg_sc}, Top {top_score}) → "
                     f"{contract_reject_count} unter {BI_STOCK_REQUIRED_GREEN}/{BI_STOCK_INDICATOR_COUNT} "
                     f"oder harte Sperre/Vertragsfehler → {range_fail} Range → "
-                    f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} BI-Signale"
+                    f"{atr_fail} ATR → {ext_fail} Extension → {rr_fail} R:R → {len(results)} BI-Kandidaten"
                     f" [Scores: {_buckets_str}]")
         print(f"[BI {direction}] Pipeline: {pipeline}")
 

@@ -11,6 +11,12 @@ from modules.breakout_warnings import (
 
 
 LABELS = {
+    "bi_plan_not_released": "Handelsplan noch nicht freigegeben",
+    "structural_barrier_blocked": "Nahe Gegenbarriere oder unbestaetigter Ausbruch",
+    "range_too_narrow": "Handelsspanne zu eng",
+    "atr_too_small": "Schwankungsbreite fuer den Handelsplan zu klein",
+    "entry_too_extended": "Kurs zu weit vom geplanten Einstieg entfernt",
+    "invalid_geometry_or_rr": "Kein gueltiger Handelsplan mit ausreichendem Chance-Risiko-Verhaeltnis",
     "crossed_resistance_unconfirmed": "Widerstandsausbruch noch nicht durch Schlusskurs bestaetigt",
     "crossed_support_unconfirmed": "Unterstuetzungsbruch noch nicht durch Schlusskurs bestaetigt",
     "first_opposing_barrier_before_minimum_rr": "Naechste Gegenbarriere sehr nahe; weniger als 1,35R Platz",
@@ -65,6 +71,8 @@ _BREAKOUT_WARNING_CONFLICTS = frozenset({
 })
 
 PLAN_BLOCKERS = frozenset({
+    "bi_plan_not_released", "structural_barrier_blocked", "invalid_geometry_or_rr",
+    "range_too_narrow", "atr_too_small", "entry_too_extended",
     "invalid_trade_geometry", "invalid_trade_plan", "estimated_trade_plan",
     "native_trade_levels_missing", "no_structural_invalidation", "plan_unavailable",
     "causal_structure_missing", "causal_structure_unavailable",

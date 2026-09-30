@@ -165,14 +165,26 @@ def calculate_atr_14(ohlcv_data):
     return round(atr, 4), round(atr_pct, 2)
 
 
-def calculate_adx(bars, period=14):
+def calculate_adx(bars, period=14, *, raw=False):
     """
     Berechnet ADX (Average Directional Index) aus OHLC-Daten.
     ADX < 20 = kein Trend (Konsolidierung), ADX steigend von <20 = Breakout beginnt.
 
-    Returns: (adx_value, adx_prev) oder (None, None) wenn nicht genug Daten
+    Returns: (adx_value, adx_prev) oder (None, None) wenn nicht genug Daten.
+    raw=True preserves decision precision; the default keeps legacy display rounding.
     """
-    if not bars or len(bars) < period + 2:
+    if type(period) is not int or period < 1 or not bars or len(bars) < 2 * period:
+        return None, None
+
+    # A missing/non-finite candle is unknown evidence, not a flat market.
+    try:
+        for bar in bars:
+            values = [bar[key] for key in ("high", "low", "close")]
+            if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in values):
+                return None, None
+            if not bar["low"] <= bar["close"] <= bar["high"]:
+                return None, None
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None, None
 
     plus_dm_list = []
@@ -208,19 +220,21 @@ def calculate_adx(bars, period=14):
     plus_dm_avg = sum(plus_dm_list[:period]) / period
     minus_dm_avg = sum(minus_dm_list[:period]) / period
 
-    dx_list = []
+    def directional_index():
+        # ATR cancels in abs(+DI - -DI) / (+DI + -DI).
+        total = plus_dm_avg + minus_dm_avg
+        return abs(plus_dm_avg - minus_dm_avg) / total * 100 if total > 0 else 0.0
+
+    # The initial 14 TR/DM observations already define the first DX. Dropping
+    # it shifts the ADX seed and can reverse the BI turning-point vote.
+    dx_list = [directional_index()]
 
     for i in range(period, len(tr_list)):
         atr = (atr * (period - 1) + tr_list[i]) / period
         plus_dm_avg = (plus_dm_avg * (period - 1) + plus_dm_list[i]) / period
         minus_dm_avg = (minus_dm_avg * (period - 1) + minus_dm_list[i]) / period
 
-        plus_di = (plus_dm_avg / atr * 100) if atr > 0 else 0
-        minus_di = (minus_dm_avg / atr * 100) if atr > 0 else 0
-
-        di_sum = plus_di + minus_di
-        dx = (abs(plus_di - minus_di) / di_sum * 100) if di_sum > 0 else 0
-        dx_list.append(dx)
+        dx_list.append(directional_index())
 
     if len(dx_list) < period:
         return None, None
@@ -239,13 +253,15 @@ def calculate_adx(bars, period=14):
         for i in range(period, end_idx):
             adx_prev = (adx_prev * (period - 1) + dx_list[i]) / period
 
+    if raw:
+        return adx, adx_prev
     return round(adx, 1), round(adx_prev, 1) if adx_prev is not None else None
 
 
-def calculate_rsi_from_bars(bars, period=14):
+def calculate_rsi_from_bars(bars, period=14, *, raw=False):
     """
     Berechnet RSI aus OHLC-Bars.
-    Returns: RSI-Wert (0-100) oder None
+    Returns: RSI-Wert (0-100) oder None; raw=True for unrounded decisions.
     """
     if not bars or len(bars) < period + 1:
         return None
@@ -275,7 +291,7 @@ def calculate_rsi_from_bars(bars, period=14):
 
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    return round(rsi, 1)
+    return rsi if raw else round(rsi, 1)
 
 
 def calculate_macd(bars, fast=12, slow=26, signal=9):
@@ -353,8 +369,8 @@ def calculate_macd_histogram_series(closes, fast=12, slow=26, signal=9):
     return result
 
 
-def calculate_stochastic(bars, k_period=14, d_period=3):
-    """Stochastic Oscillator (%K, %D). Returns (k, d) oder (None, None)."""
+def calculate_stochastic(bars, k_period=14, d_period=3, *, raw=False):
+    """Stochastic (%K, %D); raw=True preserves threshold/crossing precision."""
     if not bars or len(bars) < k_period + d_period:
         return None, None
     # %K für jeden Bar
@@ -373,6 +389,8 @@ def calculate_stochastic(bars, k_period=14, d_period=3):
     d_values = []
     for i in range(d_period - 1, len(k_values)):
         d_values.append(sum(k_values[i - d_period + 1:i + 1]) / d_period)
+    if raw:
+        return k_values[-1], d_values[-1]
     return round(k_values[-1], 1), round(d_values[-1], 1)
 
 

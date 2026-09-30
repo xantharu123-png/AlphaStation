@@ -129,15 +129,16 @@ def test_shared_retry_budget_stops_twenty_first_extra_request(monkeypatch, tmp_p
     assert d["data_failures"] == 1 and d["coverage"] == "incomplete"
 
 
-def test_required_universe_recovers_but_optional_movers_do_not_retry(monkeypatch, tmp_path):
+def test_required_universe_recovers_without_unverified_mover_requests(monkeypatch, tmp_path):
     _, final, calls, sleeps, _ = setup(monkeypatch, tmp_path, [
         Timeout("PRIVATE"), Reply(payload={"status": "OK", "results": [{"ticker": "TEST"}]}),
-        Timeout("PRIVATE optional"), Reply(503), valid(),
+        valid(),
     ])
     scanners._bi_background_scan("fixture", "long")
     d = json.loads(final.read_text())["diagnostics"]
     assert d["coverage"] == "complete" and d["data_failures"] == 0
-    assert len(calls) == 5 and sleeps == [0.5]
+    assert len(calls) == 3 and sleeps == [0.5]
+    assert all("/snapshot/" not in call[0] for call in calls)
     assert d["transport_requests"] == 3 and d["transport_recovered_incidents"] == 1
 
 
@@ -169,7 +170,7 @@ def test_stop_after_recovered_final_request_never_publishes_success(monkeypatch,
 def test_stop_during_universe_is_not_cleared_before_history(monkeypatch, tmp_path):
     _, final, calls, _, _ = setup(monkeypatch, tmp_path, [
         Reply(payload={"status": "OK", "results": [{"ticker": "TEST"}]}),
-        Reply(payload={"tickers": []}), Reply(payload={"tickers": []}), valid(),
+        valid(),
     ])
     state = {"cleared_after_request": False}
 
@@ -187,11 +188,11 @@ def test_stop_during_universe_is_not_cleared_before_history(monkeypatch, tmp_pat
 def test_old_stop_is_cleared_once_before_universe_requests(monkeypatch, tmp_path):
     _, final, calls, _, _ = setup(monkeypatch, tmp_path, [
         Reply(payload={"status": "OK", "results": [{"ticker": "TEST"}]}),
-        Reply(payload={"tickers": []}), Reply(payload={"tickers": []}), valid(),
+        valid(),
     ])
     state = {"stop": True}
     monkeypatch.setattr(scanners, "_bi_clear_stop", lambda direction: state.update(stop=False))
     monkeypatch.setattr(scanners, "_bi_should_stop", lambda direction: state["stop"])
     scanners._bi_background_scan("fixture", "long")
-    assert len(calls) == 4
+    assert len(calls) == 2
     assert json.loads(final.read_text())["diagnostics"]["coverage"] == "complete"
