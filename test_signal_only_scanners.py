@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import api
+from modules.biotech_news_contract import BIOTECH_NEWS_CONTRACT_VERSION
 
 
 ROOT = Path(__file__).resolve().parent
@@ -166,6 +167,7 @@ def test_stock_signal_scanners_default_to_swing_without_fresh_5m_gate(monkeypatc
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
     row = {
         "ticker": "RAW",
+        "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
         "grade": "S",
         "score": 98,
         "rvol": 2.4,

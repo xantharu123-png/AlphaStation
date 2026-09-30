@@ -1,8 +1,40 @@
 # Aktuelle Aufgaben / Übergabe
 
-Stand: **30.09.2026**, Gap-/BI-Reparatur und erneute Gegenprüfung.
+Stand: **30.09.2026**, Reparatur der neun erneuten Scannerbefunde.
 Workspace: `C:\Projekt\TradingBot`, Branch `main`.
-Aktueller Anschlussauftrag: alle sieben Gap-/BI-Auditbefunde und verwandte
+Aktueller Anschlussauftrag: R1–R9 aus der Nachprüfung von `b6be1f2` beheben.
+Implementiert: ORB-Finalquote/Datenausfall, Biotech-Negation/Publikationszeit,
+Turtle-Sitzungskohärenz, abgeschlossene Chartkerzen, kausale FVG-/OB-Schwellen,
+FVG-Entwertung und Penny-OHLCV. Zusätzlich ORB-Zielalias am Tracker repariert.
+Lokale Gesamtabnahme abgeschlossen: **9.611 bestanden, 0 Fehler,
+5 Plattform-Skips**, darunter 224 neue gezielte Gegenproben. SHA256 aller
+392 Python-Dateien während des Schlusslaufs unverändert. Paket für
+Commit/Push abgenommen; Veröffentlichung am Git-Verlauf prüfen.
+Server unverändert; sicherer Rollout und reale Zustellung bleiben offen.
+[Aktueller Reparaturbericht](docs/SCANNER_REAUDIT_REPAIR_2026-09-30.md).
+
+### Aktuelle Abnahme / Rolloutgrenze
+
+- [x] Alle neun dokumentierten Ursachen implementiert und Gegenproben in
+  reguläre Tests übernommen; 17/20 unverändert, BI-Vertrag jetzt v5.
+- [x] Zusätzlichen ORB-Fehler `target1/target2` am Zustellungsintent behoben;
+  Long/Short bis zum Tracker mit simuliertem SMTP geprüft.
+- [x] Biotech-Altdaten getrennt von `biotech-news-v2`; keine erneute Freigabe
+  nur durch Cache-Schreibzeit. Hintergrund-Entry-Sender unverändert gesperrt.
+- [x] Abschließende Gesamtsuite und Diff-/Syntax-/Bundleabnahme dokumentiert:
+  9.611 bestanden, 5 Plattform-Skips; Bundle `4379c5dca540` unverändert.
+- [x] Reparaturpaket für Commit/Push abgenommen; keine privaten `output/`-
+  Dateien. Veröffentlichte Revision anhand Git/Remote prüfen.
+- [ ] Server-Rechteinventur: Nutzer erhielt beim sicheren Deployment
+  `Source trust check failed`. Abbruch vor Pull/Neustart; keine Umgehung per
+  `chown -R`, normalem Pull oder Abschalten der Prüfung. Bestehendes
+  `deploy/SERVER_WARTUNG.md` und vertrauenswürdige Migration beachten.
+- [ ] Erst nach sicherem Rollout neue vollständige Scans und reale
+  Mailzustellung prüfen. Lokale Transporttests sind keine Posteingangsbelege.
+
+## Vorherige Gap-/BI-Reparatur (Basis `b6be1f2`)
+
+Vorheriger Anschlussauftrag: alle sieben Gap-/BI-Auditbefunde und verwandte
 Rechenfehler beheben. Lokale Abnahme abgeschlossen: **9.385 Tests bestanden,
 5 Plattform-Skips**, davon 80 neue Regressionstests. Desktop/Mobil, Syntax und
 Bundle geprueft. [Reparaturbericht](docs/GAP_BI_CALCULATION_REPAIR_2026-09-30.md).

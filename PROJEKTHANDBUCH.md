@@ -1,6 +1,18 @@
 # Alpha Station — Projekthandbuch
 
 > **Aktuelle Übergabe vom 30.09.2026:** [TODO.md](TODO.md) zuerst lesen.
+> Neuester Auftrag: neun erneute Scannerbefunde aus `b6be1f2` beheben.
+> Reparaturen lokal abgenommen: **9.611 Tests bestanden, 5 Plattform-Skips**;
+> darunter 224 neue Gegenproben. Alle 392 Python-Dateien im Schlusslauf
+> unverändert, Bundle `4379c5dca540` geprüft. Paket für Commit/Push abgenommen;
+> Veröffentlichungsrevision siehe Git-Verlauf. Zusätzlich ein ORB-Zielaliasfehler
+> am Zustellungsintent korrigiert. Siehe
+> [aktuellen Reparaturbericht](docs/SCANNER_REAUDIT_REPAIR_2026-09-30.md).
+> **Rollout blockiert:** Der sichere Server-Deploy scheitert vor Pull/Neustart
+> an der Quellvertrauensprüfung (Eigentümer/Schreibrechte). Rechteinventur und vertrauenswürdigen
+> Migrationsweg klären, nicht die Schutzprüfung umgehen. Server unverändert.
+>
+> Folgende Angaben beschreiben das vorherige Gap-/Mail-Paket:
 > Neuer Auftrag: Gap Long/Short 02:00 und 12:00 Europe/Zurich (Mo–Fr)
 > plus mathematische und Maildiagnose-Korrekturen. Details und getrennte
 > Freigaben im [Gap-/Mail-Prüfbericht](docs/GAP_MOMENTUM_SCHEDULE_AUDIT_2026-09-30.md).

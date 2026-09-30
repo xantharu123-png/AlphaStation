@@ -48,6 +48,25 @@ def _row(direction="LONG", **updates):
     return row
 
 
+def _orb_row(**updates):
+    """Current native ORB evidence, in addition to an executable target plan."""
+    row = _row(
+        direction="LONG",
+        current_price=100.2,
+        or_high=100.0,
+        or_low=98.0,
+        bar_state="completed_5m",
+        signal_bar_timestamp=(NOW - 900) * 1000,
+        vol_confirmed=True,
+        breakout_state="active_breakout",
+        breakout_age_bars=3,
+        recent_hold_pct=1.0,
+    )
+    row["direction"] = "LONG"
+    row.update(updates)
+    return row
+
+
 def _patch_market_evidence(monkeypatch, *, direction="LONG", bars=None):
     if bars is None:
         bars = [
@@ -152,7 +171,7 @@ def test_final_revalidation_short_is_symmetric_and_uses_bid(monkeypatch):
 
 def test_completed_polygon_bar_is_valid_causal_scan_source(monkeypatch):
     _patch_market_evidence(monkeypatch)
-    row = _row(scan_price_source="polygon_completed_5m_orb_bar")
+    row = _orb_row(scan_price_source="polygon_completed_5m_orb_bar")
 
     result = api._revalidate_stock_strategy_mail_candidate(
         row, now_ts=NOW, price_session="US_REGULAR", scanner_name="orb"
@@ -195,7 +214,7 @@ def test_stock_and_orb_accept_provider_empty_aggregate_minutes(
     )
 
     result = api._revalidate_stock_strategy_mail_candidate(
-        _row(),
+        _orb_row() if scanner_name == "orb" else _row(),
         now_ts=NOW,
         price_session="US_REGULAR",
         scanner_name=scanner_name,
@@ -574,7 +593,7 @@ def test_final_revalidation_fetches_quote_before_watermarked_path(
     monkeypatch.setattr(api, "_fetch_stock_revalidation_market_path", _path)
 
     result = api._revalidate_stock_strategy_mail_candidate(
-        _row(),
+        _orb_row() if scanner_name == "orb" else _row(),
         now_ts=NOW,
         price_session="US_REGULAR",
         scanner_name=scanner_name,

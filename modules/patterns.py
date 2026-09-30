@@ -861,7 +861,7 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 # payload contract; append a new version instead of silently renaming them.
 BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v4"
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v5"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
@@ -3271,6 +3271,18 @@ def scan_wyckoff_batch(tickers, api_key, days=180, timeframe="hour", direction="
     return sorted(results, key=lambda row: row.get("score", 0), reverse=True)
 
 
+def _causal_mean_ranges(bars):
+    """Range baseline known at each bar, never volatility from a later suffix."""
+    total, count, means = 0.0, 0, []
+    for bar in bars:
+        width = bar["high"] - bar["low"]
+        if width > 0:
+            total += width
+            count += 1
+        means.append(total / count if count else 0.0)
+    return means
+
+
 # ── detect_volume_imbalances (originally line 9744) ──
 def detect_volume_imbalances(ohlcv_data, max_zones=50):
     """
@@ -3295,7 +3307,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     empty_result = {"zones": [], "unfilled_bull": [], "unfilled_bear": [],
                     "nearest_bull": None, "nearest_bear": None,
                     "stats": {"total": 0, "filled": 0, "unfilled": 0, "fill_rate": 0,
-                              "bull_unfilled": 0, "bear_unfilled": 0}}
+                              "bull_unfilled": 0, "bear_unfilled": 0, "invalidated": 0}}
     
     if not ohlcv_data or len(ohlcv_data) < 5:
         return empty_result
@@ -3304,12 +3316,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     n = len(ohlcv_data)
     current_price = ohlcv_data[-1]["close"]
     
-    # Durchschnittliche Range und Volume für Filter
-    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
-    avg_range = sum(ranges) / len(ranges) if ranges else current_price * 0.01
-    # 30% der durchschnittlichen Kerzen-Range als Mindestgröße
-    # Filtert Mikro-Gaps raus die in jedem Trend entstehen
-    min_gap_size = avg_range * 0.30
+    mean_ranges = _causal_mean_ranges(ohlcv_data)
     
     volumes = [d.get("volume", 0) for d in ohlcv_data]
 
@@ -3330,6 +3337,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     for i in range(1, n):
         c_prev = ohlcv_data[i - 1]
         c_curr = ohlcv_data[i]
+        min_gap_size = mean_ranges[i] * 0.30
         
         # Body-Grenzen (max/min für Doji-Safe)
         body_top_1 = max(c_prev["open"], c_prev["close"])
@@ -3406,6 +3414,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         c1 = ohlcv_data[i - 2]  # Kerze 1
         c2 = ohlcv_data[i - 1]  # Kerze 2 (Impulse)
         c3 = ohlcv_data[i]      # Kerze 3
+        min_gap_size = mean_ranges[i] * 0.30
         
         # Volume der Impulse-Kerze (Kerze 2)
         impulse_vol = c2.get("volume", 0)
@@ -3435,31 +3444,16 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             if gap_pct > 1.0:
                 strength += 1
             
-            # Prüfe ob diese Zone nicht schon als VI/OG existiert (Deduplizierung)
-            already_exists = False
-            for z in zones:
-                if (z["bar_idx"] in [i, i-1] and z["direction"] == "bullish" and
-                    abs(z["zone_low"] - gap_low) < gap_size * 0.5):
-                    already_exists = True
-                    # Upgrade zu FVG wenn stärker
-                    if strength > z["strength"]:
-                        z["type"] = "FVG"
-                        z["zone_high"] = round(gap_high, 4)
-                        z["zone_low"] = round(gap_low, 4)
-                        z["zone_mid"] = round(gap_mid, 4)
-                        z["gap_pct"] = round(gap_pct, 2)
-                        z["strength"] = strength
-                    break
-            
-            if not already_exists:
-                zones.append({
-                    "direction": "bullish", "type": "FVG",
-                    "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                    "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
-                    "bar_idx": i, "time": c3.get("time", 0),
-                    "vol_ratio": round(vol_ratio, 1), "strength": strength,
-                    "filled": False, "ce_filled": False, "fill_bar": None,
-                })
+            # VI/OG and FVG have different formation times. Do not rewrite an
+            # older two-bar zone using a later third candle's evidence.
+            zones.append({
+                "direction": "bullish", "type": "FVG",
+                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "bar_idx": i, "time": c3.get("time", 0),
+                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "filled": False, "ce_filled": False, "fill_bar": None,
+            })
         
         # --- BEARISH FVG: Low[K1] > High[K3] ---
         if c1["low"] > c3["high"] + min_gap_size:
@@ -3475,29 +3469,14 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             if gap_pct > 1.0:
                 strength += 1
             
-            already_exists = False
-            for z in zones:
-                if (z["bar_idx"] in [i, i-1] and z["direction"] == "bearish" and
-                    abs(z["zone_high"] - gap_high) < gap_size * 0.5):
-                    already_exists = True
-                    if strength > z["strength"]:
-                        z["type"] = "FVG"
-                        z["zone_high"] = round(gap_high, 4)
-                        z["zone_low"] = round(gap_low, 4)
-                        z["zone_mid"] = round(gap_mid, 4)
-                        z["gap_pct"] = round(gap_pct, 2)
-                        z["strength"] = strength
-                    break
-            
-            if not already_exists:
-                zones.append({
-                    "direction": "bearish", "type": "FVG",
-                    "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                    "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
-                    "bar_idx": i, "time": c3.get("time", 0),
-                    "vol_ratio": round(vol_ratio, 1), "strength": strength,
-                    "filled": False, "ce_filled": False, "fill_bar": None,
-                })
+            zones.append({
+                "direction": "bearish", "type": "FVG",
+                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
+                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "bar_idx": i, "time": c3.get("time", 0),
+                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "filled": False, "ce_filled": False, "fill_bar": None,
+            })
     
     # Sortiere nach bar_idx für korrektes Mitigation-Tracking
     zones.sort(key=lambda z: z["bar_idx"])
@@ -3511,28 +3490,37 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         zh = zone["zone_high"]
         zl = zone["zone_low"]
         zm = zone["zone_mid"]
+        zone.update(invalidated=False, touched=False, state="unfilled", invalidation_bar=None)
+        covered = []
         
         for j in range(zone_created + 1, n):
             bar = ohlcv_data[j]
             
-            if zone["direction"] == "bullish":
-                # Bullish Zone: Preis muss RUNTER in die Zone fallen
-                if bar["low"] <= zh:  # Preis hat Zone betreten
-                    if bar["low"] <= zm:
-                        zone["ce_filled"] = True  # 50% CE
-                    if bar["low"] <= zl:
-                        zone["filled"] = True  # Komplett gefüllt
-                        zone["fill_bar"] = j
-                        break
-            else:
-                # Bearish Zone: Preis muss HOCH in die Zone steigen
-                if bar["high"] >= zl:  # Preis hat Zone betreten
-                    if bar["high"] >= zm:
-                        zone["ce_filled"] = True
-                    if bar["high"] >= zh:
-                        zone["filled"] = True
-                        zone["fill_bar"] = j
-                        break
+            low, high = max(zl, bar["low"]), min(zh, bar["high"])
+            if low <= high:
+                zone["touched"] = True
+                zone["state"] = "partially_filled"
+                if low <= zm <= high:
+                    zone["ce_filled"] = True
+                covered.append((low, high))
+                merged = []
+                for start, end in sorted(covered):
+                    if merged and start <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                    else:
+                        merged.append((start, end))
+                covered = merged
+                if len(covered) == 1 and covered[0][0] <= zl and covered[0][1] >= zh:
+                    zone.update(filled=True, fill_bar=j, state="filled")
+                    break
+            # A price jump beyond the far edge invalidates the zone but is
+            # not proof of trading inside it. It cannot remain BI support.
+            beyond = bar["close"] < zl if zone["direction"] == "bullish" else bar["close"] > zh
+            if beyond:
+                jumped = bar["high"] < zl if zone["direction"] == "bullish" else bar["low"] > zh
+                zone.update(invalidated=True, invalidation_bar=j, state="invalidated",
+                            invalidation_reason="gap_through_zone" if jumped else "close_beyond_zone")
+                break
     
     # ================================================================
     # PASS 3: Sortiere und klassifiziere
@@ -3541,8 +3529,8 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     zones = zones[-max_zones:]
     zones.reverse()  # Neueste zuerst
     
-    unfilled_bull = [z for z in zones if not z["filled"] and z["direction"] == "bullish" and z["zone_high"] < current_price]
-    unfilled_bear = [z for z in zones if not z["filled"] and z["direction"] == "bearish" and z["zone_low"] > current_price]
+    unfilled_bull = [z for z in zones if not z["filled"] and not z["invalidated"] and z["direction"] == "bullish" and z["zone_high"] < current_price]
+    unfilled_bear = [z for z in zones if not z["filled"] and not z["invalidated"] and z["direction"] == "bearish" and z["zone_low"] > current_price]
     
     unfilled_bull.sort(key=lambda z: current_price - z["zone_high"])
     unfilled_bear.sort(key=lambda z: z["zone_low"] - current_price)
@@ -3552,7 +3540,8 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
     
     total = len(zones)
     filled = sum(1 for z in zones if z["filled"])
-    unfilled = total - filled
+    invalidated = sum(1 for z in zones if z["invalidated"])
+    unfilled = total - filled - invalidated
     fill_rate = round(filled / total * 100, 1) if total > 0 else 0
     
     return {
@@ -3563,6 +3552,7 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
         "nearest_bear": nearest_bear,
         "stats": {
             "total": total, "filled": filled, "unfilled": unfilled,
+            "invalidated": invalidated,
             "fill_rate": fill_rate,
             "bull_unfilled": len(unfilled_bull),
             "bear_unfilled": len(unfilled_bear),
@@ -3587,14 +3577,16 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
 
     n = len(ohlcv_data)
     current_price = ohlcv_data[-1]["close"]
-    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
-    atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
+    mean_ranges = _causal_mean_ranges(ohlcv_data)
     volumes = [d.get("volume", 0) for d in ohlcv_data]
     bullish_obs = []
     bearish_obs = []
 
     for i in range(1, n - 2):
         c0 = ohlcv_data[i]
+        atr = mean_ranges[i]
+        if atr <= 0:
+            continue
         c1 = ohlcv_data[i + 1]
         c2 = ohlcv_data[i + 2] if i + 2 < n else None
         # Validate that c2 exists and is not a duplicate/look-ahead
@@ -3630,7 +3622,7 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 # Fix 1: Mitigation = BODY einer nachfolgenden Kerze durchbricht OB Zone
                 # Wick-Touch allein mitigiert NICHT (Wick = Ablehnung)
                 mitigated = False
-                for j in range(i + 2, n):
+                for j in range(i + 1, n):
                     candle_body_low = min(ohlcv_data[j]["open"], ohlcv_data[j]["close"])
                     if candle_body_low < ob_low:  # Body geht UNTER den OB
                         mitigated = True
@@ -3646,6 +3638,8 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
                         "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
                         "idx": i, "time": c0.get("time"),
+                        "confirmed_idx": i + 2, "confirmed_at": c2.get("close_time", c2.get("time")),
+                        "range_baseline": atr,
                     })
 
         # ── BEARISH OB: Bullische Kerze → Displacement nach unten ──
@@ -3672,7 +3666,7 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 strength = min(5, strength)
                 
                 mitigated = False
-                for j in range(i + 2, n):
+                for j in range(i + 1, n):
                     candle_body_high = max(ohlcv_data[j]["open"], ohlcv_data[j]["close"])
                     if candle_body_high > ob_high:
                         mitigated = True
@@ -3688,6 +3682,8 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
                         "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
                         "idx": i, "time": c0.get("time"),
+                        "confirmed_idx": i + 2, "confirmed_at": c2.get("close_time", c2.get("time")),
+                        "range_baseline": atr,
                     })
 
     bullish_obs.sort(key=lambda x: abs(x["dist_pct"]))
@@ -5744,7 +5740,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                         "type": "bullish",
                         "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
                         "description": f"Bullish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
-                                       f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
+                                       f"Impuls: {ob['impulse_size']:.1f}x Kerzenrange, Vol: {ob['vol_ratio']:.1f}x. "
                                        f"Dist: {ob['dist_pct']:.1f}% unter Preis. {stars} "
                                        f"— Limit Buy bei Rückkehr in diese Zone.",
                         "draw_points": [{"index": 0, "price": ob['ob_low']}, {"index": len(data)-1, "price": ob['ob_high']}]
@@ -5758,7 +5754,7 @@ def detect_chart_patterns(ohlcv_data, lookback=50, *, wyckoff_context=None):
                         "type": "bearish",
                         "confidence": "High" if ob["strength"] >= 3 else "Medium" if ob["strength"] >= 2 else "Low",
                         "description": f"Bearish OB @ ${ob['ob_low']:.2f}-${ob['ob_high']:.2f}. "
-                                       f"Impuls: {ob['impulse_size']:.1f}x ATR, Vol: {ob['vol_ratio']:.1f}x. "
+                                       f"Impuls: {ob['impulse_size']:.1f}x Kerzenrange, Vol: {ob['vol_ratio']:.1f}x. "
                                        f"Dist: {ob['dist_pct']:.1f}% über Preis. {stars} "
                                        f"— Limit Sell bei Rückkehr in diese Zone.",
                         "draw_points": [{"index": 0, "price": ob['ob_low']}, {"index": len(data)-1, "price": ob['ob_high']}]

@@ -10,6 +10,7 @@ import os
 import json
 import math
 import re
+from modules.biotech_news_contract import BIOTECH_NEWS_CONTRACT_VERSION, biotech_news_contract_valid
 import time
 import threading
 import tempfile
@@ -200,6 +201,8 @@ BIOTECH_NEGATIVE_CATALYSTS = {
 # auf title UND description (normalisiert, lowercased, Roman→Arabisch).
 # [^.!?;]{0,60} = Kontext-Fenster innerhalb desselben Satzteils.
 BIOTECH_NEGATIVE_PATTERNS = [
+    ("approval denied", -30, re.compile(r"\b(?:fda\s+)?approval\s+(?:(?:was|is|has|had|been)\s+){0,3}(?:denied|rejected|refused|(?:not|never)\s+(?:yet\s+)?(?:been\s+)?(?:granted|given|approved))\b")),
+    ("endpoint not met", -25, re.compile(r"\b(?:(?:primary|secondary)\s+)?endpoints?\s+(?:(?:was|were|is|are|has|have|been)\s+){0,3}(?:not|never)\s+(?:yet\s+)?(?:been\s+)?(?:met|achieved|reached)\b")),
     ("missed endpoint", -25, re.compile(r"\bmiss(?:es|ed|ing)?\b[^.!?;]{0,60}?\bendpoints?\b")),
     ("failed to meet", -25, re.compile(r"\bfail(?:s|ed)?\s+to\s+(?:meet|achieve|demonstrate)\b")),
     ("fell short", -20, re.compile(r"\bfell\s+short\b")),
@@ -217,10 +220,20 @@ BIOTECH_NEGATIVE_PATTERNS = [
 # K-1c: Verneinungsfenster — Negation bis ~6 Woerter VOR einem Keyword
 # ("did not ... meet primary endpoint", "no safety concerns seen").
 _BIOTECH_NEGATION_BEFORE_RE = re.compile(
-    r"(?:\b(?:did|does|do)\s+not\b|\bnot\b|\bno\b|\bwithout\b|"
+    r"(?:\b(?:did|does|do)\s+not\b(?!\s+only\b)|\bnot\b(?!\s+only\b)|\bno\b|\bwithout\b|"
     r"\bfail(?:s|ed)?\s+to\b|\bunable\s+to\b|\babsence\s+of\b|\bfree\s+of\b)"
     r"(?:\W+\w+){0,5}\W*$"
 )
+
+_BIOTECH_NEGATION_AFTER_RE = re.compile(
+    r"^\s+(?:(?:is|are|was|were|has|have|had|been)\s+){0,3}"
+    r"(?:not\b(?!\s+only\b)|never\b|denied\b|rejected\b|refused\b|failed\b|missed\b)"
+)
+
+
+def _biotech_clause_prefix(text, start):
+    # A negation in another sentence/headline must not reverse this event.
+    return re.split(r"[.!?;\n]", text[max(0, start - 80):start])[-1]
 
 # K-1a: Roman→Arabisch-Normalisierung fuer Phasen (Reihenfolge: iii vor ii vor i).
 _BIOTECH_ROMAN_PHASES = [
@@ -263,6 +276,7 @@ def _biotech_readout_timing_weight(category):
 def _biotech_normalize_text(text):
     """K-1a (10.06.): lowercased + Phasen Roman→Arabisch ('phase iii'→'phase 3')."""
     t = (text or "").lower()
+    t = re.sub(r"\b(was|were|is|are|has|have|had|did|does|do)n['’]t\b", r"\1 not", t)
     for _rx, _repl in _BIOTECH_ROMAN_PHASES:
         t = _rx.sub(_repl, t)
     return t
@@ -272,7 +286,7 @@ def _biotech_negative_match(text, kw):
     """Negativ-Keyword mit Verneinungs-Guard: 'no safety concerns seen' ist
     KEIN Negativ-Signal. Liefert True nur fuer nicht-verneinte Treffer."""
     for _m in re.finditer(r"(?<!\w)" + re.escape(kw) + r"s?(?!\w)", text):
-        _prefix = text[max(0, _m.start() - 60):_m.start()]
+        _prefix = _biotech_clause_prefix(text, _m.start())
         if _BIOTECH_NEGATION_BEFORE_RE.search(_prefix):
             continue
         return True
@@ -283,8 +297,10 @@ def _biotech_positive_match(text, kw):
     """K-1c (10.06.): Positiv-Keyword nur ohne Negation im Vorfenster
     ('did not meet primary endpoint' darf 'primary endpoint' nicht scoren)."""
     for _m in re.finditer(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", text):
-        _prefix = text[max(0, _m.start() - 60):_m.start()]
+        _prefix = _biotech_clause_prefix(text, _m.start())
         if _BIOTECH_NEGATION_BEFORE_RE.search(_prefix):
+            continue
+        if _BIOTECH_NEGATION_AFTER_RE.search(text[_m.end():]):
             continue
         return True
     return False
@@ -2081,7 +2097,7 @@ def _biotech_cache_load(max_age_hours=2):
             return None
         results = data.get("results", [])
         # Leere Ergebnisse nicht als gültigen Cache behandeln
-        return results if results else None
+        return results if results and all(biotech_news_contract_valid(row) for row in results) else None
     except Exception:
         return None
 
@@ -2177,12 +2193,16 @@ def _fetch_biotech_universe(poly_key, min_price=0.50, min_mcap_m=20, max_mcap_m=
     return biotech_tickers
 
 
-def _scan_biotech_news(poly_key, ticker, limit=5):
+def _scan_biotech_news(poly_key, ticker, limit=5, *, as_of=None):
     """
     Scannt News für einen Biotech-Ticker nach FDA/Pipeline Katalysatoren.
     Returns: dict mit catalyst_score, catalysts list, news items
     """
     try:
+        news_as_of = as_of if as_of is not None else dt.datetime.now(dt.timezone.utc)
+        if not isinstance(news_as_of, dt.datetime) or news_as_of.tzinfo is None:
+            raise ScannerDataError("scan_data_invalid", {"stage": "biotech_news_clock"})
+        news_as_of = news_as_of.astimezone(dt.timezone.utc)
         url = "https://api.polygon.io/v2/reference/news"
         resp = rate_limited_get(url, params={
             "ticker": ticker, "limit": limit, "order": "desc",
@@ -2205,15 +2225,30 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         news_items = []
         best_tier = None
         forward_catalyst = False  # H-4 (10.06.): angekuendigtes, noch nicht eingetretenes Ergebnis
+        excluded_publications = {}
 
         for article in articles[:limit]:
+            # Full publication time, not only the calendar date: future news
+            # (even later today) is not evidence available at scan time.
+            published = article.get("published_utc")
+            try:
+                pub_at = dt.datetime.fromisoformat(published.replace("Z", "+00:00"))
+                if pub_at.tzinfo is None:
+                    raise ValueError("timezone missing")
+                pub_at = pub_at.astimezone(dt.timezone.utc)
+            except (ValueError, TypeError, AttributeError):
+                excluded_publications["invalid_publication_time"] = excluded_publications.get("invalid_publication_time", 0) + 1
+                continue
+            if pub_at > news_as_of:
+                excluded_publications["future_publication"] = excluded_publications.get("future_publication", 0) + 1
+                continue
             title = (article.get("title", "") or "").lower()
             desc = (article.get("description", "") or "").lower()
-            pub_date = (article.get("published_utc", "") or "")[:10]
+            pub_date = pub_at.date().isoformat()
 
             # K-1a (10.06.): Normalisierung — lowercased + Roman→Arabisch
             # ("phase iii" → "phase 3"), auf title UND description.
-            norm_combined = (_biotech_normalize_text(title) + " " + _biotech_normalize_text(desc)).strip()
+            norm_combined = (_biotech_normalize_text(title) + ". " + _biotech_normalize_text(desc)).strip()
 
             # Sentiment
             sentiment = "neutral"
@@ -2246,7 +2281,8 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
                     _is_negative_article = True
 
             for _neg_label, _neg_penalty, _neg_rx in BIOTECH_NEGATIVE_PATTERNS:
-                if _neg_rx.search(norm_combined):
+                if any(not _BIOTECH_NEGATION_BEFORE_RE.search(_biotech_clause_prefix(norm_combined, match.start()))
+                       for match in _neg_rx.finditer(norm_combined)):
                     _stems = _neg_stems(_neg_label)
                     if _stems & _article_neg_stems:
                         _is_negative_article = True
@@ -2310,7 +2346,7 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
         # nicht hier, sondern ueber den BPIQ-Pfad bewertet (Event-Datum,
         # days_until, Kategorie IMMINENT/UPCOMING/...).
         from datetime import datetime as _dt_cls, timedelta as _td_cls, timezone as _dt_tz
-        _today = _dt_cls.now(_dt_tz.utc).date()
+        _today = news_as_of.date()
         for cat in catalysts:
             _cat_date_str = cat.get("date", "")
             if _cat_date_str and len(_cat_date_str) >= 10:
@@ -2354,7 +2390,7 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
 
         # Negative Flags abziehen (mit Time-Decay) — FIX 1: Weniger aggressive Decay
         from datetime import datetime as _nf_dt_cls, timezone as _nf_dt_tz
-        _nf_today = _nf_dt_cls.now(_nf_dt_tz.utc).date()
+        _nf_today = _today
         for nf in negative_flags:
             nf_date_str = nf.get("date", "")
             nf_age_days = 0
@@ -2390,6 +2426,8 @@ def _scan_biotech_news(poly_key, ticker, limit=5):
             "best_catalyst": catalysts[0] if catalysts else None,  # Jetzt korrekt: höchster Score
             "had_catalyst_keywords": _had_catalyst_keywords,  # Vor Decay Keywords gefunden?
             "forward_catalyst": forward_catalyst,  # H-4: angekuendigtes Event (Watch-Kontext, kein Score)
+            "publication_exclusions": excluded_publications,
+            "news_as_of": news_as_of.isoformat(),
         }
     except ScannerDataError:
         raise
@@ -3483,6 +3521,8 @@ def _biotech_background_scan(poly_key):
 
                 result = {
                     "Ticker": ticker,
+                    "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
+                    "News_Publication_Exclusions": news_data.get("publication_exclusions", {}),
                     "Name": (details.get("name", "") or stock.get("name", ""))[:30],
                     "Score": total_score,
                     "Grade": grade,
@@ -3764,6 +3804,8 @@ def _biotech_quick_scan(poly_key):
                     old["Halt_Risk"] = _bio_edge.get("halt_risk", 0)
                     old["Near_Binary_Event"] = _bio_edge.get("near_binary_event", False)  # H-1 (10.06.)
                     old["Forward_Catalyst"] = news_data.get("forward_catalyst", False)    # H-4 (10.06.)
+                    old["News_Contract_Version"] = BIOTECH_NEWS_CONTRACT_VERSION
+                    old["News_Publication_Exclusions"] = news_data.get("publication_exclusions", {})
 
                     # Grade aktualisieren — synchron zu Full Scan / Biotech Audit V3
                     s = old["Score"]
@@ -3802,6 +3844,8 @@ def _biotech_quick_scan(poly_key):
                             continue
                         results.append({
                             "Ticker": ticker, "Name": "", "Score": _score,
+                            "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
+                            "News_Publication_Exclusions": news_data.get("publication_exclusions", {}),
                             "Grade": _grade, "Risk_Flag": "",
                             "Catalyst": bpiq_data.get("readout_label") or news_data.get("best_catalyst", {}).get("label", " Catalyst"),
                             "Catalyst_Score": catalyst_score, "Pipeline_Score": _pipeline_score,

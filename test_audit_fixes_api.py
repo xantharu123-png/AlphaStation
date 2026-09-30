@@ -93,6 +93,10 @@ def test_h4_turtle_row_has_native_targets_and_trade_setup(monkeypatch):
     }
 
     def fake_get(url, params=None, timeout=None, **kwargs):
+        from test_cross_scanner_reaudit_regressions import grouped_reply
+        grouped = grouped_reply(url, bars, ("TUTL",))
+        if grouped is not None:
+            return grouped
         if "/aggs/" in url:
             return _FakeResp({"results": bars})
         if "/snapshot/" in url:

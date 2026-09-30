@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import api
+from modules.biotech_news_contract import BIOTECH_NEWS_CONTRACT_VERSION
 
 
 def _bi_contract_fields(green=17):
@@ -350,6 +351,7 @@ def test_biotech_alert_persistent_dedupe_survives_restart(tmp_path, monkeypatch)
     cache_file = tmp_path / "biotech.json"
     row = {
         "Ticker": "PFE",
+        "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
         "Grade": "A",
         "Score": 94,
         "RVOL": 1.31,

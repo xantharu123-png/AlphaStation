@@ -174,7 +174,7 @@ CONFLUENCE_HARD_GATES = frozenset({
     "last_bar_pump", "range_breakdown", "recent_bearish_pressure",
     "recent_bullish_pressure", "unknown",
 })
-CONFLUENCE_CONTRACTS = frozenset({"stock-bi-20-v2", "stock-bi-20-v3", "stock-bi-20-v4"})
+CONFLUENCE_CONTRACTS = frozenset({"stock-bi-20-v2", "stock-bi-20-v3", "stock-bi-20-v4", "stock-bi-20-v5"})
 BI_CACHE_SCANNERS = {
     "bi_cache_long.json": "bi_long", "bi_cache_long.json.partial": "bi_long",
     "bi_cache_short.json": "bi_short", "bi_cache_short.json.partial": "bi_short",
@@ -211,6 +211,7 @@ volume_spikes
 """.split())
 SUPPRESSION_REASONS = frozenset("""
 wyckoff_contract_invalid
+biotech_news_contract_invalid
 armed_watch_mail_hard_disabled
 batch_mail_not_sent
 bear_crash_drop_below_threshold

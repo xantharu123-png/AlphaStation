@@ -164,6 +164,7 @@ from modules.stock_execution import (
     stock_swing_4h_short_execution_state,
 )
 from modules import stock_swing_contract as stock_swing
+from modules.biotech_news_contract import biotech_news_contract_valid
 from modules.stock_momentum_contract import (
     CONFIRMATION_BUFFER as _MOMENTUM_CONFIRMATION_BUFFER,
     MOMENTUM_CONTRACT_VERSION,
@@ -2922,6 +2923,7 @@ def _email_pipeline_summary(
 
 _ALERT_SUPPRESSION_LABELS = {
     "missing_ticker": "Ticker fehlt",
+    "biotech_news_contract_invalid": "Biotech-News neu pruefen: veralteter Ergebnisstand",
     "grade_below_alert_threshold": "Grade unter S/A/A+",
     "score_below_alert_threshold": f"Score unter {_ALERT_MIN_SCORE}",
     "rvol_below_alert_threshold": f"RVOL unter Mindestwert ({_ALERT_MIN_RVOL}x; Breakout-Pfade {_ALERT_BREAKOUT_MIN_RVOL}x)",
@@ -9858,6 +9860,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
     }
     no_trade_markers = {
         "wyckoff_contract_invalid",
+        "biotech_news_contract_invalid",
         "drop_too_extended_no_chase",
         "target_already_missed",
         "early_mover_no_chase",
@@ -10132,6 +10135,8 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     raw_score = score
     rvol = _extract_alert_rvol(row)
     reasons = []
+    if scanner_name == "biotech" and not biotech_news_contract_valid(row):
+        reasons.append("biotech_news_contract_invalid")
     if scanner_name in _BI_SIGNAL_SCANNERS and row.get("BI_PlanAccepted") is False:
         # A visible 17/20 setup does not override the producer's plan rejection.
         reasons.append("bi_plan_not_released")
@@ -10218,6 +10223,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "rvol_below_alert_threshold",
         "wyckoff_contract_invalid",
         "bi_plan_not_released",
+        "biotech_news_contract_invalid",
     }
     cup_contract_blocked = any(reason.startswith("cup_contract_") for reason in reasons)
     base_actionable = not cup_contract_blocked and not any(reason in reasons for reason in base_blockers)
@@ -13676,6 +13682,14 @@ def _revalidate_stock_strategy_mail_candidate(
         "target_reachability": reachability,
     })
     item["trade_setup"] = setup
+    if scanner_name == "orb":
+        # The earlier classification used the scan price. A fresh quote can
+        # invalidate the defining ORB condition without touching stop or TP1.
+        orb_reasons = _orb_signal_gate_reasons(
+            item, as_of=datetime.fromtimestamp(return_receipt_ts, timezone.utc),
+        )
+        if orb_reasons:
+            return {"ok": False, "reason": orb_reasons[0], "reasons": orb_reasons}
     return {"ok": True, "candidate": item}
 
 
@@ -15930,6 +15944,11 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
     if scanner_name == "bear":
         first = next((item for item in results or [] if isinstance(item, dict)), {})
         diagnostics = first.get("diagnostics") if isinstance(first, dict) else None
+    elif scanner_name == "orb":
+        first = next((item for item in results or [] if isinstance(item, dict)), {})
+        diagnostics = first.get("data_coverage")
+        if isinstance(diagnostics, dict) and diagnostics.get("excluded", 0):
+            warnings.append(f"{diagnostics['excluded']} Aktien wegen fehlender/ungueltiger Daten ausgeschlossen")
     return {
         "scanner": scanner_name,
         "data_source": SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache"),
@@ -19311,40 +19330,46 @@ def _snapshot_atr_pct(day: Dict[str, Any], prev: Dict[str, Any], price: float) -
     return 2.5
 
 
+def _fetch_completed_daily_universe(as_of=None) -> List[Dict[str, Any]]:
+    """One dated observation for both bulk preselection and daily analysis."""
+    stock_scan_runtime.checkpoint("universe")
+    # Completed daily evidence, never a day close labelled as a live trade.
+    sessions = stock_swing.completed_sessions(as_of)
+    cache_key = ("daily_universe", tuple(sessions))
+    cached = stock_scan_runtime.cache_get(cache_key)
+    if cached is not None:
+        return cached
+    feeds = []
+    diag = {"coverage": "incomplete", "final_results": None,
+            "data_mode": stock_swing.MODE, "analysis_session": sessions[0]}
+    for session in sessions:
+        try:
+            response = rate_limited_get(
+                f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{session}",
+                params={"apiKey": POLYGON_KEY, "adjusted": "true", "include_otc": "false"}, timeout=30,
+            )
+            if response.status_code != 200:
+                raise ScannerDataError(_scanner_provider_error(response.status_code), diag)
+            feeds.append(stock_swing.parse_grouped(response.json(), session))
+        except stock_scan_runtime.ScanWorkTimeout:
+            raise
+        except ScannerDataError:
+            raise
+        except (ValueError, TypeError):
+            raise ScannerDataError("scan_data_invalid", diag) from None
+        except Exception:
+            raise ScannerDataError("scan_data_unavailable", diag) from None
+    stock_scan_runtime.checkpoint()
+    universe = stock_swing.universe(feeds[0], feeds[1], sessions[0])
+    stock_scan_runtime.cache_put(cache_key, universe)
+    return universe
+
+
 def _fetch_strategy_snapshot_universe(strategy_name: str) -> List[Dict[str, Any]]:
     """Fetch a broad stock universe, with top movers only as a supplement."""
     stock_scan_runtime.checkpoint("universe")
     if stock_swing.enabled() or strategy_name == ELLIOTT_STRATEGY:
-        # Completed daily evidence, never a day close labelled as a live trade.
-        sessions = stock_swing.completed_sessions()
-        cache_key = ("daily_universe", tuple(sessions))
-        cached = stock_scan_runtime.cache_get(cache_key)
-        if cached is not None:
-            return cached
-        feeds = []
-        diag = {"coverage": "incomplete", "final_results": None,
-                "data_mode": stock_swing.MODE, "analysis_session": sessions[0]}
-        for session in sessions:
-            try:
-                response = rate_limited_get(
-                    f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{session}",
-                    params={"apiKey": POLYGON_KEY, "adjusted": "true", "include_otc": "false"}, timeout=30,
-                )
-                if response.status_code != 200:
-                    raise ScannerDataError(_scanner_provider_error(response.status_code), diag)
-                feeds.append(stock_swing.parse_grouped(response.json(), session))
-            except stock_scan_runtime.ScanWorkTimeout:
-                raise
-            except ScannerDataError:
-                raise
-            except (ValueError, TypeError):
-                raise ScannerDataError("scan_data_invalid", diag) from None
-            except Exception:
-                raise ScannerDataError("scan_data_unavailable", diag) from None
-        stock_scan_runtime.checkpoint()
-        universe = stock_swing.universe(feeds[0], feeds[1], sessions[0])
-        stock_scan_runtime.cache_put(cache_key, universe)
-        return universe
+        return _fetch_completed_daily_universe()
     merged: Dict[str, Dict[str, Any]] = {}
 
     def _add_tickers(tickers: List[Dict[str, Any]], source: str) -> None:
@@ -24684,6 +24709,12 @@ def _turtle_scan_wrapper() -> None:
 
         print(f"[Turtle] {len(_all_tickers)} Aktien im Snapshot")
 
+        # The live snapshot is separate context for a daily plan, never its
+        # prefilter. At midnight its `day` is empty; during RTH it is forming.
+        snapshots = {row["ticker"]: row for row in _all_tickers}
+        _all_tickers = _fetch_completed_daily_universe(scan_now)
+        previous_session = stock_swing.completed_sessions(scan_now, 2)[1]
+
         # ── 2. Vorfilter: Preis $5+, Change > 0%, kein OTC ──
         _common_stock_universe, _common_stock_source = _load_common_stock_universe()
         candidates = []
@@ -24700,7 +24731,7 @@ def _turtle_scan_wrapper() -> None:
                 continue
             day = t.get("day", {})
             prev = t.get("prevDay", {})
-            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
+            price = day.get("c", 0)
             prev_close = prev.get("c", 0)
             if price < 5 or prev_close <= 0:
                 continue
@@ -24760,6 +24791,11 @@ def _turtle_scan_wrapper() -> None:
                     continue  # 20 prior sessions + one completed signal session + ATR seed
                 if bars[-1]["date"] != analysis_session:
                     raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                coherence_error = stock_swing.history_observation_error(
+                    bars, snap_data, previous_session=previous_session,
+                )
+                if coherence_error:
+                    raise ScannerDataError("scan_data_incomplete", dict(data_diagnostics, reason=coherence_error))
 
                 highs = [b.get("h", 0) for b in bars]
                 lows = [b.get("l", 0) for b in bars]
@@ -24886,6 +24922,19 @@ def _turtle_scan_wrapper() -> None:
                 score, turtle_quality_flags = _turtle_score_cap(raw_score, signal_change_pct, rvol, breakout_pct)
                 grade = _strategy_score_to_grade(score)
 
+                live_snapshot = snapshots.get(ticker) or {}
+                snapshot_day = live_snapshot.get("day") or {}
+                snapshot_price = stock_swing.number(snapshot_day.get("c"))
+                snapshot_source = "polygon_snapshot_day_close"
+                if snapshot_price is None or snapshot_price <= 0:
+                    snapshot_price = stock_swing.number((live_snapshot.get("lastTrade") or {}).get("p"))
+                    snapshot_source = "polygon_snapshot_last_trade"
+                if snapshot_price is not None and snapshot_price <= 0:
+                    snapshot_price = None
+                snapshot_prev = stock_swing.number((live_snapshot.get("prevDay") or {}).get("c"))
+                snapshot_change = ((snapshot_price / snapshot_prev - 1) * 100
+                                   if snapshot_price is not None and snapshot_prev and snapshot_prev > 0 else None)
+
                 results.append({
                     "Ticker": ticker,
                     "Preis": round(current_close, 2),
@@ -24893,13 +24942,12 @@ def _turtle_scan_wrapper() -> None:
                     "Change_Pct": round(signal_change_pct, 2),
                     # Snapshot receipt is not a verified trade timestamp or fill.
                     # Keep live context separate from the completed daily plan.
-                    "snapshot_price": price,
-                    "snapshot_change_pct": round(change_pct, 2),
-                    "snapshot_volume": volume,
-                    "snapshot_received_at": snap_data["_turtle_snapshot_received_at"],
-                    "snapshot_price_source": ("polygon_snapshot_day_close" if snap_data.get("day", {}).get("c")
-                                              else "polygon_snapshot_last_trade"),
-                    "snapshot_updated_at": snap_data.get("updated"),
+                    "snapshot_price": snapshot_price,
+                    "snapshot_change_pct": round(snapshot_change, 2) if snapshot_change is not None else None,
+                    "snapshot_volume": stock_swing.number(snapshot_day.get("v")),
+                    "snapshot_received_at": live_snapshot.get("_turtle_snapshot_received_at"),
+                    "snapshot_price_source": snapshot_source if snapshot_price is not None else None,
+                    "snapshot_updated_at": live_snapshot.get("updated"),
                     "DC_High_20": round(dc_high_20, 2),
                     "DC_Low_10": round(dc_low_10, 2),
                     "Breakout_Pct": round(breakout_pct, 2),
@@ -31327,6 +31375,22 @@ def get_chart_data(
         if "patterns" in overlay_list and HAS_PATTERNS:
             try:
                 patterns_result = {}
+                pattern_input, pattern_source_times = [], {}
+                for raw in ohlcv:
+                    adapted = _chart_level_input([raw], ticker, timeframe)
+                    if not adapted:
+                        continue
+                    prepared = adapted[0]
+                    opened = _level_timestamp_seconds(prepared.get("open_time", prepared.get("time")))
+                    if opened is not None:
+                        pattern_source_times[opened] = raw["time"]
+                    pattern_input.append(prepared)
+                pattern_ohlcv = [
+                    {**bar.to_dict(), "time": pattern_source_times.get(bar.opened_at.timestamp(), int(bar.opened_at.timestamp())),
+                     "close_time": bar.closed_at.isoformat()}
+                    for bar in normalize_completed_bars(pattern_input, timeframe=timeframe, as_of=chart_as_of)
+                ]
+                patterns_result["confirmation_basis"] = "completed_candles"
 
                 # Lookback + Min-Bars je Timeframe (höherer TF = mehr Bars nötig)
                 tf_config = {
@@ -31341,7 +31405,7 @@ def get_chart_data(
 
                 # Harmonic patterns
                 try:
-                    harmonics = find_harmonic_for_chart(ohlcv)
+                    harmonics = find_harmonic_for_chart(pattern_ohlcv)
                     if harmonics:
                         harmonics = [h for h in harmonics if (h.get("score") or 0) >= _tfc["harmonic_min_score"]]
                         if harmonics:
@@ -31351,9 +31415,9 @@ def get_chart_data(
 
                 # Chart patterns (Double Top/Bottom, H&S, Triangles, Wedges)
                 try:
-                    _lookback = min(_tfc["lookback"], len(ohlcv))
+                    _lookback = min(_tfc["lookback"], len(pattern_ohlcv))
                     chart_pats = detect_chart_patterns(
-                        ohlcv, lookback=_lookback,
+                        pattern_ohlcv, lookback=_lookback,
                         wyckoff_context={"as_of": chart_as_of, "timeframe": timeframe,
                                          "bars": (_stock_wyckoff_daily_input(ohlcv)
                                                   if timeframe == "1D" and chart_market_context(ticker)["us_equity_session"]
@@ -31362,7 +31426,7 @@ def get_chart_data(
                     if chart_pats:
                         # CRITICAL: detect_chart_patterns Indizes sind relativ zu ohlcv[-lookback:]
                         # Wir brauchen den Offset zum vollen ohlcv-Array
-                        _idx_offset = len(ohlcv) - _lookback
+                        _idx_offset = len(pattern_ohlcv) - _lookback
 
                         # Filtere Patterns mit zu wenig Bars-Abstand
                         filtered = []
@@ -31396,20 +31460,20 @@ def get_chart_data(
                             idx = cp.get("detect_index")
                             if idx is not None:
                                 actual_idx = idx + _idx_offset
-                                if 0 <= actual_idx < len(ohlcv):
-                                    cp["time"] = ohlcv[actual_idx]["time"]
+                                if 0 <= actual_idx < len(pattern_ohlcv):
+                                    cp["time"] = pattern_ohlcv[actual_idx]["time"]
                                 else:
-                                    cp["time"] = ohlcv[-1]["time"]
-                            elif ohlcv:
-                                cp["time"] = ohlcv[-1]["time"]
+                                    cp["time"] = pattern_ohlcv[-1]["time"]
+                            elif pattern_ohlcv:
+                                cp["time"] = pattern_ohlcv[-1]["time"]
                             # draw_points: Slice-Index + Offset → ohlcv-Index → Time
                             if cp.get("draw_points"):
                                 for dp in cp["draw_points"]:
                                     di = dp.get("index")
                                     if di is not None:
                                         actual_di = di + _idx_offset
-                                        if 0 <= actual_di < len(ohlcv):
-                                            dp["time"] = ohlcv[actual_di]["time"]
+                                        if 0 <= actual_di < len(pattern_ohlcv):
+                                            dp["time"] = pattern_ohlcv[actual_di]["time"]
                         patterns_result["chart_patterns"] = chart_pats
                 except Exception as e:
                     print(f"Chart patterns error: {e}")
@@ -31423,9 +31487,10 @@ def get_chart_data(
                 # V2.5: Kohärenz-Filter — widersprüchliche bullish+bearish Patterns bereinigen
                 # Bestimme dominante Richtung aus Preis-Trend
                 try:
-                    _cp = closes[-1]
-                    _sma20 = sum(closes[-20:]) / min(20, len(closes)) if len(closes) >= 5 else _cp
-                    _sma50 = sum(closes[-50:]) / min(50, len(closes)) if len(closes) >= 10 else _sma20
+                    pattern_closes = [bar["close"] for bar in pattern_ohlcv]
+                    _cp = pattern_closes[-1]
+                    _sma20 = sum(pattern_closes[-20:]) / min(20, len(pattern_closes)) if len(pattern_closes) >= 5 else _cp
+                    _sma50 = sum(pattern_closes[-50:]) / min(50, len(pattern_closes)) if len(pattern_closes) >= 10 else _sma20
                     _trend_bullish = _cp > _sma20 and _sma20 > _sma50
                     _trend_bearish = _cp < _sma20 and _sma20 < _sma50
                     # Trend neutral wenn weder klar bullish noch bearish
@@ -41903,8 +41968,7 @@ def _orb_scanner_wrapper() -> None:
                 prev_trade_date = candidate_str
                 break
         if not prev_data:
-            print("[ORB] Keine Vortages-Daten")
-            return
+            raise ScannerDataError("scan_data_incomplete", {"stage": "orb_previous_session"})
         print(f"[ORB] Referenz-Tag: {prev_trade_date}")
 
         # V2.8: Snapshot API statt fetch_grouped_daily für heutige Daten
@@ -41943,6 +42007,9 @@ def _orb_scanner_wrapper() -> None:
             today_data_raw = fetch_grouped_daily(POLYGON_KEY, today_str)
             if today_data_raw:
                 today_data = today_data_raw
+
+        if not today_data:
+            raise ScannerDataError("scan_data_incomplete", {"stage": "orb_snapshot"})
 
         mins_since_open = max(1, time_val - 570)  # 570 = 9:30
         total_market_mins = 390
@@ -42027,7 +42094,7 @@ def _orb_scanner_wrapper() -> None:
         failed_breakouts = []
 
         # V3.0 Debug-Counters: Wo gehen Kandidaten verloren?
-        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0, "non_stock": len(non_stock_excluded)}
+        _dbg = {"api_fail": 0, "no_bars": 0, "no_rth": 0, "no_or": 0, "item_error": 0, "data_valid": 0, "or_wide": 0, "or_narrow": 0, "in_range": 0, "failed": 0, "passed": 0, "non_stock": len(non_stock_excluded)}
 
         for cand in candidates:
             _scan_control_point()
@@ -42038,7 +42105,11 @@ def _orb_scanner_wrapper() -> None:
                 if resp.status_code != 200:
                     _dbg["api_fail"] += 1
                     continue
-                bars = resp.json().get("results", [])
+                payload = resp.json()
+                if not isinstance(payload, dict) or _scanner_payload_error(payload):
+                    _dbg["api_fail"] += 1
+                    continue
+                bars = payload.get("results", [])
                 if not bars or len(bars) < 2:
                     _dbg["no_bars"] += 1
                     continue
@@ -42053,6 +42124,7 @@ def _orb_scanner_wrapper() -> None:
                 if not or_bars or len(or_bars) < 3:
                     _dbg["no_or"] += 1
                     continue
+                _dbg["data_valid"] += 1
                 or_high = max(b.get("h", 0) for b in or_bars)
                 or_low = min(b.get("l", 999999) for b in or_bars)
                 or_size = or_high - or_low
@@ -42493,14 +42565,27 @@ def _orb_scanner_wrapper() -> None:
                     "score_details": " | ".join(score_details),
                 })
             except Exception as orb_item_err:
-                print(f"[ORB] Skip {t}: {orb_item_err}")
+                _dbg["item_error"] += 1
+                print(f"[ORB] Skip {t}: {_sanitized_exception_text(orb_item_err)}")
                 continue
+
+        data_excluded = sum(_dbg[key] for key in ("api_fail", "no_bars", "no_rth", "no_or", "item_error"))
+        if candidates and data_excluded >= len(candidates):
+            raise ScannerDataError("scan_data_incomplete", {
+                "stage": "orb_intraday", "candidates": len(candidates),
+                "excluded": data_excluded,
+            })
 
         # Sortiere nach Score
         breakouts.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         result = {
             "breakouts": breakouts,
+            "data_coverage": {
+                "selected": len(candidates), "excluded": data_excluded,
+                "checked": len(candidates) - data_excluded,
+                "status": "completed_with_data_exclusions" if data_excluded else "completed",
+            },
             "failed_breakouts": failed_breakouts[:10],
             "candidates": candidates[:20],
             "stats": {

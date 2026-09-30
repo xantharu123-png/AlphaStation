@@ -86,15 +86,13 @@ def _ema(values: Sequence[float], period: int) -> float:
 
 
 def _bar(bar: Dict[str, Any]) -> Dict[str, float]:
-    close = _num(bar.get("close", bar.get("c")))
-    return {
-        "open": _num(bar.get("open", bar.get("o")), close),
-        "high": _num(bar.get("high", bar.get("h")), close),
-        "low": _num(bar.get("low", bar.get("l")), close),
-        "close": close,
-        "volume": _num(bar.get("volume", bar.get("v"))),
-        "timestamp": _num(bar.get("timestamp", bar.get("t"))),
-    }
+    # Missing OHLCV is unknown, never an invented close/zero-volume candle.
+    result = {}
+    for field, alias in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v")):
+        value = bar.get(field, bar.get(alias))
+        result[field] = math.nan if isinstance(value, bool) else _num(value, math.nan)
+    result["timestamp"] = _num(bar.get("timestamp", bar.get("t")))
+    return result
 
 
 def _valid_bars(bars: Sequence[Dict[str, Any]]) -> List[Dict[str, float]]:
@@ -104,7 +102,8 @@ def _valid_bars(bars: Sequence[Dict[str, Any]]) -> List[Dict[str, float]]:
             continue
         item = _bar(raw)
         if (
-            min(item[key] for key in ("open", "high", "low", "close")) <= 0
+            not all(math.isfinite(item[key]) for key in ("open", "high", "low", "close", "volume"))
+            or min(item[key] for key in ("open", "high", "low", "close")) <= 0
             or item["high"] < max(item["open"], item["low"], item["close"])
             or item["low"] > min(item["open"], item["high"], item["close"])
             or item["volume"] < 0
@@ -1343,7 +1342,8 @@ def evaluate_penny_signal_outcome(
     tp2 = _num(tp2)
     geometry = trade_geometry(entry, stop, tp1, tp2, "LONG")
     data = _valid_bars(future_bars)
-    if not geometry.get("valid") or not data:
+    # Skipping an unknown path candle could hide a stop before a later target.
+    if not geometry.get("valid") or not data or len(data) != len(future_bars):
         return {"valid": False, "outcome": "INVALID", "net_r": None}
     risk = float(geometry["risk"])
     total_cost_bps = max(0.0, spread_bps) + 2.0 * max(0.0, slippage_bps)

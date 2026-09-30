@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 import api
+from modules.biotech_news_contract import BIOTECH_NEWS_CONTRACT_VERSION
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +85,7 @@ def _biotech_cache(tmp_path):
     """Alertbare Biotech-Row (Spiegel test_email_alert_audit.py, PFE-Fixture)."""
     row = {
         "Ticker": "PFE",
+        "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
         "Grade": "A",
         "Score": 94,
         "RVOL": 1.31,

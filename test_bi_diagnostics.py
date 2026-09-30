@@ -491,8 +491,8 @@ _SYNTHETIC_BARS = {
 }
 
 
-@pytest.mark.parametrize("direction,expected_score", [("long", 107), ("short", 113)])
-def test_real_unmocked_analysis_reaches_seventeen_on_fixed_synthetic_ohlcv(direction, expected_score):
+@pytest.mark.parametrize("direction,expected_score,expected_green", [("long", 93, 16), ("short", 113, 17)])
+def test_real_unmocked_analysis_counts_causal_evidence_on_fixed_synthetic_ohlcv(direction, expected_score, expected_green):
     bars = [dict(zip(("open", "high", "low", "close", "volume"), row))
             for row in _SYNTHETIC_BARS[direction]]
     assert len(bars) == 50
@@ -500,16 +500,32 @@ def test_real_unmocked_analysis_reaches_seventeen_on_fixed_synthetic_ohlcv(direc
                <= max(b["open"], b["close"]) <= b["high"] and b["volume"] > 0 for b in bars)
     before = copy.deepcopy(bars)
     result = analyze_breakout_imminent(bars, direction=direction)
-    assert result[0] is True
-    assert result.green_count == 17
+    # The old long fixture's OB only passed with volatility from later bars:
+    # displacement .7031 < 1.5 * contemporaneous mean range .49434.
+    expected_accepted = expected_green >= 17
+    assert result[0] is expected_accepted
+    assert result.green_count == expected_green
     assert result.available_count == 20
     assert result[1] == expected_score
     assert result.indicator_contract_ok is True
     assert not result.hard_gate_failures
     d = _diagnostics(direction=direction)
-    assert _observe(d, result, payload_accepted=True) is None
-    assert d["core_valid_count"] == d["payload_accepted_count"] == 1
-    assert d["green_count_histogram"]["17"] == 1
+    assert _observe(d, result, payload_accepted=expected_accepted) is None
+    assert d["core_valid_count"] == d["payload_accepted_count"] == int(expected_accepted)
+    assert d["green_count_histogram"][str(expected_green)] == 1
     assert d["schema_invalid"] == 0
     assert bars == before
     _identities(d)
+
+
+def test_real_long_seventeen_with_sufficient_contemporaneous_displacement():
+    bars = [dict(zip(("open", "high", "low", "close", "volume"), row))
+            for row in _SYNTHETIC_BARS["long"]]
+    # Close remains within the observed candle high. The 0.75834 move now
+    # exceeds the 0.74151 threshold actually known at the OB origin.
+    bars[24]["close"] = 40.30
+    result = analyze_breakout_imminent(bars, direction="long")
+    assert result.indicator_checks[14]["passed"] is True
+    assert result.green_count == 17
+    assert result.indicator_contract_ok and result[0]
+    assert not result.hard_gate_failures

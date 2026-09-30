@@ -154,7 +154,10 @@ def test_required_bulk_outage_preserves_last_good_cache(monkeypatch, wrapper, fa
 def test_successful_bulk_zero_is_distinct_from_optional_movers_outage(monkeypatch, wrapper):
     freeze(monkeypatch)
     small = {"tickers": [{"ticker": "AUDT", "day": {"c": 1, "v": 1}, "prevDay": {"c": 1, "v": 1}}]}
-    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: Response(small) if url.endswith("/tickers") else Response(status=503))
+    from test_cross_scanner_reaudit_regressions import grouped_reply
+    bars = [dict(bar, o=1, h=1, l=1, c=1, v=1) for bar in daily_bars(2)]
+    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw:
+        grouped_reply(url, bars) or (Response(small) if url.endswith("/tickers") else Response(status=503)))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda **kw: ({"AUDT"}, "fixture"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **kw: None)
     writes = []
@@ -167,6 +170,10 @@ def test_successful_bulk_zero_is_distinct_from_optional_movers_outage(monkeypatc
 def test_turtle_required_history_failure_preserves_cache(monkeypatch, history):
     freeze(monkeypatch)
     def get(url, **kw):
+        from test_cross_scanner_reaudit_regressions import grouped_reply
+        grouped = grouped_reply(url, daily_bars())
+        if grouped is not None:
+            return grouped
         if "/aggs/" not in url:
             return Response(snapshot())
         if history == "exception":
@@ -192,6 +199,10 @@ def test_turtle_partial_symbol_outage_does_not_publish_first_survivor(monkeypatc
     bulk = snapshot()
     bulk["tickers"].append({**deepcopy(bulk["tickers"][0]), "ticker": "MISS"})
     def get(url, **kw):
+        from test_cross_scanner_reaudit_regressions import grouped_reply
+        grouped = grouped_reply(url, bars, ("AUDT", "MISS"))
+        if grouped is not None:
+            return grouped
         if "/aggs/ticker/MISS/" in url:
             return Response(status=503)
         return Response({"results": bars} if "/aggs/" in url else bulk)
@@ -208,7 +219,8 @@ def test_turtle_partial_symbol_outage_does_not_publish_first_survivor(monkeypatc
 @pytest.mark.parametrize("count", [0, 21, 25])
 def test_turtle_successful_insufficient_or_no_break_history_is_legitimate_zero(monkeypatch, count):
     freeze(monkeypatch)
-    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: Response({"results": daily_bars(count)} if "/aggs/" in url else snapshot()))
+    from test_cross_scanner_reaudit_regressions import grouped_reply
+    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: grouped_reply(url, daily_bars()) or Response({"results": daily_bars(count)} if "/aggs/" in url else snapshot()))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda **kw: ({"AUDT"}, "fixture"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **kw: None)
     saved = []
@@ -236,7 +248,8 @@ def test_turtle_reference_and_snapshot_are_independent_coherent_observations(mon
     freeze(monkeypatch)
     bars = daily_bars()
     bars[-1].update(o=99.8, h=100.12, l=99.8, c=100.1, v=3000000)
-    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: Response({"results": bars} if "/aggs/" in url else snapshot()))
+    from test_cross_scanner_reaudit_regressions import grouped_reply
+    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: grouped_reply(url, bars) or Response({"results": bars} if "/aggs/" in url else snapshot()))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda **kw: ({"AUDT"}, "fixture"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **kw: None)
     saved = []
@@ -264,7 +277,8 @@ def test_turtle_respects_completed_daily_availability_boundary(monkeypatch, minu
     bars = daily_bars(26, "2026-09-23")
     bars[-2].update(o=99.8, h=100.12, l=99.8, c=100.1, v=3000000)
     bars[-1].update(o=100.2, h=101.2, l=100.2, c=101.1, v=3000000)
-    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: Response({"results": bars} if "/aggs/" in url else snapshot()))
+    from test_cross_scanner_reaudit_regressions import grouped_reply
+    monkeypatch.setattr(api, "rate_limited_get", lambda url, **kw: grouped_reply(url, bars) or Response({"results": bars} if "/aggs/" in url else snapshot()))
     monkeypatch.setattr(api, "_load_common_stock_universe", lambda **kw: ({"AUDT"}, "fixture"))
     monkeypatch.setattr(api, "_stock_alert_asset_exclusion_reason", lambda *a, **kw: None)
     saved = []

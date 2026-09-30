@@ -840,7 +840,7 @@ def test_mail_code_allowlists_match_reviewed_registry_without_app_import():
         assert getattr(collector, "SUPPRESSION_" + suffix) == source
 
 
-@pytest.mark.parametrize("version", ["stock-bi-20-v2", "stock-bi-20-v3", "stock-bi-20-v4"])
+@pytest.mark.parametrize("version", ["stock-bi-20-v2", "stock-bi-20-v3", "stock-bi-20-v4", "stock-bi-20-v5"])
 def test_confluence_preserves_exact_historical_or_current_contract_version(version):
     payload = _confluence_payload()
     payload["contract_version"] = version

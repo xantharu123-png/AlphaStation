@@ -234,8 +234,10 @@ _DEFAULT_MAX_ADVERSE_FILL_R = 0.50
 _TICKER_KEYS = ("ticker", "Ticker", "symbol", "Symbol")
 _ENTRY_KEYS = ("Entry", "entry")
 _STOP_KEYS = ("StopLoss", "stop_loss", "stop")
-_TP1_KEYS = ("TP1", "tp1")
-_TP2_KEYS = ("TP2", "tp2")
+# ORB produces target1/target2, not TP1/TP2. Preserve these native,
+# validated levels at the delivery-intent boundary; never invent targets.
+_TP1_KEYS = ("TP1", "tp1", "target1", "Target1")
+_TP2_KEYS = ("TP2", "tp2", "target2", "Target2")
 _PRICE_KEYS = ("price", "Preis", "current_price")
 _GRADE_KEYS = ("grade", "Grade", "BI_Grade")
 _SCORE_KEYS = ("score", "Score", "BI_Score")
