@@ -10,6 +10,7 @@ Reine API-Funktionen ohne Streamlit-Abhängigkeiten:
 """
 import re
 import json
+import hashlib
 import time
 import threading
 import requests
@@ -171,6 +172,9 @@ from pathlib import Path as _Path
 _BPIQ_CATALYST_CACHE = {}
 _BPIQ_CACHE_TIMESTAMP = 0
 _BPIQ_CACHE_TTL = 3600  # 1 hour
+_BPIQ_CACHE_LOCK = threading.RLock()
+_BPIQ_AUTH_RETRY_SECONDS = 300
+_BPIQ_AUTH_FAILURE = None
 _BPIQ_CATALYST_STATUS = {
     "status": "unknown",
     "http_status": None,
@@ -262,19 +266,27 @@ def _parse_fuzzy_catalyst_date(text):
 
 
 def _load_bpiq_catalyst_cache():
+    # Concurrent ticker lookups share one fetch/backoff decision. A rejected
+    # account must not make hundreds of identical requests in the same scan.
+    with _BPIQ_CACHE_LOCK:
+        return _load_bpiq_catalyst_cache_locked()
+
+
+def _load_bpiq_catalyst_cache_locked():
     """
     Lädt ALLE Drugs mit Catalyst-Dates von BPIQ in einen In-Memory-Cache.
     Korrekte Implementation: Pagination, Drug-Parsing, Category-Berechnung.
-    Cache-TTL: 4 Stunden (BPIQ Daten werden täglich aktualisiert).
+    Cache-TTL: eine Stunde. Zugangsausfaelle werden getrennt nach 5 Min erneut geprueft.
 
     Returns:
         dict: {TICKER: [{drug_name, stage_label, catalyst_date, catalyst_date_text,
                          days_until, category, phase_mult, ...}], ...}
     """
-    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP, _BPIQ_CATALYST_STATUS
+    global _BPIQ_CATALYST_CACHE, _BPIQ_CACHE_TIMESTAMP, _BPIQ_CATALYST_STATUS, _BPIQ_AUTH_FAILURE
 
     bpiq_key = _get_config_value("BPIQ_API_KEY")
     if not bpiq_key:
+        _BPIQ_AUTH_FAILURE = None
         _BPIQ_CATALYST_STATUS = {
             "status": "warning",
             "http_status": None,
@@ -284,6 +296,13 @@ def _load_bpiq_catalyst_cache():
             "timestamp": datetime.now().isoformat(),
         }
         return {}
+
+    key_fingerprint = hashlib.sha256(str(bpiq_key).encode("utf-8")).digest()
+    if _BPIQ_AUTH_FAILURE is not None:
+        failed_key, retry_at = _BPIQ_AUTH_FAILURE
+        if failed_key == key_fingerprint and time.monotonic() < retry_at:
+            return {}  # Keep the warning visible; no stale calendar bonuses.
+        _BPIQ_AUTH_FAILURE = None  # A corrected key is tried immediately.
 
     # Use one central TTL so status text and actual refresh behavior cannot drift.
     now = time.time()
@@ -332,6 +351,11 @@ def _load_bpiq_catalyst_cache():
 
         # Never replace a complete cache with a rate-limited or truncated page set.
         if not response_complete:
+            auth_rejected = api_error_status in (401, 403)
+            if auth_rejected:
+                _BPIQ_AUTH_FAILURE = (
+                    key_fingerprint, time.monotonic() + _BPIQ_AUTH_RETRY_SECONDS,
+                )
             reason = (
                 f"BPIQ returned HTTP {api_error_status}"
                 if api_error_status is not None
@@ -344,11 +368,11 @@ def _load_bpiq_catalyst_cache():
                 "rows_loaded": len(all_drugs),
                 "ticker_count": len(prior_cache),
                 "partial_response_discarded": True,
-                "using_stale_cache": bool(prior_cache),
+                "using_stale_cache": bool(prior_cache) and not auth_rejected,
                 "timestamp": datetime.now().isoformat(),
             }
             print(f"[CatalystData] Incomplete response discarded: {reason}")
-            return prior_cache or {}
+            return {} if auth_rejected else prior_cache or {}
 
         # Gruppiere nach Ticker mit vollständiger Daten-Aufbereitung
         cache = {}

@@ -116,6 +116,7 @@ def test_all_successful_zero_is_a_real_complete_sweep_without_guard_call(monkeyp
     api._stock_strategy_alert_sweep_wrapper()
     payload = json.loads(cache.read_text())
     assert cache.read_bytes() != previous and payload["results"] == []
+    assert payload["cache_version"] == api.STOCK_STRATEGY_CACHE_VERSION
     assert payload["diagnostics"]["coverage"] == "complete"
     assert payload["diagnostics"]["final_results"] == 0
     assert payload["diagnostics"]["strategies_completed"] == 4

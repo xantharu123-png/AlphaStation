@@ -2052,7 +2052,7 @@ def _biotech_progress_read():
         return None
 
 
-def _biotech_cache_save(results, *, partial=False, checked=0, total=0, detail=""):
+def _biotech_cache_save(results, *, partial=False, checked=0, total=0, detail="", diagnostics=None):
     """Speichert atomar; Live-Zwischenstaende ersetzen nie den Final-Cache."""
     tmp_path = None
     try:
@@ -2067,6 +2067,8 @@ def _biotech_cache_save(results, *, partial=False, checked=0, total=0, detail=""
             "total": int(total or 0),
             "detail": detail or "",
         }
+        if diagnostics is not None:
+            payload["diagnostics"] = diagnostics
         tmp_dir = os.path.dirname(path) or "."
         with tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False, suffix=".tmp") as f:
             tmp_path = f.name
@@ -2635,9 +2637,11 @@ def _biotech_technical_score(poly_key, ticker):
         error = _scanner_payload_error(payload)
         if error:
             raise ScannerDataError(error)
-        bars = payload.get("results")
-        if not isinstance(bars, list):
-            raise ScannerDataError("scan_data_invalid")
+        # Same ascending 1D endpoint as BI: a successful zero-result response
+        # may omit the optional array. It is an excluded symbol, not an outage.
+        # Do not use .get('results', []): malformed/unauthorized envelopes must
+        # still fail, including contradictory counts and truncated responses.
+        bars = parse_bi_daily_aggregates(payload)
         normalized_bars = []
         for raw_bar in bars:
             if not isinstance(raw_bar, dict):
@@ -2663,13 +2667,19 @@ def _biotech_technical_score(poly_key, ticker):
                 pass
             normalized_bars.append(bar)
         bars = _bi_strip_partial_bar(normalized_bars)
-        if not bars or len(bars) < 21:
-            return {"technical_score": 0, "details": {}}
+        if len(bars) < 21:
+            return {"technical_score": 0, "details": {}, "bar_count": len(bars),
+                    "data_status": "no_history" if not bars else "insufficient_history"}
 
         result = _compute_biotech_technical_from_bars(bars)
         if result.get("data_status") == "invalid_ohlcv":
             raise ScannerDataError("scan_data_invalid")
         return result
+    except BIAggregateDataError as exc:
+        raise ScannerDataError("scan_data_invalid", diagnostics={
+            "stage": "biotech_daily_history", "reason": exc.reason,
+            "field": exc.field, "value_class": exc.value_class,
+        }) from None
     except ScannerDataError:
         raise
     except (TypeError, ValueError, KeyError, OverflowError):
@@ -3090,6 +3100,8 @@ def _biotech_background_scan(poly_key):
         analysis_attempts = 0
         analysis_errors = 0
         analysis_data_errors = 0
+        history_exclusions = {"no_history": 0, "insufficient_history": 0}
+        data_error_reasons = defaultdict(int)
 
         for stock in universe:
             scan_control.safe_point()
@@ -3189,6 +3201,10 @@ def _biotech_background_scan(poly_key):
 
                 # E) Technical Score
                 tech_data = _biotech_technical_score(poly_key, ticker)
+                history_status = tech_data.get("data_status")
+                if history_status in history_exclusions:
+                    history_exclusions[history_status] += 1
+                    continue  # No OHLCV evidence: no score, price, plan or mail.
 
                 # F) Risk Score
                 risk_data = _biotech_risk_score(
@@ -3593,6 +3609,11 @@ def _biotech_background_scan(poly_key):
             except Exception as _bio_err:
                 analysis_errors += 1
                 analysis_data_errors += int(isinstance(_bio_err, ScannerDataError))
+                if isinstance(_bio_err, ScannerDataError):
+                    reason = _bio_err.diagnostics.get("reason")
+                    reason = reason if isinstance(reason, str) and reason in BI_DATA_ERROR_REASONS else _bio_err.code
+                    data_error_reasons[reason] += 1
+                    print(f"[BIOTECH] Datenpruefung {ticker}: {reason}", flush=True)
                 import traceback
                 print(f"[BIOTECH] Fehler bei {ticker}: {_bio_err}\n{traceback.format_exc()}")
                 continue
@@ -3601,17 +3622,20 @@ def _biotech_background_scan(poly_key):
         if analysis_data_errors:
             raise ScannerDataError("scan_data_incomplete", diagnostics={
                 "checked": checked, "total": total, "data_errors": analysis_data_errors,
+                "data_error_reasons": dict(data_error_reasons), **history_exclusions,
             })
         _raise_on_systemic_analysis_failures(
             "Biotech Full", analysis_attempts, analysis_errors
         )
         results = sorted(results, key=lambda x: x.get("Score", 0), reverse=True)[:50]
         scan_control.seal()
-        _biotech_cache_save(results)
+        _biotech_cache_save(results, checked=checked, total=total,
+                            diagnostics={"coverage": "complete", **history_exclusions})
 
         top_score = results[0]["Score"] if results else 0
         _biotech_progress_write("done", checked=checked, total=total,
                                 hits=len(results), top_score=top_score,
+                                **history_exclusions,
                                 detail=f"{total} gescannt → {len(results)} mit Katalysator")
 
     except Exception as e:

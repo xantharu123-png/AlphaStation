@@ -222,7 +222,23 @@ def test_each_final_cache_publication_has_adjacent_owner_seal(name, cache):
 def test_biotech_loop_and_its_internal_final_cache_are_guarded():
     source = inspect.getsource(scanners._biotech_background_scan)
     assert "for stock in universe:\n            scan_control.safe_point()" in source
-    assert "scan_control.seal()\n        _biotech_cache_save(results)" in source
+    finals = []
+    for parent in ast.walk(ast.parse(source)):
+        for _, statements in ast.iter_fields(parent):
+            if not isinstance(statements, list):
+                continue
+            for index, node in enumerate(statements):
+                if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "_biotech_cache_save"):
+                    continue
+                if any(kw.arg == "partial" and isinstance(kw.value, ast.Constant)
+                       and kw.value.value is True for kw in node.value.keywords):
+                    continue
+                assert index > 0
+                assert ast.unparse(statements[index - 1]) == "scan_control.seal()"
+                finals.append(node)
+    assert len(finals) == 1  # Metadata keywords do not change the ownership barrier.
 
 
 def test_actual_biotech_internal_loop_parks_then_discards_without_final_or_mail(isolated_api, monkeypatch):

@@ -24382,7 +24382,9 @@ def _stock_strategy_alert_sweep_wrapper() -> None:
     diagnostics["coverage"] = "complete"
     diagnostics["final_results"] = len(all_rows[:100])
     try:
-        save_cache_file(STRATEGY_SCAN_CACHE, all_rows[:100], metadata={"diagnostics": diagnostics})
+        save_cache_file(STRATEGY_SCAN_CACHE, all_rows[:100], metadata={
+            "cache_version": STOCK_STRATEGY_CACHE_VERSION, "diagnostics": diagnostics,
+        })
     except Exception:
         _publish_stock_strategy_attempt(attempt, "error", diagnostics=diagnostics, error="scan_cache_publish_failed")
         raise
@@ -27480,6 +27482,71 @@ def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = Non
     return False
 
 
+def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
+    """Only reusable completed stock caches may defer a startup run.
+
+    This does not approve any row for trading or mail. The normal row/session
+    guards remain authoritative. It prevents a freshly written *old contract*
+    (or partial/corrupt cache) from suppressing the scan that would repair it.
+    """
+    path = SCAN_CACHE_MAP.get(name)
+    if not path:
+        return None
+    try:
+        stamp = os.path.getmtime(path)
+        if not math.isfinite(stamp) or stamp > now:
+            return None
+        if name in {"strategy_scan", "bi_long", "bi_short", "biotech"}:
+            payload = _scan_cache_payload(path)
+            if payload is None or payload.get("partial"):
+                return None
+            rows = payload["results"]
+            if any(not isinstance(row, dict) for row in rows):
+                return None
+            diag = payload.get("diagnostics") or {}
+            if not isinstance(diag, dict) or diag.get("coverage") in {"incomplete", "error", "unknown"}:
+                return None
+            if name == "strategy_scan":
+                if payload.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION:
+                    return None
+                # Manual leaf scans also write the shared cache. Their mtime
+                # must not make another hourly strategy's old cache reusable.
+                for strategy in _AUTO_STOCK_ALERT_STRATEGIES:
+                    leaf_path = _strategy_cache_path(strategy)
+                    leaf = _scan_cache_payload(leaf_path)
+                    if (leaf is None or leaf.get("partial")
+                            or leaf.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION):
+                        return None
+                    leaf_stamp = os.path.getmtime(leaf_path)
+                    if not math.isfinite(leaf_stamp) or leaf_stamp > now:
+                        return None
+                    stamp = min(stamp, leaf_stamp)
+            elif name.startswith("bi_"):
+                if diag.get("contract_version") != _BI_INDICATOR_CONTRACT_VERSION:
+                    return None
+                if any(not _bi_row_meets_signal_contract(row) for row in rows):
+                    return None
+            elif any(not biotech_news_contract_valid(row) for row in rows):
+                return None
+        return stamp
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _scheduler_task_order(scan_tasks, last_run_times):
+    """Oldest due heavy job first; long hourly rounds cannot starve BI/Biotech."""
+    def due_at(task):
+        name, _ = task
+        with _scan_lock:
+            previous = max(last_run_times.get(name, 0),
+                           _scan_status.get(name, {}).get("_resume_completed_at", 0))
+        return previous + _effective_scan_interval_min(name) * 60 if previous else 0
+
+    heavy = iter(sorted((task for task in scan_tasks if _is_heavy_stock_worker(task[0])), key=due_at))
+    # Keep light-job/dependency order unchanged; only exchange the heavy slots.
+    return [next(heavy) if _is_heavy_stock_worker(name) else (name, func) for name, func in scan_tasks]
+
+
 def _scheduler_loop():
     """Interval scans plus durable, fixed Swiss Gap Momentum admissions."""
     global _scheduler_running
@@ -27551,10 +27618,8 @@ def _scheduler_loop():
                 _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
             continue
         interval_sec = _effective_scan_interval_min(name) * 60
-        cache_file = SCAN_CACHE_MAP.get(name)
-        cache_age = None
-        if cache_file and os.path.exists(cache_file):
-            cache_age = time.time() - os.path.getmtime(cache_file)
+        cache_time = _startup_scan_cache_time(name, time.time())
+        cache_age = time.time() - cache_time if cache_time is not None else None
 
         if cache_age is not None and cache_age < interval_sec:
             # Cache ist frisch genug → NICHT neu scannen
@@ -27569,13 +27634,8 @@ def _scheduler_loop():
             age_str = f"{int(cache_age)}s alt" if cache_age else "kein Cache"
             print(f"[Scheduler] Initial scan: {name} ({age_str})")
             if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):
-                print("[Scheduler] market_context wartet kurz auf crash_monitor...")
-                _wait_start = time.time()
-                while _scan_status.get("crash_monitor", {}).get("running") and _scheduler_running:
-                    if time.time() - _wait_start > 120:
-                        print("[Scheduler] market_context: crash_monitor wartet zu lange, nutze letzten Cache")
-                        break
-                    time.sleep(3)
+                print("[Scheduler] market_context: nach crash_monitor erneut pruefen")
+                continue
             if name in _heavy_names and _gap_automatic_slot_pending():
                 continue
             started = _automatic_scan_allowed(name) and _run_scan_safe(name, func)
@@ -27585,24 +27645,9 @@ def _scheduler_loop():
                     _scan_status[name]["next_run"] = datetime.fromtimestamp(
                         time.time() + interval_sec
                     ).isoformat()
-            # V2.2: Schwere Scans (bi_long, bi_short, biotech) WARTEN bis fertig
-            # bevor der nächste startet — sonst teilen sich alle 200 calls/min
-            if started and name in _heavy_names:
-                print(f"[Scheduler] Warte auf {name} (schwerer Scan)...")
-                _wait_start = time.time()
-                while _scan_status[name]["running"] and _scheduler_running:
-                    time.sleep(10)
-                    _drain_scan_resume_restarts()
-                    _run_due_gap_scans()
-                    if _scan_is_parked(name):
-                        break  # Keep ownership, let light jobs proceed.
-                    _wait_sec = int(time.time() - _wait_start)
-                    if _wait_sec > 3600:  # Max 1h warten
-                        print(f"[Scheduler] {name} Timeout nach 1h — weiter")
-                        break
-                print(f"[Scheduler] {name}: Startwartephase beendet nach {int(time.time() - _wait_start)}s", flush=True)
-            else:
-                time.sleep(3)  # Leichte Scans: nur kurzer Stagger
+            # Admission retains the exclusive heavy worker. Waiting here would
+            # freeze recurring light monitors/watchdogs for the entire scan.
+            time.sleep(3)  # Short stagger only; denied jobs stay due.
 
     # Fill any missing last_run_times
     for name in _scan_status:
@@ -27613,7 +27658,7 @@ def _scheduler_loop():
         _drain_scan_resume_restarts()
         _run_due_gap_scans()
         now = time.time()
-        for name, func in scan_tasks:
+        for name, func in _scheduler_task_order(scan_tasks, last_run_times):
             if not _scheduler_running:
                 break
             with _scan_lock:

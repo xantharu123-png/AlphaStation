@@ -6,6 +6,7 @@ worker admission function with inert threads, so no provider/mail work occurs.
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import os
+import json
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -126,7 +127,8 @@ def test_friday_saturday_monday_interval_transitions_use_new_york_not_utc_day(sc
 def test_weekday_fresh_cache_uses_original_mtime_not_a_faked_scan_success(scheduler):
     scheduler["now"] = utc("2026-09-21T16:00:00Z")
     path = Path(api.SCAN_CACHE_MAP["bi_long"])
-    path.write_text("{}", encoding="utf-8")
+    path.write_text(json.dumps({"results": [], "partial": False,
+        "diagnostics": {"contract_version": api._BI_INDICATOR_CONTRACT_VERSION}}), encoding="utf-8")
     stamp = scheduler["now"].timestamp() - 30
     os.utime(path, (stamp, stamp))
     api._scheduler_loop()
@@ -237,7 +239,7 @@ def test_parked_heavy_worker_releases_startup_wait_but_not_exclusive_ownership(s
     api._scheduler_loop()
     assert started == ["strategy_scan"]
     assert {"bi_long", "bi_short", "biotech"} <= set(attempts)
-    assert scheduler["sleeps"].count(10) == 1  # No one-hour startup stall.
+    assert scheduler["sleeps"].count(10) == 0  # No blocking startup wait at all.
     assert {name for name, _, _ in scheduler["calls"]} >= {"new_listing", "crypto_trade_signals"}
     assert api._scan_status["strategy_scan"]["running"]
     assert api._scan_status["strategy_scan"]["last_run"] is None
