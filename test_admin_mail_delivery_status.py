@@ -77,6 +77,37 @@ def test_audit_is_inspection_only_and_gap_uses_canonical_stock_strategy(audit_en
         assert response["scanners"][key]["scanner"] == key
 
 
+def test_real_http_route_keeps_header_binding_with_request_scoped_diagnostics(audit_environment):
+    import asyncio
+    # No lifespan context: do not start a scheduler or scan, even in fixtures.
+    async def check():
+        for headers, expected in (([], 401), ([(b"authorization", b"Bearer admin")], 200)):
+            messages = []
+            request_delivered = False
+            async def receive():
+                nonlocal request_delivered
+                if not request_delivered:
+                    request_delivered = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                await asyncio.Event().wait()
+            async def send(message):
+                messages.append(message)
+            await api.app({
+                "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+                "http_version": "1.1", "method": "GET", "scheme": "http",
+                "path": "/api/email-alert-audit", "raw_path": b"/api/email-alert-audit",
+                "query_string": b"", "headers": headers, "root_path": "",
+                "client": ("127.0.0.1", 1234), "server": ("fixture.invalid", 80),
+            }, receive, send)
+            status = next(message["status"] for message in messages if message["type"] == "http.response.start")
+            assert status == expected
+            if status == 200:
+                body = json.loads(b"".join(message.get("body", b"") for message in messages))
+                assert body["status"] == "ok"
+                assert datetime.fromisoformat(body["timestamp"]).utcoffset() == timedelta(0)
+    asyncio.run(asyncio.wait_for(check(), timeout=10))
+
+
 def test_delivery_counts_are_channel_scoped_not_global_recipient_count(audit_environment):
     calls = []
 
@@ -121,6 +152,33 @@ def test_unknown_process_event_status_is_allowlisted_not_echoed(audit_environmen
     response = api._admin_mail_delivery_status()
     assert "private-secret" not in json.dumps(response)
     assert response["recent_decisions"][0]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("SMTPAuthenticationError:not_delivered", "smtp_authentication_failed"),
+    ("SMTPRecipientsRefused:not_delivered", "smtp_recipients_rejected"),
+    ("SMTPSenderRefused:not_delivered", "smtp_sender_rejected"),
+    ("SMTPDataError:not_delivered", "smtp_message_rejected"),
+    ("TimeoutError:not_delivered", "smtp_delivery_failed"),
+    ("SMTPDataError:outcome_unknown", "smtp_delivery_outcome_unknown"),
+    ("TimeoutError:outcome_unknown", "smtp_delivery_outcome_unknown"),
+])
+def test_reviewed_transport_failures_remain_explainable_without_raw_details(audit_environment, reason, expected):
+    api._EMAIL_SEND_LOG.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(), "status": "error",
+        "subject": "Private subject and recipient", "reason": reason,
+    })
+    result = api._admin_mail_delivery_status()
+    reasons = result["recent_decisions"][0]["reasons"]
+    assert [item["code"] for item in reasons] == [expected]
+    assert "Private subject" not in json.dumps(result)
+
+
+def test_disabled_watch_mail_is_explained_without_requesting_server_logs(audit_environment):
+    api._EMAIL_SEND_LOG.append({"timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "skipped", "reason": "new_listing_dump_watch_emails_disabled"})
+    reasons = api._admin_mail_delivery_status()["recent_decisions"][0]["reasons"]
+    assert reasons[0]["code"] == "new_listing_dump_watch_emails_disabled"
 
 
 def test_recent_decisions_and_frontend_window_do_not_include_old_events(audit_environment):

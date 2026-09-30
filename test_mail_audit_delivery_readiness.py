@@ -40,6 +40,20 @@ def test_passing_cache_explicitly_stops_before_final_send_checks(ready_status):
     assert "alle Gates" not in result["next_step"]
 
 
+@pytest.mark.parametrize("signals,crashes", [(0, 1), (2, 0), (2, 1)])
+def test_crash_precheck_is_not_counted_as_a_trade_signal(ready_status, signals, crashes):
+    result = api._summarize_email_alert_audit({"bear": {
+        "rows_checked": 3, "alertable_now_count": signals,
+        "crash_alertable_now_count": crashes, "suppression_counts": {},
+    }})
+    scanner = result["scanner_statuses"][0]
+    assert scanner["alertable_now_count"] == result["total_alertable_now"] == signals
+    assert scanner["crash_alertable_now_count"] == result["total_crash_alertable_now"] == crashes
+    assert ("Handelssignal" in scanner["label"]) is bool(signals)
+    assert ("Crash-Hinweis" in scanner["label"]) is bool(crashes)
+    assert result["delivery_evaluated"] is False
+
+
 @pytest.mark.parametrize("passing_sibling", [False, True])
 def test_failed_audit_is_not_an_empty_successful_scan(ready_status, passing_sibling):
     caches = {"bi_long": {"error": "audit_unavailable"}}

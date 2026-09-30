@@ -1095,6 +1095,28 @@ def test_alert_classifier_blocks_runner_rr_that_hides_weak_tp1():
     assert "trade_rr_below_threshold" in state["suppression_reasons"]
 
 
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("field,value", [
+    ("target_quality", "PROJECTION_ONLY"),
+    ("target_quality", "WEAK_STRUCTURAL_TARGET"),
+    ("tp1_is_projection", True),
+])
+def test_valid_numeric_rr_with_unconfirmed_target_is_not_called_low_rr(direction, field, value):
+    mirror = lambda price: 29.64 - price if direction == "SHORT" else price
+    row = {"ticker": "AAA", "grade": "A", "score": 87, "rvol": 2.08,
+           "price": 14.82, "direction": direction, "Entry": 14.82,
+           "StopLoss": mirror(14.06), "TP1": mirror(16.04), "TP2": mirror(16.70),
+           field: value}
+    quality = api._alert_trade_plan_quality(api._alert_trade_levels(row))
+    assert quality["effective_rr"] == pytest.approx(2.0394736842)
+    assert not quality["issues"]
+    state = api._classify_alert_candidate("stock_strategy", row, now=1_000_000.0)
+    assert not state["alertable_now"]
+    assert "trade_target_not_structural" in state["suppression_reasons"]
+    assert "trade_rr_below_threshold" not in state["suppression_reasons"]
+    assert api._alert_trade_plan_ok(row) is False
+
+
 def test_alert_classifier_blocks_tp_targets_that_are_too_close():
     api._EMAIL_COOLDOWN.clear()
     state = api._classify_alert_candidate("stock_strategy", {
@@ -1113,7 +1135,8 @@ def test_alert_classifier_blocks_tp_targets_that_are_too_close():
     }, now=1_000_000.0)
 
     assert state["alertable_now"] is False
-    assert "trade_rr_below_threshold" in state["suppression_reasons"]
+    assert "trade_target_quality_invalid" in state["suppression_reasons"]
+    assert "trade_rr_below_threshold" not in state["suppression_reasons"]
 
 
 def test_generic_scanner_email_includes_entry_stop_tp1_tp2(tmp_path, monkeypatch):

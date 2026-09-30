@@ -568,6 +568,10 @@ trade_health_wait_for_retest
 trade_health_wait_for_trigger
 trade_health_watch_only
 trade_rr_below_threshold
+trade_target_not_structural
+trade_structure_not_confirmed
+trade_breakout_not_confirmed
+trade_target_quality_invalid
 trade_score_below_80
 trigger_stale_for_mail
 turn_not_confirmed

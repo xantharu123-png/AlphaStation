@@ -11,6 +11,38 @@ from modules.trade_levels import normalize_alert_trade_levels
 from modules.level_zones import LevelEvidence, build_structure_snapshot
 
 
+@pytest.mark.parametrize("direction,stop,tp1,tp2", [
+    ("LONG", 95., 110., 120.), ("SHORT", 105., 90., 80.),
+])
+@pytest.mark.parametrize("fields,reason", [
+    ({}, None),
+    ({"target_quality": "PROJECTION_ONLY"}, "trade_target_not_structural"),
+    ({"tp1_is_projection": True}, "trade_target_not_structural"),
+    ({"structure_status": "REJECT"}, "trade_structure_not_confirmed"),
+    ({"structure_status": "STRUCTURE_UNAVAILABLE"}, "trade_structure_not_confirmed"),
+    ({"structure_decision": {"status": "REJECT"}}, "trade_structure_not_confirmed"),
+    ({"barrier_gate": "BREAK_RECLAIM_REQUIRED"}, "trade_breakout_not_confirmed"),
+    ({"barrier_gate": "BREAK_SUPPORT_REQUIRED"}, "trade_breakout_not_confirmed"),
+    ({"structure_status": "WAIT_BREAK_RECLAIM"}, "trade_breakout_not_confirmed"),
+])
+def test_plan_gate_explains_evidence_separately_from_numeric_rr(direction, stop, tp1, tp2, fields, reason):
+    row = {"direction": direction, "Entry": 100., "StopLoss": stop, "TP1": tp1, "TP2": tp2, **fields}
+    assert api._alert_trade_plan_rejection_reason(row) == reason
+    assert api._alert_trade_plan_ok(row) is (reason is None)
+    if reason:
+        assert api._alert_decision_from_reasons("stock_strategy", [reason])["decision"] == "NO_TRADE"
+
+
+def test_finalized_plan_reason_ignores_old_nested_rejection():
+    row = {"direction": "LONG", "Entry": 100., "StopLoss": 95., "TP1": 110., "TP2": 120.,
+           "structure_status": "ACCEPT", "target_quality": "STRUCTURAL", "tp1_is_projection": False,
+           "trade_setup": {"structure_status": "REJECT", "target_quality": "PROJECTION_ONLY",
+                           "structure_decision": {"status": "REJECT"}, "tp1_is_projection": True}}
+    assert api._alert_trade_plan_rejection_reason(row) is None
+    del row["target_quality"]
+    assert api._alert_trade_plan_rejection_reason(row) == "trade_target_not_structural"
+
+
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
 def test_mail_projection_does_not_invent_entry_stop_or_targets_from_current_price(direction):
     levels = api._alert_trade_levels({"Preis": 100.0, "direction": direction})

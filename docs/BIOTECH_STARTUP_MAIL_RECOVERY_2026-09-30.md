@@ -90,9 +90,16 @@ remain separate from real inbox receipt.
 
 ## Deployment boundary
 
-At inspection, Hetzner was healthy on `ce16f4de0374`. These corrections require
-a normal pull and restart and have not been deployed. No server restart, real scan, test message,
-credential change or replay of old trade mail was performed during this work.
+At the original inspection, Hetzner was healthy on `ce16f4de0374`.
+The continuation on 30 September verified production health on `716f2ebd1e0c`
+at 16:28 UTC: the operator has deployed these Biotech/startup corrections.
+The hourly strategy round subsequently completed and BI Long was visibly
+running alongside lightweight monitors. A new complete Biotech run was not
+yet verified. No server restart, real scan, test message, credential change or
+replay of old trade mail was initiated by this continuation.
+
+Further diagnostic corrections and their separate deployment boundary are
+documented in [Mail diagnostics](MAIL_DIAGNOSTIC_CAUSES_2026-09-30.md).
 
 The existing request to remove the deployment installer is separate work in
 the checkout. This repair does not use an installation migration or change

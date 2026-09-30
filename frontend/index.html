@@ -2767,7 +2767,7 @@ function useSortable(data, defaultKey = null, defaultDesc = true) {
 
 // Global helper: relative time display (German)
 function getRelativeTime(timestamp, isFuture = false) {
-        if (!timestamp) return 'nie';
+        if (!timestamp) return isFuture ? 'noch nicht festgelegt' : 'nie';
         // Naive server timestamps are UTC; keep an already supplied offset.
         const raw = String(timestamp).trim();
         const date = new Date(/(?:z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : raw + 'Z');
@@ -2981,7 +2981,7 @@ function SchedulerStatus({ status }) {
         return scan.running && !(control?.state === 'paused' && control.worker_alive);
     }).length;
     const staleCount = scanEntries.filter(([_, s]) => ['stale', 'missing', 'error', 'stuck'].includes(s.cache_health)).length;
-    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', penny_stocks: 'Pennystock Suche', penny_positions: 'Pennystock Positionen', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie' };
+    const scanNames = { bi_long: 'BI Long', bi_short: 'BI Short', bear: 'Bear', biotech: 'Biotech', early_movers: 'Early Mover', crypto_trade_signals: 'Crypto Signals', crypto_explosion: 'Crypto Long Engine', crash_monitor: 'Crash Monitor', market_context: 'Market Weather', btc_divergenz: 'BTC Divergenz', money_flow: 'Money Flow', new_listing: 'Crypto Short Engine', volume_spikes: 'Volume Spikes', penny_stocks: 'Pennystock Suche', penny_positions: 'Pennystock Positionen', orb: 'ORB', turtle: 'Turtle', strategy_scan: 'Strategie', strat_gap_momentum_long: 'Gap Momentum Long', strat_gap_momentum_short: 'Gap Momentum Short' };
     const healthLabels = {
         ok: ['OK', 'text-green-600'],
         stale: ['Alt', 'text-amber-600'],
@@ -3340,6 +3340,10 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
     else if (has('breakout_evidence_conflict', 'breakout_failed', 'failed_breakout', 'breakout_invalidated',
         'breakout_expired', 'live_price_lost_breakout_confirmation', 'orb_current_breakout_lost')) message = 'Ausbruch nicht gültig bestätigt';
     else if (has(...barrierCodes)) message = `${side}${price} nah`;
+    else if (has('trade_target_not_structural')) message = 'Kursziel nicht durch Struktur bestätigt';
+    else if (has('trade_structure_not_confirmed')) message = 'Handelsstruktur nicht bestätigt';
+    else if (has('trade_breakout_not_confirmed')) message = 'Ausbruchsbestätigung fehlt';
+    else if (has('trade_target_quality_invalid')) message = 'Zielaufteilung nicht freigegeben';
     else if (has('invalid_trade_geometry', 'invalid_trade_plan', 'estimated_trade_plan', 'native_trade_levels_missing',
         'no_structural_invalidation', 'plan_unavailable', 'causal_structure_missing', 'causal_structure_unavailable')) message = 'Handelsplan noch nicht bestätigt';
     else if (has('trade_rr_below_threshold')) message = 'Zu wenig Platz bis zum Kursziel';
@@ -14380,8 +14384,8 @@ function AdminTab() {
                         <details style={cardStyle}>
                             <summary style={{cursor:'pointer',fontWeight:600}}>Scanner-Vorprüfung</summary>
                             <div style={{fontSize:12,color:'var(--text-muted)',margin:'12px 0'}}>Gespeicherte Setups, keine Versand- oder Zustellfreigabe.</div>
-                            <div style={{overflowX:'auto'}}><table style={{width:'100%',fontSize:12}}><thead><tr><th>Scanner</th><th>Geprüft</th><th>Vorprüfung bestanden</th><th>Status</th></tr></thead><tbody>
-                                {(mailAudit.summary?.scanner_statuses || []).map(scan => <tr key={scan.scanner}><td>{mailScannerNames[scan.scanner] || scan.scanner}</td><td>{mailNumber(scan.rows_checked)}</td><td>{mailNumber(scan.alertable_now_count)}</td><td>{scan.label}</td></tr>)}
+                            <div style={{overflowX:'auto'}}><table style={{width:'100%',minWidth:520,fontSize:12}}><thead><tr><th>Scanner</th><th>Geprüft</th><th>Signale</th><th>Crash-Hinweise</th><th>Status</th></tr></thead><tbody>
+                                {(mailAudit.summary?.scanner_statuses || []).map(scan => <tr key={scan.scanner}><td>{mailScannerNames[scan.scanner] || scan.scanner}</td><td>{mailNumber(scan.rows_checked)}</td><td>{mailNumber(scan.alertable_now_count)}</td><td>{scan.scanner === 'bear' ? mailNumber(scan.crash_alertable_now_count) : '—'}</td><td>{scan.label}</td></tr>)}
                             </tbody></table></div>
                         </details>
                     </>}

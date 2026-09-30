@@ -15,6 +15,20 @@ def run(expression):
     return json.loads(node_run(PURE + NOTIFY + "\nconsole.log(JSON.stringify(" + expression + "));"))
 
 
+@pytest.mark.parametrize("code,message", [
+    ("trade_target_not_structural", "Kursziel nicht durch Struktur bestätigt"),
+    ("trade_structure_not_confirmed", "Handelsstruktur nicht bestätigt"),
+    ("trade_breakout_not_confirmed", "Ausbruchsbestätigung fehlt"),
+    ("trade_target_quality_invalid", "Zielaufteilung nicht freigegeben"),
+    ("trade_rr_below_threshold", "Zu wenig Platz bis zum Kursziel"),
+])
+def test_compact_plan_warning_preserves_the_actual_rejection_reason(code, message):
+    row = {"visibility_status": "candidate_warning", "visibility_warnings": [{"code": code, "label": message}]}
+    view = run(f"scannerCandidateCompactPresentation({json.dumps(row)})")
+    assert view["label"] == "Einstieg nicht freigegeben"
+    assert view["message"] == message
+
+
 def test_score_or_action_cannot_manufacture_display_release():
     assert run('scannerCandidatePresentation({score:100,trade_action:"LONG_NOW"})') is None
     row = {"visibility_status": "candidate_warning", "visibility_is_trade_signal": False,

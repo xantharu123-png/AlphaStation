@@ -99,6 +99,12 @@ except ImportError as _auth_err:
 import requests as req
 from modules.crypto_scan_runtime import ScanRequestError, paced_scan_requests, scan_http_get
 from modules import stock_scan_runtime
+from modules.mail_diagnostics import (
+    TRANSPORT_DIAGNOSTIC_LABELS,
+    mail_diagnostic_snapshot,
+    read_diagnostic_reference,
+    transport_diagnostic_code,
+)
 from modules import scan_control, scan_control_policy, scan_schedule, gap_scan_schedule
 from modules.wyckoff import MODEL as WYCKOFF_MODEL
 from modules.pattern_context import is_elliott_pattern_context
@@ -1289,6 +1295,14 @@ def _adr_ticker_set() -> set[str]:
 
 def _load_common_stock_universe_cached(max_age_seconds: int = 24 * 3600):
     """Read-only admission evidence; never refresh a provider or publish a cache."""
+    return read_diagnostic_reference(
+        ("common_stock_universe", max_age_seconds),
+        lambda: _read_common_stock_universe_cached(max_age_seconds),
+    )
+
+
+def _read_common_stock_universe_cached(max_age_seconds: int):
+    """One reference read; callers outside diagnostics always revalidate it."""
     now = time.time()
     if (_COMMON_STOCK_UNIVERSE_MEM.get("tickers") is not None
             and now - float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at") or 0) <= max_age_seconds):
@@ -2947,6 +2961,10 @@ _ALERT_SUPPRESSION_LABELS = {
     "bi_plan_not_released": "Handelsplan noch nicht freigegeben",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
     "trade_rr_below_threshold": "R:R unter Mindestwert",
+    "trade_target_not_structural": "Kursziel nicht durch Struktur bestaetigt",
+    "trade_structure_not_confirmed": "Handelsstruktur nicht bestaetigt",
+    "trade_breakout_not_confirmed": "Ausbruchs-/Rueckeroberungsbestaetigung fehlt",
+    "trade_target_quality_invalid": "Zielaufteilung nicht freigegeben",
     "trade_missing_entry": "Entry fehlt",
     "trade_missing_stop": "Stop fehlt",
     "trade_missing_tp1": "TP1 fehlt",
@@ -4210,11 +4228,12 @@ def _format_alert_timing_label(value: Any, market_type: str = "stocks") -> str:
     return raw.replace("_", " ").title()[:40]
 
 
-def _alert_trade_plan_ok(
+def _alert_trade_plan_rejection_reason(
     row: Dict[str, Any],
     min_rr: float = _ALERT_MIN_LEVEL_RR,
     require_native_levels: bool = True,
-) -> bool:
+) -> Optional[str]:
+    """Explain the existing plan gate without conflating evidence and R:R."""
     setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
 
     def _final_field(name: str) -> Any:
@@ -4245,36 +4264,49 @@ def _alert_trade_plan_ok(
         or ""
     ).upper()
     if (
-        structure_status in {"REJECT", "STRUCTURE_UNAVAILABLE"}
-        or str(structure_decision.get("status") or "").upper() == "REJECT"
-        or target_quality.startswith("PROJECTION_ONLY")
+        target_quality.startswith("PROJECTION_ONLY")
         or target_quality.startswith("WEAK_")
         or _final_field("tp1_is_projection") is True
     ):
-        return False
+        return "trade_target_not_structural"
+    if (
+        structure_status in {"REJECT", "STRUCTURE_UNAVAILABLE"}
+        or str(structure_decision.get("status") or "").upper() == "REJECT"
+    ):
+        return "trade_structure_not_confirmed"
     barrier = _extract_trade_barrier(row)
     reclaim_confirmed = bool(
         barrier and _confirmed_trade_break_evidence(row, barrier)
     )
     if barrier and _barrier_release_requires_live_evidence(barrier) and not reclaim_confirmed:
-        return False
+        return "trade_breakout_not_confirmed"
     if not reclaim_confirmed and (
         barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
         or structure_status == "WAIT_BREAK_RECLAIM"
     ):
-        return False
+        return "trade_breakout_not_confirmed"
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
-        return False
+        return "invalid_trade_plan"
     if require_native_levels and levels.get("estimated"):
-        return False
+        return "estimated_trade_plan"
     quality = _alert_trade_plan_quality(levels)
     effective_rr = quality.get("effective_rr")
     if quality.get("tp1_ok") is False:
-        return False
+        return "trade_rr_below_threshold"
     if quality.get("issues"):
-        return False
-    return not isinstance(effective_rr, (int, float)) or effective_rr >= min_rr
+        return "trade_target_quality_invalid"
+    if isinstance(effective_rr, (int, float)) and not effective_rr >= min_rr:
+        return "trade_rr_below_threshold"
+    return None
+
+
+def _alert_trade_plan_ok(
+    row: Dict[str, Any],
+    min_rr: float = _ALERT_MIN_LEVEL_RR,
+    require_native_levels: bool = True,
+) -> bool:
+    return _alert_trade_plan_rejection_reason(row, min_rr, require_native_levels) is None
 
 
 def _alert_trade_health_reasons(row: Dict[str, Any], scanner_name: str) -> List[str]:
@@ -9558,7 +9590,7 @@ def _classify_crash_alert_candidate(row: Dict[str, Any], now: Optional[float] = 
     elif levels.get("estimated"):
         reasons.append("estimated_trade_plan")
     elif not _alert_trade_plan_ok(row):
-        reasons.append("trade_rr_below_threshold")
+        reasons.append(_alert_trade_plan_rejection_reason(row) or "invalid_trade_plan")
     reasons.extend(_alert_trade_health_reasons(row, "bear"))
 
     dedupe_key = f"crash_stock_{datetime.now().strftime('%Y%m%d')}_{ticker}" if ticker else ""
@@ -9878,6 +9910,10 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "invalid_trade_plan",
         "bi_plan_not_released",
         "trade_rr_below_threshold",
+        "trade_target_not_structural",
+        "trade_structure_not_confirmed",
+        "trade_breakout_not_confirmed",
+        "trade_target_quality_invalid",
         "trade_health_no_trade",
         "trade_health_chase_risk",
         "trade_health_fakeout_risk",
@@ -10295,7 +10331,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
             # Scanner bleiben hier hart geblockt.
             reasons.append("estimated_trade_plan")
         elif not _alert_trade_plan_ok(row):
-            reasons.append("trade_rr_below_threshold")
+            reasons.append(_alert_trade_plan_rejection_reason(row) or "invalid_trade_plan")
     if quality_gate_actionable and scanner_name in _ALERT_TRADE_HEALTH_GUARD_SCANNERS:
         reasons.extend(_alert_trade_health_reasons(row, scanner_name))
 
@@ -10675,7 +10711,12 @@ def _summarize_email_alert_audit(scanners: Dict[str, Dict[str, Any]]) -> Dict[st
                     aggregate_reasons[reason] = aggregate_reasons.get(reason, 0) + int(count or 0)
         if alertable or crash_alertable:
             status = "PRECHECK_PASSED"
-            label = f"{alertable + crash_alertable} Kandidat(en) bestehen die Cache-Vorpruefung"
+            passed = []
+            if alertable:
+                passed.append(f"{alertable} Handelssignal(e)")
+            if crash_alertable:
+                passed.append(f"{crash_alertable} Crash-Hinweis(e)")
+            label = " / ".join(passed) + ": Cache-Vorpruefung bestanden"
         elif armed_alertable:
             status = "ARMED_READY"
             label = f"{armed_alertable} Explosion-Armed Kandidat(en); kein Market-Buy, Orderbook-Check im Sendelauf"
@@ -29882,11 +29923,17 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
         events = [dict(event) for event in _EMAIL_SEND_LOG[-50:]]
     reviewed = {
         **_ALERT_SUPPRESSION_LABELS,
+        **TRANSPORT_DIAGNOSTIC_LABELS,
         "startup_cooldown": "Startpause nach Neustart",
         "missing_gmail_config": "Mailzugang nicht konfiguriert",
         "no_recipients": "Keine berechtigten Empfaenger",
         "no_eligible_recipients": "Keine berechtigten Empfaenger",
         "blocked_etf_content": "Nicht zulaessiges Finanzprodukt",
+        "new_listing_dump_watch_emails_disabled": "Krypto-Watch-Mails sind deaktiviert; nur bestaetigte Signale",
+        "no_new_listing_dump_watch_candidates": "Keine aktuellen Krypto-Watch-Kandidaten",
+        "no_active_short_signals": "Keine bestaetigten Krypto-Short-Signale",
+        "daily_dump_watch_dedupe_active": "Krypto-Watch-Hinweis heute bereits verarbeitet",
+        "time_sensitive_entry_mail": "Einstiegssignal wird nicht zeitversetzt nachgesendet",
         "unclassified_code_reason": "Weiterer Versandgrund; im Betreiberprotokoll pruefen",
     }
     decisions = []
@@ -29908,6 +29955,9 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
         codes = [code for code in reviewed if re.search(
             r"(?<![A-Za-z0-9_])" + re.escape(code) + r"(?![A-Za-z0-9_])", raw
         )]
+        transport_code = transport_diagnostic_code(raw) if event.get("status") == "error" else None
+        if transport_code:
+            codes = [transport_code]
         if raw and not codes:
             stable = _stable_suppression_reason(raw)
             codes = [stable if stable in reviewed else "unclassified_code_reason"]
@@ -29936,6 +29986,7 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
 
 
 @app.get("/api/email-alert-audit")
+@mail_diagnostic_snapshot
 def get_email_alert_audit(authorization: Optional[str] = Header(None)):
     """Read cache prechecks and actual delivery evidence; never send an alert."""
     _readonly_diagnostic_call(_require_admin, authorization)
@@ -29989,7 +30040,7 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
         },
         "scanners": scanners,
         "recent_email_events": delivery["recent_decisions"],
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 

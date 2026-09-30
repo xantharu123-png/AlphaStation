@@ -36,3 +36,22 @@ def test_mail_operator_panel_uses_read_only_route_and_clears_failed_snapshot():
     assert "SMTP-Annahme ist keine Bestätigung im Postfach" in component
     assert "Gespeicherte Setups, keine Versand- oder Zustellfreigabe" in component
     assert "/api/email-test" not in component
+
+
+def test_trade_and_crash_prechecks_have_separate_labelled_counts():
+    component = SOURCE[SOURCE.index("function AdminTab()"):SOURCE.index("// Render App")]
+    assert "<th>Signale</th><th>Crash-Hinweise</th>" in component
+    assert "minWidth:520" in component
+    assert "<td>{mailNumber(scan.alertable_now_count)}</td>" in component
+    assert "scan.scanner === 'bear' ? mailNumber(scan.crash_alertable_now_count) : '—'" in component
+
+
+@pytest.mark.parametrize("stamp,future,expected", [
+    (None, True, "noch nicht festgelegt"), (None, False, "nie"),
+    ("", True, "noch nicht festgelegt"), ("bad-date", True, "unbekannt"),
+])
+def test_unassigned_next_scan_is_not_labelled_as_never(stamp, future, expected):
+    start = SOURCE.index("function getRelativeTime(")
+    helper = SOURCE[start:SOURCE.index("// Helper: extract scan timing", start)]
+    assert json.loads(node_run(helper + "\nconsole.log(JSON.stringify(getRelativeTime("
+                               + json.dumps(stamp) + "," + json.dumps(future) + ")));")) == expected
