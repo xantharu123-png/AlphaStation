@@ -14032,6 +14032,10 @@ function AdminTab() {
     const [logs, setLogs] = useState([]);
     const [mailAudit, setMailAudit] = useState(null);
     const [mailError, setMailError] = useState('');
+    const [technicalMailBusy, setTechnicalMailBusy] = useState(false);
+    const [technicalMailConfirm, setTechnicalMailConfirm] = useState(false);
+    const [technicalMailResult, setTechnicalMailResult] = useState('');
+    const technicalMailInFlight = useRef(false);
     const [coupons, setCoupons] = useState([]);
     const [tickets, setTickets] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -14107,6 +14111,36 @@ function AdminTab() {
         } finally {
             clearTimeout(timeout);
             setLoading(false);
+        }
+    };
+
+    const sendTechnicalTestMail = async () => {
+        if (technicalMailInFlight.current || !technicalMailConfirm) return;
+        technicalMailInFlight.current = true;
+        setTechnicalMailConfirm(false);
+        setTechnicalMailBusy(true);
+        setTechnicalMailResult('');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 90000);
+        try {
+            const res = await fetch(`${API}/api/test-email`, {method:'POST',headers,signal:controller.signal});
+            const data = await res.json();
+            const delivery = res.ok ? data : data.detail;
+            if (res.ok && delivery?.delivery_status === 'accepted') {
+                setTechnicalMailResult('Vom Mailserver angenommen. Bitte Postfach prüfen.');
+            } else if (delivery?.delivery_status === 'not_sent') {
+                setTechnicalMailResult('Nicht vom Mailserver angenommen. Mailstatus prüfen.');
+            } else {
+                setTechnicalMailResult('Ergebnis unklar. Nicht erneut senden; Mailstatus prüfen.');
+            }
+        } catch(e) {
+            // A disconnected/aborted browser cannot prove non-delivery.
+            // Never repeat a POST automatically after an uncertain outcome.
+            setTechnicalMailResult('Ergebnis unklar. Nicht erneut senden; Mailstatus prüfen.');
+        } finally {
+            clearTimeout(timeout);
+            technicalMailInFlight.current = false;
+            setTechnicalMailBusy(false);
         }
     };
 
@@ -14362,11 +14396,20 @@ function AdminTab() {
             {/* Admin-only operational evidence; never an extra scanner warning block. */}
             {activePanel === 'mail' && (
                 <section aria-label="Mailversand">
-                    <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:16}}>
+                    <div style={{display:'flex',flexWrap:'wrap',gap:12,alignItems:'center',marginBottom:16}}>
                         <button onClick={fetchMailAudit} disabled={loading} className="button" style={{padding:'10px 20px'}}>Aktualisieren</button>
+                        <button onClick={() => setTechnicalMailConfirm(true)} disabled={technicalMailBusy} className="button" style={{padding:'10px 20px'}}>{technicalMailBusy ? 'Versand prüfen…' : 'Technische Testmail'}</button>
                         <span style={{fontSize:12,color:'var(--text-muted)'}}>{loading ? 'Laden…' : mailAudit?.timestamp ? new Date(mailAudit.timestamp).toLocaleString('de-CH') : ''}</span>
                     </div>
                     {mailError && <div role="alert" style={{...cardStyle,color:'#b45309'}}>{mailError}</div>}
+                    {technicalMailConfirm && <div role="dialog" aria-label="Technische Testmail bestätigen" style={{...cardStyle,marginBottom:16}}>
+                        <p style={{margin:'0 0 12px'}}>Genau eine technische Testmail an deine eigene Adresse senden? Kein Handelssignal.</p>
+                        <div style={{display:'flex',gap:12}}>
+                            <button onClick={sendTechnicalTestMail} disabled={technicalMailBusy} className="button">Einmal senden</button>
+                            <button onClick={() => setTechnicalMailConfirm(false)} className="button">Abbrechen</button>
+                        </div>
+                    </div>}
+                    {technicalMailResult && <div role="status" style={{...cardStyle,marginBottom:16}}>{technicalMailResult}</div>}
                     {mailAudit && <>
                         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:16}}>
                             {[

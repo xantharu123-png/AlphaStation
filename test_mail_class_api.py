@@ -743,7 +743,7 @@ def test_h3_operator_can_explicitly_opt_in_to_watch_mail(monkeypatch):
 
 def test_h3_test_email_goes_only_to_admin(monkeypatch):
     sent = []
-    monkeypatch.setattr(api, "_require_admin", lambda authorization: None)
+    monkeypatch.setattr(api, "_require_admin", lambda authorization: ({}, "admin@x.com"))
     monkeypatch.setattr(api, "_email_alert_status", lambda: {"configured": True})
     monkeypatch.setattr(api, "_SECRETS", {"GMAIL_USER": "op@x.com", "GMAIL_APP_PASSWORD": "pw", "ALERT_EMAIL": "admin@x.com"})
     monkeypatch.setattr(api, "_send_email_alert", lambda subject, body, **kwargs: sent.append((subject, kwargs)) or True)

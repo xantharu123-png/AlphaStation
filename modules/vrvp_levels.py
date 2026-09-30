@@ -1595,6 +1595,11 @@ def apply_vrvp_to_trade_setup(
         enriched["vrvp_atr_warning"] = "implausible_atr_ignored"
         atr_value = 0.0
     used: List[str] = []
+    native_invalidation_stop = stop if (
+        enriched.get("stop_causal_structure_validated") is True
+        and enriched.get("stop_zone_id")
+        and enriched.get("stop_confirmed_at")
+    ) else None
     # Stop only moves to a nearby VRVP invalidation zone when it does not widen
     # risk too aggressively. Otherwise we keep the existing structure stop.
     stop_candidates = _stop_zone_candidates(vrvp, side, entry)
@@ -1603,6 +1608,15 @@ def apply_vrvp_to_trade_setup(
             boundary = float(candidate["invalidation_boundary"])
             buffer = max(entry * profile["stop_buffer_pct"], atr_value * 0.35)
             proposed = boundary - buffer if side == "LONG" else boundary + buffer
+            if native_invalidation_stop is not None and (
+                (side == "LONG" and proposed > native_invalidation_stop)
+                or (side == "SHORT" and proposed < native_invalidation_stop)
+            ):
+                # A nearer volume node cannot invalidate the original causal
+                # price structure. Keep its stop including its safety buffer;
+                # otherwise both the stop and every R unit become misleading.
+                enriched["vrvp_stop_preserved"] = "native_structure_invalidation"
+                continue
             new_risk = entry - proposed if side == "LONG" else proposed - entry
             if proposed > 0 and risk * 0.80 <= new_risk <= risk * profile["max_stop_mult"]:
                 stop = proposed

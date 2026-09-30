@@ -859,7 +859,7 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Daily-signal session references precede the signal bar. Old geometry must
 # be recomputed, not merely re-labelled as the corrected version.
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
-STOCK_STRATEGY_CACHE_VERSION = 16
+STOCK_STRATEGY_CACHE_VERSION = 17
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -11279,6 +11279,7 @@ def _send_email_alert(
     tracking_scope: str = "",
     delivery_dedupe_keys: Optional[Iterable[str]] = None,
     rendered_at: Optional[datetime] = None,
+    queue_on_failure: bool = True,
 ):
     """Sendet E-Mail Alert via Gmail SMTP."""
     scan_mail_audit.transport(mail_class, "sender_called")
@@ -11844,6 +11845,7 @@ def _send_email_alert(
     if (
         not delivery_outcome_unknown
         and _mail_outbox is not None
+        and queue_on_failure
         and str(mail_class or "").strip().lower() not in {"trade", "swing_trade"}
     ):
         try:
@@ -19074,6 +19076,12 @@ def _build_structured_trade_setup(
             "timeframe": first_barrier["timeframe"],
             "zone_id": first_barrier["zone_id"],
             "confirmed_at": first_barrier.get("confirmed_at"),
+            **({
+                "source_family": "level_zone",
+                "independence_key": f"level_zone:{first_barrier['timeframe']}:{first_barrier['zone_id']}",
+                "data_cutoff_at": structure_snapshot.as_of.isoformat().replace("+00:00", "Z"),
+                "causal_structure_validated": True,
+            } if has_canonical_geometry else {}),
             **({"reclaim_history": barrier_history} if has_bound_history else {}),
             "overlapping": bool(first_barrier.get("overlapping")),
             "reclaim_boundary": reclaim_boundary if has_canonical_geometry else _round_trade_price(reclaim_boundary),
@@ -19277,12 +19285,18 @@ def _build_structured_trade_setup(
         for prefix, zone in zones_to_persist:
             if zone is None:
                 continue
+            zone_timeframe = "/".join(sorted({item.timeframe for item in zone.evidence}))
             result.update({
                 f"{prefix}_zone_id": zone.zone_id,
                 f"{prefix}_zone_low": zone.lower,
                 f"{prefix}_zone_high": zone.upper,
-                f"{prefix}_timeframe": "/".join(sorted({item.timeframe for item in zone.evidence})),
+                f"{prefix}_timeframe": zone_timeframe,
+                f"{prefix}_source_family": "level_zone",
+                # Distinct zones, not two prices in one evidence family/profile,
+                # supply independently confirmed structural target identities.
+                f"{prefix}_independence_key": f"level_zone:{zone_timeframe}:{zone.zone_id}",
                 f"{prefix}_confirmed_at": zone.confirmed_at.isoformat().replace("+00:00", "Z"),
+                f"{prefix}_data_cutoff_at": structure_snapshot.as_of.isoformat().replace("+00:00", "Z"),
                 f"{prefix}_causal_structure_validated": True,
             })
     if breakout_warnings:
@@ -30317,35 +30331,47 @@ def test_email_alert(authorization: Optional[str] = Header(None)):
     deaktiviertem Commerce-Gate sogar anonyme) Aufrufer Mails an alle
     konfigurierten Empfaenger ausloesen (Spam-/Kosten-Vektor).
     """
-    _require_admin(authorization)
+    _, admin_email = _require_admin(authorization)
     status = _email_alert_status()
     if not status["configured"]:
-        raise HTTPException(status_code=500, detail={
-            "message": "Email Alerts nicht konfiguriert",
-            "status": status,
+        raise HTTPException(status_code=503, detail={
+            "message": "Mailversand nicht konfiguriert.",
+            "delivery_status": "not_sent",
         })
-    # AUDIT H-3: Test-Mail ist "info" und geht NUR an die Betreiber-/Admin-
-    # Adresse (ALERT_EMAIL, Fallback GMAIL_USER), nie an Abonnenten.
-    _admin_alert_to = str(_SECRETS.get("ALERT_EMAIL", _SECRETS.get("GMAIL_USER", "")) or "")
-    _admin_recipients = [addr.strip() for addr in _admin_alert_to.split(",") if addr.strip()]
+    # The endpoint remains admin-only and never sends to subscriber cohorts.
+    # This explicitly requested test is personal: exactly the authenticated
+    # admin, not the complete operator list or any subscriber cohort.
+    _admin_recipients = [admin_email]
     rendered_at = datetime.now(timezone.utc)
+    _set_last_delivery_outcome("not_attempted")
     success = _send_email_alert(
-        "TradingBot Test — Email Alerts funktionieren!",
+        "Alpha Station — Technische Testmail",
         f'''<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-        <h2 style="color:#059669">✅ Email Alert System aktiv</h2>
+        <h2 style="color:#059669">Technische Testmail</h2>
         <p>Dieser Test wurde am <b>{_mail_timestamp_dual(rendered_at)}</b> gesendet.</p>
-        <p>Du wirst ab jetzt automatisch benachrichtigt bei: <b>Grade S/A/A+</b> (BI + Biotech), <b>Bear/Crash</b>, <b>ORB Breakouts</b>, <b>Pump-&-Dump SHORT</b> und manuellen Aktien-/Crypto-Strategie-Scans mit Top-Grade.</p>
+        <p>Kein Handelssignal, keine Order und keine Einstellungsänderung.</p>
+        <p>Diese einmalige Nachricht prüft nur den technischen Versand an deine eigene Adresse.
+        Sie bestätigt keine Scanner-Freigabe und keinen späteren Signalversand.</p>
         <p style="color:#999;font-size:12px">TradingBot Alert System v{API_VERSION}</p>
         </body></html>''',
         bypass_startup_cooldown=True,
         trade_horizon="swing",  # AUDIT H-3: explizit
         recipient_emails=_admin_recipients,  # AUDIT H-3: nur Admin/Betreiber
         mail_class="info",  # AUDIT H-2
+        queue_on_failure=False,  # One immediate personal check, no delayed resend.
         rendered_at=rendered_at,
     )
     if success:
-        return {"status": "ok", "message": "Test-Email gesendet!"}
-    raise HTTPException(status_code=500, detail="Email konnte nicht gesendet werden — prüfe GMAIL_APP_PASSWORD")
+        return {"status": "ok", "delivery_status": "accepted",
+                "message": "Vom Mailserver angenommen. Bitte Postfach prüfen."}
+    # Treat every non-definitive result conservatively, including any future
+    # queued/journal-pending outcome. A browser must not invite duplicate mail.
+    unknown = _last_delivery_outcome() not in {"failed", "refused", "not_attempted"}
+    raise HTTPException(status_code=409 if unknown else 502, detail={
+        "delivery_status": "unknown" if unknown else "not_sent",
+        "message": ("Mailserver-Annahme unklar. Nicht erneut senden; Mailstatus prüfen."
+                    if unknown else "Nicht vom Mailserver angenommen. Details im Mailstatus prüfen."),
+    })
 
 
 @app.get("/api/market-status", response_model=MarketStatusResponse)
