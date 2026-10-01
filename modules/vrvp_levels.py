@@ -1,12 +1,14 @@
 """
 Shared VRVP/volume-profile trade level helpers.
 
-The local volume profile is built from OHLCV bars, so it is an approximation
-of TradingView's tick-based VRVP. We use it as structural confluence for
+The local volume profile allocates OHLCV bar volume by price-range overlap.
+TradingView VRVP uses lower-timeframe bars; equal row counts do not make these
+different inputs/allocations identical. We use our profile as confluence for
 support/resistance and targets, not as a standalone signal generator.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import math
@@ -1557,6 +1559,23 @@ def trade_level_quality(setup: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _trade_level_evidence(setup: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    """Copy only supplied identity fields and the actual delivered price."""
+    evidence = {
+        field: deepcopy(setup[f"{prefix}_{field}"])
+        for field in ("source", "source_family", "timeframe", "zone_id",
+                      "zone_low", "zone_high", "confirmed_at", "data_cutoff_at",
+                      "independence_key", "causal_structure_validated", "is_projection")
+        if f"{prefix}_{field}" in setup
+    }
+    aliases = {"stop": ("stop", "StopLoss", "stop_loss"),
+               "tp1": ("tp1", "TP1", "target1"), "tp2": ("tp2", "TP2", "target2")}
+    price = _get_level(setup, *aliases[prefix])
+    if price is not None:
+        evidence["price"] = price
+    return evidence
+
+
 def apply_vrvp_to_trade_setup(
     setup: Dict[str, Any],
     vrvp: Optional[Dict[str, Any]],
@@ -1973,6 +1992,22 @@ def apply_vrvp_to_trade_setup(
         enriched["trade_action"] = "NO_TRADE"
         enriched["entry_status"] = "NO_TRADE"
         enriched["signal_quality"] = "blocked_structure"
+        enriched["entry_eligible"] = False
+        # No proposed rounded levels are published on this path. Keep the
+        # input geometry/history, but make the final negative decision honest.
+        prior_decision = setup.get("structure_decision")
+        decision = enriched.get("structure_decision")
+        if isinstance(decision, dict):
+            if (isinstance(prior_decision, dict)
+                    and "pre_vrvp_structure_decision" not in enriched):
+                enriched["pre_vrvp_structure_decision"] = deepcopy(prior_decision)
+            if "pre_vrvp_level_evidence" not in enriched:
+                enriched["pre_vrvp_level_evidence"] = {
+                    prefix: _trade_level_evidence(setup, prefix) for prefix in ("stop", "tp1", "tp2")}
+            enriched["structure_decision"] = {
+                **decision, "status": "REJECT", "reason": "rounded_trade_geometry_invalid",
+                "entry_eligible": False,
+            }
         return enriched
 
     _set_level_aliases(enriched, "entry", entry)
@@ -2007,6 +2042,68 @@ def apply_vrvp_to_trade_setup(
     enriched["rr_tp1"] = round(rr_tp1, 2)
     enriched["rr_tp2"] = round(rr_tp2, 2)
     enriched["direction"] = side
+    # The decision is consumed as the final plan, not as a historical native
+    # snapshot. Preserve that input separately before synchronizing delivered
+    # geometry and the actual evidence chosen above. A VRVP stop must never be
+    # attributed to the original native zone merely because its old decision
+    # still contains the pre-confluence stop/risk.
+    prior_decision = setup.get("structure_decision")
+    decision = enriched.get("structure_decision")
+    final_status = str(enriched.get("structure_status") or (
+        decision.get("status") if isinstance(decision, dict) else "") or "").upper()
+    blocked = bool(
+        enriched.get("barrier_gate_active") is True
+        or bool(enriched.get("barrier_gate"))
+        or final_status.startswith(("WAIT", "REJECT", "BLOCK"))
+        or final_status in {"STRUCTURE_UNAVAILABLE", "UNAVAILABLE", "NO_TRADE"})
+    if blocked:
+        enriched["entry_eligible"] = False
+    if isinstance(decision, dict):
+        if (isinstance(prior_decision, dict)
+                and "pre_vrvp_structure_decision" not in enriched):
+            enriched["pre_vrvp_structure_decision"] = deepcopy(prior_decision)
+        if "pre_vrvp_level_evidence" not in enriched:
+            enriched["pre_vrvp_level_evidence"] = {
+                prefix: _trade_level_evidence(setup, prefix) for prefix in ("stop", "tp1", "tp2")}
+        decision = dict(decision)
+        decision.update({
+            "entry": entry, "stop": stop, "risk": enriched["risk"],
+            "target1": tp1, "target2": tp2,
+            "status": enriched.get("structure_status") or decision.get("status"),
+            "reason": enriched.get("structure_reason") or decision.get("reason"),
+            "direction": side,
+            "geometry_updated_by": "vrvp_trade_setup",
+        })
+        if "barrier_gate" in enriched:
+            decision["barrier_gate"] = enriched["barrier_gate"]
+        final_barrier = enriched.get("nearest_barrier")
+        if isinstance(final_barrier, dict):
+            decision["nearest_barrier"] = deepcopy(final_barrier)
+            final_boundary = _barrier_zone_geometry(final_barrier, side, entry)
+            if final_boundary is not None:
+                distance = float(final_boundary["distance"])
+                decision["barrier_distance"] = distance
+                decision["barrier_r"] = round(distance / risk, 2)
+                if "room_to_barrier_r" in enriched:
+                    enriched["room_to_barrier_r"] = decision["barrier_r"]
+        elif "nearest_barrier" in enriched:
+            decision.update(nearest_barrier=None, barrier_distance=None, barrier_r=None)
+        for prefix, key in (("stop", "stop_evidence"),
+                            ("tp1", "target1_evidence"), ("tp2", "target2_evidence")):
+            evidence = _trade_level_evidence(enriched, prefix)
+            if trade_level_quality(enriched)[prefix]["quality"] == "projection":
+                # A replacement risk projection is not anchored to leftover
+                # native IDs. Those belong only to the historical input above.
+                evidence = {field: evidence[field] for field in ("price", "source") if field in evidence}
+                evidence.update(is_projection=True, causal_structure_validated=False)
+            decision[key] = evidence
+        if blocked:
+            # Negative eligibility is diagnostic only. Never manufacture a
+            # positive release from ACCEPT or from preserved breakout labels.
+            decision["entry_eligible"] = False
+        elif "entry_eligible" in enriched:
+            decision["entry_eligible"] = enriched["entry_eligible"]
+        enriched["structure_decision"] = decision
     enriched["vrvp_applied"] = bool(used)
     enriched["vrvp_timeframe"] = vrvp.get("timeframe")
     enriched["vrvp_poc"] = vrvp.get("poc")

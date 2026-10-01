@@ -129,9 +129,17 @@ def test_vrvp_targets_waehlen_strukturelle_barriere():
         {"price": 110.0, "source": "vrvp_resistance"},
         {"price": 118.0, "source": "vrvp_resistance"},
     ]}
+    # This level-selection regression constructs fresh synthetic producer
+    # output. Unversioned legacy profile claims must still fail closed.
+    assert api._crypto_profile_contract_reason(vrvp) == "crypto_profile_cache_version_old_scan_again"
+    api._apply_early_mover_vrvp_targets(row, vrvp)
+    assert row.get("overhead_resistance") is None
+    api._stamp_fresh_crypto_profile_contract(vrvp)
+    assert api._crypto_profile_contract_reason(vrvp) is None
     api._apply_early_mover_vrvp_targets(row, vrvp)
     res = row.get("overhead_resistance")
     assert res is not None
+    assert res["price"] == 101.5
     assert not str(res.get("source", "")).startswith("vrvp_lvn")
 
 

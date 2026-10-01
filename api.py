@@ -159,6 +159,8 @@ from modules.patterns import (
     BI_STOCK_REQUIRED_GREEN,
 )
 from modules.volume_analysis import calculate_volume_profile, find_volume_voids
+from modules.trendlines import build_causal_trendlines
+from modules.level_context import build_level_context
 from modules.trade_levels import format_target_reachability_text, minimum_stop_distance, normalize_alert_trade_levels, target_reachability, trade_geometry, trade_plan_quality
 from modules.trading_risk import summarize_hypothetical_batch_risk
 from modules.performance_metrics import chronological_trade_key, profit_factor_metrics
@@ -233,6 +235,7 @@ from modules.vrvp_levels import (
     trade_level_quality,
 )
 from modules.level_zones import (
+    _coerce_datetime as _level_coerce_datetime,
     StructureSnapshot,
     build_structure_snapshot,
     classify_for_trade,
@@ -859,7 +862,9 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Daily-signal session references precede the signal bar. Old geometry must
 # be recomputed, not merely re-labelled as the corrected version.
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
-STOCK_STRATEGY_CACHE_VERSION = 17
+# Native profiles now require genuine contributing bars for their price range.
+# Prior profiles may have been distorted by invalid or zero-volume records.
+STOCK_STRATEGY_CACHE_VERSION = 18
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -1796,7 +1801,10 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS) | {"btc_divergenz"}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_MAX_SIGNAL_RISK_PCT = 35.0
-_NEW_LISTING_SHORT_CACHE_VERSION = 2
+_NEW_LISTING_SHORT_CACHE_VERSION = 3
+# The corrected profile excludes invalid/zero-volume bars before price bounds
+# and requires 20 genuine contributing bars. This is not a trade permission.
+_CRYPTO_PROFILE_CACHE_VERSION = 1
 _NEW_LISTING_MICRO_MAX_AGE_SECONDS = 600.0
 _NEW_LISTING_FINAL_MAX_SPREAD_BPS = 120.0
 _NEW_LISTING_FINAL_MIN_DEPTH_50BPS_USD = 10_000.0
@@ -2964,6 +2972,7 @@ _ALERT_SUPPRESSION_LABELS = {
     "trade_target_not_structural": "Kursziel nicht durch Struktur bestaetigt",
     "trade_structure_not_confirmed": "Handelsstruktur nicht bestaetigt",
     "trade_breakout_not_confirmed": "Ausbruchs-/Rueckeroberungsbestaetigung fehlt",
+    "trade_first_barrier_below_minimum_reward": "Zu wenig Platz bis zur ersten Kursbarriere",
     "trade_target_quality_invalid": "Zielaufteilung nicht freigegeben",
     "trade_missing_entry": "Entry fehlt",
     "trade_missing_stop": "Stop fehlt",
@@ -3776,6 +3785,78 @@ def _early_mover_long_rule_reasons(row: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def _crypto_profile_cache_metadata(*, new_listing: bool = False) -> Dict[str, Any]:
+    metadata = {"crypto_profile_cache_version": _CRYPTO_PROFILE_CACHE_VERSION}
+    if new_listing:
+        metadata["new_listing_short_cache_version"] = _NEW_LISTING_SHORT_CACHE_VERSION
+    return metadata
+
+
+def _stamp_fresh_crypto_profile_contract(row: Dict[str, Any], *, new_listing: bool = False) -> None:
+    """Annotate fresh producer output only; never migrate cached evidence.
+
+    The marker identifies the calculation code, not confirmed S/R or a release.
+    Prices, profile identities, scores and existing gates remain untouched.
+    """
+    if not isinstance(row, dict):
+        return
+    row.update(_crypto_profile_cache_metadata(new_listing=new_listing))
+    for key in ("trade_setup", "signal", "vrvp_levels"):
+        nested = row.get(key)
+        if isinstance(nested, dict) and nested:
+            _stamp_fresh_crypto_profile_contract(nested, new_listing=new_listing)
+    trigger = row.get("intraday_trigger")
+    if isinstance(trigger, dict) and isinstance(trigger.get("vrvp"), dict):
+        _stamp_fresh_crypto_profile_contract(trigger["vrvp"])
+    for key in ("coins", "signals", "watchlist", "monitoring"):
+        for nested in row.get(key, []) if isinstance(row.get(key), list) else []:
+            _stamp_fresh_crypto_profile_contract(nested, new_listing=new_listing)
+
+
+def _crypto_profile_contract_reason(row: Dict[str, Any], *, new_listing: bool = False) -> Optional[str]:
+    """Reject legacy computation claims without changing or re-labelling them."""
+    if (not isinstance(row, dict)
+            or type(row.get("crypto_profile_cache_version")) is not int
+            or row.get("crypto_profile_cache_version") != _CRYPTO_PROFILE_CACHE_VERSION):
+        return "crypto_profile_cache_version_old_scan_again"
+    if (new_listing or "new_listing_short_cache_version" in row) and (
+            type(row.get("new_listing_short_cache_version")) is not int
+            or row.get("new_listing_short_cache_version") != _NEW_LISTING_SHORT_CACHE_VERSION):
+        return "new_listing_short_cache_contract_invalid"
+    for key in ("trade_setup", "signal", "vrvp_levels"):
+        nested = row.get(key)
+        if isinstance(nested, dict) and nested:
+            reason = _crypto_profile_contract_reason(nested, new_listing=new_listing)
+            if reason:
+                return reason
+    trigger = row.get("intraday_trigger")
+    if isinstance(trigger, dict) and isinstance(trigger.get("vrvp"), dict):
+        reason = _crypto_profile_contract_reason(trigger["vrvp"])
+        if reason:
+            return reason
+    for key in ("coins", "signals", "watchlist", "monitoring"):
+        for nested in row.get(key, []) if isinstance(row.get(key), list) else []:
+            reason = _crypto_profile_contract_reason(nested, new_listing=new_listing)
+            if reason:
+                return reason
+    return None
+
+
+def _compatible_crypto_cache_results(
+    results: List[Dict[str, Any]], metadata: Dict[str, Any], *, new_listing: bool = False,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Same fail-closed empty-result boundary as incompatible stock caches."""
+    reason = _crypto_profile_contract_reason(metadata, new_listing=new_listing)
+    if not reason:
+        if not isinstance(results, list):
+            return [], "crypto_profile_cache_version_old_scan_again"
+        for row in results:
+            reason = _crypto_profile_contract_reason(row, new_listing=new_listing)
+            if reason:
+                break
+    return ([], reason) if reason else (results, None)
+
+
 def _flatten_early_mover_rows(payload_or_rows: Any) -> List[Dict[str, Any]]:
     containers = payload_or_rows if isinstance(payload_or_rows, list) else [payload_or_rows]
     rows: List[Dict[str, Any]] = []
@@ -4284,6 +4365,11 @@ def _alert_trade_plan_rejection_reason(
         barrier_gate in {"BREAK_RECLAIM_REQUIRED", "BREAK_SUPPORT_REQUIRED"}
         or structure_status == "WAIT_BREAK_RECLAIM"
     ):
+        # This gate can originate in insufficient first-barrier room after a
+        # legitimate wider stop, not in a missing pattern breakout. Explain
+        # that already-blocked result without changing its release condition.
+        if barrier and barrier.get("below_minimum_reward") is True:
+            return "trade_first_barrier_below_minimum_reward"
         return "trade_breakout_not_confirmed"
     levels = _alert_trade_levels(row)
     if not levels.get("valid"):
@@ -5502,7 +5588,7 @@ def _verify_early_mover_intraday_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
             row.get("tp2", setup.get("tp2")),
         )
     )
-    cache_key = f"{exchange}:{contract}:adaptive_5m_v3:{plan_fingerprint}"
+    cache_key = f"{exchange}:{contract}:adaptive_5m_v3:profile_v{_CRYPTO_PROFILE_CACHE_VERSION}:{plan_fingerprint}"
     now = time.time()
     cached = _EARLY_MOVER_TRIGGER_CACHE.get(cache_key)
     if cached and now - cached.get("ts", 0) < _EARLY_MOVER_TRIGGER_TTL:
@@ -5998,6 +6084,7 @@ def _early_mover_vrvp_from_bars(bars: List[Dict[str, Any]]) -> Optional[Dict[str
         "as_of": profile.get("as_of"),
         "causal_structure_validated": profile.get("causal_structure_validated") is True,
         "provenance": profile.get("provenance"),
+        "crypto_profile_cache_version": _CRYPTO_PROFILE_CACHE_VERSION,
     }
 
 
@@ -6073,6 +6160,8 @@ def _annotate_early_mover_overhead_resistance(
 def _apply_early_mover_vrvp_targets(row: Dict[str, Any], vrvp: Optional[Dict[str, Any]]) -> None:
     """Use VRVP resistance/acceptance levels as TP candidates when they are valid."""
     if not isinstance(vrvp, dict):
+        return
+    if _crypto_profile_contract_reason(vrvp):
         return
     entry = _alert_float(row.get("entry"))
     stop = _alert_float(row.get("stop_loss", row.get("stop")))
@@ -6656,6 +6745,7 @@ def _evaluate_structure_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
 
 def _find_early_mover_row(symbol: str) -> Optional[Dict[str, Any]]:
     rows, _ = load_cache_file(EARLY_MOVERS_CACHE, max_age_hours=24)
+    rows, _ = _compatible_crypto_cache_results(rows, load_cache_metadata(EARLY_MOVERS_CACHE))
     wanted = str(symbol or "").strip().upper().removesuffix("USDT")
     matches = []
     for row in _flatten_early_mover_rows(rows):
@@ -6708,6 +6798,9 @@ def _crypto_reminder_capability_reason(
         return "crypto_reminder_long_plan_invalid"
     if not check_plan:
         return None
+    profile_reason = _crypto_profile_contract_reason(row)
+    if profile_reason:
+        return profile_reason
     contract = row.get("PerpChartSymbol") or row.get("PerpMatchSymbol")
     exchange = row.get("PerpChartExchange") or row.get("BestExchange")
     if not isinstance(contract, str) or not contract.strip() or not isinstance(exchange, str) or not exchange.strip():
@@ -8063,6 +8156,9 @@ def _revalidate_crypto_trade_mail_candidate(
 ) -> Dict[str, Any]:
     """Final causal gate shared by actionable crypto entry mail paths."""
     item = dict(candidate or {})
+    profile_reason = _crypto_profile_contract_reason(item)
+    if profile_reason:
+        return {"ok": False, "reason": profile_reason}
     venue = _normalize_crypto_exchange(item.get("venue") or item.get("exchange"))
     contract = str(
         item.get("contract_symbol") or item.get("contract") or item.get("symbol") or ""
@@ -8184,6 +8280,9 @@ def _revalidate_early_mover_mail_candidate(
 ) -> Dict[str, Any]:
     """Fail closed unless the exact long contract still supports the plan."""
     item = dict(candidate or {})
+    profile_reason = _crypto_profile_contract_reason(item)
+    if profile_reason:
+        return {"ok": False, "reason": profile_reason}
     prior_price = _alert_float(item.get("price"))
     entry = _alert_float(item.get("entry"))
     stop = _alert_float(item.get("stop"))
@@ -8279,6 +8378,10 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
 
     for source_row in _flatten_early_mover_rows(payload):
         row = dict(source_row)
+        profile_reason = _crypto_profile_contract_reason(row)
+        if profile_reason:
+            suppressed[profile_reason] = suppressed.get(profile_reason, 0) + 1
+            continue
         trigger_check: Dict[str, Any] = {
             "ok": False,
             "reason": "swing_structure_plan",
@@ -8378,6 +8481,7 @@ def _send_early_mover_long_alerts(payload: Dict[str, Any]) -> bool:
                 source_price_name = "exchange_trigger:last_close"
         candidates.append({
             "key": key,
+            "crypto_profile_cache_version": row.get("crypto_profile_cache_version"),
             "symbol": state["ticker"],
             "name": row.get("Name", row.get("name", "")),
             "grade": state["grade"],
@@ -9913,6 +10017,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "trade_target_not_structural",
         "trade_structure_not_confirmed",
         "trade_breakout_not_confirmed",
+        "trade_first_barrier_below_minimum_reward",
         "trade_target_quality_invalid",
         "trade_health_no_trade",
         "trade_health_chase_risk",
@@ -15364,6 +15469,9 @@ def _revalidate_new_listing_mail_candidate(
     """Apply the shared causal gate to one New-Listing SHORT setup."""
     item = dict(alert or {})
     source_row = dict(item.get("source_row") or {})
+    profile_reason = _crypto_profile_contract_reason(source_row, new_listing=True)
+    if profile_reason:
+        return {"ok": False, "reason": profile_reason}
     candidate = {
         **source_row,
         "symbol": source_row.get("symbol") or item.get("contract_symbol") or item.get("symbol"),
@@ -15448,6 +15556,10 @@ def _send_new_listing_pipeline_alerts(payload: Dict[str, Any]) -> None:
             continue
         entry = dict(entry)
         sig = entry.get("signal", {}) or {}
+        profile_reason = _crypto_profile_contract_reason(sig, new_listing=True)
+        if profile_reason:
+            suppressed[profile_reason] = suppressed.get(profile_reason, 0) + 1
+            continue
         if isinstance(sig, dict):
             entry.setdefault("direction", "short")
             entry.setdefault("strategy", sig.get("setup_type") or "new_listing_dump")
@@ -17193,7 +17305,9 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
         item = dict(raw)
         if is_elliott_pattern_context(item, strategy=scanner_name):
             if _stock_elliott_row_contract_valid(item):
-                decorated.append(_elliott_display_row(item))
+                item = _elliott_display_row(item)
+                item["level_context"] = build_level_context(item, timeframe="1D")
+                decorated.append(item)
             continue
         why = []
         warnings = []
@@ -17316,6 +17430,8 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
             },
             "market_context": market_context.get("summary"),
         }
+        # Add evidence provenance only; never change release, scores or prices.
+        item["level_context"] = build_level_context(item)
         decorated.append(item)
     return decorated
 
@@ -18582,11 +18698,69 @@ def _chart_level_input(bars, ticker: str, timeframe: str):
     adapted = []
     for raw in bars:
         for bar in _daily_level_bars([raw]):
+            if stock_swing.session_close(bar["open_time"].date().isoformat()) is None:
+                continue  # No invented US session on weekends or exchange holidays.
             for key in ("is_closed", "complete", "completed", "final"):
                 if key in raw:
                     bar[key] = raw[key]
+            bar["chart_time"] = raw.get("time")
             adapted.append(bar)
     return adapted
+
+
+def _chart_completed_evidence(bars, ticker: str, timeframe: str, as_of):
+    """One frozen completed prefix for all structural chart overlays.
+
+    Preserve provider x-axis times while using actual session close times for
+    confirmation. Duplicate/conflicting bars cannot acquire closed evidence.
+    """
+    # One chart candle per source instant. Conflicting copies are quarantined,
+    # including closed/open disagreement; identical copies cannot double volume.
+    grouped = {}
+    for raw in bars or []:
+        if not isinstance(raw, dict):
+            continue
+        stamp = _level_timestamp_seconds(raw.get("time"))
+        if stamp is None or stamp > as_of.timestamp():
+            continue
+        signature = tuple(repr(raw.get(key)) for key in (
+            "open", "high", "low", "close", "volume", "close_time",
+            "is_closed", "complete", "completed", "final",
+        ))
+        grouped.setdefault(stamp, []).append((signature, raw))
+    prepared = []
+    for stamp, copies in sorted(grouped.items()):
+        if len({signature for signature, _ in copies}) != 1:
+            continue
+        raw = dict(copies[0][1])
+        values = [_alert_float(raw.get(key), None) for key in ("open", "high", "low", "close")]
+        if any(value is None or not math.isfinite(value) or value <= 0 for value in values):
+            continue
+        opn, high, low, close = values
+        if high < max(opn, low, close) or low > min(opn, high, close):
+            continue
+        raw.update(time=stamp, open=opn, high=high, low=low, close=close)
+        prepared.append(raw)
+    adapted = _chart_level_input(prepared, ticker, timeframe)
+    completed = normalize_completed_bars(adapted, timeframe=timeframe, as_of=as_of)
+    chart_time_by_open = {}
+    for raw in adapted:
+        opened = next((raw.get(key) for key in ("open_time", "opened_at", "time", "timestamp", "t")
+                       if raw.get(key) is not None), None)
+        opened = _level_timestamp_seconds(opened)
+        chart_time = raw.get("chart_time", raw.get("time"))
+        if opened is not None and chart_time is not None:
+            chart_time_by_open[opened] = chart_time
+    by_chart_time = {chart_time_by_open[bar.opened_at.timestamp()]: bar for bar in completed
+                     if bar.opened_at.timestamp() in chart_time_by_open}
+    candles = []
+    for raw in prepared:
+        item = dict(raw)
+        evidence = by_chart_time.get(raw.get("time"))
+        item["is_closed"] = evidence is not None
+        item["close_time"] = evidence.closed_at.timestamp() if evidence is not None else None
+        candles.append(item)
+    return adapted, completed, chart_time_by_open, candles
 
 
 def _calculate_directional_fib_levels(
@@ -19756,17 +19930,11 @@ def _exclude_stock_history_symbol(error, diagnostics):
 
 def _level_timestamp_seconds(value: Any) -> Optional[float]:
     """Normalize common epoch units for local level-bar adapters."""
-    parsed = _alert_float(value, None)
-    if parsed is None or parsed <= 0:
+    try:
+        parsed = _level_coerce_datetime(value).timestamp()
+    except (ValueError, TypeError, OverflowError, OSError):
         return None
-    magnitude = abs(parsed)
-    if magnitude >= 1e18:
-        parsed /= 1_000_000_000.0
-    elif magnitude >= 1e15:
-        parsed /= 1_000_000.0
-    elif magnitude >= 1e12:
-        parsed /= 1_000.0
-    return parsed
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
 
 
 def _daily_level_bars(
@@ -27538,7 +27706,7 @@ def _api_scheduler_should_skip(scanner_name: str, env_value: Optional[str] = Non
 
 
 def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
-    """Only reusable completed stock caches may defer a startup run.
+    """Only reusable completed scanner caches may defer a startup run.
 
     This does not approve any row for trading or mail. The normal row/session
     guards remain authoritative. It prevents a freshly written *old contract*
@@ -27582,6 +27750,14 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
                 if any(not _bi_row_meets_signal_contract(row) for row in rows):
                     return None
             elif any(not biotech_news_contract_valid(row) for row in rows):
+                return None
+        elif name in {"early_movers", "crypto_explosion", "new_listing", "crypto_trade_signals"}:
+            payload = _scan_cache_payload(path)
+            if payload is None or payload.get("partial"):
+                return None
+            _, reason = _compatible_crypto_cache_results(
+                payload["results"], payload, new_listing=name == "new_listing")
+            if reason:
                 return None
         return stamp
     except (OSError, ValueError, TypeError):
@@ -31167,28 +31343,47 @@ def get_chart_data(
 ):
     """Get OHLCV data with chart overlays for TradingView Lightweight Charts."""
     try:
+        if timeframe not in ("5m", "15m", "1H", "4H", "1D", "1W"):
+            raise HTTPException(status_code=422, detail="Unsupported chart timeframe")
+        # Freeze request time and provider availability BEFORE I/O. Starter
+        # Polygon equity data is delayed: a nominal candle close after this
+        # watermark cannot establish S/R, Fib, trends, patterns or native VRVP.
+        # Do not session-clamp this clock or apply it to Yahoo/crypto/live data.
+        chart_requested_at = datetime.now(timezone.utc)
+        chart_delay_seconds = (
+            stock_swing.DELAY_SECONDS
+            if stock_swing.enabled() and chart_market_context(ticker)["us_equity_session"]
+            else 0
+        )
+        chart_as_of = chart_requested_at - timedelta(seconds=chart_delay_seconds)
         # ── Chart Cache Check ──
         fib_direction = _normalize_chart_direction(direction)
-        _cache_key = f"{ticker}:{timeframe}:{overlays}:{fib_direction or 'auto'}"
+        _cache_key = f"{ticker}:{timeframe}:{overlays}:{fib_direction or 'auto'}:available_v1:{chart_delay_seconds}"
         _ttl = _CHART_CACHE_TTL.get(timeframe, 120)
         if _cache_key in _CHART_CACHE:
             _cached = _CHART_CACHE[_cache_key]
             if time.time() - _cached["ts"] < _ttl:
                 return _cached["data"]
 
-        # Freeze the cutoff BEFORE I/O: a candle still forming when requested
-        # cannot become confirmed only because the provider response was slow.
-        chart_as_of = datetime.now(timezone.utc)
         # Fetch OHLCV bars for the requested timeframe
         ohlcv = fetch_ohlcv_for_chart(ticker, POLYGON_KEY, timeframe=timeframe, bars=300)
         if not ohlcv or len(ohlcv) < 5:
             raise HTTPException(status_code=404, detail=f"No chart data for '{ticker}' ({timeframe})")
 
         overlay_list = [x.strip().lower() for x in overlays.split(",")]
+        chart_level_input, chart_completed, chart_time_by_open, chart_candles = _chart_completed_evidence(
+            ohlcv, ticker, timeframe, chart_as_of,
+        )
+        ohlcv = chart_candles
+        if len(ohlcv) < 5:
+            raise HTTPException(status_code=404, detail="Insufficient valid chart candles")
         result = {
             "ticker": ticker,
             "timeframe": timeframe,
-            "candles": ohlcv,  # Already in {time, open, high, low, close, volume} format
+            "candles": chart_candles,
+            "chart_as_of": chart_as_of.timestamp(),
+            "chart_requested_at": chart_requested_at.timestamp(),
+            "completed_bar_count": len(chart_completed),
         }
         last_candle_ts = ohlcv[-1].get("time") if ohlcv else None
         if last_candle_ts:
@@ -31287,12 +31482,12 @@ def get_chart_data(
                 current_price = closes[-1] if closes else 0
                 if HAS_REAL_SR and len(ohlcv) >= 20:
                     # S/R and Fib share the same asset-aware completed-bar input.
-                    sr_input = _chart_level_input(ohlcv, ticker, timeframe)
+                    sr_input = chart_level_input
                     sr_result = calculate_sr_from_historical(
                         sr_input,
                         current_price,
                         timeframe=timeframe,
-                        as_of=datetime.now(timezone.utc),
+                        as_of=chart_as_of,
                         direction=fib_direction or "LONG",
                     )
                     # sr_result returns: ((supports_prices, resistances_prices), fib_info)
@@ -31335,114 +31530,51 @@ def get_chart_data(
             except Exception as e:
                 print(f"S/R error: {e}")
 
-        # Diagonal Trendlines V2 — Minimum 3 Touches, extend bis zum letzten Bar
-        if "sr" in overlay_list and len(ohlcv) >= 40:
+        if "sr" in result:
+            sr_payload = result["sr"]
+            zone_provenance = sr_payload.get("provenance") or {}
+            sr_payload["level_context"] = build_level_context(
+                {"direction": (fib_direction or "long").upper()}, timeframe=timeframe, as_of=chart_as_of,
+                snapshot={"model": sr_payload.get("zone_model"), "zones": sr_payload.get("zones", []),
+                          "as_of": zone_provenance.get("as_of")},
+            )
+
+        # Causal diagonal context, separate from confirmed horizontal target zones.
+        if "sr" in overlay_list:
             try:
-                _n = len(ohlcv)
-                _highs = [d["high"] for d in ohlcv]
-                _lows = [d["low"] for d in ohlcv]
-                _times = [d["time"] for d in ohlcv]
-
-                # ATR für Toleranz
-                _tr = [max(_highs[i] - _lows[i], abs(_highs[i] - ohlcv[i-1]["close"]), abs(_lows[i] - ohlcv[i-1]["close"])) for i in range(1, _n)]
-                _atr = sum(_tr[-14:]) / min(14, len(_tr)) if _tr else 1
-
-                # Swing-Erkennung (window proportional zur Datenmenge)
-                _sw = max(4, _n // 25)
-                _swing_highs = []
-                _swing_lows = []
-                for i in range(_sw, _n - _sw - 1):
-                    if _highs[i] >= max(_highs[max(0,i-_sw):i]) and _highs[i] >= max(_highs[i+1:min(_n, i+_sw+1)]):
-                        if not _swing_highs or i - _swing_highs[-1][0] >= _sw:
-                            _swing_highs.append((i, _highs[i]))
-                    if _lows[i] <= min(_lows[max(0,i-_sw):i]) and _lows[i] <= min(_lows[i+1:min(_n, i+_sw+1)]):
-                        if not _swing_lows or i - _swing_lows[-1][0] >= _sw:
-                            _swing_lows.append((i, _lows[i]))
-
-                trendlines = []
-                _tol = _atr * 0.4  # Toleranz: 40% vom ATR
-
-                def find_best_trendline(swings, check_above=False):
-                    """Findet die Linie mit den meisten Touches durch Swing-Punkte.
-                    check_above=True: Resistance (kein Preis darf signifikant ÜBER die Linie)
-                    check_above=False: Support (kein Preis darf signifikant UNTER die Linie)
-                    """
-                    best = None
-                    best_score = 0
-                    for a in range(len(swings)):
-                        for b in range(a + 1, len(swings)):
-                            i1, p1 = swings[a]
-                            i2, p2 = swings[b]
-                            if i2 <= i1 or i2 - i1 < max(10, _n // 8):
-                                continue
-                            slope = (p2 - p1) / (i2 - i1)
-                            # Zähle Touches (Swings die die Linie berühren)
-                            touches = 0
-                            touch_indices = []
-                            violated = False
-                            for idx, price in swings:
-                                expected = p1 + slope * (idx - i1)
-                                diff = price - expected
-                                if abs(diff) <= _tol:
-                                    touches += 1
-                                    touch_indices.append(idx)
-                                elif check_above and diff > _tol * 2:
-                                    # Preis weit ÜBER Resistance → ungültig
-                                    violated = True
-                                    break
-                                elif not check_above and diff < -_tol * 2:
-                                    # Preis weit UNTER Support → ungültig
-                                    violated = True
-                                    break
-                            if violated or touches < 3:
-                                continue
-                            # Score = touches × Spannweite
-                            span = max(touch_indices) - min(touch_indices)
-                            score = touches * span
-                            if score > best_score:
-                                best_score = score
-                                # Linie vom ersten Touch bis zum letzten Bar verlängern
-                                first_i = min(touch_indices)
-                                last_i = _n - 1
-                                best = {
-                                    "points": [
-                                        {"time": _times[first_i], "price": round(p1 + slope * (first_i - i1), 2)},
-                                        {"time": _times[last_i], "price": round(p1 + slope * (last_i - i1), 2)},
-                                    ],
-                                    "touches": touches,
-                                }
-                    return best
-
-                sup = find_best_trendline(_swing_lows, check_above=False)
-                if sup:
-                    sup["type"] = "support"
-                    trendlines.append(sup)
-
-                res = find_best_trendline(_swing_highs, check_above=True)
-                if res:
-                    res["type"] = "resistance"
-                    trendlines.append(res)
-
-                if trendlines:
-                    result["trendlines"] = trendlines
+                trendlines = build_causal_trendlines(
+                    chart_level_input, timeframe=timeframe, as_of=chart_as_of,
+                    scale="linear", max_per_side=3,
+                )
+                for line in trendlines:
+                    for point in line.get("points", []):
+                        point["time"] = chart_time_by_open.get(point["time"], point["time"])
+                result["trendlines"] = trendlines
+                result["trendline_meta"] = {
+                    "model": "causal_trendline_v1", "timeframe": timeframe,
+                    "data_cutoff_at": chart_as_of.isoformat(), "scale": "linear",
+                    "requested_as_of": chart_requested_at.isoformat(),
+                    "last_completed_at": chart_completed[-1].closed_at.isoformat() if chart_completed else None,
+                    "projection_is_confirmed_horizontal_level": False,
+                }
             except Exception as e:
+                result["trendlines"] = []
                 print(f"Trendline error: {e}")
                 _print_sanitized_traceback()
 
         # Volume Profile (VRVP)
-        if "vrvp" in overlay_list and len(ohlcv) >= 10:
+        if "vrvp" in overlay_list and len(chart_completed) >= 20:
             try:
-                vp = calculate_volume_profile(ohlcv, num_bins=24)
+                vp = calculate_volume_profile([bar.to_dict() for bar in chart_completed], num_bins=24, timeframe=timeframe)
                 if vp:
                     # Add POC, VAH, VAL as price lines
                     # Add bins for histogram rendering
                     result["vrvp"] = {
-                        "poc": round(vp["poc"], 2),
-                        "vah": round(vp["vah"], 2),
-                        "val": round(vp["val"], 2),
-                        "bins": [{"low": round(b["low"], 2), "high": round(b["high"], 2), "mid": round(b["mid"], 2), "volume": int(b["volume"])} for b in vp["bins"]],
-                        "hvns": [{"mid": round(h["mid"], 2), "volume": int(h["volume"])} for h in (vp.get("hvns") or [])],
-                        "lvns": [{"mid": round(l["mid"], 2), "volume": int(l["volume"])} for l in (vp.get("lvns") or [])],
+                        "poc": vp["poc"], "vah": vp["vah"], "val": vp["val"],
+                        "bins": vp["bins"], "hvns": vp.get("hvns") or [], "lvns": vp.get("lvns") or [],
+                        "scope": "loaded_completed_candles",
+                        "timeframe": timeframe,
+                        "data_cutoff_at": chart_as_of.isoformat(),
                         "approximation": vp.get("approximation", True),
                         "tick_data_used": vp.get("tick_data_used", False),
                         "profile_method": vp.get("profile_method", vp.get("method")),
@@ -31461,7 +31593,7 @@ def get_chart_data(
         # Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
         if "fib" in overlay_list and len(ohlcv) >= 20:
             try:
-                _fib_cutoff = datetime.now(timezone.utc)
+                _fib_cutoff = chart_as_of
                 _fib_chart_bars = normalize_completed_bars(
                     _chart_level_input(ohlcv, ticker, timeframe),
                     timeframe=timeframe, as_of=_fib_cutoff,
@@ -32666,6 +32798,10 @@ def get_scan_results(
         results = verified_results
 
     pre_policy_count = len(results or [])
+    crypto_profile_warning = None
+    if scanner_name in {"early_movers", "crypto_explosion", "new_listing", "crypto_trade_signals"}:
+        results, crypto_profile_warning = _compatible_crypto_cache_results(
+            results, cache_meta, new_listing=scanner_name == "new_listing")
     results = _decorate_scan_results(results, scanner_name, cache_age)
     decorated_count = len(results or [])
     results = _apply_scanner_visibility_policy(scanner_name, results)
@@ -32678,6 +32814,10 @@ def get_scan_results(
         diagnostics["suppressed_by_signal_policy"] = max(0, decorated_count - visible_count)
     quality = _scan_quality_payload(scanner_name, cache_age, results)
     warnings = list(quality["warnings"])
+    if crypto_profile_warning:
+        warnings.insert(0, crypto_profile_warning)
+        quality["cache_status"] = "stale"
+        quality["cache_stale_reason"] = crypto_profile_warning
     if elliott_cache_warning:
         quality["cache_status"] = "stale"
         quality["cache_stale_reason"] = elliott_cache_warning
@@ -33453,6 +33593,7 @@ def _build_early_mover_long_setup(
     return {
         "direction": "LONG",
         "entry": _round_crypto_price(setup_entry),
+        "crypto_profile_cache_version": _CRYPTO_PROFILE_CACHE_VERSION,
         "stop": _round_crypto_price(stop),
         "stop_loss": _round_crypto_price(stop),
         "tp1": _round_crypto_price(tp1),
@@ -34722,6 +34863,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
         entry.update({
             "direction": "LONG",
             "setup_score": final_score,
+            "crypto_profile_cache_version": setup.get("crypto_profile_cache_version"),
             "entry": setup.get("entry"),
             "live_entry": entry.get("Price"),
             "stop_loss": setup.get("stop_loss"),
@@ -34954,22 +35096,25 @@ def _early_movers_wrapper() -> None:
 
         # Run full analysis
         def _save_progress(payload, checked, total, detail):
+            _stamp_fresh_crypto_profile_contract(payload)
             save_partial_cache_file(
                 EARLY_MOVERS_CACHE,
                 [payload],
                 checked=checked,
                 total=total,
                 detail=detail,
+                metadata=_crypto_profile_cache_metadata(),
             )
 
         result = fetch_early_movers(
             _prefetched_perps=perp_data,
             _progress_callback=_save_progress,
         )
+        _stamp_fresh_crypto_profile_contract(result)
 
         # Save results
         _scan_control_point(finishing=True)
-        finalize_cache_file(EARLY_MOVERS_CACHE, [result])
+        finalize_cache_file(EARLY_MOVERS_CACHE, [result], metadata=_crypto_profile_cache_metadata())
         s = result.get("stats", {})
         print(f"[Early Movers] Scan complete. {s.get('unified_count', 0)} coins — "
               f"Phase 1: {s.get('phase_1_count', 0)}, Phase 2: {s.get('phase_2_count', 0)}, "
@@ -35017,6 +35162,7 @@ def get_early_movers():
         EARLY_MOVERS_CACHE,
         running=bool(scan_state.get("running")),
     )
+    results, profile_warning = _compatible_crypto_cache_results(results, cache_meta)
     cache_age = None
     if cached_at:
         try:
@@ -35039,6 +35185,9 @@ def get_early_movers():
     except Exception as stats_exc:
         print(f"[Early Movers] post-downgrade stats sync skipped: {stats_exc}")
     quality = _scan_quality_payload("early_movers", cache_age, decorated)
+    if profile_warning:
+        quality.update(cache_status="stale", cache_stale_reason=profile_warning)
+        quality["warnings"] = list(dict.fromkeys([*quality["warnings"], profile_warning]))
     return {
         "status": "success",
         "data": decorated,
@@ -35807,6 +35956,7 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "alertable_crypto": bool(trigger_tradeable and risk_level != "HIGH" and rr >= 1.5),
         "execution_trigger_ok": bool(trigger_ok),
     }
+    _stamp_fresh_crypto_profile_contract(result)
     apply_breakout_warning(result, trigger_tradeable)
     apply_breakout_warning(setup, trigger_tradeable)
     return result
@@ -35944,8 +36094,12 @@ def _crypto_explosion_wrapper() -> None:
         rows, stats = _run_crypto_explosion_scan()
         if stats.get("incomplete"):
             raise RuntimeError("Crypto Explosion partial cache prevented: venue unavailable/rate-limited; previous cache retained")
+        for row in rows:
+            _stamp_fresh_crypto_profile_contract(row)
         _scan_control_point(finishing=True)
-        save_cache_file(CRYPTO_EXPLOSION_CACHE, rows, metadata={"scan_stats": stats})
+        save_cache_file(CRYPTO_EXPLOSION_CACHE, rows, metadata={
+            **_crypto_profile_cache_metadata(), "scan_stats": stats,
+        })
         _ce_progress_update(running=False, status="done")
         print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks", flush=True)
     except scan_control.ScanRestartRequired:
@@ -36017,6 +36171,8 @@ def trigger_crypto_explosion_scan():
 @app.get("/api/crypto-explosion-results")
 def get_crypto_explosion_results():
     results, cached_at = load_cache_file(CRYPTO_EXPLOSION_CACHE)
+    cache_meta = load_cache_metadata(CRYPTO_EXPLOSION_CACHE)
+    results, profile_warning = _compatible_crypto_cache_results(results, cache_meta)
     cache_age = None
     if cached_at:
         try:
@@ -36029,6 +36185,9 @@ def get_crypto_explosion_results():
     decorated = _downgrade_expired_crypto_triggers(decorated, cache_age)
     decorated = _apply_scanner_visibility_policy("crypto_explosion", decorated)
     quality = _scan_quality_payload("crypto_explosion", cache_age, decorated)
+    if profile_warning:
+        quality.update(cache_status="stale", cache_stale_reason=profile_warning)
+        quality["warnings"] = list(dict.fromkeys([*quality["warnings"], profile_warning]))
     runtime_stats = (_scan_cache_payload(CRYPTO_EXPLOSION_CACHE) or {}).get("scan_stats") or {}
     if runtime_stats.get("source_degraded"):
         quality["warnings"] = list(dict.fromkeys([*quality["warnings"], "Eingeschraenkte Boersen-/Datenabdeckung; siehe Scannerstatus"]))
@@ -37248,7 +37407,8 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "listing_trade_ok": sig.get("listing_trade_ok", entry.get("listing_trade_ok", False)),
             "trade_category": sig.get("trade_category", entry.get("trade_category", "")),
             "direction": sig.get("direction"),
-            "new_listing_short_cache_version": _NEW_LISTING_SHORT_CACHE_VERSION,
+            "crypto_profile_cache_version": sig.get("crypto_profile_cache_version"),
+            "new_listing_short_cache_version": sig.get("new_listing_short_cache_version"),
             "source_trade_contract_validated": source_contract_valid,
             "trade_action": "SHORT_NOW" if is_tradeable else "BEOBACHTEN",
             "trade_signal": "JETZT_TRADEN" if is_tradeable else "BEOBACHTEN",
@@ -37586,8 +37746,13 @@ def _new_listing_wrapper() -> None:
     try:
         seed_instrument_cache()
         payload = run_new_listing_scanner()
+        _stamp_fresh_crypto_profile_contract(payload, new_listing=True)
         results = _flatten_new_listing_pipeline_results(payload if isinstance(payload, dict) else {})
-        save_cache_file(NEW_LISTING_CACHE, results)
+        # All flat rows originate in this fresh producer call, including
+        # monitoring/announcement context which cannot authorize a trade.
+        for row in results:
+            _stamp_fresh_crypto_profile_contract(row, new_listing=True)
+        save_cache_file(NEW_LISTING_CACHE, results, metadata=_crypto_profile_cache_metadata(new_listing=True))
         # Publish first, alert second: a mail must never describe a result that
         # failed to become the scanner's readable source of truth.
         _send_new_listing_pipeline_alerts(payload if isinstance(payload, dict) else {})
@@ -37612,6 +37777,8 @@ def trigger_new_listing_scan():
 def get_new_listing_results():
     """Get cached new listing scan results."""
     results, cached_at = load_cache_file(NEW_LISTING_CACHE)
+    cache_meta = load_cache_metadata(NEW_LISTING_CACHE)
+    results, profile_warning = _compatible_crypto_cache_results(results, cache_meta, new_listing=True)
     parsed_cache_age = _new_listing_observed_age_seconds(cached_at)
     cache_age = math.floor(parsed_cache_age) if parsed_cache_age is not None else None
     raw_count = len(results) if results else 0
@@ -37632,6 +37799,9 @@ def get_new_listing_results():
         "display_mode": "pump_dump_analysis",
     }
     quality = _scan_quality_payload("new_listing", cache_age, decorated)
+    if profile_warning:
+        quality.update(cache_status="stale", cache_stale_reason=profile_warning)
+        quality["warnings"] = list(dict.fromkeys([*quality["warnings"], profile_warning]))
     quality["signal_only"] = False
     quality["signal_policy"] = (
         "Pump & Dump Analyse: Short-ready Zeilen zuerst, danach sinnvolle Dump-/Crack-Watch-Kandidaten. "
@@ -37683,6 +37853,9 @@ def _crypto_structure_block_reason(row: Dict[str, Any]) -> Optional[str]:
     """Return why a cached crypto row cannot be promoted to trade-now."""
     if not isinstance(row, dict):
         return "invalid_structure_payload"
+    profile_reason = _crypto_profile_contract_reason(row)
+    if profile_reason:
+        return profile_reason
     setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
 
     if "barrier_gate" in row:
@@ -38143,6 +38316,10 @@ def _merge_crypto_trade_signals(long_rows: List[Dict[str, Any]], short_rows: Lis
 def _build_crypto_trade_signals_from_caches(*, display_only: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str], Optional[int], List[str]]:
     long_raw, long_cached_at = load_cache_file(CRYPTO_EXPLOSION_CACHE)
     short_raw, short_cached_at = load_cache_file(NEW_LISTING_CACHE)
+    long_raw, long_profile_warning = _compatible_crypto_cache_results(
+        long_raw, load_cache_metadata(CRYPTO_EXPLOSION_CACHE))
+    short_raw, short_profile_warning = _compatible_crypto_cache_results(
+        short_raw, load_cache_metadata(NEW_LISTING_CACHE), new_listing=True)
     long_age = _crypto_trade_cache_age(long_cached_at)
     short_age = _crypto_trade_cache_age(short_cached_at)
     long_rows = _decorate_scan_results(long_raw or [], "crypto_explosion", long_age)
@@ -38158,7 +38335,7 @@ def _build_crypto_trade_signals_from_caches(*, display_only: bool = False) -> Tu
               if display_only else _merge_crypto_trade_signals(long_rows, short_rows))
     cached_at = _crypto_trade_max_cached_at(long_cached_at, short_cached_at)
     cache_age = _crypto_trade_cache_age(cached_at)
-    warnings = []
+    warnings = list(dict.fromkeys(reason for reason in (long_profile_warning, short_profile_warning) if reason))
     if not long_cached_at:
         warnings.append("Long-Engine Cache fehlt")
     long_scan_stats = ((_scan_cache_payload(CRYPTO_EXPLOSION_CACHE) or {}).get("scan_stats") or {})
@@ -38191,7 +38368,7 @@ def _crypto_trade_signals_wrapper(refresh_sources: bool = True) -> None:
             if HAS_NEW_LISTING_SCANNER:
                 _new_listing_wrapper()
         rows, stats, _, _, warnings = _build_crypto_trade_signals_from_caches()
-        save_cache_file(CRYPTO_TRADE_SIGNALS_CACHE, rows)
+        save_cache_file(CRYPTO_TRADE_SIGNALS_CACHE, rows, metadata=_crypto_profile_cache_metadata())
         print(f"[Crypto Signals] Done: {stats.get('result_count', 0)} rows ({stats.get('long_count', 0)} long / {stats.get('short_count', 0)} short), warnings={warnings}")
     except Exception as exc:
         print(f"[Crypto Signals] Error: {exc}")

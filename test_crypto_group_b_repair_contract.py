@@ -89,11 +89,13 @@ def _valid_short_payload():
         "trade_setup": setup,
         "pump_data": pump,
     }
-    return {
+    payload = {
         "signals": [{"symbol": "TESTUSDT", "exchange": "bybit", "signal": signal}],
         "watchlist": [],
         "monitoring": [],
     }
+    api._stamp_fresh_crypto_profile_contract(payload, new_listing=True)
+    return payload
 
 
 def test_new_listing_versioned_cache_is_fresh_now_and_stale_watch(monkeypatch):
@@ -116,6 +118,7 @@ def test_new_listing_versioned_cache_is_fresh_now_and_stale_watch(monkeypatch):
         lambda path, *_a, **_k: (flat, cached_at) if path == api.NEW_LISTING_CACHE else ([], cached_at),
     )
     monkeypatch.setattr(api, "_scan_cache_payload", lambda _path: {})
+    monkeypatch.setattr(api, "load_cache_metadata", lambda _path: api._crypto_profile_cache_metadata(new_listing=True))
     rows, stats, *_rest = api._build_crypto_trade_signals_from_caches()
     assert rows[0]["trade_action"] == "JETZT_SHORT"
     assert stats["short_trade_now_count"] == 1
@@ -138,6 +141,7 @@ def _new_listing_routes(monkeypatch, *, close_age_seconds, cached_at):
         ),
     )
     monkeypatch.setattr(api, "_scan_cache_payload", lambda _path: {})
+    monkeypatch.setattr(api, "load_cache_metadata", lambda _path: api._crypto_profile_cache_metadata(new_listing=True))
     return api.get_new_listing_results(), api._build_crypto_trade_signals_from_caches()
 
 
@@ -221,8 +225,27 @@ def _long_row(**overrides):
         "tp1_is_projection": False,
         "structure_status": "ACCEPT",
     }
+    api._stamp_fresh_crypto_profile_contract(row)
     row.update(overrides)
     return row
+
+
+@pytest.mark.parametrize("overrides", [
+    {"crypto_profile_cache_version": 0},
+    {"crypto_profile_cache_version": None},
+    {"crypto_profile_cache_version": True},
+    {"crypto_profile_cache_version": "1"},
+    {"trade_setup": {"crypto_profile_cache_version": 0}},
+])
+def test_fresh_long_fixture_preserves_explicit_invalid_profile_contract(monkeypatch, overrides):
+    row = _long_row(**overrides)
+    for key, value in overrides.items():
+        assert row[key] == value
+        assert type(row[key]) is type(value)
+    monkeypatch.setattr(api, "_fetch_crypto_executable_quote", lambda *a, **k: pytest.fail("invalid profile reached quote IO"))
+    assert api._revalidate_crypto_trade_mail_candidate(row, direction="LONG", now_ts=1000) == {
+        "ok": False, "reason": "crypto_profile_cache_version_old_scan_again",
+    }
 
 
 def test_high_risk_or_crowded_funding_cannot_normalize_to_trade_now():

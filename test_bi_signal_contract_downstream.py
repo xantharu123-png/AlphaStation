@@ -65,6 +65,7 @@ def test_bi_row_contract_accepts_exact_complete_17_of_20():
         lambda row: row.update(BI_IndicatorContractOK=False),
         lambda row: row.update(BI_IndicatorContractVersion="legacy-score-only"),
         lambda row: row.update(BI_IndicatorContractVersion="stock-bi-20-v1"),
+        lambda row: row.update(BI_IndicatorContractVersion="stock-bi-20-v5"),
         lambda row: row["BI_IndicatorChecks"].pop(),
         lambda row: row["BI_IndicatorChecks"][0].update(passed=False),
         lambda row: row["BI_IndicatorChecks"][1].update(id=1),

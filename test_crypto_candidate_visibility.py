@@ -8,7 +8,7 @@ import api
 
 
 def _early(**changes):
-    return {
+    row = {
         "Symbol": "CAND", "Price": 10.0, "direction": "LONG",
         "setup_score": 88, "score": 88, "explosion_score": 86,
         "entry_score": 78, "grade": "S", "risk_level": "LOW",
@@ -18,7 +18,28 @@ def _early(**changes):
         "live_rr_ratio": 2.2, "distance_to_entry_r": 0.1,
         "btc_context": {"tailwind": True, "btc_24h": 0.2, "btc_7d": 1.0},
         "native_plan_status": "unavailable", "native_plan_reason": "no_structural_invalidation",
-        "risk_flags": ["trade_health_no_trade"], **changes,
+        "risk_flags": ["trade_health_no_trade"],
+    }
+    api._stamp_fresh_crypto_profile_contract(row)
+    row.update(changes)
+    return row
+
+
+@pytest.mark.parametrize("overrides", [
+    {"crypto_profile_cache_version": 0},
+    {"crypto_profile_cache_version": None},
+    {"crypto_profile_cache_version": True},
+    {"crypto_profile_cache_version": "1"},
+    {"trade_setup": {"crypto_profile_cache_version": 0}},
+])
+def test_fresh_candidate_fixture_preserves_explicit_invalid_profile_contract(monkeypatch, overrides):
+    row = _early(**overrides)
+    for key, value in overrides.items():
+        assert row[key] == value
+        assert type(row[key]) is type(value)
+    monkeypatch.setattr(api, "_fetch_crypto_executable_quote", lambda *a, **k: pytest.fail("invalid profile reached quote IO"))
+    assert api._revalidate_crypto_trade_mail_candidate(row, direction="LONG", now_ts=1000) == {
+        "ok": False, "reason": "crypto_profile_cache_version_old_scan_again",
     }
 
 
@@ -94,6 +115,7 @@ def _cache_sources(monkeypatch, rows, *, age=30):
     monkeypatch.setattr(api, "load_cache_file", lambda path: (
         deepcopy(rows) if path == api.CRYPTO_EXPLOSION_CACHE else [], cached_at))
     monkeypatch.setattr(api, "_scan_cache_payload", lambda _path: {})
+    monkeypatch.setattr(api, "load_cache_metadata", lambda _path: api._crypto_profile_cache_metadata(new_listing=True))
     monkeypatch.setattr(api, "_decorate_scan_results", lambda values, *_a: deepcopy(values))
     monkeypatch.setattr(api, "_decorate_new_listing_display_results", lambda values, *_a: (values, {}))
     monkeypatch.setattr(api, "_get_market_context_snapshot", lambda: {})
@@ -179,6 +201,6 @@ def test_combined_display_keeps_existing_expired_trigger_downgrade(monkeypatch):
 def test_combined_cache_wrapper_does_not_enable_display_candidates(monkeypatch):
     _cache_sources(monkeypatch, [_early()])
     saved = []
-    monkeypatch.setattr(api, "save_cache_file", lambda path, rows: saved.append(deepcopy(rows)))
+    monkeypatch.setattr(api, "save_cache_file", lambda path, rows, **_kwargs: saved.append(deepcopy(rows)))
     api._crypto_trade_signals_wrapper(refresh_sources=False)
     assert saved == [[]]

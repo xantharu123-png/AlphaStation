@@ -230,6 +230,7 @@ def test_new_trade_reminder_replaces_existing_symbol_and_returns_iso_expiry(monk
     monkeypatch.setattr(api, "_find_early_mover_row", lambda _: {
         "Symbol": "BTC", "direction": "LONG", "entry": 100, "stop_loss": 95,
         "tp1": 110, "PerpChartSymbol": "BTCUSDT", "PerpChartExchange": "binance",
+        **api._crypto_profile_cache_metadata(),
     })
 
     first = api.create_trade_reminder(

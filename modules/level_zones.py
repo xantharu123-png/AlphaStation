@@ -606,13 +606,10 @@ def normalize_completed_bars(
             continue
         if not isinstance(raw, Mapping):
             continue
-        completion_flag = next(
-            (raw[key] for key in ("is_closed", "complete", "completed", "final") if key in raw),
-            None,
-        )
-        if completion_flag is not None and str(completion_flag).strip().lower() in (
-            "false", "0", "no", "n", "open",
-        ):
+        # No positive alias may overrule another explicit unfinished flag.
+        completion_flags = [raw[key] for key in ("is_closed", "complete", "completed", "final") if key in raw]
+        if any(str(flag).strip().lower() in ("false", "0", "no", "n", "open")
+               for flag in completion_flags):
             continue
 
         explicit_close = next((raw[key] for key in _CLOSE_TIME_KEYS if raw.get(key) is not None), None)

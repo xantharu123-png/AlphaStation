@@ -160,6 +160,9 @@ def test_new_listing_flattener_preserves_projection_and_structure_provenance():
         }],
     }
 
+    # This signal represents current producer output, unlike the deliberately
+    # unversioned legacy monitoring row below.
+    api._stamp_fresh_crypto_profile_contract(payload["watchlist"][0]["signal"], new_listing=True)
     rows = api._flatten_new_listing_pipeline_results(payload)
     projection = next(row for row in rows if row["symbol"] == "PROJ")
     legacy_watch = next(row for row in rows if row["symbol"] == "LEGACY")

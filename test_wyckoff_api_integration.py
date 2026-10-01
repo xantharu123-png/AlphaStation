@@ -152,7 +152,8 @@ def test_bad_wyckoff_payload_fails_closed_without_exception(row):
     assert not api._stock_wyckoff_row_contract_valid(row, expected_strategy="Wyckoff Accumulation")
 
 
-def test_chart_wyckoff_cutoff_is_frozen_before_provider_latency(monkeypatch):
+@pytest.mark.parametrize("starter", [False, True])
+def test_chart_wyckoff_cutoff_is_frozen_before_provider_latency(monkeypatch, starter):
     clock = [CUTOFF]
     class Clock(datetime):
         @classmethod
@@ -169,13 +170,17 @@ def test_chart_wyckoff_cutoff_is_frozen_before_provider_latency(monkeypatch):
         seen.append(wyckoff_context)
         return []
     monkeypatch.setattr(api, "datetime", Clock)
+    monkeypatch.setattr(api.stock_swing, "enabled", lambda: starter)
     monkeypatch.setattr(api, "fetch_ohlcv_for_chart", fetch)
     monkeypatch.setattr(api, "find_harmonic_for_chart", lambda *a, **k: [])
     monkeypatch.setattr(api, "detect_chart_patterns", detect)
     monkeypatch.setattr(api, "HAS_PATTERNS", True)
     monkeypatch.setattr(api, "_CHART_CACHE", {})
-    api.get_chart_data("AAPL", "1D", "patterns", None)
-    assert seen[0]["as_of"] == CUTOFF
+    result = api.get_chart_data("AAPL", "1D", "patterns", None)
+    available_cutoff = CUTOFF - timedelta(seconds=api.stock_swing.DELAY_SECONDS if starter else 0)
+    assert seen[0]["as_of"] == available_cutoff
+    assert result["chart_as_of"] == available_cutoff.timestamp()
+    assert result["chart_requested_at"] == CUTOFF.timestamp()
 
 
 def test_export_includes_only_bounded_wyckoff_counts(tmp_path):

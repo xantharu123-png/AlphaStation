@@ -120,6 +120,7 @@ def test_final_crypto_gate_rejects_stale_executable_quote(monkeypatch):
         lambda *args, **kwargs: _quote(observed_ts=980),
     )
     candidate = {
+        **api._crypto_profile_cache_metadata(),
         "venue": "binance",
         "contract_symbol": "TESTUSDT",
         "scan_price_observed_at": 900,
@@ -147,6 +148,7 @@ def test_final_crypto_gate_fails_closed_without_original_observation(monkeypatch
         lambda *args, **kwargs: calls.append("quote"),
     )
     candidate = {
+        **api._crypto_profile_cache_metadata(),
         "venue": "binance",
         "contract_symbol": "TESTUSDT",
         "entry": 10.0,
@@ -176,6 +178,7 @@ def test_final_crypto_gate_blocks_stop_touch_even_after_retrace(monkeypatch):
     )
     monkeypatch.setattr(api, "_fetch_crypto_executable_quote", lambda *args, **kwargs: _quote())
     candidate = {
+        **api._crypto_profile_cache_metadata(),
         "venue": "binance",
         "contract_symbol": "TESTUSDT",
         "scan_price_observed_at": 900,
@@ -212,6 +215,7 @@ def test_final_crypto_gate_blocks_short_stop_touch_after_retrace(monkeypatch):
 
     result = api._revalidate_crypto_trade_mail_candidate(
         {
+            **api._crypto_profile_cache_metadata(),
             "venue": "binance",
             "contract_symbol": "TESTUSDT",
             "scan_price_observed_at": 900,
@@ -236,6 +240,7 @@ def test_final_crypto_gate_blocks_tp1_touch_even_after_retrace(monkeypatch):
     )
     monkeypatch.setattr(api, "_fetch_crypto_executable_quote", lambda *args, **kwargs: _quote())
     candidate = {
+        **api._crypto_profile_cache_metadata(),
         "venue": "binance",
         "contract_symbol": "TESTUSDT",
         "scan_price_observed_at": 900,
@@ -263,6 +268,7 @@ def test_final_crypto_gate_uses_ask_for_long_and_bid_for_short(monkeypatch):
 
     monkeypatch.setattr(api, "_fetch_crypto_executable_quote", fake_quote)
     common = {
+        **api._crypto_profile_cache_metadata(),
         "venue": "binance",
         "contract_symbol": "TESTUSDT",
         "scan_price_observed_at": 900,
@@ -306,6 +312,7 @@ def test_final_crypto_gate_quotes_before_fetching_watermarked_path(monkeypatch):
     monkeypatch.setattr(api, "_fetch_exchange_candles_any", fake_path)
     result = api._revalidate_crypto_trade_mail_candidate(
         {
+            **api._crypto_profile_cache_metadata(),
             "venue": "binance",
             "contract_symbol": "TESTUSDT",
             "scan_price_observed_at": 900,
@@ -353,6 +360,7 @@ def test_new_listing_final_gate_reprices_short_to_live_bid(monkeypatch):
         "tp2": 8.0,
         "cooldown_key": "new_listing_TEST",
         "source_row": {
+            **api._crypto_profile_cache_metadata(new_listing=True),
             "symbol": "TESTUSDT",
             "contract_symbol": "TESTUSDT",
             "venue": "binance",
@@ -394,6 +402,7 @@ def test_early_mover_final_gate_reprices_long_to_live_ask(monkeypatch):
         },
     )
     candidate = {
+        **api._crypto_profile_cache_metadata(),
         "symbol": "TEST",
         "key": "early_TEST",
         "venue": "binance",

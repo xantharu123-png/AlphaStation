@@ -57,7 +57,7 @@ def test_crypto_daily_fib_excludes_running_utc_bar_even_after_us_close(monkeypat
     assert baseline["fib_meta"]["lookback_bars"] == 20
 
 
-@pytest.mark.parametrize("ticker,expected_count", [("AAPL", 21), ("BTC-USD", 20), ("VNA.DE", 20), ("EURUSD=X", 20)])
+@pytest.mark.parametrize("ticker,expected_count", [("AAPL", 14), ("BTC-USD", 20), ("VNA.DE", 20), ("EURUSD=X", 20)])
 def test_daily_completion_uses_market_context_not_us_clock_for_all_assets(monkeypatch, ticker, expected_count):
     bars = _bars(hour_offset=4)
     bars.append({**bars[-1], "time": int((BASE + timedelta(days=20, hours=4)).timestamp())})
@@ -67,13 +67,15 @@ def test_daily_completion_uses_market_context_not_us_clock_for_all_assets(monkey
     assert len(completed) == expected_count
 
 
-@pytest.mark.parametrize("ticker", ["AAPL", "BTC-USD"])
-def test_explicit_unclosed_daily_bar_cannot_confirm_a_fib(monkeypatch, ticker):
+@pytest.mark.parametrize("ticker,expected_count", [("AAPL", 12), ("BTC-USD", 19)])
+def test_explicit_unclosed_daily_bar_cannot_confirm_a_fib(monkeypatch, ticker, expected_count):
     bars = _bars(hour_offset=4)
     bars[-1] = {**bars[-1], "is_closed": False}
     completed = api.normalize_completed_bars(api._chart_level_input(bars, ticker, "1D"),
                                              timeframe="1D", as_of=BASE + timedelta(days=30))
-    assert len(completed) == 19
+    # US fixtures include weekends and July 3 (observed exchange holiday).
+    # Those are not completed equity sessions; crypto retains calendar days.
+    assert len(completed) == expected_count
 
 
 @pytest.mark.parametrize("tf,hours", [("5m", 1/12), ("15m", 1/4), ("1H", 1), ("4H", 4), ("1D", 24), ("1W", 168)])

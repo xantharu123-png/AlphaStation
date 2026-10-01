@@ -297,8 +297,14 @@ def test_turtle_mismatched_grouped_evidence_cannot_publish_plan(monkeypatch, fau
 
 
 @pytest.mark.parametrize("timeframe,minutes", [("5m", 5), ("15m", 15), ("1H", 60), ("4H", 240)])
-def test_open_chart_candle_cannot_invalidate_confirmed_orderblock(monkeypatch, timeframe, minutes):
-    freeze(monkeypatch)
+@pytest.mark.parametrize("starter", [False, True], ids=["live", "starter"])
+def test_open_chart_candle_cannot_invalidate_confirmed_orderblock(monkeypatch, timeframe, minutes, starter):
+    # NOW is the observed market clock used to construct the history. In
+    # Starter mode the corresponding request is 900 seconds later; the open
+    # candle must be evaluated against that same available market cutoff.
+    delay = timedelta(seconds=api.stock_swing.DELAY_SECONDS if starter else 0)
+    monkeypatch.setattr(api.stock_swing, "enabled", lambda: starter)
+    freeze(monkeypatch, NOW + delay)
     bars = ob_history() + [candle(98, 99, 97, 98)]
     for i, bar in enumerate(bars):
         bar["time"] = int((NOW - timedelta(minutes=minutes * (len(bars)-1-i) + 1)).timestamp())
@@ -310,12 +316,17 @@ def test_open_chart_candle_cannot_invalidate_confirmed_orderblock(monkeypatch, t
         observed.append(deepcopy(data))
         return real(data, *a, **kw)
     monkeypatch.setattr(api, "detect_chart_patterns", capture)
-    api.get_chart_data(ticker="AUDT", timeframe=timeframe, overlays="patterns", direction="LONG")
+    result = api.get_chart_data(ticker="AUDT", timeframe=timeframe, overlays="patterns", direction="LONG")
+    assert result["chart_as_of"] == NOW.timestamp()
+    assert result["chart_requested_at"] == (NOW + delay).timestamp()
     assert len(observed[-1]) == len(bars) - 1
     assert any(b["idx"] == 27 for b in patterns.detect_order_blocks(observed[-1])["bullish_obs"])
-    freeze(monkeypatch, NOW + timedelta(minutes=minutes))
+    completed_market_at = NOW + timedelta(minutes=minutes)
+    freeze(monkeypatch, completed_market_at + delay)
     monkeypatch.setattr(api, "_CHART_CACHE", {})
-    api.get_chart_data(ticker="AUDT", timeframe=timeframe, overlays="patterns", direction="LONG")
+    result = api.get_chart_data(ticker="AUDT", timeframe=timeframe, overlays="patterns", direction="LONG")
+    assert result["chart_as_of"] == completed_market_at.timestamp()
+    assert result["chart_requested_at"] == (completed_market_at + delay).timestamp()
     assert len(observed[-1]) == len(bars)
     assert not patterns.detect_order_blocks(observed[-1])["bullish_obs"]
 

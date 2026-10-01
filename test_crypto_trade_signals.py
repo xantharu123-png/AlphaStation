@@ -46,6 +46,10 @@ def test_crypto_trade_signals_prefers_confirmed_short_over_long_watch():
         "from_ath_pct": 14,
     }]
 
+    for row in long_rows:
+        api._stamp_fresh_crypto_profile_contract(row)
+    for row in short_rows:
+        api._stamp_fresh_crypto_profile_contract(row, new_listing=True)
     rows = api._merge_crypto_trade_signals(long_rows, short_rows)
 
     assert len(rows) == 1
@@ -88,6 +92,10 @@ def test_crypto_trade_signals_prefers_confirmed_long_over_weak_short_watch():
         "from_ath_pct": 2,
     }]
 
+    for row in long_rows:
+        api._stamp_fresh_crypto_profile_contract(row)
+    for row in short_rows:
+        api._stamp_fresh_crypto_profile_contract(row, new_listing=True)
     rows = api._merge_crypto_trade_signals(long_rows, short_rows)
 
     assert len(rows) == 1

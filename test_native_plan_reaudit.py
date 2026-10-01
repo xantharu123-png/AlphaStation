@@ -4,6 +4,7 @@ No provider or SMTP is called. The histories are synthetic OHLCV, not copied
 scanner payloads, and no eligibility or score threshold is relaxed.
 """
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 import json
 import os
 
@@ -12,6 +13,7 @@ import pytest
 import api
 from modules.level_zones import classify_for_trade
 from modules.vrvp_levels import apply_vrvp_to_trade_setup, build_vrvp_structure
+from modules.volume_analysis import calculate_volume_profile
 
 
 UTC = timezone.utc
@@ -110,8 +112,8 @@ def test_real_vrvp_retains_independent_native_second_target(monkeypatch, directi
     before_gate = api._alert_trade_plan_rejection_reason(before_row)
     after_gate = api._alert_trade_plan_rejection_reason(after_row)
     assert api._alert_trade_plan_ok(before_row), before_gate
-    # Numeric geometry/plan eligibility must not be silently altered by a
-    # profile that does not replace the already confirmed opposing zones.
+    # Confirmed targets survive confluence, but a legitimate wider stop can
+    # reduce actual first-barrier room below the unchanged release floor.
     assert api._alert_trade_levels(after_row)["valid"] is True
     before_state = api._classify_alert_candidate("stock_strategy", before_row, CUTOFF.timestamp())
     after_state = api._classify_alert_candidate("stock_strategy", after_row, CUTOFF.timestamp())
@@ -120,8 +122,20 @@ def test_real_vrvp_retains_independent_native_second_target(monkeypatch, directi
            "native_mail_gate": before_gate, "vrvp_mail_gate": after_gate,
            "native_classification": before_state["suppression_reasons"],
            "vrvp_classification": after_state["suppression_reasons"]})
-    assert api._alert_trade_plan_ok(after_row), after_gate
-    assert before_state["suppression_reasons"] == after_state["suppression_reasons"]
+    if direction == "LONG":
+        assert result["stop"] == plan["stop"]
+        assert api._alert_trade_plan_ok(after_row), after_gate
+        assert before_state["suppression_reasons"] == after_state["suppression_reasons"]
+    else:
+        assert result["stop"] == 101.83
+        assert result["risk"] > plan["risk"]
+        assert result["rr_tp1"] < 1.5
+        assert result["rr"] > 1.5  # A farther TP2 must not hide TP1's room.
+        assert result["nearest_barrier"]["below_minimum_reward"] is True
+        assert after_gate == "trade_first_barrier_below_minimum_reward"
+        assert api._alert_trade_plan_ok(after_row) is False
+        assert after_state["suppression_reasons"] == [
+            *before_state["suppression_reasons"], "trade_first_barrier_below_minimum_reward"]
     assert result["tp2_is_projection"] is False, {
         "native": {key: value for key, value in plan.items() if key.startswith("tp")},
         "after_vrvp": {key: value for key, value in result.items() if key.startswith("tp")},
@@ -197,6 +211,9 @@ def _causal_profile_level(lower, upper, name):
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
 def test_widened_vrvp_stop_recalculates_rr_and_first_barrier_gate(direction):
     history, _, plan = _native(direction)
+    plan["entry_eligible"] = True
+    plan["structure_decision"]["entry_eligible"] = True
+    original = deepcopy(plan)
     original_risk = abs(plan["entry"]-plan["stop"])
     buffer = plan["entry"]*.0025
     boundary = plan["entry"]-original_risk*1.2+buffer if direction == "LONG" else plan["entry"]+original_risk*1.2-buffer
@@ -219,6 +236,135 @@ def test_widened_vrvp_stop_recalculates_rr_and_first_barrier_gate(direction):
     assert result["tp2_zone_id"] == plan["tp2_zone_id"]
     assert result["structure_status"] == "WAIT_BREAK_RECLAIM"
     assert api._alert_trade_plan_ok(_mail_row(result, history, direction)) is False
+    assert result["structure_decision"]["entry"] == result["entry"]
+    assert result["structure_decision"]["stop"] == result["stop"]
+    assert result["structure_decision"]["risk"] == result["risk"]
+    assert result["structure_decision"]["target1"] == result["tp1"]
+    assert result["structure_decision"]["target2"] == result["tp2"]
+    assert result["structure_decision"]["status"] == result["structure_status"]
+    assert result["entry_eligible"] is False
+    assert result["structure_decision"]["entry_eligible"] is False
+    assert result["structure_decision"]["stop_evidence"]["source_family"] == "vrvp"
+    assert result["structure_decision"]["stop_evidence"]["zone_id"] == level["zone_id"]
+    assert result["structure_decision"]["target1_evidence"]["zone_id"] == plan["tp1_zone_id"]
+    assert result["structure_decision"]["target2_evidence"]["zone_id"] == plan["tp2_zone_id"]
+    assert result["pre_vrvp_structure_decision"] == original["structure_decision"]
+    assert result["pre_vrvp_structure_decision"] is not plan["structure_decision"]
+    assert plan == original
+    assert result["pre_vrvp_level_evidence"]["stop"]["zone_id"] == original["stop_zone_id"]
+    assert result["pre_vrvp_level_evidence"]["stop"]["price"] == original["stop"]
+    assert result["pre_vrvp_level_evidence"]["tp2"]["zone_id"] == original["tp2_zone_id"]
+    again = apply_vrvp_to_trade_setup(result, profile, direction=direction,
+                                     asset_type="stock_swing", atr=.2)
+    assert again["pre_vrvp_structure_decision"] == original["structure_decision"]
+    assert again["pre_vrvp_level_evidence"] == result["pre_vrvp_level_evidence"]
+    assert again["structure_decision"]["entry_eligible"] is False
+    assert api._alert_trade_plan_rejection_reason(_mail_row(result, history, direction)) == (
+        "trade_first_barrier_below_minimum_reward")
+
+
+def test_shared_hvn_edge_is_exact_and_its_short_stop_cannot_disappear():
+    history, _, plan = _native("SHORT")
+    raw = calculate_volume_profile(history, num_bins=24, timeframe="1D")
+    assert raw is not None
+    assert all(left["high"] == right["low"] for left, right in zip(raw["bins"], raw["bins"][1:]))
+    profiles = [build_vrvp_structure(bars, plan["entry"], "SHORT", timeframe="1D", min_bars=30,
+        lookback=90, as_of=CUTOFF, date_session_context="us_equity_regular")
+        for bars in (history, list(reversed(history)))]
+    assert profiles[0] == profiles[1]
+    anchors = [level for level in profiles[0]["resistances"]
+               if level["source"] == "VRVP HVN high" and level["zone_high"] == 101.125]
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    assert anchor["zone_low"] == pytest.approx(99.83333333333334)
+    assert anchor["price"] == anchor["zone_high"]
+    result = apply_vrvp_to_trade_setup(plan, profiles[0], direction="SHORT",
+                                      asset_type="stock_swing", atr=2.)
+    assert result["stop"] == 101.83
+    assert result["stop_zone_id"] == anchor["zone_id"]
+    assert result["tp1_zone_id"] == plan["tp1_zone_id"]
+    assert result["tp2_zone_id"] == plan["tp2_zone_id"]
+    assert result["structure_decision"]["risk"] == result["risk"]
+    assert api._alert_trade_plan_rejection_reason(_mail_row(result, history, "SHORT")) == (
+        "trade_first_barrier_below_minimum_reward")
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+@pytest.mark.parametrize("below_minimum", [False, True])
+def test_wait_reason_distinguishes_first_barrier_room_from_missing_break(direction, below_minimum):
+    history, _, plan = _native(direction)
+    row = _mail_row(plan, history, direction)
+    barrier = dict(plan["nearest_barrier"], below_minimum_reward=below_minimum,
+                   action="BREAK_RECLAIM_REQUIRED" if direction == "LONG" else "BREAK_SUPPORT_REQUIRED")
+    row.update(nearest_barrier=barrier, structure_status="WAIT_BREAK_RECLAIM",
+               barrier_gate=barrier["action"])
+    reason = api._alert_trade_plan_rejection_reason(row)
+    assert reason == ("trade_first_barrier_below_minimum_reward" if below_minimum
+                      else "trade_breakout_not_confirmed")
+    assert api._alert_trade_plan_ok(row) is False
+    assert api._alert_decision_from_reasons("stock_strategy", [reason])["decision"] == "NO_TRADE"
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_rounded_geometry_rejection_cannot_retain_positive_decision(direction):
+    mirror = (lambda value: value) if direction == "LONG" else (lambda value: 2-value)
+    setup = dict(direction=direction, entry=mirror(1.0000000001), stop=1.,
+                 tp1=mirror(1.0000000002), tp2=mirror(1.0000000003),
+                 structure_status="ACCEPT", entry_eligible=True,
+                 structure_decision=dict(status="ACCEPT", entry_eligible=True))
+    original = deepcopy(setup)
+    result = apply_vrvp_to_trade_setup(setup, dict(timeframe="1D", supports=[], resistances=[]),
+                                      direction=direction, asset_type="stock_swing")
+    assert result["structure_status"] == result["structure_decision"]["status"] == "REJECT"
+    assert result["structure_decision"]["reason"] == "rounded_trade_geometry_invalid"
+    assert result["entry_eligible"] is result["structure_decision"]["entry_eligible"] is False
+    assert result["pre_vrvp_structure_decision"] == original["structure_decision"]
+    assert setup == original
+    # Reject the proposal without publishing invented replacement numbers.
+    assert {key: result[key] for key in ("entry", "stop", "tp1", "tp2")} == {
+        key: original[key] for key in ("entry", "stop", "tp1", "tp2")}
+    assert api._alert_trade_plan_ok({"trade_setup": result}) is False
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_negative_eligibility_does_not_require_a_nested_decision(direction):
+    history, _, plan = _native(direction)
+    plan.pop("structure_decision")
+    plan.update(structure_status="REJECT", structure_reason="causal_structure_unavailable",
+                entry_eligible=True)
+    result = apply_vrvp_to_trade_setup(plan, dict(timeframe="1D", supports=[], resistances=[]),
+                                      direction=direction, asset_type="stock_swing")
+    assert result["structure_status"] == "REJECT"
+    assert result["entry_eligible"] is False
+    assert "structure_decision" not in result
+    assert api._alert_trade_plan_ok(_mail_row(result, history, direction)) is False
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_projected_final_target_evidence_cannot_claim_its_old_native_zone(direction):
+    history, _, plan = _native(direction)
+    # A second price from the same claimed zone is not independent evidence.
+    plan.update(tp2_zone_id=plan["tp1_zone_id"],
+                tp2_independence_key=plan["tp1_independence_key"])
+    original = deepcopy(plan)
+    profile = build_vrvp_structure(history, plan["entry"], direction, timeframe="1D", min_bars=30,
+        lookback=90, as_of=CUTOFF, date_session_context="us_equity_regular")
+    result = apply_vrvp_to_trade_setup(plan, profile, direction=direction,
+                                      asset_type="stock_swing", atr=2.)
+    assert result["tp2_is_projection"] is True
+    evidence = result["structure_decision"]["target2_evidence"]
+    assert evidence["is_projection"] is True
+    assert evidence["causal_structure_validated"] is False
+    assert evidence["price"] == result["tp2"]
+    assert not set(evidence).intersection({"zone_id", "zone_low", "zone_high", "timeframe",
+        "confirmed_at", "data_cutoff_at", "independence_key", "source_family"})
+    historical = result["pre_vrvp_level_evidence"]["tp2"]
+    assert historical["zone_id"] == original["tp2_zone_id"]
+    assert historical["price"] == original["tp2"]
+    assert historical["is_projection"] is False
+    assert historical["causal_structure_validated"] is True
+    assert result["level_quality"]["tp2"]["quality"] == "projection"
+    assert plan == original
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
@@ -239,6 +385,14 @@ def test_closer_real_vrvp_barrier_still_is_tp1_and_cannot_be_skipped(direction):
     assert result["structure_status"] == "WAIT_BREAK_RECLAIM"
     assert result["barrier_gate"] == ("BREAK_RECLAIM_REQUIRED" if direction == "LONG" else "BREAK_SUPPORT_REQUIRED")
     assert api._alert_trade_plan_ok(_mail_row(result, history, direction)) is False
+    assert result["structure_decision"]["nearest_barrier"] == result["nearest_barrier"]
+    assert result["structure_decision"]["nearest_barrier"]["zone_id"] == level["zone_id"]
+    assert result["structure_decision"]["barrier_distance"] == pytest.approx(.9)
+    assert result["structure_decision"]["barrier_r"] == result["nearest_barrier"]["distance_r"]
+    assert result["room_to_barrier_r"] == result["nearest_barrier"]["distance_r"]
+    assert result["pre_vrvp_structure_decision"] == plan["structure_decision"]
+    assert result["pre_vrvp_structure_decision"]["nearest_barrier"]["zone_id"] == plan["tp1_zone_id"]
+    assert result["structure_decision"]["entry_eligible"] is False
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

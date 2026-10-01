@@ -34,7 +34,7 @@ def _execution_bars(count=36, *, age_bars=1, last_close=10.1, last_volume=3000):
 
 
 def _early_row(action="LONG_TRIGGER"):
-    return {
+    row = {
         "Symbol": "TEST",
         "Price": 10.1,
         "current_price": 10.1,
@@ -50,6 +50,8 @@ def _early_row(action="LONG_TRIGGER"):
         "risk_level": "LOW",
         "trade_setup": {"entry": 10.0, "stop_loss": 9.5, "tp1": 11.0, "tp2": 12.0},
     }
+    api._stamp_fresh_crypto_profile_contract(row)
+    return row
 
 
 def test_early_mover_rejects_stale_execution_candle():
@@ -254,6 +256,7 @@ def test_crypto_merge_rechecks_structure_after_normalization(monkeypatch):
         "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
         "tp1_is_projection": True,
     }
+    api._stamp_fresh_crypto_profile_contract(blocked)
     monkeypatch.setattr(api, "_normalize_crypto_long_signal", lambda row: dict(row))
 
     rows = api._merge_crypto_trade_signals([blocked], [])
@@ -291,6 +294,7 @@ def test_final_crypto_structure_acceptance_masks_stale_nested_wait_state():
             "tp1_is_projection": True,
         },
     }
+    api._stamp_fresh_crypto_profile_contract(row)
 
     normalized = api._normalize_crypto_long_signal(row)
 

@@ -20,6 +20,7 @@ def run(expression):
     ("trade_structure_not_confirmed", "Handelsstruktur nicht bestätigt"),
     ("trade_breakout_not_confirmed", "Ausbruchsbestätigung fehlt"),
     ("trade_target_quality_invalid", "Zielaufteilung nicht freigegeben"),
+    ("trade_first_barrier_below_minimum_reward", "Zu wenig Platz bis zur ersten Kursbarriere"),
     ("trade_rr_below_threshold", "Zu wenig Platz bis zum Kursziel"),
 ])
 def test_compact_plan_warning_preserves_the_actual_rejection_reason(code, message):
@@ -234,6 +235,7 @@ def compact_candidate(row):
     ("first_opposing_barrier_before_minimum_rr", "Widerstand nah"),
     ("no_structural_invalidation", "Handelsplan noch nicht bestätigt"),
     ("native_trade_levels_missing", "Handelsplan noch nicht bestätigt"),
+    ("trade_first_barrier_below_minimum_reward", "Zu wenig Platz bis zur ersten Kursbarriere"),
     ("trade_rr_below_threshold", "Zu wenig Platz bis zum Kursziel"),
     ("WAIT_FOR_TRIGGER", "Einstiegsbestätigung fehlt"),
     ("WAIT_FOR_CONTINUATION", "Fortsetzung noch offen"),
@@ -253,6 +255,15 @@ def test_compact_candidate_has_one_primary_warning_plus_optional_retest():
     assert "Technical" not in json.dumps(view)
     assert "unknown_internal_gate" not in json.dumps(view)
     assert len(view["message"].split(" · ")) == 2
+
+
+def test_compact_candidate_does_not_confuse_first_barrier_with_average_reward():
+    row = _candidate_row("trade_first_barrier_below_minimum_reward",
+                         rr=2.92, rr_tp1=1.29, trade_action="NO_TRADE")
+    view = compact_candidate(row)
+    assert view["message"] == "Zu wenig Platz bis zur ersten Kursbarriere"
+    assert "Ausbruch" not in view["message"]
+    assert "Kursziel" not in view["message"]
 
 
 def test_compact_candidate_never_invents_breakout_confirmation_from_pending_retest():

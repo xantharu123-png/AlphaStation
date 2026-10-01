@@ -39,7 +39,7 @@ def merge_lvn_bins(lvns):
 
     zones = []
     for node in parsed:
-        tolerance = max(abs(node["low"]) * 1e-9, 1e-12)
+        tolerance = max(abs(node["low"]) * 1e-9, math.ulp(node["low"]) * 16)
         if zones and node["low"] <= zones[-1]["high"] + tolerance:
             zone = zones[-1]
             previous_count = zone["bin_count"]
@@ -53,7 +53,7 @@ def merge_lvn_bins(lvns):
             zones.append(dict(node))
 
     for zone in zones:
-        zone["mid"] = (zone["low"] + zone["high"]) / 2.0
+        zone["mid"] = zone["low"] + (zone["high"] - zone["low"]) / 2.0
     return zones
 
 
@@ -69,45 +69,84 @@ def calculate_volume_profile(ohlcv_data, num_bins=20, *, timeframe=None):
         return None
     
     try:
-        # Finde Gesamt-Range
-        all_highs = [d['high'] for d in ohlcv_data if d.get('high', 0) > 0]
-        all_lows = [d['low'] for d in ohlcv_data if d.get('low', 0) > 0]
-        
-        if not all_highs or not all_lows:
+        if isinstance(num_bins, bool) or not isinstance(num_bins, int) or num_bins <= 0:
             return None
-        
-        range_high = max(all_highs)
-        range_low = min(all_lows)
+
+        # Only genuine positive-volume bars may determine profile geometry.
+        # Preserve the legacy H/L/V-only contract without inventing missing O/C;
+        # when O/C are provided, they must be finite and inside the stated range.
+        contributing = []
+        range_volume_only_bar_count = 0
+        for raw in ohlcv_data:
+            if not isinstance(raw, dict):
+                continue
+            if any(raw[key] is False or (isinstance(raw[key], (int, float)) and raw[key] == 0)
+                   or str(raw[key]).strip().lower() in ('false', '0', 'no', 'n', 'open')
+                   for key in ('is_closed', 'complete', 'completed', 'final') if key in raw):
+                continue
+            try:
+                if any(isinstance(raw.get(key), bool) for key in ('high', 'low', 'volume')):
+                    continue
+                high, low, volume = (float(raw[key]) for key in ('high', 'low', 'volume'))
+                if (not all(math.isfinite(value) and value > 0 for value in (high, low, volume))
+                        or high < low):
+                    continue
+                valid_ohlc = True
+                for key in ('open', 'close'):
+                    if key not in raw:
+                        continue
+                    if isinstance(raw[key], bool):
+                        valid_ohlc = False
+                        break
+                    value = float(raw[key])
+                    if not math.isfinite(value) or not low <= value <= high:
+                        valid_ohlc = False
+                        break
+                if not valid_ohlc:
+                    continue
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            contributing.append((high, low, volume))
+            range_volume_only_bar_count += int('open' not in raw or 'close' not in raw)
+
+        contributing_bar_count = len(contributing)
+        if contributing_bar_count < 20:
+            return None
+        input_volume = math.fsum(row[2] for row in contributing)
+        if not math.isfinite(input_volume) or input_volume <= 0:
+            return None
+        range_high = max(row[0] for row in contributing)
+        range_low = min(row[1] for row in contributing)
         
         if range_high <= range_low:
             return None
         
         # Erstelle Preis-Bins
         bin_size = (range_high - range_low) / num_bins
+        if not math.isfinite(bin_size) or bin_size <= 0:
+            return None
+        # Reuse exact neighbouring boundaries, including the true final edge.
+        # Distinct prices closer than the floating-point grid cannot support
+        # native positive-width zones; do not fabricate a tick-size expansion.
+        boundaries = [range_low + i * bin_size for i in range(num_bins)] + [range_high]
+        if any(not math.isfinite(value) for value in boundaries) or any(
+            high <= low for low, high in zip(boundaries, boundaries[1:])
+        ):
+            return None
         bins = []
         
         for i in range(num_bins):
-            bin_low = range_low + (i * bin_size)
-            bin_high = bin_low + bin_size
+            bin_low, bin_high = boundaries[i], boundaries[i + 1]
             bins.append({
                 'low': bin_low,
                 'high': bin_high,
-                'mid': (bin_low + bin_high) / 2,
+                'mid': bin_low + (bin_high - bin_low) / 2,
                 'volume': 0
             })
         
         # Verteile Volumen auf Bins
         # Für jeden Tag: Verteile das Tagesvolumen proportional auf die Bins die der Tag berührt
-        contributing_bar_count = 0
-        for day in ohlcv_data:
-            day_high = day.get('high', 0)
-            day_low = day.get('low', 0)
-            day_vol = day.get('volume', 0)
-            
-            if day_high <= 0 or day_low <= 0 or day_vol <= 0:
-                continue
-
-            contributing_bar_count += 1
+        for day_high, day_low, day_vol in contributing:
             
             day_range = day_high - day_low
             if day_range <= 0:
@@ -133,15 +172,21 @@ def calculate_volume_profile(ohlcv_data, num_bins=20, *, timeframe=None):
         
         # Berechne Statistiken
         volumes = [b['volume'] for b in bins]
-        if not volumes or max(volumes) == 0:
+        if not volumes or any(not math.isfinite(value) or value < 0 for value in volumes) or max(volumes) == 0:
             return None
         
-        total_volume = sum(volumes)
+        total_volume = math.fsum(volumes)
         avg_volume = total_volume / num_bins
+        if (not math.isfinite(total_volume) or not math.isfinite(avg_volume) or avg_volume <= 0
+                or not math.isclose(total_volume, input_volume, rel_tol=1e-12)):
+            return None
         max_volume = max(volumes)
         
-        # Point of Control (POC) - Bin mit meistem Volumen
-        poc_idx = max(range(num_bins), key=lambda i: bins[i]['volume'])
+        # Floating bin edges can perturb mathematically identical allocations.
+        # Treat only 1e-12-relative ties alike: the lowest-price POC wins without
+        # rounding or modifying any stored volume or real volume advantage.
+        poc_idx = next(i for i in range(num_bins)
+                       if math.isclose(bins[i]['volume'], max_volume, rel_tol=1e-12))
         poc_bin = bins[poc_idx]
         poc = poc_bin['mid']
 
@@ -164,7 +209,7 @@ def calculate_volume_profile(ohlcv_data, num_bins=20, *, timeframe=None):
             vol_down = float(bins[va_low_idx - 1]['volume']) if can_go_down else -1
             # Overshoot-Guard wie im Vorbild
             remaining = va_target - accumulated
-            if vol_up >= vol_down:
+            if vol_up >= vol_down or math.isclose(vol_up, vol_down, rel_tol=1e-12):
                 va_high_idx += 1
                 accumulated += min(vol_up, remaining)
             else:
@@ -247,6 +292,9 @@ def calculate_volume_profile(ohlcv_data, num_bins=20, *, timeframe=None):
             'bin_width': bin_size,
             'input_bar_count': len(ohlcv_data),
             'contributing_bar_count': contributing_bar_count,
+            'excluded_bar_count': len(ohlcv_data) - contributing_bar_count,
+            'range_volume_only_bar_count': range_volume_only_bar_count,
+            'ohlc_validation': 'finite_positive_high_low_volume_and_optional_open_close_in_range',
             'volume_coverage_ratio': (
                 contributing_bar_count / len(ohlcv_data) if ohlcv_data else 0.0
             ),
@@ -363,51 +411,76 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
         return []
 
     try:
+        if isinstance(num_bins, bool):
+            return []
         num_bins = int(num_bins)
         if num_bins <= 0:
             return []
 
-        # Preis-Range
-        all_highs = []
-        all_lows = []
-        for day in ohlcv_data:
-            try:
-                high = float(day.get("high"))
-                low = float(day.get("low"))
-            except (AttributeError, TypeError, ValueError):
+        # Keep the chart's legacy ten-bar/H-L-V contract (native profiles need
+        # twenty), but use the same valid, genuine-volume geometry. Missing
+        # completion metadata is left to the caller's causal bar selection;
+        # an explicitly open bar never contributes to these chart zones.
+        contributing = []
+        for raw in ohlcv_data:
+            if not isinstance(raw, dict):
                 continue
-            if math.isfinite(high) and math.isfinite(low) and high > 0 and low > 0:
-                all_highs.append(high)
-                all_lows.append(low)
-        if not all_highs or not all_lows:
+            if any(raw[key] is False or (isinstance(raw[key], (int, float)) and raw[key] == 0)
+                   or str(raw[key]).strip().lower() in ('false', '0', 'no', 'n', 'open')
+                   for key in ('is_closed', 'complete', 'completed', 'final') if key in raw):
+                continue
+            try:
+                if any(isinstance(raw.get(key), bool) for key in ('high', 'low', 'volume')):
+                    continue
+                high, low, volume = (float(raw[key]) for key in ('high', 'low', 'volume'))
+                if (not all(math.isfinite(value) and value > 0 for value in (high, low, volume))
+                        or high < low):
+                    continue
+                valid_ohlc = True
+                for key in ('open', 'close'):
+                    if key not in raw:
+                        continue
+                    if isinstance(raw[key], bool):
+                        valid_ohlc = False
+                        break
+                    value = float(raw[key])
+                    if not math.isfinite(value) or not low <= value <= high:
+                        valid_ohlc = False
+                        break
+                if not valid_ohlc:
+                    continue
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            contributing.append((high, low, volume))
+        if len(contributing) < 10:
             return []
 
-        range_high = max(all_highs)
-        range_low = min(all_lows)
+        input_volume = math.fsum(row[2] for row in contributing)
+        if not math.isfinite(input_volume) or input_volume <= 0:
+            return []
+        range_high = max(row[0] for row in contributing)
+        range_low = min(row[1] for row in contributing)
         if not math.isfinite(range_high) or not math.isfinite(range_low) or range_high <= range_low:
             return []
         bin_size = (range_high - range_low) / num_bins
         if not math.isfinite(bin_size) or bin_size <= 0:
             return []
-        
+
+        boundaries = [range_low + i * bin_size for i in range(num_bins)] + [range_high]
+        if any(not math.isfinite(value) for value in boundaries) or any(
+            high <= low for low, high in zip(boundaries, boundaries[1:])
+        ):
+            return []
         # Volume pro Bin
-        bins = [{"low": range_low + i * bin_size, 
-                 "high": range_low + (i + 1) * bin_size, 
+        bins = [{"low": boundaries[i],
+                 "high": boundaries[i + 1],
                  "volume": 0} for i in range(num_bins)]
-        
-        for d in ohlcv_data:
-            try:
-                vol = float(d.get("volume", 0))
-                h = float(d.get("high"))
-                l = float(d.get("low"))
-            except (AttributeError, TypeError, ValueError):
-                continue
-            if not math.isfinite(vol) or vol <= 0 or not math.isfinite(h) or not math.isfinite(l):
-                continue
-            if h <= l:
+
+        for h, l, vol in contributing:
+            if h == l:
                 # M-Doji AUDIT FIX: High==Low-Bar — gesamtes Volumen in den Bin
                 # des Preises (der 0.01-Fallback war toter Code, Volumen ging verloren).
-                idx = int((h - range_low) / bin_size) if bin_size > 0 else 0
+                idx = int((h - range_low) / bin_size)
                 idx = max(0, min(num_bins - 1, idx))
                 bins[idx]["volume"] += vol
                 continue
@@ -420,8 +493,16 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
                     overlap_pct = (overlap_high - overlap_low) / day_range
                     bin["volume"] += vol * overlap_pct
         
-        # Durchschnitt berechnen
-        avg_vol = sum(b["volume"] for b in bins) / len(bins)
+        # Verify finite allocation and volume conservation before declaring any
+        # low-volume price area. Do not publish fabricated finite overflow bins.
+        volumes = [bin["volume"] for bin in bins]
+        if any(not math.isfinite(value) or value < 0 for value in volumes):
+            return []
+        total_volume = math.fsum(volumes)
+        if (not math.isfinite(total_volume) or total_volume <= 0
+                or not math.isclose(total_volume, input_volume, rel_tol=1e-12)):
+            return []
+        avg_vol = total_volume / len(bins)
         if not math.isfinite(avg_vol) or avg_vol <= 0:
             return []
         
@@ -431,8 +512,8 @@ def find_volume_voids_for_chart(ohlcv_data, num_bins=20):
             if bin["volume"] < avg_vol * 0.5:
                 strength = max(0, min(1, 1 - (bin["volume"] / avg_vol)))
                 voids.append({
-                    "price_low": round(bin["low"], 2),
-                    "price_high": round(bin["high"], 2),
+                    "price_low": bin["low"],
+                    "price_high": bin["high"],
                     "strength": round(strength, 2)
                 })
         

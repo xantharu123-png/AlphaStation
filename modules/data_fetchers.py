@@ -1924,6 +1924,10 @@ def _aggregate_session_bars(
             "v": sum(float(item.get("v", 0) or 0) for item in chunk),
             "source_bar_count": len(chunk),
             "partial_source_bar": len(chunk) < int(bars_per_bucket),
+            # A growing tail is not closed merely because its last 1H source
+            # bar is closed. Without explicit session-end evidence retain the
+            # nominal bucket end; never guess completion from source count.
+            "close_time": _seconds(chunk[0]) + int(bars_per_bucket) * float(expected_interval_seconds),
         })
         chunk = []
 
@@ -2025,7 +2029,9 @@ def _fetch_ohlcv_yahoo(ticker, timeframe="1H"):
                 "high": bar["h"],
                 "low": bar["l"],
                 "close": bar["c"],
-                "volume": bar.get("v", 0)
+                "volume": bar.get("v", 0),
+                **({key: bar[key] for key in ("close_time", "source_bar_count", "partial_source_bar")
+                    if key in bar}),
             })
         
         return ohlcv if ohlcv else None
@@ -2099,7 +2105,9 @@ def _fetch_ohlcv_polygon(ticker, poly_key, timeframe="1H"):
                 "high": bar["h"],
                 "low": bar["l"],
                 "close": bar["c"],
-                "volume": bar.get("v", 0)
+                "volume": bar.get("v", 0),
+                **({key: bar[key] for key in ("close_time", "source_bar_count", "partial_source_bar")
+                    if key in bar}),
             })
         
         return ohlcv

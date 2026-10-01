@@ -13,8 +13,27 @@ def crypto_row(**updates):
         "tp1": 110, "tp2": 120,
         "PerpChartSymbol": "TESTUSDT", "PerpChartExchange": "binance",
     }
+    api._stamp_fresh_crypto_profile_contract(row)
     row.update(updates)
     return row
+
+
+@pytest.mark.parametrize("overrides", [
+    {"crypto_profile_cache_version": 0},
+    {"crypto_profile_cache_version": None},
+    {"crypto_profile_cache_version": True},
+    {"crypto_profile_cache_version": "1"},
+    {"trade_setup": {"crypto_profile_cache_version": 0}},
+])
+def test_fresh_reminder_fixture_preserves_explicit_invalid_profile_contract(monkeypatch, overrides):
+    row = crypto_row(**overrides)
+    for key, value in overrides.items():
+        assert row[key] == value
+        assert type(row[key]) is type(value)
+    monkeypatch.setattr(api, "_fetch_crypto_executable_quote", lambda *a, **k: pytest.fail("invalid profile reached quote IO"))
+    assert api._revalidate_crypto_trade_mail_candidate(row, direction="LONG", now_ts=1000) == {
+        "ok": False, "reason": "crypto_profile_cache_version_old_scan_again",
+    }
 
 
 def record(**updates):
@@ -157,13 +176,15 @@ def test_legacy_triggered_retry_is_blocked_in_worker(reminder_env, monkeypatch):
 
 def test_cache_lookup_rejects_ambiguous_symbols(monkeypatch):
     monkeypatch.setattr(api, "load_cache_file", lambda *a, **k: ([crypto_row(), crypto_row()], None))
+    monkeypatch.setattr(api, "load_cache_metadata", lambda *a, **k: api._crypto_profile_cache_metadata())
     assert api._find_early_mover_row("TESTUSDT") is None
 
 
 def test_cache_lookup_returns_independent_snapshot(monkeypatch):
-    row = crypto_row(trade_setup={"direction": "LONG"})
+    row = crypto_row(trade_setup={"direction": "LONG", **api._crypto_profile_cache_metadata()})
     original = deepcopy(row)
     monkeypatch.setattr(api, "load_cache_file", lambda *a, **k: ([row], None))
+    monkeypatch.setattr(api, "load_cache_metadata", lambda *a, **k: api._crypto_profile_cache_metadata())
     found = api._find_early_mover_row("TESTUSDT")
     found["trade_setup"]["direction"] = "SHORT"
     assert row == original

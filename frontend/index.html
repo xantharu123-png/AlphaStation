@@ -3243,6 +3243,157 @@ function scannerMailPresentation(row = {}) {
             ? 'Mail-Vorprüfung erfüllt; Versand separat' : 'Mail-Vorprüfung nicht vollständig verfügbar' };
 }
 
+// Visible-window OHLCV profile. Up/down means candle direction, not buyers/sellers.
+// Closed-bar metadata comes from the same frozen API cutoff as S/R and trendlines.
+function calculateVisibleVolumeProfile(candles, range, {numBins = 24, asOf, timeframe} = {}) {
+    if (!Array.isArray(candles) || !range || !Number.isFinite(asOf)
+        || !Number.isInteger(numBins) || numBins < 1 || numBins > 200) return null;
+    const logical = Number.isFinite(range.logicalFrom) && Number.isFinite(range.logicalTo);
+    const from = logical ? range.logicalFrom : range.from;
+    const to = logical ? range.logicalTo : range.to;
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return null;
+    const visible = candles.filter((bar, index) => {
+        const position = logical ? index : bar?.time;
+        return bar && Number.isFinite(position) && position >= from && position <= to
+            && bar.is_closed === true && Number.isFinite(bar.close_time) && bar.close_time <= asOf
+            && Number.isFinite(bar.time) && bar.time <= bar.close_time
+            && ['open', 'high', 'low', 'close', 'volume'].every(key => Number.isFinite(bar[key]))
+            && Math.min(bar.open, bar.high, bar.low, bar.close) > 0 && bar.volume > 0
+            && bar.high >= Math.max(bar.open, bar.close, bar.low)
+            && bar.low <= Math.min(bar.open, bar.close, bar.high);
+    });
+    if (!visible.length) return null;
+    const low = Math.min(...visible.map(bar => bar.low));
+    const high = Math.max(...visible.map(bar => bar.high));
+    const width = (high - low) / numBins;
+    if (!Number.isFinite(width) || (high > low && width === 0)) return null;
+    const count = width > 0 ? numBins : 1;
+    const bins = Array.from({length: count}, (_, i) => ({
+        low: low + i * width, high: i === count - 1 ? high : low + (i + 1) * width,
+        mid: low + (i + 0.5) * width, volume: 0, upVolume: 0, downVolume: 0,
+    }));
+    for (const bar of visible) {
+        const allocations = [];
+        if (bar.high === bar.low || !width) {
+            const index = width ? Math.min(count - 1, Math.max(0, Math.floor((bar.low - low) / width))) : 0;
+            allocations.push([index, 1]);
+        } else {
+            for (let i = 0; i < count; i++) {
+                const overlap = Math.min(bins[i].high, bar.high) - Math.max(bins[i].low, bar.low);
+                if (overlap > 0) allocations.push([i, overlap]);
+            }
+        }
+        const totalWeight = allocations.reduce((sum, part) => sum + part[1], 0);
+        if (!(totalWeight > 0)) return null;
+        let assigned = 0;
+        allocations.forEach(([i, weight], j) => {
+            const volume = j === allocations.length - 1 ? bar.volume - assigned : bar.volume * (weight / totalWeight);
+            assigned += volume;
+            bins[i].volume += volume;
+            bins[i][bar.close >= bar.open ? 'upVolume' : 'downVolume'] += volume;
+        });
+    }
+    const totalVolume = bins.reduce((sum, bin) => sum + bin.volume, 0);
+    if (!Number.isFinite(totalVolume) || totalVolume <= 0) return null;
+    // Match native OHLCV-profile tie policy without changing volume values.
+    const volumeTie = (left, right) => Math.abs(left - right) <= Math.max(Math.abs(left), Math.abs(right)) * 1e-12;
+    const peakVolume = Math.max(...bins.map(bin => bin.volume));
+    const pocIndex = bins.findIndex(bin => volumeTie(bin.volume, peakVolume));
+    let bottom = pocIndex, top = pocIndex, areaVolume = bins[pocIndex].volume;
+    while (areaVolume < totalVolume * 0.70 && (bottom > 0 || top < count - 1)) {
+        const above = top < count - 1 ? bins[top + 1].volume : -1;
+        const below = bottom > 0 ? bins[bottom - 1].volume : -1;
+        areaVolume += above >= below || volumeTie(above, below) ? bins[++top].volume : bins[--bottom].volume;
+    }
+    return {bins, poc: bins[pocIndex].mid, val: bins[bottom].low, vah: bins[top].high,
+        totalVolume, candleCount: visible.length, timeframe, data_cutoff_at: asOf,
+        visible_from: visible[0].time, visible_to: visible[visible.length - 1].time,
+        approximation: true, tick_data_used: false, scope: 'visible_completed_candles',
+        profile_method: 'proportional_bar_volume_by_price_overlap'};
+}
+
+function mountVisibleVolumeProfile({chart, series, container, chartData}) {
+    if (!chart || !series || !container) return null;
+    container.querySelector('.vrvp-canvas')?.remove();
+    const canvas = document.createElement('canvas');
+    canvas.className = 'vrvp-canvas';
+    Object.assign(canvas.style, {position: 'absolute', top: '0', right: '48px', pointerEvents: 'none', zIndex: '5'});
+    canvas.title = 'Sichtbarer Bereich · abgeschlossene Kerzen · OHLCV-Volumenprofil';
+    container.style.position = 'relative';
+    container.appendChild(canvas);
+    const lines = new Map();
+    let profile = null, previousRangeKey = null;
+    let frame = 0, disposed = false;
+    const nextFrame = globalThis.requestAnimationFrame || (callback => { callback(); return 0; });
+    const cancelFrame = globalThis.cancelAnimationFrame || (() => {});
+    const removeLines = () => { for (const line of lines.values()) series.removePriceLine(line); lines.clear(); };
+    const render = () => {
+        const logical = chart.timeScale().getVisibleLogicalRange();
+        const range = logical ? {logicalFrom: logical.from, logicalTo: logical.to} : null;
+        const key = JSON.stringify(range);
+        if (key !== previousRangeKey) {
+            previousRangeKey = key;
+            profile = calculateVisibleVolumeProfile(chartData.candles, range, {
+                numBins: 24, asOf: chartData.chart_as_of, timeframe: chartData.timeframe,
+            });
+        }
+        const maxWidth = Math.max(1, container.clientWidth * 0.15);
+        canvas.width = Math.ceil(maxWidth + 10);
+        canvas.height = container.clientHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!profile) {
+            removeLines(); canvas.dataset.candleCount = '0'; canvas.dataset.totalVolume = '0';
+            for (const key of ['poc', 'rangeLow', 'rangeHigh', 'plotLowY', 'plotHighY']) delete canvas.dataset[key];
+            return;
+        }
+        canvas.dataset.poc = String(profile.poc);
+        canvas.dataset.candleCount = String(profile.candleCount);
+        canvas.dataset.totalVolume = String(profile.totalVolume);
+        canvas.dataset.rangeLow = String(profile.bins[0].low);
+        canvas.dataset.rangeHigh = String(profile.bins[profile.bins.length - 1].high);
+        for (const [field, title] of [['poc', 'VP POC'], ['vah', 'VP VAH'], ['val', 'VP VAL']]) {
+            const options = {price: profile[field], title, color: '#0891b2', lineWidth: field === 'poc' ? 2 : 1,
+                lineStyle: field === 'poc' ? 0 : 2, axisLabelVisible: true};
+            if (lines.has(field)) lines.get(field).applyOptions(options);
+            else lines.set(field, series.createPriceLine(options));
+        }
+        const maxVolume = Math.max(...profile.bins.map(bin => bin.volume));
+        canvas.dataset.plotLowY = String(series.priceToCoordinate(profile.bins[0].low));
+        canvas.dataset.plotHighY = String(series.priceToCoordinate(profile.bins[profile.bins.length - 1].high));
+        profile.bins.forEach(bin => {
+            const yHigh = series.priceToCoordinate(bin.high), yLow = series.priceToCoordinate(bin.low);
+            if (yHigh === null || yLow === null || !Number.isFinite(yHigh) || !Number.isFinite(yLow)) return;
+            const barWidth = bin.volume / maxVolume * maxWidth;
+            const upWidth = bin.upVolume / maxVolume * maxWidth;
+            const y = Math.min(yHigh, yLow), height = Math.max(2, Math.abs(yLow - yHigh));
+            ctx.fillStyle = 'rgba(6,182,212,0.40)';
+            ctx.fillRect(canvas.width - barWidth, y, upWidth, height);
+            ctx.fillStyle = 'rgba(244,63,94,0.35)';
+            ctx.fillRect(canvas.width - barWidth + upWidth, y, barWidth - upWidth, height);
+        });
+    };
+    // Lightweight Charts settles autoscaling in its own animation frame.
+    // Draw after it, not inside its range-change event using stale coordinates.
+    const draw = () => {
+        if (disposed || frame) return;
+        frame = nextFrame(() => {
+            frame = nextFrame(() => { frame = 0; if (!disposed) render(); });
+        });
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(draw);
+    chart.subscribeCrosshairMove(draw);
+    draw.dispose = () => {
+        disposed = true; if (frame) cancelFrame(frame); frame = 0;
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(draw);
+        chart.unsubscribeCrosshairMove(draw);
+        removeLines(); canvas.remove();
+    };
+    draw();
+    return draw;
+}
+
 function scannerMomentumQualityPresentation(row = {}) {
     const source = row?.momentum_quality;
     if (!source || typeof source !== 'object' || source.schema_version !== 1 || source.timeframe !== '1D'
@@ -3346,6 +3497,7 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
     else if (has('trade_target_quality_invalid')) message = 'Zielaufteilung nicht freigegeben';
     else if (has('invalid_trade_geometry', 'invalid_trade_plan', 'estimated_trade_plan', 'native_trade_levels_missing',
         'no_structural_invalidation', 'plan_unavailable', 'causal_structure_missing', 'causal_structure_unavailable')) message = 'Handelsplan noch nicht bestätigt';
+    else if (has('trade_first_barrier_below_minimum_reward')) message = 'Zu wenig Platz bis zur ersten Kursbarriere';
     else if (has('trade_rr_below_threshold')) message = 'Zu wenig Platz bis zum Kursziel';
     else if (has('wait_for_trigger')) message = 'Einstiegsbestätigung fehlt';
     else if (has('wait_for_continuation')) message = 'Fortsetzung noch offen';
@@ -4447,12 +4599,12 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             // Diagonal Trendlines
             if (overlays.sr && chartData.trendlines) {
                 chartData.trendlines.forEach(tl => {
-                    if (tl.points && tl.points.length >= 2) {
+                    if (tl.status === 'active' && tl.scale === 'linear' && tl.points && tl.points.length >= 2) {
                         const color = tl.type === 'support' ? '#10b981' : '#ef4444';
                         const tlLine = chart.current.addLineSeries({
                             color, lineWidth: 2, lineStyle: LineStyle.Solid,
                             lastValueVisible: false, priceLineVisible: false,
-                            crosshairMarkerVisible: false,
+                            crosshairMarkerVisible: false, title: 'Trend',
                         });
                         tlLine.setData(tl.points.map(p => ({ time: p.time, value: p.price })));
                         overlaySeriesRef.current.push(tlLine);
@@ -4460,77 +4612,11 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
                 });
             }
 
-            // VRVP — V2.3: Volume Profile als Balken (horizontales Histogramm)
-            if (overlays.vrvp && chartData.vrvp) {
-                const vp = chartData.vrvp;
-                // POC, VAH, VAL als Preis-Linien beibehalten
-                const addVPLine = (price, title, color, style, width) => {
-                    if (price && price > 0) {
-                        candleSeries.current.createPriceLine({
-                            price, color, lineWidth: width || 1,
-                            lineStyle: style || LineStyle.Dashed,
-                            axisLabelVisible: true, title,
-                        });
-                    }
-                };
-                addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
-                addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
-                addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
-
-                // Balken als Canvas-Overlay zeichnen
-                if (vp.bins && vp.bins.length > 0 && chart.current) {
-                    const maxVol = Math.max(...vp.bins.map(b => b.volume));
-                    const maxBarWidth = chartContainer.current ? chartContainer.current.clientWidth * 0.15 : 80;
-                    const priceScale = chart.current.priceScale('right');
-
-                    // Canvas-Overlay erstellen
-                    const existingCanvas = chartContainer.current.querySelector('.vrvp-canvas');
-                    if (existingCanvas) existingCanvas.remove();
-                    const canvas = document.createElement('canvas');
-                    canvas.className = 'vrvp-canvas';
-                    canvas.style.position = 'absolute';
-                    canvas.style.top = '0';
-                    canvas.style.right = '48px';
-                    canvas.style.pointerEvents = 'none';
-                    canvas.style.zIndex = '5';
-                    canvas.width = Math.ceil(maxBarWidth + 10);
-                    canvas.height = chartContainer.current.clientHeight;
-                    chartContainer.current.style.position = 'relative';
-                    chartContainer.current.appendChild(canvas);
-
-                    const drawVRVP = () => {
-                        const ctx = canvas.getContext('2d');
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        const series = candleSeries.current;
-                        if (!series) return;
-
-                        vp.bins.forEach(bin => {
-                            const yMid = series.priceToCoordinate(bin.mid);
-                            const yHigh = series.priceToCoordinate(bin.high);
-                            const yLow = series.priceToCoordinate(bin.low);
-                            if (yMid === null || yHigh === null || yLow === null) return;
-
-                            const barH = Math.max(2, Math.abs(yLow - yHigh));
-                            const barW = Math.max(2, (bin.volume / maxVol) * maxBarWidth);
-                            const y = Math.min(yHigh, yLow);
-                            const isPOC = Math.abs(bin.mid - vp.poc) < (bin.high - bin.low);
-                            const isVA = bin.mid >= vp.val && bin.mid <= vp.vah;
-
-                            ctx.fillStyle = isPOC ? 'rgba(6, 182, 212, 0.45)' : isVA ? 'rgba(34, 211, 238, 0.25)' : 'rgba(100, 116, 139, 0.18)';
-                            ctx.fillRect(canvas.width - barW, y, barW, barH);
-                            // Rand
-                            ctx.strokeStyle = isPOC ? 'rgba(6, 182, 212, 0.7)' : isVA ? 'rgba(34, 211, 238, 0.4)' : 'rgba(100, 116, 139, 0.3)';
-                            ctx.lineWidth = 0.5;
-                            ctx.strokeRect(canvas.width - barW, y, barW, barH);
-                        });
-                    };
-
-                    drawVRVP();
-                    // Redraw on scroll/zoom — store refs for cleanup
-                    chart.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
-                    chart.current.subscribeCrosshairMove(drawVRVP);
-                    vrvpSubsRef.current = [drawVRVP];
-                }
+            // VRVP: recompute bins and POC/VAH/VAL from the actual visible closed bars.
+            if (overlays.vrvp && chartData.candles) {
+                const draw = mountVisibleVolumeProfile({chart: chart.current,
+                    series: candleSeries.current, container: chartContainer.current, chartData});
+                vrvpSubsRef.current = draw ? [draw] : [];
             }
 
             // Fibonacci levels — V3.0: Richtungsabhängig (SHORT=abwärts, LONG=aufwärts)
@@ -4707,6 +4793,7 @@ function DetailSidebar({ ticker, onClose, scannerData }) {
             if (vrvpSubsRef.current.length > 0 && chart.current) {
                 try {
                     vrvpSubsRef.current.forEach(fn => {
+                        if (fn.dispose) { fn.dispose(); return; }
                         chart.current.timeScale().unsubscribeVisibleTimeRangeChange(fn);
                         chart.current.unsubscribeCrosshairMove(fn);
                     });
@@ -13399,12 +13486,12 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             // Diagonal Trendlines
             if (overlays.sr && chartData.trendlines) {
                 chartData.trendlines.forEach(tl => {
-                    if (tl.points && tl.points.length >= 2) {
+                    if (tl.status === 'active' && tl.scale === 'linear' && tl.points && tl.points.length >= 2) {
                         const color = tl.type === 'support' ? '#10b981' : '#ef4444';
                         const tlLine = chartRef.current.addLineSeries({
                             color, lineWidth: 2, lineStyle: LineStyle.Solid,
                             lastValueVisible: false, priceLineVisible: false,
-                            crosshairMarkerVisible: false,
+                            crosshairMarkerVisible: false, title: 'Trend',
                         });
                         tlLine.setData(tl.points.map(p => ({ time: p.time, value: p.price })));
                         overlaySeriesRef.current.push(tlLine);
@@ -13412,63 +13499,11 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
                 });
             }
 
-            // VRVP
-            if (overlays.vrvp && chartData.vrvp) {
-                const vp = chartData.vrvp;
-                const addVPLine = (price, title, color, style, width) => {
-                    if (price && price > 0) {
-                        candleSeriesRef.current.createPriceLine({ price, color, lineWidth: width || 1, lineStyle: style || LineStyle.Dashed, axisLabelVisible: true, title });
-                    }
-                };
-                addVPLine(vp.poc, 'POC', '#06b6d4', LineStyle.Solid, 2);
-                addVPLine(vp.vah, 'VAH', '#0891b2', LineStyle.Dashed, 1);
-                addVPLine(vp.val, 'VAL', '#0891b2', LineStyle.Dashed, 1);
-
-                if (vp.bins && vp.bins.length > 0 && chartRef.current) {
-                    const maxVol = Math.max(...vp.bins.map(b => b.volume));
-                    const maxBarWidth = chartContainer.current ? chartContainer.current.clientWidth * 0.15 : 80;
-                    const existingCanvas = chartContainer.current.querySelector('.vrvp-canvas');
-                    if (existingCanvas) existingCanvas.remove();
-                    const canvas = document.createElement('canvas');
-                    canvas.className = 'vrvp-canvas';
-                    canvas.style.position = 'absolute';
-                    canvas.style.top = '0';
-                    canvas.style.right = '48px';
-                    canvas.style.pointerEvents = 'none';
-                    canvas.style.zIndex = '5';
-                    canvas.width = Math.ceil(maxBarWidth + 10);
-                    canvas.height = chartContainer.current.clientHeight;
-                    chartContainer.current.style.position = 'relative';
-                    chartContainer.current.appendChild(canvas);
-
-                    const drawVRVP = () => {
-                        const ctx = canvas.getContext('2d');
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        const series = candleSeriesRef.current;
-                        if (!series) return;
-                        vp.bins.forEach(bin => {
-                            const yMid = series.priceToCoordinate(bin.mid);
-                            const yHigh = series.priceToCoordinate(bin.high);
-                            const yLow = series.priceToCoordinate(bin.low);
-                            if (yMid === null || yHigh === null || yLow === null) return;
-                            const barH = Math.max(2, Math.abs(yLow - yHigh));
-                            const barW = Math.max(2, (bin.volume / maxVol) * maxBarWidth);
-                            const y = Math.min(yHigh, yLow);
-                            const isPOC = Math.abs(bin.mid - vp.poc) < (bin.high - bin.low);
-                            const isVA = bin.mid >= vp.val && bin.mid <= vp.vah;
-                            ctx.fillStyle = isPOC ? 'rgba(6, 182, 212, 0.45)' : isVA ? 'rgba(34, 211, 238, 0.25)' : 'rgba(100, 116, 139, 0.18)';
-                            ctx.fillRect(canvas.width - barW, y, barW, barH);
-                            ctx.strokeStyle = isPOC ? 'rgba(6, 182, 212, 0.7)' : isVA ? 'rgba(34, 211, 238, 0.4)' : 'rgba(100, 116, 139, 0.3)';
-                            ctx.lineWidth = 0.5;
-                            ctx.strokeRect(canvas.width - barW, y, barW, barH);
-                        });
-                    };
-                    drawVRVP();
-                    // Store refs for cleanup
-                    chartRef.current.timeScale().subscribeVisibleTimeRangeChange(drawVRVP);
-                    chartRef.current.subscribeCrosshairMove(drawVRVP);
-                    vrvpSubsRef.current = [drawVRVP];
-                }
+            // VRVP: recompute bins and POC/VAH/VAL from the actual visible closed bars.
+            if (overlays.vrvp && chartData.candles) {
+                const draw = mountVisibleVolumeProfile({chart: chartRef.current,
+                    series: candleSeriesRef.current, container: chartContainer.current, chartData});
+                vrvpSubsRef.current = draw ? [draw] : [];
             }
 
             // Fibonacci — V3.0: Richtungsabhängig
@@ -13599,6 +13634,7 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
             if (vrvpSubsRef.current.length > 0 && chartRef.current) {
                 try {
                     vrvpSubsRef.current.forEach(fn => {
+                        if (fn.dispose) { fn.dispose(); return; }
                         chartRef.current.timeScale().unsubscribeVisibleTimeRangeChange(fn);
                         chartRef.current.unsubscribeCrosshairMove(fn);
                     });

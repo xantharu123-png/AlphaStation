@@ -87,6 +87,7 @@ def test_biotech_full_scan_excludes_empty_symbol_without_losing_siblings(monkeyp
 @pytest.mark.parametrize("payload", [
     {"results": []},
     {"results": [], "cache_version": 1},
+    {"results": [], "cache_version": 17},
     {"results": [], "cache_version": api.STOCK_STRATEGY_CACHE_VERSION, "partial": True},
     {"results": [], "cache_version": api.STOCK_STRATEGY_CACHE_VERSION,
      "diagnostics": {"coverage": "incomplete"}},

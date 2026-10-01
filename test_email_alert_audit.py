@@ -1796,6 +1796,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
         ]
     }
 
+    api._stamp_fresh_crypto_profile_contract(payload, new_listing=True)
     api._send_new_listing_pipeline_alerts(payload)
 
     assert len(sent) == 1
@@ -1876,6 +1877,7 @@ def test_new_listing_batch_is_split_into_one_wire_and_intent_per_setup(monkeypat
         ],
     }
 
+    api._stamp_fresh_crypto_profile_contract(payload, new_listing=True)
     api._send_new_listing_pipeline_alerts(payload)
 
     assert len(sent) == 2
@@ -2422,6 +2424,7 @@ def _early_mover_row(**overrides):
             "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
         },
     }
+    api._stamp_fresh_crypto_profile_contract(row)
     row.update(overrides)
     return row
 

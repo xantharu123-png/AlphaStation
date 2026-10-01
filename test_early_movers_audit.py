@@ -363,6 +363,7 @@ def test_early_mover_one_vrvp_profile_upgrades_tp1_but_keeps_tp2_projection_hone
         ],
     }
 
+    api._stamp_fresh_crypto_profile_contract(vrvp)
     api._apply_early_mover_signal_state(row, {"ok": False, "reason": "no_fresh_5m_trigger", "vrvp": vrvp})
 
     assert row["tp1"] == 10.8
@@ -404,6 +405,7 @@ def test_early_mover_vrvp_marks_close_overhead_resistance_as_gate():
         ],
     }
 
+    api._stamp_fresh_crypto_profile_contract(vrvp)
     api._apply_early_mover_vrvp_targets(row, vrvp)
 
     assert row["breakout_level"] == api._round_crypto_price(0.2502)

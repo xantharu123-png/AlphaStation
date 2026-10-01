@@ -10,10 +10,12 @@ from modules.breakout_warnings import BREAKOUT_WITHOUT_RETEST_CODE as CODE
 def row(action="WAIT_FOR_RETEST"):
     plan = {"entry": 10., "stop_loss": 9., "tp1": 13., "tp2": 15.,
             "target_quality": "STRUCTURAL", "direction": "LONG"}
-    return {**plan, "Symbol": "POLICY", "Price": 10., "trade_action": action,
+    value = {**plan, "Symbol": "POLICY", "Price": 10., "trade_action": action,
             "trade_setup": dict(plan), "live_rr_ratio": 4., "distance_to_entry_r": 0.,
             "btc_context": {"btc_24h": 1., "btc_7d": 2., "tailwind": True},
             "risk_flags": [], "score": 95, "grade": "S"}
+    api._stamp_fresh_crypto_profile_contract(value)
+    return value
 
 
 def trigger(price, matched=None):
@@ -125,7 +127,8 @@ def quote_gate(monkeypatch, price):
 
 
 def candidate():
-    return {"symbol": "POLICY", "price": 10.2, "entry": 10., "stop": 9.,
+    return {**api._crypto_profile_cache_metadata(),
+            "symbol": "POLICY", "price": 10.2, "entry": 10., "stop": 9.,
             "tp1": 13., "tp2": 15., "action": "LONG_TRIGGER",
             "breakout_entry_policy": "near_original_entry",
             "breakout_policy_entry": 10., "breakout_policy_stop": 9.}

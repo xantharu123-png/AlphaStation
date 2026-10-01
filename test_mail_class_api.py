@@ -101,6 +101,7 @@ def _early_mover_row(**overrides):
             "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
         },
     }
+    api._stamp_fresh_crypto_profile_contract(row)
     row.update(overrides)
     return row
 

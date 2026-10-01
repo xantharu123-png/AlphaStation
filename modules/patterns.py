@@ -861,7 +861,9 @@ def detect_flag_pattern_multiday(poly_key, ticker, pattern_type="bull"):
 # payload contract; append a new version instead of silently renaming them.
 BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v5"
+# Recompute cached native VRVP plans after price-range input validation changed.
+# The 20 factors and strict 17-of-20 requirement remain unchanged.
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v6"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
