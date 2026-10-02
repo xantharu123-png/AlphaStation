@@ -74,7 +74,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # V3.4: Auth & Subscription System
 try:
@@ -45100,13 +45100,14 @@ _BACKTEST_PROGRESS_TTL_SECONDS = 2 * 3600
 
 
 class BacktestRequest(BaseModel):
-    ticker: str = "AAPL"
-    strategy: str = "sma_crossover"  # sma_crossover, rsi_mean_reversion, ema_crossover
-    months: int = 6
-    max_tickers: int = 50
-    min_price: float = 0
-    min_volume: int = 0
-    job_id: Optional[str] = None
+    ticker: str = Field(default="AAPL", max_length=32, pattern=r"^[A-Za-z0-9._:-]*$")
+    strategy: str = Field(default="sma_crossover", min_length=1, max_length=120)
+    months: int = Field(default=6, ge=1, le=24, strict=True)
+    max_tickers: int = Field(default=50, ge=5, le=500, strict=True)
+    min_price: float = Field(default=0.0, ge=0, allow_inf_nan=False, strict=True)
+    min_volume: int = Field(default=0, ge=0, strict=True)
+    job_id: Optional[str] = Field(default=None, min_length=1, max_length=80,
+                                  pattern=r"^[A-Za-z0-9_-]+$")
 
 
 ADVANCED_SCANNER_BACKTESTS = {
@@ -45158,6 +45159,121 @@ CRYPTO_BACKTESTS = {
         "note": "Daily-OHLC Backtest fuer parabolische Pumps mit bestaetigtem Crack; neue Coin-Microstructure ist nicht voll rekonstruierbar.",
     },
 }
+
+
+_BACKTEST_CACHE_VERSION = 2
+_BACKTEST_MODEL_VERSION = "deep_audit_20261002_v1"
+_BACKTEST_ACTIVE_JOBS = set()
+_BACKTEST_ACTIVE_REQUESTS = set()
+_BACKTEST_INDICATOR_IDS = {
+    "sma_crossover", "ema_crossover", "rsi_mean_reversion", "macd",
+    "bollinger_bands", "mean_reversion_sma", "turtle_breakout",
+}
+
+
+def _normalized_backtest_request(request: BacktestRequest) -> BacktestRequest:
+    """One execution/read identity; universe sentinels are never a stock ticker."""
+    selected = request.model_copy(deep=True)
+    selected.strategy = BACKTEST_STRATEGY_ALIASES.get(selected.strategy, selected.strategy)
+    if selected.strategy in ADVANCED_SCANNER_BACKTESTS or selected.strategy in CRYPTO_BACKTESTS:
+        selected.ticker = ""
+        if selected.strategy in ADVANCED_SCANNER_BACKTESTS:
+            # Omitted filters retain the profile defaults. An explicit numeric
+            # zero is a real caller choice, not an omitted/default sentinel.
+            meta = ADVANCED_SCANNER_BACKTESTS[selected.strategy]
+            if "min_price" not in request.model_fields_set:
+                selected.min_price = float(meta["default_min_price"])
+            if "min_volume" not in request.model_fields_set:
+                selected.min_volume = int(meta["default_min_volume"])
+    else:
+        selected.ticker = selected.ticker.upper()
+        if selected.strategy not in _BACKTEST_INDICATOR_IDS and selected.strategy not in BACKTEST_RULES:
+            raise HTTPException(status_code=400, detail={"code": "backtest_strategy_unknown"})
+        if not selected.ticker or selected.ticker == "UNIVERSE":
+            raise HTTPException(status_code=400, detail={"code": "backtest_ticker_required"})
+    if selected.strategy in CRYPTO_BACKTESTS and (selected.months > 12 or selected.max_tickers > 120):
+        raise HTTPException(status_code=422, detail={"code": "backtest_crypto_parameters_out_of_range"})
+    return selected
+
+
+def _backtest_request_identity(request: BacktestRequest) -> Dict[str, Any]:
+    identity = {key: getattr(request, key) for key in
+                ("ticker", "strategy", "months", "max_tickers", "min_price", "min_volume")}
+    identity["min_price"] = float(identity["min_price"])
+    return identity
+
+
+def _backtest_v2_cache_path(identity: Dict[str, Any], *, latest: bool = False) -> Path:
+    # Only a digest is used in the path. No ticker, strategy or caller path is
+    # interpolated into filenames, and v1 files remain completely untouched.
+    basis = ({key: identity[key] for key in ("ticker", "strategy")} if latest else identity)
+    encoded = json.dumps({"model": _BACKTEST_MODEL_VERSION, "request": basis},
+                         sort_keys=True, separators=(",", ":"), allow_nan=False)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    prefix = "backtest_v2_latest_" if latest else "backtest_v2_"
+    return Path(BACKTEST_CACHE).parent / f"{prefix}{digest}.json"
+
+
+def _store_backtest_result(identity: Dict[str, Any], result: Dict[str, Any]) -> None:
+    # Failed studies never replace the last successful report. Validate the
+    # entire payload before either atomic write, including non-finite numbers.
+    json.dumps(result, allow_nan=False, default=_serialize_json)
+    metadata = {"cache_version": _BACKTEST_CACHE_VERSION, "model_version": _BACKTEST_MODEL_VERSION,
+                "request": identity, "cached_at": result["cached_at"]}
+    save_cache_file(str(_backtest_v2_cache_path(identity)), result, metadata)
+    save_cache_file(str(_backtest_v2_cache_path(identity, latest=True)), result, metadata)
+
+
+def _fetch_api_backtest_daily_rows(ticker: str, months: int, cutoff: datetime) -> List[Dict[str, Any]]:
+    """Bounded, adjusted, fully paginated provider response; no invented rows."""
+    from urllib.parse import urlsplit
+    start = (cutoff - timedelta(days=months * 30 + 365)).date().isoformat()
+    end = cutoff.date().isoformat()
+    path_prefix = f"/v2/aggs/ticker/{ticker}/range/1/day/"
+    url = f"https://api.polygon.io{path_prefix}{start}/{end}"
+    params = {"apiKey": POLYGON_KEY, "limit": 50000, "sort": "desc", "adjusted": "true"}
+    seen_urls = set()
+    rows = []
+    started = time.monotonic()
+    for _page in range(30):
+        parts = urlsplit(url)
+        if (parts.scheme != "https" or parts.netloc != "api.polygon.io"
+                or not parts.path.startswith(path_prefix) or parts.fragment
+                or url in seen_urls or time.monotonic() - started > 120):
+            raise ValueError("backtest_provider_pagination_invalid")
+        seen_urls.add(url)
+        resp = rate_limited_get(url, params=params, timeout=20)
+        if resp.status_code != 200:
+            raise ValueError(f"backtest_provider_http_{int(resp.status_code)}")
+        body = resp.json()
+        if (not isinstance(body, dict) or body.get("status") not in {None, "OK", "DELAYED"}
+                or body.get("adjusted") is False or not isinstance(body.get("results", []), list)):
+            raise ValueError("backtest_provider_payload_invalid")
+        page_rows = body.get("results", [])
+        if any(not isinstance(row, dict) for row in page_rows):
+            raise ValueError("backtest_provider_rows_invalid")
+        rows.extend(page_rows)
+        if len(rows) > 50000:
+            raise ValueError("backtest_provider_result_limit")
+        next_url = body.get("next_url")
+        if not next_url:
+            # Identical overlaps between pages are okay; contradictory daily
+            # candles are not silently resolved by iteration order.
+            by_timestamp = {}
+            for row in rows:
+                timestamp = row.get("t")
+                if timestamp is None or isinstance(timestamp, (list, dict)):
+                    continue
+                previous = by_timestamp.get(timestamp)
+                if previous is not None and previous != row:
+                    raise ValueError("backtest_provider_conflicting_daily_rows")
+                by_timestamp[timestamp] = row
+            return rows
+        if not isinstance(next_url, str):
+            raise ValueError("backtest_provider_pagination_invalid")
+        url = next_url
+        params = {"apiKey": POLYGON_KEY, "adjusted": "true"}
+    raise ValueError("backtest_provider_pagination_limit")
 
 
 def _backtest_progress_key(job_id: Optional[str]) -> str:
@@ -45266,14 +45382,14 @@ def _bt_max_drawdown(trades: List[Dict[str, Any]]) -> float:
         peak = max(peak, equity)
         if peak > 0:
             max_dd = max(max_dd, ((peak - equity) / peak) * 100)
-    return round(max_dd, 2)
+    return max_dd
 
 
 def _bt_compounded_return(trades: List[Dict[str, Any]]) -> float:
     equity = 100.0
     for trade in sorted(trades or [], key=chronological_trade_key):
         equity *= 1 + (_bt_float(trade.get("pnl_pct")) / 100)
-    return round(equity - 100.0, 2)
+    return equity - 100.0
 
 
 def _bt_performance_snapshot(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -45288,8 +45404,8 @@ def _bt_performance_snapshot(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     count = len(ordered)
     return {
         "total_trades": count,
-        "win_rate": round(len(wins) / count * 100, 1) if count else 0,
-        "avg_pnl": round(sum(pcts) / count, 2) if count else 0,
+        "win_rate": len(wins) / count * 100 if count else 0,
+        "avg_pnl": sum(pcts) / count if count else 0,
         "total_return": _bt_compounded_return(ordered),
         "max_drawdown": _bt_max_drawdown(ordered),
         "profit_factor": pf["value"],
@@ -45328,6 +45444,7 @@ def _bt_out_of_sample_summary(
     split_date = dates[split_index]
     in_sample = []
     holdout = []
+    purged = 0
     for trade in ordered:
         trade_date = str(
             trade.get("entry_date")
@@ -45335,7 +45452,16 @@ def _bt_out_of_sample_summary(
             or trade.get("exit_date")
             or ""
         )
-        (in_sample if trade_date < split_date else holdout).append(trade)
+        if trade_date < split_date:
+            exit_date = str(trade.get("exit_date_upper") or trade.get("exit_date") or "")
+            # A training outcome must have been known before the holdout starts.
+            # Missing terminal times are not an assumed early closure.
+            if not exit_date or exit_date >= split_date:
+                purged += 1
+                continue
+            in_sample.append(trade)
+        else:
+            holdout.append(trade)
     if len(in_sample) < 20 or len(holdout) < 6:
         return {
             "status": "insufficient_split",
@@ -45343,6 +45469,7 @@ def _bt_out_of_sample_summary(
             "holdout_fraction": holdout_fraction,
             "in_sample_trades": len(in_sample),
             "holdout_trades": len(holdout),
+            "purged_in_sample_trades": purged,
         }
 
     in_stats = _bt_performance_snapshot(in_sample)
@@ -45360,6 +45487,7 @@ def _bt_out_of_sample_summary(
         "split_date": split_date,
         "holdout_fraction": holdout_fraction,
         "same_date_leakage": False,
+        "purged_in_sample_trades": purged,
         "in_sample": in_stats,
         "holdout": holdout_stats,
     }
@@ -45523,9 +45651,9 @@ def _bt_stats_by_grade(trades: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
             "total": len(grade_trades),
             "winners": len(wins),
             "losers": len(losses),
-            "win_rate": round(len(wins) / len(grade_trades) * 100, 1),
-            "avg_pnl": round(sum(_bt_float(t.get("pnl_pct")) for t in grade_trades) / len(grade_trades), 2),
-            "avg_r": round(sum(_bt_float(t.get("r_multiple")) for t in grade_trades) / len(grade_trades), 2),
+            "win_rate": len(wins) / len(grade_trades) * 100,
+            "avg_pnl": sum(_bt_float(t.get("pnl_pct")) for t in grade_trades) / len(grade_trades),
+            "avg_r": _bt_complete_r_average(grade_trades),
             "profit_factor": profit_factor["value"],
             "profit_factor_display": profit_factor["display"],
             "profit_factor_unbounded": profit_factor["unbounded"],
@@ -45546,7 +45674,7 @@ def _bt_optional_report_number(value: Any) -> Optional[float]:
 
 def _bt_complete_r_average(trades: List[Dict[str, Any]]) -> Optional[float]:
     values = [_bt_optional_report_number(trade.get("r_multiple")) for trade in trades]
-    return round(sum(values) / len(values), 2) if values and all(value is not None for value in values) else None
+    return sum(values) / len(values) if values and all(value is not None for value in values) else None
 
 
 def _bt_apply_report_data_quality(
@@ -45613,7 +45741,7 @@ def _bt_apply_report_data_quality(
         limitations.append("Abgeschlossene Ergebniszeilen ohne gueltigen PnL wurden nicht als Gewinn, Verlust oder Nulltrade bewertet.")
     if invalid_metadata:
         limitations.append("Datenqualitaetsangaben sind ungueltig; die Vollstaendigkeit der Auswertung ist nicht belegbar.")
-    if any(str(source.get("status") or "").upper() == "PARTIAL" for source in sources) and not limitations:
+    if any(str(source.get("status") or "").upper() in {"PARTIAL", "UNAVAILABLE"} for source in sources) and not limitations:
         limitations.append("Die Datenquelle meldet eine unvollstaendige Auswertung.")
     partial = bool(limitations)
     quality.update({
@@ -45633,8 +45761,8 @@ def _bt_apply_report_data_quality(
     result["avg_r"] = _bt_complete_r_average(decided)
     if "avg_r_upper" in result:
         complete_upper = bool(upper_rs) and not missing_upper_r
-        result["avg_r_upper"] = round(sum(upper_rs) / len(upper_rs), 2) if complete_upper else None
-        result["total_r_upper"] = round(sum(upper_rs), 2) if complete_upper else None
+        result["avg_r_upper"] = sum(upper_rs) / len(upper_rs) if complete_upper else None
+        result["total_r_upper"] = sum(upper_rs) if complete_upper else None
     if result.get("stats_by_grade"):
         result["stats_by_grade"] = {grade: dict(stats) for grade, stats in result["stats_by_grade"].items()}
         for grade, stats in result["stats_by_grade"].items():
@@ -45662,13 +45790,13 @@ def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, cry
         rows.append({
             "ticker": trade.get("ticker") or trade.get("symbol") or "",
             "entry_date": trade.get("entry_date") or trade.get("signal_date") or "",
-            "entry_price": _bt_round_price(entry_price, crypto),
+            "entry_price": _bt_optional_report_number(entry_price),
             "exit_date": trade.get("exit_date") or "",
-            "exit_price": _bt_round_price(exit_price, crypto),
+            "exit_price": _bt_optional_report_number(exit_price),
             "pnl_pct": _bt_optional_report_number(trade.get("pnl_pct")),
             "r_multiple": _bt_optional_report_number(trade.get("r_multiple")),
             "exit_date_upper": trade.get("exit_date_upper") or trade.get("exit_date") or "",
-            "exit_price_upper": _bt_round_price(trade.get("exit_price_upper", exit_price), crypto),
+            "exit_price_upper": _bt_optional_report_number(trade.get("exit_price_upper", exit_price)),
             "pnl_pct_upper": _bt_optional_report_number(trade.get("pnl_pct_upper", trade.get("pnl_pct"))),
             "r_multiple_upper": _bt_optional_report_number(trade.get("r_multiple_upper", trade.get("r_multiple"))),
             "type": str(trade.get("direction") or direction or "LONG").upper(),
@@ -45682,10 +45810,6 @@ def _normalize_backtest_trades(trades: List[Dict[str, Any]], direction: str, cry
             "ambiguity_reason": trade.get("ambiguity_reason"),
             "ohlc_path_policy": trade.get("ohlc_path_policy"),
         })
-    for row in rows:
-        for key in ("pnl_pct", "r_multiple", "pnl_pct_upper", "r_multiple_upper"):
-            if row[key] is not None:
-                row[key] = round(row[key], 2)
     return rows
 
 
@@ -45737,9 +45861,9 @@ def _build_backtest_result(
     gross_loss = abs(sum(losses))
     total_trades = len(decided)
     normalized_trades = _normalize_backtest_trades(decided, direction, crypto)
-    win_rate = round(len(wins) / total_trades * 100, 1) if total_trades else 0
-    avg_pnl = round(sum(pcts) / total_trades, 2) if total_trades else 0
-    sum_pnl = round(sum(pcts), 2) if total_trades else 0
+    win_rate = len(wins) / total_trades * 100 if total_trades else 0
+    avg_pnl = sum(pcts) / total_trades if total_trades else 0
+    sum_pnl = sum(pcts) if total_trades else 0
     total_return = _bt_compounded_return(decided)
     max_drawdown = _bt_max_drawdown(decided)
     profit_factor = profit_factor_metrics(gross_profit, gross_loss)
@@ -45775,11 +45899,16 @@ def _build_backtest_result(
         "sum_pnl": sum_pnl,
         "total_return": total_return,
         "compounded_return": total_return,
+        "trade_sequence_compounded_return_pct": total_return,
+        "trade_sequence_max_drawdown_pct": max_drawdown,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
+        "account_performance_available": False,
+        "capital_allocation_model": None,
         "max_drawdown": max_drawdown,
-        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
-        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
-        "best_trade": round(max(pcts), 2) if pcts else 0,
-        "worst_trade": round(min(pcts), 2) if pcts else 0,
+        "avg_win": sum(wins) / len(wins) if wins else 0,
+        "avg_loss": sum(losses) / len(losses) if losses else 0,
+        "best_trade": max(pcts) if pcts else 0,
+        "worst_trade": min(pcts) if pcts else 0,
         "profit_factor": profit_factor["value"],
         "profit_factor_display": profit_factor["display"],
         "profit_factor_unbounded": profit_factor["unbounded"],
@@ -45838,8 +45967,8 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
     strategy = request.strategy
     meta = ADVANCED_SCANNER_BACKTESTS[strategy]
     max_tickers = max(5, min(int(request.max_tickers or meta["default_max_tickers"]), 500))
-    min_price = max(0.0, float(request.min_price or meta["default_min_price"]))
-    min_volume = max(0, int(request.min_volume or meta["default_min_volume"]))
+    min_price = float(request.min_price)
+    min_volume = int(request.min_volume)
     months = max(1, min(int(request.months or 6), 24))
     job_id = _backtest_progress_key(request.job_id)
 
@@ -45875,14 +46004,24 @@ def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
 
 
 def _normalize_crypto_bars(raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from modules.momentum_daily_backtest import daily_bar_is_explicitly_incomplete
     by_date: Dict[str, Dict[str, Any]] = {}
     for bar in raw_bars or []:
-        o = _bt_float(bar.get("open", bar.get("o")))
-        h = _bt_float(bar.get("high", bar.get("h")))
-        l = _bt_float(bar.get("low", bar.get("l")))
-        c = _bt_float(bar.get("close", bar.get("c")))
-        if min(o, h, l, c) <= 0:
-            continue
+        if not isinstance(bar, dict):
+            return []
+        if daily_bar_is_explicitly_incomplete(bar):
+            return []
+        raw_values = [bar.get(key, bar.get(short)) for key, short in
+                      (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"), ("volume", "v"))]
+        if any(value is None or isinstance(value, bool) for value in raw_values):
+            return []
+        try:
+            o, h, l, c, volume = map(float, raw_values)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        if (not all(math.isfinite(value) for value in (o, h, l, c, volume))
+                or min(o, h, l, c) <= 0 or volume < 0):
+            return []
         raw_date = bar.get("date") or bar.get("time")
         date_key = str(raw_date)[:10] if raw_date else ""
         if not date_key:
@@ -45906,7 +46045,7 @@ def _normalize_crypto_bars(raw_bars: List[Dict[str, Any]]) -> List[Dict[str, Any
             "high": h,
             "low": l,
             "close": c,
-            "volume": _bt_float(bar.get("volume", bar.get("v"))),
+            "volume": volume,
         }
         # Multiple rows for one UTC date mean this is not a trustworthy daily
         # series (usually mixed intraday candles). Reject instead of silently
@@ -45942,15 +46081,17 @@ def _validated_exchange_daily_crypto_bars(
         except Exception:
             raw_bars = []
         bars = _normalize_crypto_bars(raw_bars)
-        if bars and bars[-1]["date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d"):
-            bars = bars[:-1]
+        today_date = datetime.now(timezone.utc).date()
+        today = today_date.isoformat()
+        bars = [bar for bar in bars if bar["date"] < today]
         if len(bars) < 45:
+            continue
+        if bars[-1]["date"] != (today_date - timedelta(days=1)).isoformat():
             continue
 
         ordinals = [datetime.strptime(bar["date"], "%Y-%m-%d").date().toordinal() for bar in bars]
         gaps = [right - left for left, right in zip(ordinals, ordinals[1:])]
-        median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 999
-        if median_gap != 1 or any(gap <= 0 for gap in gaps):
+        if not gaps or any(gap != 1 for gap in gaps):
             continue
 
         latest_close = _bt_float(bars[-1].get("close"), 0.0)
@@ -46087,7 +46228,9 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
     job_id = _backtest_progress_key(request.job_id)
     months = max(1, min(int(request.months or 3), 12))
     max_tickers = max(5, min(int(request.max_tickers or meta["default_max_tickers"]), 120))
-    days = min(365, max(90, months * 30 + 45))
+    days = max(90, months * 30 + 45)
+    cutoff = datetime.now(timezone.utc)
+    study_start = (cutoff - timedelta(days=months * 30)).date().isoformat()
     _backtest_progress_update(job_id, "running", 0.03, "Crypto-Universum wird geladen...", strategy=strategy)
     universe = _crypto_backtest_universe(max_tickers)
     _backtest_progress_update(
@@ -46101,6 +46244,9 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
     )
     trades: List[Dict[str, Any]] = []
     total_signals = 0
+    source_quality = {"status": "COMPLETE", "unavailable_tickers": [],
+                      "insufficient_warmup_tickers": [], "missing_expected_sessions": [],
+                      "requested_series": len(universe), "validated_series": 0}
 
     total_universe = max(1, len(universe))
     for coin_idx, coin in enumerate(universe, start=1):
@@ -46118,7 +46264,18 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
         )
         bars, bar_exchange = _validated_exchange_daily_crypto_bars(coin, days=days)
         if len(bars) < 45:
+            source_quality["unavailable_tickers"].append(symbol or coin_id)
+            source_quality["status"] = "PARTIAL"
             continue
+        source_quality["validated_series"] += 1
+        warmup_start = (datetime.fromisoformat(study_start).date() - timedelta(days=30)).isoformat()
+        if bars[0]["date"] > warmup_start:
+            source_quality["insufficient_warmup_tickers"].append(symbol or coin_id)
+            source_quality["status"] = "PARTIAL"
+        final_day = (cutoff.date() - timedelta(days=1)).isoformat()
+        if bars[-1]["date"] != final_day:
+            source_quality["missing_expected_sessions"].append(final_day)
+            source_quality["status"] = "PARTIAL"
         date_to_index = {
             str(bar.get("date") or ""): index
             for index, bar in enumerate(bars)
@@ -46129,6 +46286,8 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
         # future bars are therefore required; using confirmation-bar data for
         # an entry at that same bar's open would be look-ahead bias.
         for idx in range(30, len(bars) - 2):
+            if str(bars[idx].get("date") or "") < study_start:
+                continue
             if idx <= cooldown_until:
                 continue
             close = bars[idx]["close"]
@@ -46264,7 +46423,7 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
         )
 
     _backtest_progress_update(job_id, "running", 0.96, "Crypto-Kennzahlen werden berechnet...", strategy=strategy, signals_found=total_signals)
-    return _build_backtest_result(
+    result = _build_backtest_result(
         strategy=strategy,
         label=meta["name"],
         direction=meta["direction"],
@@ -46275,7 +46434,19 @@ def _run_crypto_backtest(request: BacktestRequest) -> Dict[str, Any]:
         n_tickers=len(universe),
         note=meta["note"],
         crypto=True,
+        data_quality=source_quality if universe else {"status": "UNAVAILABLE", "unavailable_tickers": []},
+        methodology_warnings=["current_crypto_universe_survivorship_bias",
+                              "perpetual_funding_not_modelled", "crypto_daily_proxy_not_intraday_scanner"],
     )
+    result["model_provenance"] = {
+        "data_cutoff_at": cutoff.isoformat(), "requested_period_start": study_start,
+        "requested_period_end": cutoff.date().isoformat(), "warmup_not_in_test_period": True,
+        "universe_source": "current_coingecko_market_cap_and_volume", "point_in_time_universe": False,
+        "input_timeframe": "1D", "instrument_basis": "perpetual_usdt", "funding_costs_modelled": False,
+    }
+    if not universe or not source_quality["validated_series"]:
+        result["error"] = "backtest_crypto_history_unavailable"
+    return result
 
 
 def _calc_ema_series(data, period):
@@ -46342,10 +46513,24 @@ def _calc_wilder_rsi_series(data, period=14):
     return result
 
 
+def _backtest_next_us_session(day):
+    try:
+        cursor = datetime.fromisoformat(str(day)[:10]).date()
+    except (TypeError, ValueError):
+        return None
+    for _ in range(15):
+        cursor += timedelta(days=1)
+        if stock_swing.session_close(cursor.isoformat()) is not None:
+            return cursor.isoformat()
+    return None
+
+
 def _indicator_entry_on_next_open(signal_index, dates, opens, direction="long"):
     """Fill a close-confirmed signal at the next tradable session open."""
     fill_index = int(signal_index) + 1
     if fill_index >= len(opens) or fill_index >= len(dates):
+        return None
+    if str(dates[fill_index]) != _backtest_next_us_session(dates[signal_index]):
         return None
     fill_price = float(opens[fill_index])
     if not math.isfinite(fill_price) or fill_price <= 0:
@@ -46365,6 +46550,23 @@ def _indicator_exit_on_next_open(position, signal_index, dates, opens):
     """Exit an open indicator trade on the session after its close signal."""
     fill_index = int(signal_index) + 1
     if fill_index >= len(opens) or fill_index >= len(dates):
+        return None
+    if position.get("exit_path_unresolved"):
+        return None
+    expected = _backtest_next_us_session(dates[signal_index])
+    missing = []
+    if str(dates[fill_index]) != expected:
+        if expected:
+            missing.append(expected)
+    cursor = _backtest_next_us_session(position.get("entry_date"))
+    observed_dates = set(map(str, dates))
+    while cursor and cursor < str(dates[fill_index]):
+        if cursor not in observed_dates:
+            missing.append(cursor)
+        cursor = _backtest_next_us_session(cursor)
+    if missing:
+        position.update({"exit_path_unresolved": True, "evaluation_status": "INCOMPLETE_DAILY_BAR",
+                         "missing_expected_sessions": sorted(set(missing))})
         return None
     exit_price = float(opens[fill_index])
     if not math.isfinite(exit_price) or exit_price <= 0:
@@ -46392,7 +46594,7 @@ def _indicator_unresolved_trade(position, dates):
     direction = str(position.get("dir") or "long").upper()
     normalized = {
         "entry_date": position.get("entry_date"),
-        "entry_price": round(float(position.get("entry_price") or 0.0), 6),
+        "entry_price": _bt_optional_report_number(position.get("entry_price")),
         "entry_signal_date": position.get("signal_date"),
         "exit_date": None,
         "exit_price": None,
@@ -46400,7 +46602,9 @@ def _indicator_unresolved_trade(position, dates):
         "r_multiple": None,
         "type": f"{direction} (OPEN)",
         "outcome": "UNRESOLVED",
-        "exit_reason": "END_OF_DATA",
+        "exit_reason": "MISSING_EXPECTED_SESSION" if position.get("exit_path_unresolved") else "END_OF_DATA",
+        "evaluation_status": position.get("evaluation_status"),
+        "missing_expected_sessions": list(position.get("missing_expected_sessions") or []),
         "last_data_date": dates[-1] if dates else None,
         "fill_model": position.get("fill_model") or "next_session_open_after_close_signal",
     }
@@ -46453,13 +46657,13 @@ def _backtest_stats(trades, ticker, strategy, months):
         return _bt_apply_report_data_quality(result, input_trades, trades, source_quality)
     wins = [t for t in trades if t["pnl_pct"] > 0]
     losses_list = [t for t in trades if t["pnl_pct"] <= 0]
-    win_rate = round(len(wins) / total_trades * 100, 1)
-    avg_pnl = round(sum(t["pnl_pct"] for t in trades) / total_trades, 2)
-    total_return = round(sum(t["pnl_pct"] for t in trades), 2)
-    avg_win = round(sum(t["pnl_pct"] for t in wins) / len(wins), 2) if wins else 0
-    avg_loss = round(sum(t["pnl_pct"] for t in losses_list) / len(losses_list), 2) if losses_list else 0
-    best_trade = round(max(t["pnl_pct"] for t in trades), 2)
-    worst_trade = round(min(t["pnl_pct"] for t in trades), 2)
+    win_rate = len(wins) / total_trades * 100
+    avg_pnl = sum(t["pnl_pct"] for t in trades) / total_trades
+    total_return = sum(t["pnl_pct"] for t in trades)
+    avg_win = sum(t["pnl_pct"] for t in wins) / len(wins) if wins else 0
+    avg_loss = sum(t["pnl_pct"] for t in losses_list) / len(losses_list) if losses_list else 0
+    best_trade = max(t["pnl_pct"] for t in trades)
+    worst_trade = min(t["pnl_pct"] for t in trades)
     gross_profit = sum(t["pnl_pct"] for t in wins)
     gross_loss = abs(sum(t["pnl_pct"] for t in losses_list))
     profit_factor = profit_factor_metrics(gross_profit, gross_loss)
@@ -46475,7 +46679,7 @@ def _backtest_stats(trades, ticker, strategy, months):
         dd_pct = ((peak - equity) / peak) * 100 if peak > 0 else 0
         if dd_pct > max_dd:
             max_dd = dd_pct
-    rounded_max_dd = round(max_dd, 2)
+    rounded_max_dd = max_dd
     out_of_sample = _bt_out_of_sample_summary(trades)
     verdict = _bt_apply_oos_verdict(
         _bt_backtest_verdict(
@@ -46493,6 +46697,12 @@ def _backtest_stats(trades, ticker, strategy, months):
         "ticker": ticker, "strategy": strategy, "months": months,
         "total_trades": total_trades, "win_rate": win_rate, "avg_pnl": avg_pnl,
         "total_return": total_return, "max_drawdown": rounded_max_dd,
+        "sum_pnl": total_return,
+        "trade_sequence_compounded_return_pct": _bt_compounded_return(trades),
+        "trade_sequence_max_drawdown_pct": rounded_max_dd,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
+        "account_performance_available": False,
+        "capital_allocation_model": None,
         "avg_win": avg_win, "avg_loss": avg_loss, "best_trade": best_trade,
         "worst_trade": worst_trade,
         "profit_factor": profit_factor["value"],
@@ -46525,9 +46735,11 @@ def _make_trade(entry_date, entry_price, exit_date, exit_price, direction="long"
         pnl_raw = ((exit_price - entry_price) / entry_price) * 100
     pnl = pnl_raw - (2 * FEE_PCT)  # Entry + Exit Fee abziehen
     return {
-        "entry_date": entry_date, "entry_price": round(entry_price, 2),
-        "exit_date": exit_date, "exit_price": round(exit_price, 2),
-        "pnl_pct": round(pnl, 2), "pnl_raw": round(pnl_raw, 2), "type": direction.upper(),
+        "entry_date": entry_date, "entry_price": entry_price,
+        "exit_date": exit_date, "exit_price": exit_price,
+        "pnl_pct": pnl, "pnl_raw": pnl_raw, "type": direction.upper(),
+        "roundtrip_fee_pct": 2 * FEE_PCT,
+        "cost_policy": "fixed_0.1pct_per_side_not_broker_fills",
     }
 
 
@@ -46547,13 +46759,8 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         return result
 
     try:
-        # Fetch daily bars from Polygon
-        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
-        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": months * 22 + 60, "sort": "desc"})
-        if resp.status_code != 200:
-            return described({"error": f"Keine Daten fuer {ticker}"})
-        raw_bars = resp.json().get("results", [])
         cutoff = datetime.now(timezone.utc)
+        raw_bars = _fetch_api_backtest_daily_rows(ticker, months, cutoff)
         adapted = []
         invalid_ohlcv_bars = 0
         for raw in raw_bars:
@@ -46588,6 +46795,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 adapted.append(bar)
         bars = normalize_completed_bars(adapted, timeframe="1D", as_of=cutoff)
         input_provenance.update({"data_cutoff_at": cutoff.isoformat(), "completed_daily_bars_only": True,
+                                 "source": "polygon_adjusted_daily_aggregates", "adjusted": True,
                                  "input_bars": len(raw_bars), "completed_bars": len(bars),
                                  "excluded_invalid_ohlcv_bars": invalid_ohlcv_bars,
                                  "excluded_open_future_invalid_or_duplicate_bars": len(raw_bars) - len(bars)})
@@ -46600,8 +46808,41 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         closes = [b.close for b in bars]
         volumes = [b.volume for b in bars]
         dates = [b.opened_at.date().isoformat() for b in bars]
-
-        trades = []
+        study_start = (cutoff - timedelta(days=months * 30)).date().isoformat()
+        study_start_index = next((index for index, day in enumerate(dates) if day >= study_start), len(dates))
+        input_provenance.update({"requested_period_start": study_start,
+                                 "requested_period_end": cutoff.date().isoformat(),
+                                 "effective_first_session": dates[study_start_index] if study_start_index < len(dates) else None,
+                                 "effective_last_session": dates[-1],
+                                 "study_session_count": len(dates) - study_start_index,
+                                 "warmup_not_in_test_period": True,
+                                 "initial_position_state": "flat_at_requested_period_start"})
+        if study_start_index == len(dates):
+            return described({"error": "backtest_requested_period_unavailable", "ticker": ticker, "strategy": strategy})
+        present_dates = set(dates)
+        expected_dates = []
+        cursor = datetime.fromisoformat(study_start).date()
+        while cursor <= cutoff.date():
+            close_at = stock_swing.session_close(cursor.isoformat())
+            if close_at is not None and close_at <= cutoff:
+                expected_dates.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+        missing_sessions = [day for day in expected_dates if day not in present_dates]
+        minimum_warmup = {"sma_crossover": 50, "ema_crossover": 21, "macd": 35,
+                          "rsi_mean_reversion": 14, "bollinger_bands": 20,
+                          "mean_reversion_sma": 20, "turtle_breakout": 55}.get(strategy, 20)
+        insufficient_warmup = study_start_index < minimum_warmup
+        source_quality = {"status": "PARTIAL" if (missing_sessions or invalid_ohlcv_bars or insufficient_warmup) else "COMPLETE",
+                          "missing_expected_sessions": missing_sessions,
+                          "excluded_invalid_bars": invalid_ohlcv_bars,
+                          "insufficient_warmup_tickers": [ticker] if insufficient_warmup else [],
+                          "requested_start": study_start, "requested_end": cutoff.date().isoformat(),
+                          "observed_study_sessions": len(dates) - study_start_index,
+                          "expected_study_sessions": len(expected_dates),
+                          "source": "polygon_adjusted_daily_aggregates", "adjusted": True}
+        class StudyTrades(list):
+            data_quality = source_quality
+        trades = StudyTrades()
         position = None
 
         # ══════════════════════════════════════════════════════════
@@ -46609,7 +46850,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
         # ══════════════════════════════════════════════════════════
 
         if strategy == "sma_crossover":
-            for i in range(50, len(closes)):
+            for i in range(max(50, study_start_index), len(closes)):
                 sma20 = sum(closes[i - 19:i + 1]) / 20
                 sma50 = sum(closes[i - 49:i + 1]) / 50
                 prev_sma20 = sum(closes[i - 20:i]) / 20
@@ -46626,7 +46867,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
         elif strategy == "rsi_mean_reversion":
             rsi_values = _calc_wilder_rsi_series(closes, 14)
-            for i in range(14, len(closes)):
+            for i in range(max(14, study_start_index), len(closes)):
                 rsi = rsi_values[i]
                 if rsi is None:
                     continue
@@ -46644,7 +46885,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             if len(closes) > 21:
                 ema9 = _calc_aligned_ema_series(closes, 9)
                 ema21 = _calc_aligned_ema_series(closes, 21)
-                for bar_idx in range(21, len(closes)):
+                for bar_idx in range(max(21, study_start_index), len(closes)):
                     if any(value is None for value in (
                         ema9[bar_idx], ema21[bar_idx],
                         ema9[bar_idx - 1], ema21[bar_idx - 1],
@@ -46674,7 +46915,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
                 for offset, value in enumerate(compact_signal):
                     signal_line[25 + offset] = value
                 if len(compact_macd) > 9:
-                    for bar_idx in range(34, len(closes)):
+                    for bar_idx in range(max(34, study_start_index), len(closes)):
                         if any(value is None for value in (
                             macd_line[bar_idx], signal_line[bar_idx],
                             macd_line[bar_idx - 1], signal_line[bar_idx - 1],
@@ -46692,7 +46933,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
         elif strategy == "bollinger_bands":
             period = 20
-            for i in range(period, len(closes)):
+            for i in range(max(period, study_start_index), len(closes)):
                 window = closes[i-period:i]
                 sma = sum(window) / period
                 std = (sum((x - sma)**2 for x in window) / period) ** 0.5
@@ -46729,7 +46970,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
         elif strategy == "mean_reversion_sma":
             # Buy when price drops >5% below SMA50, sell when back above SMA50
-            for i in range(50, len(closes)):
+            for i in range(max(50, study_start_index), len(closes)):
                 sma50 = sum(closes[i-50:i]) / 50
                 pct_from_sma = ((closes[i] - sma50) / sma50) * 100
                 if position is None:
@@ -46782,7 +47023,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             # Track previous breakout outcome for System 1 filter
             last_breakout_profitable = False
 
-            for i in range(donchian_entry + 1, len(closes)):
+            for i in range(max(donchian_entry + 1, study_start_index), len(closes)):
                 # Donchian Channel High (20-Tage) — ohne aktuellen Tag
                 dc_high = max(highs[i - donchian_entry:i])
                 # Donchian Channel Low (10-Tage) für Exit
@@ -46909,7 +47150,7 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
             }
             last_exit_index = -1
 
-            for signal_index in range(1, len(canonical_bars)):
+            for signal_index in range(max(1, study_start_index), len(canonical_bars)):
                 if signal_index <= last_exit_index:
                     continue
                 if canonical_bars[signal_index]["close"] < min_price:
@@ -46962,14 +47203,26 @@ def _run_backtest(ticker: str, strategy: str, months: int) -> Dict:
 
     except Exception as e:
         print(f"[Backtest] calculation failed: {_sanitized_exception_text(e)}")
-        return described({"error": "backtest_calculation_failed", "ticker": ticker, "strategy": strategy})
+        code = str(e) if str(e).startswith("backtest_provider_") else "backtest_calculation_failed"
+        return described({"error": code, "ticker": ticker, "strategy": strategy})
 
 
 @app.post("/api/run-backtest")
 def run_backtest(request: BacktestRequest):
     """Run a backtest for a ticker with given strategy."""
-    job_id = _backtest_progress_key(request.job_id)
+    request = _normalized_backtest_request(request)
+    identity = _backtest_request_identity(request)
+    request_key = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    job_id = request.job_id or f"bt_{uuid.uuid4().hex}"
     request.job_id = job_id
+    with _BACKTEST_PROGRESS_LOCK:
+        if job_id in _BACKTEST_ACTIVE_JOBS:
+            raise HTTPException(status_code=409, detail={"code": "backtest_job_already_running"})
+        if request_key in _BACKTEST_ACTIVE_REQUESTS:
+            raise HTTPException(status_code=409, detail={"code": "backtest_request_already_running"})
+        _BACKTEST_ACTIVE_JOBS.add(job_id)
+        _BACKTEST_ACTIVE_REQUESTS.add(request_key)
+        BACKTEST_PROGRESS.pop(job_id, None)
     _backtest_progress_update(job_id, "running", 0.01, "Backtest gestartet...", strategy=request.strategy)
 
     try:
@@ -46985,6 +47238,7 @@ def run_backtest(request: BacktestRequest):
             _backtest_progress_update(job_id, "running", 0.15, f"Daten fuer {request.ticker.upper()} werden geladen...", strategy=request.strategy)
             result = _run_backtest(request.ticker.upper(), request.strategy, request.months)
             _backtest_progress_update(job_id, "running", 0.9, "Einzel-Ticker Kennzahlen werden berechnet...", strategy=request.strategy)
+        return _complete_backtest_request(request, result, identity, job_id)
     except Exception as exc:
         print(f"[Backtest] request failed: {_sanitized_exception_text(exc)}")
         _backtest_progress_update(
@@ -46996,24 +47250,43 @@ def run_backtest(request: BacktestRequest):
             error="backtest_failed",
         )
         raise
+    finally:
+        with _BACKTEST_PROGRESS_LOCK:
+            _BACKTEST_ACTIVE_JOBS.discard(job_id)
+            _BACKTEST_ACTIVE_REQUESTS.discard(request_key)
 
+
+def _complete_backtest_request(request, result, identity, job_id):
     # All historical engines, including empty/error results, disclose that
     # their verdict is not an automatic live or paper-trading release.
     from modules.backtest_methodology import attach_backtest_methodology
     _rule_name = BACKTEST_STRATEGY_ALIASES.get(request.strategy, request.strategy)
     result = attach_backtest_methodology(result, request.strategy, BACKTEST_RULES.get(_rule_name))
+    if not result.get("error"):
+        if (not isinstance(result.get("trades", []), list)
+                or type(result.get("total_trades")) is not int or result["total_trades"] < 0):
+            result["error"] = "backtest_result_invalid"
+        result.setdefault("trades", [])
+    result.update({"job_id": job_id, "request": identity,
+                   "cache_identity_version": _BACKTEST_CACHE_VERSION,
+                   "cached_at": datetime.now(timezone.utc).isoformat() if not result.get("error") else None})
+    if not result.get("error"):
+        result.update({"trades_total": result["total_trades"], "trades_returned": len(result["trades"]),
+                       "trades_truncated": result["total_trades"] > len(result["trades"]),
+                       "open_trades_total": int(result.get("unresolved") or 0),
+                       "open_trades_returned": len(result.get("open_trades") or []),
+                       "open_trades_truncated": int(result.get("unresolved") or 0) > len(result.get("open_trades") or [])})
 
-    # Cache result
-    try:
-        safe_ticker = re.sub(r"[^A-Za-z0-9_-]", "_", str(request.ticker or "UNIVERSE").upper()) or "UNIVERSE"
-        safe_strategy = re.sub(r"[^A-Za-z0-9_-]", "_", str(request.strategy or "unknown"))
-        cache_key = f"/tmp/backtest_{safe_ticker}_{safe_strategy}.json"
-        with open(cache_key, "w") as f:
-            json.dump({"cached_at": datetime.now().isoformat(), "results": result}, f, default=_serialize_json)
-    except Exception as e:
-        print(f"[Warning] {e}")
+    if not result.get("error"):
+        try:
+            _store_backtest_result(identity, result)
+            result["cache_saved"] = True
+        except Exception as exc:
+            result["cache_saved"] = False
+            result["cached_at"] = None
+            result["cache_warning"] = "backtest_result_not_saved"
+            print(f"[Backtest] result persistence failed: {_sanitized_exception_text(exc)}")
 
-    result["job_id"] = job_id
     if result.get("error"):
         _backtest_progress_update(job_id, "error", 1.0, str(result.get("error")), strategy=request.strategy, error=result.get("error"))
     else:
@@ -47057,6 +47330,9 @@ def list_backtest_strategies():
             "default_max_tickers": meta.get("default_max_tickers"),
             "default_min_price": meta.get("default_min_price"),
             "default_min_volume": meta.get("default_min_volume"),
+            "available": HAS_ADVANCED_BACKTESTS,
+            "max_months": 24,
+            "max_tickers_limit": 500,
             "note": meta.get("note", ""),
         }
         for sid, meta in ADVANCED_SCANNER_BACKTESTS.items()
@@ -47069,6 +47345,9 @@ def list_backtest_strategies():
             "direction": meta["direction"],
             "requires_ticker": False,
             "default_max_tickers": meta.get("default_max_tickers"),
+            "available": HAS_NEW_LISTING_SCANNER,
+            "max_months": 12,
+            "max_tickers_limit": 120,
             "note": meta.get("note", ""),
         }
         for sid, meta in CRYPTO_BACKTESTS.items()
@@ -47093,21 +47372,62 @@ def list_backtest_strategies():
 
 
 @app.get("/api/backtest-results")
-def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover")):
-    """Get cached backtest results."""
-    safe_ticker = re.sub(r"[^A-Za-z0-9_-]", "_", str(ticker or "UNIVERSE").upper()) or "UNIVERSE"
-    safe_strategy = re.sub(r"[^A-Za-z0-9_-]", "_", str(strategy or "unknown"))
-    cache_key = f"/tmp/backtest_{safe_ticker}_{safe_strategy}.json"
-    if Path(cache_key).exists():
+def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma_crossover"),
+                         months: Optional[int] = Query(None), max_tickers: Optional[int] = Query(None),
+                         min_price: Optional[float] = Query(None), min_volume: Optional[int] = Query(None)):
+    """Restore an exact versioned study, never relabel a legacy/other request."""
+    from pydantic import ValidationError
+    values = {"months": months, "max_tickers": max_tickers,
+              "min_price": min_price, "min_volume": min_volume}
+    values = {key: value for key, value in values.items() if isinstance(value, (int, float))}
+    exact = bool(values)
+    if exact and len(values) != 4:
+        raise HTTPException(status_code=400, detail={"code": "backtest_cache_parameters_required"})
+    try:
+        request = _normalized_backtest_request(BacktestRequest(
+            ticker=ticker if isinstance(ticker, str) else "AAPL",
+            strategy=strategy if isinstance(strategy, str) else "sma_crossover", **values))
+    except ValidationError:
+        raise HTTPException(status_code=422, detail={"code": "backtest_parameters_invalid"}) from None
+    identity = _backtest_request_identity(request)
+    path = _backtest_v2_cache_path(identity, latest=not exact)
+    if path.exists():
         try:
-            with open(cache_key, "r") as f:
-                data = json.load(f)
+            with _cache_lock:
+                if path.is_symlink():
+                    raise ValueError("symlink")
+                with path.open("r", encoding="utf-8") as stream:
+                    payload = json.load(stream)
+            saved_request = payload.get("request") if isinstance(payload, dict) else None
+            saved_result = payload.get("results") if isinstance(payload, dict) else None
+            if (payload.get("cache_version") != _BACKTEST_CACHE_VERSION
+                    or payload.get("model_version") != _BACKTEST_MODEL_VERSION
+                    or not isinstance(saved_request, dict) or not isinstance(saved_result, dict)
+                    or saved_result.get("error") or not payload.get("cached_at")
+                    or (exact and saved_request != identity)
+                    or any(saved_request.get(key) != identity[key] for key in ("ticker", "strategy"))):
+                raise ValueError("identity/schema")
+            validated_saved = _normalized_backtest_request(BacktestRequest(**saved_request))
+            if (_backtest_request_identity(validated_saved) != saved_request
+                    or saved_result.get("request") != saved_request
+                    or saved_result.get("cached_at") != payload["cached_at"]
+                    or not isinstance(saved_result.get("trades"), list)
+                    or type(saved_result.get("total_trades")) is not int
+                    or saved_result["total_trades"] < 0):
+                raise ValueError("result/schema")
+            json.dumps(payload, allow_nan=False)
             from modules.backtest_methodology import describe_cached_backtest
-            return {"status": "success", "data": describe_cached_backtest(data.get("results", {}), strategy), "cached_at": data.get("cached_at")}
-        except Exception as e:
-            print(f"[Warning] {e}")
+            return {"status": "success", "data": describe_cached_backtest(saved_result, request.strategy),
+                    "cached_at": payload["cached_at"], "request": saved_request,
+                    "cache_status": "available", "cache_identity_version": _BACKTEST_CACHE_VERSION,
+                    "cache_match": "exact_request" if exact else "latest_selected_strategy"}
+        except Exception as exc:
+            print(f"[Backtest] cached result unavailable: {_sanitized_exception_text(exc)}")
+            raise HTTPException(status_code=503, detail={"code": "backtest_cache_invalid"}) from None
     from modules.backtest_methodology import attach_backtest_methodology
-    return {"status": "success", "data": attach_backtest_methodology({"data_available": False}, strategy), "cached_at": None}
+    return {"status": "success", "data": attach_backtest_methodology({"data_available": False}, request.strategy),
+            "cached_at": None, "cache_status": "missing", "request": identity,
+            "cache_match": "exact_request" if exact else "latest_selected_strategy"}
 
 # ── Auto-Trader Endpoints ──
 _autotrader_thread = None

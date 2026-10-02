@@ -1,5 +1,41 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 02.10.2026 – Backtest zuerst tief auditiert, dann repariert
+
+Aktueller Auftrag: Backtest Center vor dem Reload-Fix tief prüfen.
+Ausgangsrevision `4ef6c9b284825686fef60913a2e932a8f9414202`.
+
+- [x] Neue mathematische/kausale Gegenfälle vor Reparatur reproduziert;
+  unabhängiger Originalvergleich 11 rot / 8 grüne Kontrollen.
+- [x] Rohpräzision, Netto-P&L/R, Fills, boolesche/offene Preiswerte,
+  historische Universumswahl und Datenqualitätsfortführung korrigiert.
+- [x] Holdout-Leck, PF-Rundungsgrenze, Krypto-Warmup-/Jahrescap und
+  irreführende Konto-/Null-Kennzahlen korrigiert; keine Signalgrenzen gelockert.
+- [x] Exakte V2-Cacheidentität, atomare Erfolgsdateien und passives Reopen;
+  Fehler überschreiben keinen gespeicherten Erfolg.
+- [x] UI-Deadline/SingleFlight/Generation-/Unmountschutz, pure Formular-
+  präferenzen, sichere Fehlertexte, Server-/UI-Capzähler und ganzzahliges
+  Volumen. Parameterlose Dateien erhalten, nicht als aktuelle Studie ausgegeben.
+  Verlassen der Ansicht beendet nicht den Serverworker.
+- [x] Controller 30/30, Independent 19/19, gemeinsame Kernfälle205/205 grün.
+  Lokale Playwright-Desktop-/Mobilansicht: Reopen/Parameter-Miss/422/Erfolg,
+  keine Live-API/Mail/externen Requests, Mobilbreite390/390.
+- [x] Quellen-/API-Nachtrag eingefroren: 247/247 grün,
+  `tmp/qa-7495abeac921/results.xml`; finaler Browserlauf mit Bundle
+  `17410b75a42c` bestanden (Desktop/Mobil, keine externen Requests).
+- [x] Eingefrorenes Gesamtpaket offline geprüft: 11.030 bestanden,
+  eine POSIX-Prüfung auf Windows übersprungen, keine Fehler.
+  `tmp/qa-a8c5b525dfe2/results.xml`, 430,18 s; Deploy-Umstellungstests
+  ausdrücklich nicht im Umfang. Erster Vollpaketlauf fand nur fünf alte
+  gerundete R-Erwartungen; unabhängig hergeleitet, übrige Assertions erhalten.
+- [ ] Nur geprüften Backtest-Scope committen/pushen; bestehende Deploy-/Handbuch-
+  und Commerce-/Kalender-WIP nicht übernehmen.
+- [ ] Nach Betreiberpull echten Backtest-Reopen kontrollieren;
+  kein Serverupdate oder echter Provider-Backtest durch Codex.
+
+Details: [Backtest-Prüfbericht](docs/BACKTEST_DEEP_AUDIT_2026-10-02.md).
+Andere Mail-/Live-/Dreimonatsnachweise bleiben separat.
+
 ## 02.10.2026 – Erstaufruf ohne manuelles Neuladen
 
 Zusätzlicher aktueller Befund: Die anfänglich leere Seite war nicht bloß ein

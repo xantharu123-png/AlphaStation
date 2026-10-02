@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from api import (
     _alert_trade_plan_ok,
     _attach_starter_entry_plan,
@@ -684,13 +686,16 @@ def test_backtest_does_not_exit_at_untraded_average_target():
     assert trade["target_model"] == "50_50_tp1_tp2"
     assert trade["exit_reason"] == "TP1_STOP"
     assert trade["tp1_hit"] is True
-    assert trade["r_multiple"] == 0.45
+    entry = 100 * 1.0005
+    stopped_exit = (entry * 1.05 + entry) * .9995 / 2
+    expected_stop_r = ((stopped_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple"] == pytest.approx(expected_stop_r, rel=0, abs=1e-12)
     assert trade["exit_reason_upper"] == "TP1+EOD"
     # The runner's EOD close pays the same exit slippage as the TP1 leg.
-    entry = 100 * 1.0005
     blended_exit = (entry * 1.05 + 110) * .9995 / 2
     expected_r = ((blended_exit - entry) / entry * 100 - .2) / 5
-    assert trade["r_multiple_upper"] == round(expected_r, 2) == 1.44
+    assert trade["r_multiple_upper"] == pytest.approx(expected_r, rel=0, abs=1e-12)
+    assert round(expected_r, 2) == 1.44
     assert trade["intrabar_ambiguous"] is True
 
 
@@ -705,9 +710,14 @@ def test_backtest_reports_tp1_stop_to_tp2_band_when_daily_order_is_unknown():
 
     assert trade is not None
     assert trade["exit_reason"] == "TP1_STOP"
-    assert trade["r_multiple"] == 0.45
+    entry = 100 * 1.0005
+    stopped_exit = (entry * 1.05 + entry) * .9995 / 2
+    expected_stop_r = ((stopped_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple"] == pytest.approx(expected_stop_r, rel=0, abs=1e-12)
     assert trade["exit_reason_upper"] == "BLENDED_TP"
-    assert trade["r_multiple_upper"] == 1.95
+    blended_exit = (entry * 1.05 + entry * 1.15) * .9995 / 2
+    expected_r = ((blended_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple_upper"] == pytest.approx(expected_r, rel=0, abs=1e-12)
     assert "same_bar_tp1_and_trailed_stop" in trade["ambiguity_reason"]
 
 
@@ -722,7 +732,10 @@ def test_backtest_tp1_then_breakeven_stop_keeps_only_partial_profit():
 
     assert trade is not None
     assert trade["exit_reason"] == "TP1_STOP"
-    assert trade["r_multiple"] == 0.45
+    entry = 100 * 1.0005
+    stopped_exit = (entry * 1.05 + entry) * .9995 / 2
+    expected_r = ((stopped_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple"] == pytest.approx(expected_r, rel=0, abs=1e-12)
 
 
 def test_backtest_short_partial_exit_is_directionally_symmetric():
@@ -736,9 +749,14 @@ def test_backtest_short_partial_exit_is_directionally_symmetric():
 
     assert trade is not None
     assert trade["exit_reason"] == "TP1_STOP"
-    assert trade["r_multiple"] == 0.45
+    entry = 100 * .9995
+    stopped_exit = (entry * .95 + entry) * 1.0005 / 2
+    expected_stop_r = ((entry - stopped_exit) / entry * 100 - .2) / 5
+    assert trade["r_multiple"] == pytest.approx(expected_stop_r, rel=0, abs=1e-12)
     assert trade["exit_reason_upper"] == "BLENDED_TP"
-    assert trade["r_multiple_upper"] == 1.95
+    blended_exit = (entry * .95 + entry * .85) * 1.0005 / 2
+    expected_r = ((entry - blended_exit) / entry * 100 - .2) / 5
+    assert trade["r_multiple_upper"] == pytest.approx(expected_r, rel=0, abs=1e-12)
 
 
 def test_backtest_clean_same_bar_tp2_is_not_delayed_to_next_day():
@@ -752,5 +770,8 @@ def test_backtest_clean_same_bar_tp2_is_not_delayed_to_next_day():
     assert trade is not None
     assert trade["exit_reason"] == "BLENDED_TP"
     assert trade["exit_reason_upper"] == "BLENDED_TP"
-    assert trade["r_multiple"] == 1.95
+    entry = 100 * 1.0005
+    blended_exit = (entry * 1.05 + entry * 1.15) * .9995 / 2
+    expected_r = ((blended_exit - entry) / entry * 100 - .2) / 5
+    assert trade["r_multiple"] == pytest.approx(expected_r, rel=0, abs=1e-12)
     assert trade["intrabar_ambiguous"] is False

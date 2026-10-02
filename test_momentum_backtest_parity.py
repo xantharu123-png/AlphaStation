@@ -11,6 +11,18 @@ from modules.stock_momentum_contract import evaluate_momentum_breakout
 from modules.strategies import BACKTEST_STRATEGY_RULES
 
 
+@pytest.fixture(autouse=True)
+def fixed_api_study_clock(monkeypatch):
+    # Fixture history ends in April 2026. Its selected three-month window
+    # must not drift as the host clock moves to a later quarter.
+    cutoff = datetime(2026, 4, 10, 23, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cutoff if tz else cutoff.replace(tzinfo=None)
+    monkeypatch.setattr(api, "datetime", Clock)
+
+
 def _daily_bars(count=65):
     day = datetime(2026, 1, 5, tzinfo=timezone.utc)
     rows = []

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import api
 import pytest
@@ -156,6 +156,12 @@ def test_crypto_trade_simulation_keeps_tp1_partial_when_runner_trails_out():
 
 
 def test_crypto_backtest_enters_after_confirmation_close_not_before(monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            cutoff = datetime(2026, 2, 16, tzinfo=timezone.utc)
+            return cutoff if tz else cutoff.replace(tzinfo=None)
+    monkeypatch.setattr(api, "datetime", Clock)
     bars = []
     start_date = datetime(2026, 1, 1)
     for idx in range(46):
@@ -224,7 +230,7 @@ def test_backtest_result_sorts_trades_chronologically_before_drawdown():
 
     assert [t["ticker"] for t in result["trades"]] == ["EARLY", "LATE"]
     assert result["sum_pnl"] == 0.0
-    assert result["compounded_return"] == -1.0
+    assert result["compounded_return"] == pytest.approx(-1.0)
     assert result["max_drawdown"] == 10.0
 
 

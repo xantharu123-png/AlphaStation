@@ -62,6 +62,9 @@ def backtest_methodology(strategy=None, rule=None, *, legacy=False):
         "unavailable_live_inputs": list(LIVE_INPUTS) if rule and not legacy else [],
         "unavailable_live_input_labels": list(LIVE_INPUTS.values()) if rule and not legacy else [],
         "unverified_live_inputs": [] if rule and not legacy else list(LIVE_INPUTS),
+        "arithmetic_policy": "full_numeric_precision_until_display" if not legacy else "legacy_unverified",
+        "capital_allocation_model": None,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
     }
     if rule and not legacy:
         provenance["execution_rule"] = {
@@ -77,6 +80,10 @@ def backtest_methodology(strategy=None, rule=None, *, legacy=False):
         "live_equivalent": False,
         "live_validation_eligible": False,
         "paper_autotrade_release_eligible": False,
+        "account_performance_available": False,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
+        "capital_allocation_model": None,
+        "drawdown_label": "Modell-Tradefolge, kein Konto-Drawdown",
         "model_provenance": provenance,
     }
 
@@ -90,6 +97,9 @@ def attach_backtest_methodology(result, strategy=None, rule=None, *, legacy=Fals
     labels = {
         "volume_spike_proxy_not_historical_catalyst": "Volumenspikes sind nur ein technischer Ersatz, kein Backtest damaliger Katalysator-Nachrichten.",
         "current_static_universe_survivorship_bias": "Das heutige feste Aktienuniversum kann historische Ergebnisse durch Survivorship Bias verzerren.",
+        "current_crypto_universe_survivorship_bias": "Das heutige Krypto-Universum ist kein vollstaendiges historisches Universum und kann Ergebnisse verzerren.",
+        "perpetual_funding_not_modelled": "Historische Funding-Zahlungen der Perpetual-Kontrakte werden nicht nachgebildet.",
+        "crypto_daily_proxy_not_intraday_scanner": "Das Krypto-Tagesmodell bildet den Intraday-Scanner nicht vollstaendig nach.",
     }
     for warning in producer_warnings:
         if not isinstance(warning, str):
@@ -130,7 +140,8 @@ def limit_backtest_report(result):
                     "best_r", "worst_r", "expectancy", "profit_factor", "max_drawdown",
                     "avg_hold", "tp1_rate", "tp2_rate", "stop_rate", "full_stop_rate",
                     "post_tp1_stop_rate", "eod_rate", "win_rate_upper", "avg_pnl_upper",
-                    "total_pnl_upper", "avg_r_upper", "total_r_upper"):
+                    "total_pnl_upper", "avg_r_upper", "total_r_upper", "compounded_return",
+                    "trade_sequence_compounded_return_pct", "trade_sequence_max_drawdown_pct"):
             enriched[key] = None
         enriched["profit_factor_display"] = "Nicht verfuegbar"
         enriched["profit_factor_unbounded"] = False

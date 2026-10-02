@@ -11482,139 +11482,262 @@ function backtestEvidencePresentation(result) {
     };
 }
 
-function BacktestTab() {
-    const [ticker, setTicker] = useState('');
-    const [strategy, setStrategy] = useState('sma_crossover');
-    const [months, setMonths] = useState('6');
-    const [maxTickers, setMaxTickers] = useState('50');
-    const [minPrice, setMinPrice] = useState('');
-    const [minVolume, setMinVolume] = useState('');
-    const [isRunning, setIsRunning] = useState(false);
-    const [results, setResults] = useState(null);
-    const [trades, setTrades] = useState([]);
-    const [error, setError] = useState(null);
-    const [strategyOptions, setStrategyOptions] = useState([]);
-    const [progress, setProgress] = useState({ pct: 0, percent: 0, status: 'idle', message: '' });
-
-    // Load available strategies from server
-    useEffect(() => {
-        const fetchStrategies = async () => {
-            try {
-                const resp = await fetch(`${API}/api/backtest-strategies`);
-                if (resp.ok) {
-                    const data = await resp.json();
-                    setStrategyOptions(data.strategies || []);
-                }
-            } catch (e) {
-                // Fallback if endpoint not available
-                setStrategyOptions([
-                    { id: 'sma_crossover', name: 'SMA Crossover (20/50)', category: 'Indikator', direction: 'long' },
-                    { id: 'ema_crossover', name: 'EMA Crossover (9/21)', category: 'Indikator', direction: 'long' },
-                    { id: 'rsi_mean_reversion', name: 'RSI Mean Reversion', category: 'Indikator', direction: 'long' },
-                ]);
+function loadBacktestPreferences() {
+    const defaults = { ticker: '', strategy: 'sma_crossover', months: '6', maxTickers: '50', minPrice: '', minVolume: '' };
+    try {
+        const saved = JSON.parse(window.localStorage.getItem('alpha_backtest_selection_v2') || 'null');
+        if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+            for (const key of Object.keys(defaults)) {
+                if (typeof saved[key] === 'string' && saved[key].length <= 80) defaults[key] = saved[key];
             }
-        };
-        fetchStrategies();
-    }, []);
+        }
+    } catch (_) { /* Storage failure must not prevent a server-backed result read. */ }
+    return defaults;
+}
 
+function backtestRequestKey(request) {
+    return JSON.stringify(['ticker', 'strategy', 'months', 'max_tickers', 'min_price', 'min_volume']
+        .map(key => request?.[key]));
+}
+
+function backtestSelection(form, option) {
+    if (!option?.id) return { request: null, error: '' };
+    if (option.available === false) return { request: null, error: 'Dieses Backtest-Modell ist nicht verfügbar.' };
+    const ticker = option.requires_ticker === false ? '' : String(form.ticker || '').trim().toUpperCase();
+    if (option.requires_ticker !== false && !ticker) return { request: null, error: 'Bitte Ticker eingeben.' };
+    const number = (value, fallback) => String(value ?? '').trim() === '' ? fallback : Number(value);
+    const request = { ticker, strategy: option.id, months: number(form.months, 6),
+        max_tickers: number(form.maxTickers, option.default_max_tickers ?? 50),
+        min_price: number(form.minPrice, option.default_min_price ?? 0),
+        min_volume: number(form.minVolume, option.default_min_volume ?? 0) };
+    if (!Number.isInteger(request.months) || ![3, 6, 12, 24].includes(request.months)
+        || request.months > (option.max_months ?? 24)
+        || !Number.isInteger(request.max_tickers) || request.max_tickers < 5 || request.max_tickers > (option.max_tickers_limit ?? 500)
+        || !Number.isFinite(request.min_price) || request.min_price < 0
+        || !Number.isInteger(request.min_volume) || request.min_volume < 0) {
+        return { request: null, error: 'Bitte Zeitraum und Filter prüfen.' };
+    }
+    return { request, error: '' };
+}
+
+function backtestErrorText(error) {
+    const detail = error?.detail ?? error?.message ?? error;
+    const code = typeof detail === 'string' ? detail : detail?.code || detail?.error_code || '';
+    const messages = { backtest_job_already_running: 'Dieser Backtest läuft bereits.',
+        backtest_request_already_running: 'Dieser Backtest läuft bereits.',
+        backtest_read_timeout: 'Gespeicherte Auswertung derzeit nicht erreichbar. Bitte erneut laden.',
+        backtest_run_timeout: 'Die Antwort dauert zu lange. Der Serverlauf kann weiterlaufen; bitte später die gespeicherte Auswertung laden.',
+        backtest_result_identity_mismatch: 'Die Auswertung gehört zu einer anderen Auswahl und wird nicht angezeigt.',
+        backtest_invalid_response: 'Keine gültige Backtest-Antwort erhalten.' };
+    if (messages[code]) return messages[code];
+    if (error?.status === 401 || error?.status === 403) return 'Bitte anmelden und die Zugriffsberechtigung prüfen.';
+    if (error?.status === 422) return 'Bitte Ticker, Zeitraum und Filter prüfen.';
+    return 'Backtest derzeit nicht erreichbar. Bitte erneut versuchen.';
+}
+
+async function readBacktestJson(url, options = {}, parentSignal, timeoutMs = 12000) {
+    const controller = new AbortController();
+    let timer, onAbort;
+    try {
+        const cancelled = new Promise((_, reject) => {
+            onAbort = () => { reject({ detail: 'backtest_view_closed' }); controller.abort(); };
+            if (parentSignal?.aborted) onAbort();
+            else parentSignal?.addEventListener('abort', onAbort, { once: true });
+        });
+        return await Promise.race([
+            (async () => {
+                const response = await fetch(url, { ...options, signal: controller.signal });
+                const payload = await response.json();
+                if (!response.ok) throw { status: response.status, detail: payload?.detail };
+                return payload;
+            })(),
+            cancelled,
+            new Promise((_, reject) => { timer = setTimeout(() => {
+                reject({ detail: options.method === 'POST' ? 'backtest_run_timeout' : 'backtest_read_timeout' });
+                controller.abort();
+            }, timeoutMs); }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+        parentSignal?.removeEventListener('abort', onAbort);
+    }
+}
+
+// Owns view requests only: leaving the tab does not cancel the server worker.
+function createBacktestSession(publish) {
+    let disposed = false, generation = 0, selection = null, readController = null;
+    let jobController = null, progressController = null, progressTimer = null;
+    let state = { record: null, error: '', isRunning: false, cacheLoading: false,
+        cacheStatus: '', progress: { percent: 0, status: 'idle' } };
+    const update = patch => { if (!disposed) { state = { ...state, ...patch }; publish(state); } };
+    const accept = (payload, request, cached) => {
+        const data = cached ? payload?.data : payload;
+        if (cached && payload?.status !== 'success') throw { detail: 'backtest_invalid_response' };
+        if (cached && payload?.cache_status === 'missing') return null;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || data.error
+            || !Number.isInteger(data.total_trades) || data.total_trades < 0
+            || !Array.isArray(data.trades)) throw { detail: 'backtest_invalid_response' };
+        const basis = payload.request || data.request;
+        if (backtestRequestKey(basis) !== backtestRequestKey(request)) throw { detail: 'backtest_result_identity_mismatch' };
+        return { key: backtestRequestKey(request), request: basis, data, saved: cached || data.cache_saved === true,
+            cachedAt: payload.cached_at || data.cached_at || null };
+    };
+    const stopProgress = () => {
+        clearTimeout(progressTimer);
+        progressController?.abort();
+        progressTimer = null;
+    };
+    return {
+        async select(request, force = false) {
+            if (disposed || state.isRunning) return;
+            const key = request && backtestRequestKey(request);
+            const same = key === (selection && backtestRequestKey(selection));
+            if (same && !force) return;
+            selection = request;
+            const serial = ++generation;
+            readController?.abort();
+            update({ ...(same ? {} : { record: null }), error: '', cacheStatus: '', cacheLoading: !!request });
+            if (!request) return;
+            readController = new AbortController();
+            try {
+                const query = new URLSearchParams(request).toString();
+                const payload = await readBacktestJson(API + '/api/backtest-results?' + query, {}, readController.signal);
+                if (disposed || serial !== generation) return;
+                const record = accept(payload, request, true);
+                update({ record, cacheStatus: record ? 'saved' : 'missing' });
+            } catch (error) {
+                if (!disposed && serial === generation) update({ error: backtestErrorText(error), cacheStatus: 'error' });
+            } finally {
+                if (!disposed && serial === generation) update({ cacheLoading: false });
+            }
+        },
+        async run(request) {
+            if (disposed || state.isRunning || !request) return false;
+            const serial = ++generation;
+            selection = request;
+            readController?.abort();
+            jobController = new AbortController();
+            update({ isRunning: true, cacheLoading: false, error: '',
+                progress: { percent: 1, status: 'running', message: 'Backtest läuft…' } });
+            const jobId = 'bt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+            const poll = async () => {
+                if (disposed || serial !== generation || !state.isRunning) return;
+                progressController = new AbortController();
+                try {
+                    const progress = await readBacktestJson(API + '/api/backtest-progress?job_id=' + encodeURIComponent(jobId),
+                        {}, progressController.signal, 5000);
+                    if (!disposed && serial === generation && state.isRunning && progress
+                        && typeof progress === 'object' && !Array.isArray(progress)) update({ progress });
+                } catch (_) { /* Progress failure must not block the actual result. */ }
+                if (!disposed && serial === generation && state.isRunning) progressTimer = setTimeout(poll, 1000);
+            };
+            void poll();
+            try {
+                const payload = await readBacktestJson(API + '/api/run-backtest', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...request, job_id: jobId }) },
+                    jobController.signal, 60 * 60 * 1000);
+                if (disposed || serial !== generation) return false;
+                update({ record: accept(payload, request, false), cacheStatus: 'saved',
+                    progress: { percent: 100, status: 'done' } });
+                return true;
+            } catch (error) {
+                if (!disposed && serial === generation) update({ error: backtestErrorText(error) });
+                return false;
+            } finally {
+                stopProgress();
+                if (!disposed && serial === generation) update({ isRunning: false });
+            }
+        },
+        dispose() {
+            disposed = true;
+            ++generation;
+            readController?.abort();
+            jobController?.abort();
+            stopProgress();
+        },
+    };
+}
+
+function backtestTradeCounts(result) {
+    const received = Array.isArray(result?.trades) ? result.trades.length : 0;
+    const supplied = result?.trades_total;
+    const total = typeof supplied === 'number' && Number.isInteger(supplied) && supplied >= received ? supplied : received;
+    const shown = Math.min(30, received);
+    return { received, total, shown, notLoaded: total - received, hidden: total - shown };
+}
+
+function BacktestTab() {
+    const initial = useRef(null);
+    if (!initial.current) initial.current = loadBacktestPreferences();
+    const [ticker, setTicker] = useState(initial.current.ticker);
+    const [strategy, setStrategy] = useState(initial.current.strategy);
+    const [months, setMonths] = useState(initial.current.months);
+    const [maxTickers, setMaxTickers] = useState(initial.current.maxTickers);
+    const [minPrice, setMinPrice] = useState(initial.current.minPrice);
+    const [minVolume, setMinVolume] = useState(initial.current.minVolume);
+    const [strategyOptions, setStrategyOptions] = useState([]);
+    const [catalogError, setCatalogError] = useState('');
+    const [catalogAttempt, setCatalogAttempt] = useState(0);
+    const [view, setView] = useState({ record: null, error: '', isRunning: false,
+        cacheLoading: false, cacheStatus: '', progress: { percent: 0, status: 'idle' } });
+    const session = useRef(null);
+    if (!session.current) session.current = createBacktestSession(setView);
+    useEffect(() => () => session.current.dispose(), []);
+    useEffect(() => {
+        let active = true;
+        const controller = new AbortController();
+        setCatalogError('');
+        readBacktestJson(API + '/api/backtest-strategies', {}, controller.signal).then(data => {
+            if (!Array.isArray(data?.strategies) || !data.strategies.length
+                || data.strategies.some(item => !item || typeof item.id !== 'string')) throw { detail: 'backtest_invalid_response' };
+            if (active) {
+                setStrategyOptions(data.strategies);
+                if (!data.strategies.some(item => item.id === strategy)) setStrategy(data.strategies[0].id);
+            }
+        }).catch(error => { if (active) setCatalogError(backtestErrorText(error)); });
+        return () => { active = false; controller.abort(); };
+    }, [catalogAttempt]);
+    const form = { ticker, strategy, months, maxTickers, minPrice, minVolume };
     const selectedStrategy = strategyOptions.find(s => s.id === strategy) || {};
+    const selection = backtestSelection(form, selectedStrategy);
+    const selectionKey = selection.request && backtestRequestKey(selection.request);
+    const { isRunning, progress, cacheLoading, cacheStatus } = view;
+    const record = view.record?.key === selectionKey ? view.record : null;
+    const results = record?.data || null;
+    const trades = results?.trades || [];
+    const error = catalogError || view.error;
+    useEffect(() => {
+        try { window.localStorage.setItem('alpha_backtest_selection_v2', JSON.stringify(form)); } catch (_) {}
+    }, [ticker, strategy, months, maxTickers, minPrice, minVolume]);
+    useEffect(() => { void session.current.select(selection.request); }, [selectionKey]);
+    const runBacktest = () => {
+        if (selection.error) { if (window.addToast) window.addToast(selection.error, 'error'); return; }
+        void session.current.run(selection.request);
+    };
+    const reloadSaved = () => {
+        if (catalogError) setCatalogAttempt(value => value + 1);
+        else void session.current.select(selection.request, true);
+    };
     const requiresTicker = selectedStrategy.requires_ticker !== false;
     const isUniverseBacktest = !requiresTicker;
     const formatBtPrice = (value) => {
         if (value == null || value === '' || typeof value === 'boolean') return '-';
         const n = Number(value);
         if (!Number.isFinite(n) || n <= 0) return '-';
-        if (n >= 100) return `$${n.toFixed(2)}`;
-        if (n >= 1) return `$${n.toFixed(3)}`;
-        if (n >= 0.01) return `$${n.toFixed(5)}`;
-        return `$${n.toPrecision(6)}`;
+        if (n >= 100) return '$' + n.toFixed(2);
+        if (n >= 1) return '$' + n.toFixed(3);
+        if (n >= 0.01) return '$' + n.toFixed(5);
+        return '$' + n.toPrecision(6);
     };
-    const formatBtPct = (value) => {
-        return formatBacktestMetric(value, 2, '%', true);
-    };
-    const numberOr = (value, fallback) => {
-        const n = Number(value);
-        return Number.isFinite(n) ? n : fallback;
-    };
-
-    const runBacktest = async () => {
-        if (requiresTicker && !ticker.trim()) {
-            if (window.addToast) window.addToast('Bitte Ticker eingeben', 'error');
-            return;
-        }
-
-        setIsRunning(true);
-        setError(null);
-        setResults(null);
-        setTrades([]);
-        const jobId = `bt_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-        setProgress({ pct: 0.01, percent: 1, status: 'running', message: 'Backtest gestartet...' });
-        let progressTimer = null;
-        const pollProgress = async () => {
-            try {
-                const progressResp = await fetch(`${API}/api/backtest-progress?job_id=${encodeURIComponent(jobId)}`);
-                if (progressResp.ok) {
-                    const progressData = await progressResp.json();
-                    setProgress(progressData);
-                }
-            } catch (e) {
-                // Progress polling is best effort; the main backtest request still decides success/failure.
-            }
-        };
-        progressTimer = setInterval(pollProgress, 800);
-        pollProgress();
-        try {
-            const response = await fetch(`${API}/api/run-backtest`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ticker: requiresTicker ? ticker.toUpperCase() : 'UNIVERSE',
-                    strategy,
-                    months: numberOr(months, 6),
-                    max_tickers: numberOr(maxTickers || selectedStrategy.default_max_tickers, 50),
-                    min_price: numberOr(minPrice || selectedStrategy.default_min_price, 0),
-                    min_volume: numberOr(minVolume || selectedStrategy.default_min_volume, 0),
-                    job_id: jobId
-                })
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                if (data.error) {
-                    setError(data.error);
-                    setResults(null);
-                    setTrades([]);
-                    if (window.addToast) window.addToast(data.error, 'error');
-                } else if (data.total_trades === 0) {
-                    setError(null);
-                    setResults(data);
-                    setTrades([]);
-                    if (window.addToast) window.addToast('Keine Trades gefunden', 'info');
-                } else {
-                    setResults(data);
-                    setTrades(data.trades || []);
-                    if (window.addToast) window.addToast(`Backtest: ${data.total_trades} Trades gefunden`, 'success');
-                }
-            } else {
-                const errData = await response.json().catch(() => ({}));
-                setError(errData.detail || 'Backtest fehlgeschlagen');
-                if (window.addToast) window.addToast('Backtest fehlgeschlagen', 'error');
-            }
-        } catch (err) {
-            setError('Netzwerkfehler');
-            if (window.addToast) window.addToast('Fehler beim Backtest', 'error');
-        } finally {
-            if (progressTimer) clearInterval(progressTimer);
-            await pollProgress();
-            setIsRunning(false);
-        }
-    };
+    const formatBtPct = value => formatBacktestMetric(value, 2, '%', true);
 
     const visibleTrades = trades.slice(0, 30);
-    const hiddenTradeCount = Math.max(0, trades.length - visibleTrades.length);
+    const tradeCounts = backtestTradeCounts(results);
+    const hiddenTradeCount = tradeCounts.hidden;
     const evidence = backtestEvidencePresentation(results);
     const verdict = evidence.verdict;
     const outOfSample = results?.out_of_sample || null;
+    const progressPercent = Number.isFinite(Number(progress?.percent)) ? Math.max(0, Math.min(100, Number(progress.percent))) : 0;
     const verdictThemes = {
         approved: { border: '#10b981', bg: '#ecfdf5', text: '#065f46' },
         selective: { border: '#3b82f6', bg: '#eff6ff', text: '#1e40af' },
@@ -11651,17 +11774,18 @@ function BacktestTab() {
                             onChange={(e) => setTicker(e.target.value.toUpperCase())}
                             onKeyDown={(e) => e.key === 'Enter' && runBacktest()}
                             placeholder={requiresTicker ? 'z.B. AAPL' : 'Scanner-Universum'}
-                            disabled={!requiresTicker}
+                            disabled={!requiresTicker || isRunning || !strategyOptions.length}
                         />
                     </div>
                     <div className="xl:col-span-4">
                         <label className="block text-sm font-semibold mb-2">Strategie</label>
-                        <select value={strategy} onChange={(e) => {
+                        <select value={strategy} disabled={isRunning || !strategyOptions.length} onChange={(e) => {
                             const next = strategyOptions.find(s => s.id === e.target.value) || {};
                             setStrategy(e.target.value);
-                            if (next.default_max_tickers) setMaxTickers(String(next.default_max_tickers));
-                            if (next.default_min_price) setMinPrice(String(next.default_min_price));
-                            if (next.default_min_volume) setMinVolume(String(next.default_min_volume));
+                            setMaxTickers(String(next.default_max_tickers ?? 50));
+                            setMinPrice('');
+                            setMinVolume('');
+                            if (Number(months) > (next.max_months ?? 24)) setMonths(String(next.max_months));
                         }}>
                             {(() => {
                                 const categories = {};
@@ -11673,7 +11797,7 @@ function BacktestTab() {
                                 return Object.entries(categories).map(([cat, strats]) => (
                                     <optgroup key={cat} label={cat}>
                                         {strats.map(s => (
-                                            <option key={s.id} value={s.id}>{s.name} {s.direction === 'short' ? '(Short)' : ''}</option>
+                                            <option key={s.id} value={s.id} disabled={s.available === false}>{s.name} {s.direction === 'short' ? '(Short)' : ''}</option>
                                         ))}
                                     </optgroup>
                                 ));
@@ -11682,11 +11806,11 @@ function BacktestTab() {
                     </div>
                     <div className="xl:col-span-2">
                         <label className="block text-sm font-semibold mb-2">Zeitraum</label>
-                        <select value={months} onChange={(e) => setMonths(e.target.value)}>
+                        <select value={months} disabled={isRunning} onChange={(e) => setMonths(e.target.value)}>
                             <option value="3">3 Monate</option>
                             <option value="6">6 Monate</option>
                             <option value="12">12 Monate</option>
-                            <option value="24">24 Monate</option>
+                            <option value="24" disabled={(selectedStrategy.max_months ?? 24) < 24}>24 Monate</option>
                         </select>
                     </div>
                     <div className="xl:col-span-2">
@@ -11696,12 +11820,12 @@ function BacktestTab() {
                             value={maxTickers}
                             onChange={(e) => setMaxTickers(e.target.value)}
                             min="5"
-                            max="500"
-                            disabled={!isUniverseBacktest}
+                            max={selectedStrategy.max_tickers_limit ?? 500}
+                            disabled={!isUniverseBacktest || isRunning}
                         />
                     </div>
                     <div className="xl:col-span-2 flex items-end">
-                        <button onClick={runBacktest} disabled={isRunning} className="button w-full">
+                        <button onClick={runBacktest} disabled={isRunning || !selection.request || !!catalogError} className="button w-full">
                             {isRunning ? 'Laeuft...' : 'Backtest starten'}
                         </button>
                     </div>
@@ -11710,11 +11834,11 @@ function BacktestTab() {
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
                         <div>
                             <label className="block text-xs font-semibold mb-1 text-gray-500">Min Preis optional</label>
-                            <input type="number" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} placeholder={selectedStrategy.default_min_price || 'auto'} />
+                            <input type="number" disabled={isRunning} value={minPrice} onChange={(e) => setMinPrice(e.target.value)} placeholder={selectedStrategy.default_min_price ?? 'auto'} />
                         </div>
                         <div>
                             <label className="block text-xs font-semibold mb-1 text-gray-500">Min Volumen optional</label>
-                            <input type="number" value={minVolume} onChange={(e) => setMinVolume(e.target.value)} placeholder={selectedStrategy.default_min_volume || 'auto'} />
+                            <input type="number" disabled={isRunning} value={minVolume} onChange={(e) => setMinVolume(e.target.value)} placeholder={selectedStrategy.default_min_volume ?? 'auto'} />
                         </div>
                         <div className="text-xs text-gray-500 flex items-end">
                             {selectedStrategy.note || 'Scanner-Backtest nutzt ein ganzes Universum statt nur einen Ticker.'}
@@ -11726,16 +11850,24 @@ function BacktestTab() {
                 )}
             </div>
 
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm" data-testid="backtest-saved-status">
+                <span className="text-gray-500">{cacheLoading ? 'Gespeicherte Auswertung wird geladen…'
+                    : record ? `${isRunning ? 'Vorherige Auswertung' : record.saved ? 'Gespeicherte Auswertung' : 'Neue Auswertung · nicht gespeichert'} · ${record.request.ticker || 'Universum'} · ${record.request.months} Monate${record.cachedAt ? ' · ' + new Date(record.cachedAt).toLocaleString('de-CH') : ''}`
+                    : cacheStatus === 'missing' ? 'Keine gespeicherte Auswertung für diese Auswahl.' : selection.error || ''}</span>
+                <button onClick={reloadSaved} disabled={isRunning || cacheLoading || (!selection.request && !catalogError)}
+                    className="button" style={{ width: 'auto', padding: '8px 12px', fontSize: 12 }} data-testid="backtest-reload">Gespeicherte Auswertung laden</button>
+            </div>
+
             {isRunning && (
                 <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
                     <div className="flex items-center justify-between text-xs font-semibold text-blue-900 mb-2">
                         <span>{progress.message || 'Backtest laeuft...'}</span>
-                        <span>{Math.max(0, Math.min(100, Number(progress.percent || 0))).toFixed(1)}%</span>
+                        <span>{progressPercent.toFixed(1)}%</span>
                     </div>
                     <div className="h-3 w-full overflow-hidden rounded-full bg-blue-100">
                         <div
                             className="h-full rounded-full bg-blue-600 transition-all duration-500"
-                            style={{ width: `${Math.max(2, Math.min(100, Number(progress.percent || 0)))}%` }}
+                            style={{ width: `${Math.max(2, progressPercent)}%` }}
                         />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-3 text-xs text-blue-700">
@@ -11751,10 +11883,10 @@ function BacktestTab() {
                 <div className="card border border-red-200 bg-red-50 p-4 rounded-lg text-sm text-red-700">{error}</div>
             )}
 
-            {results && !error && (
+            {results && (
                 <>
-                    <div role="status" data-testid="backtest-methodology" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
-                        <div className="font-bold">{evidence.label}</div>
+                    <details data-testid="backtest-methodology" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
+                        <summary className="font-bold cursor-pointer">{evidence.label} · Modell &amp; Kosten</summary>
                         <p className="mt-2">{evidence.modelLimited
                             ? 'Näherungsmodell, kein identischer Live-Scanner. Fehlende Intraday-Daten, historische Quotes und tatsächliche Ausführungen werden nicht als bestätigt gewertet.'
                             : 'Modell und Datenbasis sind ausgewiesen. Historische Ergebnisse bleiben eine Simulation, kein Gewinnversprechen.'}</p>
@@ -11762,7 +11894,7 @@ function BacktestTab() {
                             {evidence.warnings.map((warning, index) => <li key={index}>{warning}</li>)}
                         </ul>}
                         <p className="mt-2 font-semibold">Trefferquote und R gelten nur für dieses Modell und diese Stichprobe – nicht automatisch für App-Signale oder Mails.</p>
-                    </div>
+                    </details>
                     {(results.data_quality?.status === 'PARTIAL' || Number(results.unresolved) > 0) && (
                         <div role="status" data-testid="backtest-data-coverage" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
                             <div className="font-bold">Datenabdeckung unvollständig</div>
@@ -11811,10 +11943,10 @@ function BacktestTab() {
                             {outOfSample.holdout ? (
                                 <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-3 text-xs">
                                     <div><span className="text-gray-500">Split:</span> {outOfSample.split_date || '-'}</div>
-                                    <div><span className="text-gray-500">Trades:</span> {outOfSample.holdout.total_trades ?? 0}</div>
+                                    <div><span className="text-gray-500">Trades:</span> {formatBacktestMetric(outOfSample.holdout.total_trades, 0)}</div>
                                     <div><span className="text-gray-500">Avg PnL:</span> {formatBtPct(outOfSample.holdout.avg_pnl)}</div>
-                                    <div><span className="text-gray-500">PF:</span> {outOfSample.holdout.profit_factor_display || outOfSample.holdout.profit_factor || '-'}</div>
-                                    <div><span className="text-gray-500">Drawdown:</span> {(outOfSample.holdout.max_drawdown ?? 0).toFixed(1)}%</div>
+                                    <div><span className="text-gray-500">PF:</span> {outOfSample.holdout.profit_factor_display || formatBacktestMetric(outOfSample.holdout.profit_factor)}</div>
+                                    <div><span className="text-gray-500">Modell-Drawdown:</span> {formatBacktestMetric(outOfSample.holdout.trade_sequence_max_drawdown_pct ?? outOfSample.holdout.max_drawdown, 1, '%')}</div>
                                 </div>
                             ) : (
                                 <div className="mt-2 text-xs text-gray-500">
@@ -11840,13 +11972,13 @@ function BacktestTab() {
                             </div>
                         </div>
                         <div className="metric-card purple">
-                            <div className="text-xs font-semibold text-gray-500">Max Drawdown</div>
+                            <div className="text-xs font-semibold text-gray-500">Modell-Drawdown (Tradefolge)</div>
                             <div className="text-2xl font-bold mt-1">{formatBacktestMetric(results.max_drawdown, 2, '%')}</div>
                         </div>
                         <div className="metric-card">
-                            <div className="text-xs font-semibold text-gray-500">{results.backtest_type ? 'Equity*' : 'Gesamtrendite'}</div>
-                            <div className={`text-2xl font-bold mt-1 ${backtestMetricClass(results.total_return)}`}>
-                                {formatBtPct(results.total_return)}
+                            <div className="text-xs font-semibold text-gray-500">Verkettete Modellrendite</div>
+                            <div className={`text-2xl font-bold mt-1 ${backtestMetricClass(results.trade_sequence_compounded_return_pct)}`}>
+                                {formatBtPct(results.trade_sequence_compounded_return_pct)}
                             </div>
                         </div>
                     </div>
@@ -11903,11 +12035,11 @@ function BacktestTab() {
                                     {Object.entries(results.stats_by_grade).map(([grade, stat]) => (
                                         <tr key={grade} className="table-row border-b border-gray-200">
                                             <td className="py-2 px-2 font-semibold">{grade}</td>
-                                            <td className="py-2 px-2 text-right">{stat.total ?? 0}</td>
-                                            <td className="py-2 px-2 text-right">{(stat.win_rate ?? 0).toFixed(1)}%</td>
+                                            <td className="py-2 px-2 text-right">{formatBacktestMetric(stat.total, 0)}</td>
+                                            <td className="py-2 px-2 text-right">{formatBacktestMetric(stat.win_rate, 1, '%')}</td>
                                             <td className={`py-2 px-2 text-right ${backtestMetricClass(stat.avg_pnl)}`}>{formatBtPct(stat.avg_pnl)}</td>
                                             <td className="py-2 px-2 text-right">{formatBacktestMetric(stat.avg_r)}</td>
-                                            <td className="py-2 px-2 text-right">{stat.profit_factor_display || ((stat.profit_factor ?? 0).toFixed ? (stat.profit_factor ?? 0).toFixed(2) : stat.profit_factor)}</td>
+                                            <td className="py-2 px-2 text-right">{stat.profit_factor_display || formatBacktestMetric(stat.profit_factor)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -11918,8 +12050,8 @@ function BacktestTab() {
                     {trades.length > 0 && (
                         <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                                <h3 className="font-semibold">Trade Historie ({trades.length} Trades)</h3>
-                                {hiddenTradeCount > 0 && <span className="text-xs text-gray-500">Zeigt erste 30 chronologische Trades - {hiddenTradeCount} ausgeblendet</span>}
+                                <h3 className="font-semibold">Trade Historie ({tradeCounts.total} Einträge)</h3>
+                                {hiddenTradeCount > 0 && <span className="text-xs text-gray-500">{tradeCounts.shown} sichtbar · {tradeCounts.received} geladen{tradeCounts.notLoaded > 0 ? ` · ${tradeCounts.notLoaded} nicht übertragen` : ''}</span>}
                             </div>
                             <table className="w-full text-sm">
                                 <thead className="border-b border-gray-200">

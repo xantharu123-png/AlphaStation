@@ -46,12 +46,13 @@ def profit_factor_metrics(
         loss = 0.0
 
     if loss > 0:
-        value = round(profit / loss, precision)
+        raw_value = profit / loss
+        value = round(raw_value, precision)
         return {
             "value": value,
             "display": f"{value:.{precision}f}",
             "unbounded": False,
-            "comparison_value": value,
+            "comparison_value": raw_value,
         }
     if profit > 0:
         return {

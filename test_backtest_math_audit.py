@@ -236,7 +236,7 @@ def test_prev_high_gap_fills_at_open_not_at_stale_trigger():
 
     assert trade is not None
     assert trade["entry_fill_basis"] == "gap_open_above_trigger"
-    assert trade["entry_price"] == 105.05
+    assert trade["entry_price"] == pytest.approx(105 * 1.0005)
     assert trade["entry_price"] > trade["entry_trigger"]
 
 
@@ -754,17 +754,17 @@ def test_legacy_rsi_uses_wilder_smoothing_and_source_alignment():
 
 
 def test_close_confirmed_indicator_signal_fills_only_at_next_open():
-    dates = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    dates = ["2026-01-08", "2026-01-09", "2026-01-12"]
     opens = [10.0, 11.0, 12.0]
 
     position = api._indicator_entry_on_next_open(0, dates, opens)
     trade = api._indicator_exit_on_next_open(position, 1, dates, opens)
 
-    assert position["signal_date"] == "2026-01-01"
-    assert position["entry_date"] == "2026-01-02"
+    assert position["signal_date"] == "2026-01-08"
+    assert position["entry_date"] == "2026-01-09"
     assert position["entry_price"] == 11.0
-    assert trade["exit_signal_date"] == "2026-01-02"
-    assert trade["exit_date"] == "2026-01-03"
+    assert trade["exit_signal_date"] == "2026-01-09"
+    assert trade["exit_date"] == "2026-01-12"
     assert trade["exit_price"] == 12.0
 
 
@@ -806,6 +806,7 @@ def test_oos_split_keeps_all_same_day_trades_on_one_side():
             trades.append({
                 "ticker": f"{day_index}{suffix}",
                 "entry_date": trade_date,
+                "exit_date": trade_date,
                 "pnl_pct": 1.0,
                 "r_multiple": 0.2,
             })

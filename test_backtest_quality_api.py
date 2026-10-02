@@ -52,7 +52,7 @@ def test_complete_positive_control_retains_existing_report_verdict():
     assert result["verdict"]["tradable"] is True
     assert result["out_of_sample"]["status"] == "pass"
     assert result["data_quality"]["status"] == "NO_KNOWN_FETCH_OR_SESSION_GAP"
-    assert result["avg_r"] == 0.69
+    assert result["avg_r"] == 0.6875
 
 
 def test_scanner_normalization_preserves_partial_source_and_removes_edge_claim():
@@ -70,8 +70,8 @@ def test_scanner_normalization_preserves_partial_source_and_removes_edge_claim()
     _assert_incomplete(result)
     assert result["data_quality"]["failed_fetch_dates"] == ["2026-01-20"]
     assert result["total_decided"] == 40
-    assert result["avg_pnl"] == 1.38  # Descriptive observed-subset result remains.
-    assert result["avg_r"] == 0.69
+    assert result["avg_pnl"] == 1.375  # Descriptive observed-subset result remains at raw precision.
+    assert result["avg_r"] == 0.6875
     assert raw == original
 
 
@@ -87,7 +87,7 @@ def test_unresolved_path_prevents_positive_verdict_for_observed_winners(use_indi
     assert result["total_decided"] == 40
     assert result["total_filled"] == 40  # Unknown pending entry is not an actual fill.
     assert result["unresolved"] == 1
-    assert result["avg_r"] == 0.69
+    assert result["avg_r"] == 0.6875
     assert result["data_quality"]["missing_expected_sessions"] == ["2026-02-17"]
 
 
@@ -138,8 +138,8 @@ def test_normalization_preserves_unknown_metrics_as_null(value):
 @pytest.mark.parametrize("value", [0, -1.234, 1.234])
 def test_normalization_keeps_real_zero_positive_and_negative_measurements(value):
     row = api._normalize_backtest_trades([{"pnl_pct": value, "r_multiple": value}], "long")[0]
-    assert row["pnl_pct"] == row["r_multiple"] == round(value, 2)
-    assert row["pnl_pct_upper"] == row["r_multiple_upper"] == round(value, 2)
+    assert row["pnl_pct"] == row["r_multiple"] == value
+    assert row["pnl_pct_upper"] == row["r_multiple_upper"] == value
 
 
 @pytest.mark.parametrize("use_indicator", [False, True])
@@ -151,7 +151,7 @@ def test_nominally_closed_row_without_pnl_is_not_counted_as_zero_loss(use_indica
     assert result["total_decided"] == 39
     assert result["unresolved"] == 1
     assert result["data_quality"]["missing_pnl_trades"] == 1
-    assert result["win_rate"] == 74.4
+    assert result["win_rate"] == pytest.approx(29 / 39 * 100)
 
 
 @pytest.mark.parametrize("use_indicator", [False, True])

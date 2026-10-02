@@ -83,11 +83,22 @@ BIOTECH_BACKTEST_UNIVERSE = [
 ]
 
 
-def _initial_universe_average_volume(bars, window_size, lookback=20, minimum_periods=10):
+def _initial_universe_average_volume(bars, window_size, lookback=20, minimum_periods=10, *, as_of=None):
     """Rank a backtest universe from information available at test start only."""
     if not bars or window_size <= 0:
         return None
-    initial_window = bars[:window_size]
+    # A recent listing can have its first 50 bars extend past the study start.
+    # Its future volume must not decide whether another asset gets a scarce
+    # ticker-budget slot. Missing pre-start warmup is not filled with the future.
+    available = bars
+    if as_of is not None:
+        try:
+            cutoff = dt.date.fromisoformat(str(as_of)[:10])
+            available = [bar for bar in bars
+                         if dt.date.fromisoformat(str(bar["date"])[:10]) < cutoff]
+        except (KeyError, TypeError, ValueError):
+            return None
+    initial_window = available[:window_size]
     if len(initial_window) < minimum_periods:
         return None
     return historical_volume_baseline(
@@ -141,11 +152,34 @@ class _BacktestTradeList(list):
     methodology = None
 
 
-def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers=()):
+def _finite_backtest_number(value):
+    """Unknown calculation inputs stay unknown; booleans are not prices/P&L."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers=(), source_quality=()):
     inherited = getattr(trades, "data_quality", None) or {}
     failed = set(failed_fetch_dates) | set(inherited.get("failed_fetch_dates") or ())
     unavailable = set(unavailable_tickers) | set(inherited.get("unavailable_tickers") or ())
     missing = set(inherited.get("missing_expected_sessions") or ())
+    invalid_dates = set(inherited.get("invalid_dates") or ())
+    excluded_invalid = inherited.get("excluded_invalid_bars", 0)
+    source_partial = inherited.get("status") in {"PARTIAL", "UNAVAILABLE"}
+    for quality in source_quality:
+        if not isinstance(quality, dict):
+            continue
+        failed.update(quality.get("failed_fetch_dates") or ())
+        unavailable.update(quality.get("unavailable_tickers") or ())
+        missing.update(quality.get("missing_expected_sessions") or ())
+        invalid_dates.update(quality.get("invalid_dates") or ())
+        excluded_invalid += quality.get("excluded_invalid_bars", 0)
+        source_partial = source_partial or quality.get("status") in {"PARTIAL", "UNAVAILABLE"}
     affected = 0
     for trade in trades:
         if not isinstance(trade, dict):
@@ -153,28 +187,36 @@ def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers
         quality = trade.get("data_quality") or {}
         failed.update(quality.get("failed_fetch_dates") or ())
         unavailable.update(quality.get("unavailable_tickers") or ())
+        missing.update(quality.get("missing_expected_sessions") or ())
+        invalid_dates.update(quality.get("invalid_dates") or ())
+        # A copied plain list loses its class metadata, but every trade still
+        # carries the cohort totals. Repeated rows must not multiply exclusions.
+        excluded_invalid = max(excluded_invalid, quality.get("excluded_invalid_bars", 0))
+        source_partial = source_partial or quality.get("status") in {"PARTIAL", "UNAVAILABLE"}
         missing.update(trade.get("missing_expected_sessions") or ())
         if trade.get("evaluation_status") in {
             "MISSING_EXPECTED_SESSION", "NON_INCREASING_DAILY_DATES", "SESSION_CALENDAR_UNAVAILABLE",
-            "INCOMPLETE_DAILY_BAR",
+            "INCOMPLETE_DAILY_BAR", "INVALID_OHLC", "INVALID_OHLCV", "INVALID_VOLUME",
+            "INVALID_TRADE_RESULT",
         }:
             affected += 1
-    partial = bool(failed or unavailable or missing or affected)
+    partial = bool(failed or unavailable or missing or affected or excluded_invalid or source_partial)
     return {
         "status": "PARTIAL" if partial else "NO_KNOWN_FETCH_OR_SESSION_GAP",
         "failed_fetch_days": len(failed), "failed_fetch_dates": sorted(failed),
         "unavailable_tickers": sorted(unavailable),
         "missing_expected_sessions": sorted(missing), "coverage_unresolved_trades": affected,
+        "excluded_invalid_bars": excluded_invalid, "invalid_dates": sorted(invalid_dates),
         "statistics_scope": "observed_decided_paths_only_not_complete_market_cohort",
     }
 
 
-def _attach_backtest_data_quality(results, *, failed_fetch_dates=(), unavailable_tickers=()):
+def _attach_backtest_data_quality(results, *, failed_fetch_dates=(), unavailable_tickers=(), source_quality=()):
     for strategy_name, trades in results.items():
         methodology = backtest_methodology(strategy_name, BACKTEST_STRATEGY_RULES.get(strategy_name))
         trades.methodology = methodology
         quality = _backtest_data_quality(trades, failed_fetch_dates=failed_fetch_dates,
-                                         unavailable_tickers=unavailable_tickers)
+                                         unavailable_tickers=unavailable_tickers, source_quality=source_quality)
         trades.data_quality = quality
         for trade in trades:
             trade["data_quality"] = quality
@@ -203,18 +245,24 @@ def _simulate_50_50_daily_path(
     direction = str(direction or "").upper()
     if direction not in {"LONG", "SHORT"}:
         raise ValueError("direction must be LONG or SHORT")
-    if not bars or start_idx >= len(bars) or max_hold <= 0:
+    if (not bars or type(start_idx) is not int or type(max_hold) is not int
+            or start_idx < 0 or start_idx >= len(bars) or max_hold <= 0):
         return None
 
-    entry_price = float(entry_price)
-    stop_price = float(stop_price)
-    tp1_price = float(tp1_price)
-    tp2_price = float(tp2_price)
-    post_tp1_stop_offset = max(0.0, float(post_tp1_stop_offset or 0.0))
+    values = (entry_price, stop_price, tp1_price, tp2_price, exit_slippage,
+              fee_pct, trail_fraction, post_tp1_stop_offset)
+    if any(isinstance(value, bool) for value in values):
+        return None
+    try:
+        (entry_price, stop_price, tp1_price, tp2_price, exit_slippage,
+         fee_pct, trail_fraction, post_tp1_stop_offset) = map(float, values)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if (not all(math.isfinite(value) for value in (entry_price, stop_price, tp1_price, tp2_price,
              float(exit_slippage), float(fee_pct), float(trail_fraction), post_tp1_stop_offset))
             or min(entry_price, stop_price, tp1_price, tp2_price) <= 0
-            or not 0 <= exit_slippage < 1 or fee_pct < 0 or not 0 <= trail_fraction <= 1):
+            or not 0 <= exit_slippage < 1 or fee_pct < 0 or not 0 <= trail_fraction <= 1
+            or post_tp1_stop_offset < 0):
         return None
     if direction == "LONG":
         geometry_valid = stop_price < entry_price < tp1_price < tp2_price
@@ -275,6 +323,8 @@ def _simulate_50_50_daily_path(
             if coverage.get("reason"):
                 return _unresolved(coverage["reason"], bar_idx)
         try:
+            if any(isinstance(bar[key], bool) for key in ("open", "high", "low", "close")):
+                return _unresolved("INVALID_OHLC", bar_idx)
             bar_open, bar_high, bar_low, bar_close = (float(bar[key]) for key in ("open", "high", "low", "close"))
         except (KeyError, ValueError, TypeError, OverflowError):
             return _unresolved("INVALID_OHLC", bar_idx)
@@ -433,10 +483,12 @@ def _simulate_50_50_daily_path(
 
     return {
         "exit_date": exit_date,
-        "exit_price": round(exit_price, 4),
+        "exit_price": exit_price,
         "exit_reason": exit_reason,
-        "pnl_pct": round(pnl_pct, 4),
-        "r_multiple": round(r_multiple, 4),
+        # These are calculation fields, not display strings. Rounding before
+        # aggregation can turn a genuine net loss/win into zero and change PF.
+        "pnl_pct": pnl_pct,
+        "r_multiple": r_multiple,
         "bars_held": bars_held,
         "tp1_hit": tp1_hit,
         "is_winner": pnl_pct > 0,
@@ -545,17 +597,19 @@ def _backtest_uncertainty_metrics(trades):
         }
     total = len(trades)
     ambiguous = sum(1 for trade in trades if trade.get("intrabar_ambiguous"))
-    upper_pnls = [float(trade.get("pnl_pct_upper", trade.get("pnl_pct", 0)) or 0) for trade in trades]
-    upper_rs = [float(trade.get("r_multiple_upper", trade.get("r_multiple", 0)) or 0) for trade in trades]
-    upper_wins = sum(1 for pnl in upper_pnls if pnl > 0)
+    upper_pnls = [_finite_backtest_number(trade.get("pnl_pct_upper", trade.get("pnl_pct"))) for trade in trades]
+    upper_rs = [_finite_backtest_number(trade.get("r_multiple_upper", trade.get("r_multiple"))) for trade in trades]
+    pnl_known = all(value is not None for value in upper_pnls)
+    r_known = all(value is not None for value in upper_rs)
+    upper_wins = sum(1 for pnl in upper_pnls if pnl is not None and pnl > 0)
     return {
         "ambiguous_trades": ambiguous,
-        "ambiguity_rate": round(ambiguous / total * 100, 1),
-        "win_rate_upper": round(upper_wins / total * 100, 1),
-        "avg_pnl_upper": round(sum(upper_pnls) / total, 2),
-        "total_pnl_upper": round(sum(upper_pnls), 2),
-        "avg_r_upper": round(sum(upper_rs) / total, 2),
-        "total_r_upper": round(sum(upper_rs), 2),
+        "ambiguity_rate": ambiguous / total * 100,
+        "win_rate_upper": upper_wins / total * 100 if pnl_known else None,
+        "avg_pnl_upper": sum(upper_pnls) / total if pnl_known else None,
+        "total_pnl_upper": sum(upper_pnls) if pnl_known else None,
+        "avg_r_upper": sum(upper_rs) / total if r_known else None,
+        "total_r_upper": sum(upper_rs) if r_known else None,
         "ohlc_path_policy": "lower_stop_first_upper_target_first",
     }
 
@@ -958,6 +1012,8 @@ def _simulate_bi_plan_daily(bars, start_idx, plan, direction, *, horizon_bars=10
         bar = bars[index]
         observed += 1
         result["exit_date"] = bar["date"]
+        if daily_bar_is_explicitly_incomplete(bar):
+            return dict(result, evaluation_status="INCOMPLETE_DAILY_BAR")
         if index > 0:
             coverage = _daily_session_gap(bars[index-1].get("date"), bar.get("date"), "us_equity")
             result.update(session_calendar="us_equity", session_coverage=coverage["coverage"],
@@ -965,6 +1021,8 @@ def _simulate_bi_plan_daily(bars, start_idx, plan, direction, *, horizon_bars=10
             if coverage.get("reason"):
                 return dict(result, evaluation_status=coverage["reason"])
         try:
+            if any(isinstance(bar[key], bool) for key in ("open", "high", "low", "close")):
+                return dict(result, evaluation_status="INVALID_OHLC")
             opening, high, low, closing = (float(bar[key]) for key in ("open", "high", "low", "close"))
         except (ValueError, TypeError, KeyError, OverflowError):
             return dict(result, evaluation_status="INVALID_OHLC")
@@ -979,18 +1037,18 @@ def _simulate_bi_plan_daily(bars, start_idx, plan, direction, *, horizon_bars=10
         if method == "market_at_signal":
             fill = opening
         elif method == "stop_breakout":
-            if opening >= entry:
+            if opening >= entry if side == "LONG" else opening <= entry:
                 fill = opening
-            elif high >= entry:
+            elif high >= entry if side == "LONG" else low <= entry:
                 fill, intrabar = entry, True
-                if low <= stop:
+                if low <= stop if side == "LONG" else high >= stop:
                     return dict(result, evaluation_status="ENTRY_STOP_ORDER_UNRESOLVED")
         elif method == "limit_pullback":
-            if opening >= entry:
+            if opening <= entry if side == "LONG" else opening >= entry:
                 fill = opening
-            elif high >= entry:
+            elif low <= entry if side == "LONG" else high >= entry:
                 fill, intrabar = entry, True
-                if low <= tp1:
+                if high >= tp1 if side == "LONG" else low <= tp1:
                     return dict(result, evaluation_status="LIMIT_ENTRY_TARGET_ORDER_UNRESOLVED")
         else:
             return dict(result, evaluation_status="UNKNOWN_ENTRY_METHOD")
@@ -1135,10 +1193,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     # Sortiere und filtere Ticker — Mid-Caps (500K-10M Vol) sind BI-Goldzone
     ticker_avg_vol = {}
     for t, bars_list in ticker_history.items():
-        if len(bars_list) >= (window_size + 5):  # Genug History für Window + Simulation
-            avg_vol = _initial_universe_average_volume(bars_list, window_size)
-            if avg_vol is not None:
-                ticker_avg_vol[t] = avg_vol
+        # Future survival/exit coverage cannot determine the starting universe.
+        # The later rolling analysis still requires its full indicator window.
+        avg_vol = _initial_universe_average_volume(bars_list, window_size, as_of=test_start)
+        if avg_vol is not None:
+            ticker_avg_vol[t] = avg_vol
 
     # Priorisiere Mid-Cap-Volumen (500K-10M) — hier passieren die besten Breakouts
     # Aber schliesse High-Volume nicht komplett aus (niedrigere Prio)
@@ -1265,15 +1324,15 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             "total": len(grade_trades),
             "winners": len(winners),
             "losers": len(losers),
-            "win_rate": round(win_rate, 1),
-            "avg_pnl": round(avg_pnl, 2),
-            "avg_winner": round(avg_winner, 2),
-            "avg_loser": round(avg_loser, 2),
-            "total_pnl": round(total_pnl, 2),
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "avg_winner": avg_winner,
+            "avg_loser": avg_loser,
+            "total_pnl": total_pnl,
             "profit_factor": profit_factor_summary["value"],
             "profit_factor_display": profit_factor_summary["display"],
             "profit_factor_unbounded": profit_factor_summary["unbounded"],
-            "avg_r": round(avg_r, 2),
+            "avg_r": avg_r,
             "tp1_rate": round(tp1_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
             "tp2_rate": round(tp2_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
         }
@@ -1296,7 +1355,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         if str(t.get("outcome") or "").upper() == "UNRESOLVED"
     )
 
-    # Calculate Max Drawdown from equity curve
+    # Hypothetical full-notional trade sequence, not account/portfolio equity.
     equity = 10000
     peak = equity
     max_dd = 0
@@ -1312,10 +1371,14 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "total_decided": len(decided_trades),
         "no_fill": no_fill_count,
         "unresolved": unresolved_count,
-        "win_rate": round(sum(1 for t in decided_trades if t["is_winner"]) / len(decided_trades) * 100, 1) if decided_trades else 0,
-        "avg_pnl": round(sum(t["pnl_pct"] for t in decided_trades) / len(decided_trades), 2) if decided_trades else 0,
-        "total_pnl": round(sum(t["pnl_pct"] for t in decided_trades), 2) if decided_trades else 0,
-        "max_drawdown": round(max_dd, 2),
+        "win_rate": sum(1 for t in decided_trades if t["pnl_pct"] > 0) / len(decided_trades) * 100 if decided_trades else 0,
+        "avg_pnl": sum(t["pnl_pct"] for t in decided_trades) / len(decided_trades) if decided_trades else 0,
+        "total_pnl": sum(t["pnl_pct"] for t in decided_trades),
+        "max_drawdown": max_dd,
+        "trade_sequence_max_drawdown_pct": max_dd,
+        "account_performance_available": False,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
+        "capital_allocation_model": None,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "failed_fetch_days": failed_fetch_days,
@@ -1462,14 +1525,14 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 ticker_history[ticker] = []
             ticker_history[ticker].append(bar)
 
-    # Filtere Ticker mit genug History
-    valid_tickers = {t: bars for t, bars in ticker_history.items()
-                     if len(bars) >= (window_size + 5)}
+    # Rank only observations known at study start, never future survival.
+    # Analysis warmup and observed exit coverage are checked independently later.
+    valid_tickers = ticker_history
 
     # Sortiere nach avg Volumen (aktivste zuerst)
     ticker_avg_vol = {}
     for t, bars_list in valid_tickers.items():
-        avg_vol = _initial_universe_average_volume(bars_list, window_size)
+        avg_vol = _initial_universe_average_volume(bars_list, window_size, as_of=test_start)
         if avg_vol is not None:
             ticker_avg_vol[t] = avg_vol
 
@@ -1599,10 +1662,10 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 "max_score": 20,
                 "rvol": rvol,
                 "direction": "LONG",
-                "entry_target": round(entry_price, 4),
-                "stop_target": round(stop_price, 4),
-                "tp1_target": round(tp1_price, 4),
-                "tp2_target": round(tp2_price, 4),
+                "entry_target": entry_price,
+                "stop_target": stop_price,
+                "tp1_target": tp1_price,
+                "tp2_target": tp2_price,
                 "rr_planned": round(rr, 2),
                 "trade_hold_bars": trade_hold_bars,
             }
@@ -1632,12 +1695,12 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
                 trade_result["pnl_pct"] = 0
                 trade_result["r_multiple"] = 0
                 trade_result["is_winner"] = False
-                trade_result["actual_entry"] = round(entry_price, 4)
+                trade_result["actual_entry"] = entry_price
                 trade_result["entry_date"] = entry_bar["date"]
                 trade_result["evaluation_status"] = "NO_POST_ENTRY_DATA"
                 blocked_until[ticker] = len(bars) - 1
             else:
-                trade_result["actual_entry"] = round(entry_price, 4)
+                trade_result["actual_entry"] = entry_price
                 trade_result["entry_date"] = entry_bar["date"]
                 trade_result.update(simulated)
                 trade_result["outcome"] = simulated["exit_reason"]
@@ -1683,15 +1746,15 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
             "total": len(grade_trades),
             "winners": len(winners),
             "losers": len(losers),
-            "win_rate": round(win_rate, 1),
-            "avg_pnl": round(avg_pnl, 2),
-            "avg_winner": round(avg_winner, 2),
-            "avg_loser": round(avg_loser, 2),
-            "total_pnl": round(total_pnl, 2),
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "avg_winner": avg_winner,
+            "avg_loser": avg_loser,
+            "total_pnl": total_pnl,
             "profit_factor": profit_factor_summary["value"],
             "profit_factor_display": profit_factor_summary["display"],
             "profit_factor_unbounded": profit_factor_summary["unbounded"],
-            "avg_r": round(avg_r, 2),
+            "avg_r": avg_r,
             "tp1_rate": round(tp1_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
             "tp2_rate": round(tp2_hits / len(grade_trades) * 100, 1) if grade_trades else 0,
         }
@@ -1714,7 +1777,7 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         if str(t.get("outcome") or "").upper() == "UNRESOLVED"
     )
 
-    # Calculate Max Drawdown from equity curve
+    # Hypothetical full-notional trade sequence, not account/portfolio equity.
     equity = 10000
     peak = equity
     max_dd = 0
@@ -1730,10 +1793,14 @@ def run_biotech_backtest(poly_key, months=6, max_tickers=100,
         "total_decided": len(decided_trades),
         "no_fill": no_fill_count,
         "unresolved": unresolved_count,
-        "win_rate": round(sum(1 for t in decided_trades if t["is_winner"]) / len(decided_trades) * 100, 1) if decided_trades else 0,
-        "avg_pnl": round(sum(t["pnl_pct"] for t in decided_trades) / len(decided_trades), 2) if decided_trades else 0,
-        "total_pnl": round(sum(t["pnl_pct"] for t in decided_trades), 2) if decided_trades else 0,
-        "max_drawdown": round(max_dd, 2),
+        "win_rate": sum(1 for t in decided_trades if t["pnl_pct"] > 0) / len(decided_trades) * 100 if decided_trades else 0,
+        "avg_pnl": sum(t["pnl_pct"] for t in decided_trades) / len(decided_trades) if decided_trades else 0,
+        "total_pnl": sum(t["pnl_pct"] for t in decided_trades),
+        "max_drawdown": max_dd,
+        "trade_sequence_max_drawdown_pct": max_dd,
+        "account_performance_available": False,
+        "aggregate_performance_model": "chronological_trade_sequence_full_notional_not_portfolio",
+        "capital_allocation_model": None,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "failed_fetch_days": failed_fetch_days,
@@ -1862,20 +1929,17 @@ def simulate_trade(bars, signal_idx, strategy):
     result = {
         "signal_date": signal_day["date"],
         "entry_date": entry_date,
-        "entry_trigger": round(entry_trigger, 4) if entry_trigger is not None else None,
+        "entry_trigger": entry_trigger,
         "entry_fill_basis": entry_fill_basis,
-        "entry_price": round(entry_price, 2),
-        "stop_price": round(initial_stop_price, 2),
-        "tp1_price": round(tp1_price, 2),
-        "tp2_price": round(tp2_price, 2),
-        "blended_target_price": round(blended_target_price, 2),
+        "entry_price": entry_price,
+        "stop_price": initial_stop_price,
+        "tp1_price": tp1_price,
+        "tp2_price": tp2_price,
+        "blended_target_price": blended_target_price,
         "target_model": "50_50_tp1_tp2",
     }
     result.update(simulated)
     result.update(backtest_methodology(rule=strategy))
-    for key in ("exit_price", "exit_price_upper", "pnl_pct", "pnl_pct_upper", "r_multiple", "r_multiple_upper"):
-        if result.get(key) is not None:
-            result[key] = round(float(result[key]), 2)
     return result
 
 
@@ -1913,6 +1977,7 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
     total_tickers = len(tickers)
     skipped_no_data = 0
     unavailable_tickers = []
+    history_source_quality = []
     skipped_too_short = 0
     total_signals = 0
     
@@ -1923,12 +1988,16 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
         # Daten holen (mit Cache)
         if ticker not in ticker_data_cache:
             bars = fetch_backtest_daily_data(poly_key, ticker, start_date, end_date)
+            quality = getattr(bars, "data_quality", None)
+            if isinstance(quality, dict):
+                history_source_quality.append(quality)
             if not bars:
                 skipped_no_data += 1
                 unavailable_tickers.append(ticker)
                 continue
             if len(bars) < 30:
                 skipped_too_short += 1
+                unavailable_tickers.append(ticker)
                 continue
             ticker_data_cache[ticker] = bars
         
@@ -1988,7 +2057,8 @@ def run_full_backtest(poly_key, strategies=None, tickers=None, months=6, progres
         loaded = len(ticker_data_cache)
         progress_callback(1.0, f"[OK] Fertig! {loaded} geladen, {skipped_no_data} keine Daten, {skipped_too_short} zu kurz, {total_signals} Signale")
     
-    _attach_backtest_data_quality(all_results, unavailable_tickers=unavailable_tickers)
+    _attach_backtest_data_quality(all_results, unavailable_tickers=unavailable_tickers,
+                                 source_quality=history_source_quality)
     return all_results
 
 
@@ -1999,11 +2069,25 @@ def compute_backtest_stats(trades):
         first = next(iter(trades or ()), {})
         strategy_name = first.get("strategy") if isinstance(first, dict) else None
         methodology = backtest_methodology(strategy_name, BACKTEST_STRATEGY_RULES.get(strategy_name))
-    data_quality = _backtest_data_quality(trades or ())
-    # Preserve attached coverage even for an empty strategy list.
-    if isinstance(trades, _BacktestTradeList):
-        data_quality = _backtest_data_quality(trades)
-    input_trades = list(trades or [])
+    source_quality = _backtest_data_quality(trades if trades is not None else ())
+    # Do not mutate a legacy caller's records while normalizing calculation
+    # fields. Unknown net results are unresolved, never zero-return wins/losses.
+    input_trades = _BacktestTradeList()
+    input_trades.data_quality = source_quality
+    for original in trades or ():
+        trade = dict(original) if isinstance(original, dict) else {}
+        outcome = str(trade.get("outcome") or "").upper()
+        if outcome not in _NON_DECIDED_BACKTEST_OUTCOMES:
+            pnl = _finite_backtest_number(trade.get("pnl_pct"))
+            if pnl is None:
+                trade.update(outcome="UNRESOLVED", evaluation_status="INVALID_TRADE_RESULT",
+                             pnl_pct=None, r_multiple=None, is_winner=False)
+            else:
+                trade["pnl_pct"] = pnl
+                trade["r_multiple"] = _finite_backtest_number(trade.get("r_multiple"))
+                trade["is_winner"] = pnl > 0
+        input_trades.append(trade)
+    data_quality = _backtest_data_quality(input_trades)
     no_fill_count = sum(
         1 for trade in input_trades
         if str((trade or {}).get("outcome") or "").upper() == "NO_FILL"
@@ -2043,22 +2127,27 @@ def compute_backtest_stats(trades):
         empty.update(methodology)
         return limit_backtest_report(empty)
     
-    winners = [t for t in trades if t["is_winner"]]
-    losers = [t for t in trades if not t["is_winner"]]
+    # Net results are authoritative; stale flags must not contradict P&L.
+    winners = [t for t in trades if t["pnl_pct"] > 0]
+    losers = [t for t in trades if t["pnl_pct"] <= 0]
     
     total = len(trades)
     win_count = len(winners)
     
     avg_pnl = sum(t["pnl_pct"] for t in trades) / total
-    avg_r = sum(t["r_multiple"] for t in trades) / total
-    total_r = sum(t["r_multiple"] for t in trades)
+    r_known = all(t["r_multiple"] is not None for t in trades)
+    total_r = sum(t["r_multiple"] for t in trades) if r_known else None
+    avg_r = total_r / total if r_known else None
     
     avg_win = sum(t["pnl_pct"] for t in winners) / len(winners) if winners else 0
     avg_loss = abs(sum(t["pnl_pct"] for t in losers) / len(losers)) if losers else 0
     
-    gross_profit = sum(t["r_multiple"] for t in winners) if winners else 0
-    gross_loss = abs(sum(t["r_multiple"] for t in losers)) if losers else 0
-    profit_factor_summary = profit_factor_metrics(gross_profit, gross_loss)
+    if r_known:
+        gross_profit = sum(t["r_multiple"] for t in winners) if winners else 0
+        gross_loss = abs(sum(t["r_multiple"] for t in losers)) if losers else 0
+        profit_factor_summary = profit_factor_metrics(gross_profit, gross_loss)
+    else:
+        profit_factor_summary = {"value": None, "display": "Nicht verfuegbar", "unbounded": False}
     
     tp1_reasons = {"TP1", "TP2", "BLENDED_TP", "TP1_STOP", "TP1+EOD"}
     tp2_reasons = {"TP2", "BLENDED_TP"}
@@ -2089,14 +2178,14 @@ def compute_backtest_stats(trades):
         "total_trades": total,
         "winners": win_count,
         "losers": len(losers),
-        "win_rate": round(win_count / total * 100, 1) if total > 0 else 0,
-        "avg_pnl": round(avg_pnl, 2),
-        "avg_win": round(avg_win, 2),
-        "avg_loss": round(avg_loss, 2),
-        "avg_r": round(avg_r, 2),
-        "total_r": round(total_r, 1),
-        "best_r": round(max(t["r_multiple"] for t in trades), 2) if trades else 0,
-        "worst_r": round(min(t["r_multiple"] for t in trades), 2) if trades else 0,
+        "win_rate": win_count / total * 100,
+        "avg_pnl": avg_pnl,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "avg_r": avg_r,
+        "total_r": total_r,
+        "best_r": max(t["r_multiple"] for t in trades) if r_known else None,
+        "worst_r": min(t["r_multiple"] for t in trades) if r_known else None,
         "avg_hold": round(sum(t["bars_held"] for t in trades) / total, 1) if total > 0 else 0,
         "tp1_rate": round(tp1_count / total * 100, 1) if total > 0 else 0,
         "tp2_rate": round(tp2_count / total * 100, 1) if total > 0 else 0,
@@ -2107,7 +2196,9 @@ def compute_backtest_stats(trades):
         "profit_factor": profit_factor_summary["value"],
         "profit_factor_display": profit_factor_summary["display"],
         "profit_factor_unbounded": profit_factor_summary["unbounded"],
-        "expectancy": round(avg_r, 2),
+        "expectancy": avg_r,
+        "r_metrics_available": r_known,
+        "profit_factor_basis": "net_initial_r",
         "total_input_trades": len(input_trades),
         "total_filled": total_filled,
         "total_decided": total,

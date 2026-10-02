@@ -1536,65 +1536,121 @@ def get_ticker_details(poly_key, ticker):
 
 # ── fetch_backtest_daily_data (originally line 12113) ──
 def fetch_backtest_daily_data(poly_key, ticker, start_date, end_date):
+    """Adjusted, bounded daily history, never OHLCV fabricated from a close.
+
+    Preserve completion flags for the execution engine. Invalid observations
+    carry explicit per-series quality even if they lie at a series boundary;
+    provider failures return an unavailable list, not a successful zero study.
     """
-    Holt tägliche OHLCV-Daten von Polygon für Backtesting.
-    Includes retry logic für Rate Limits (429).
-    """
-    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}"
-    params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
-    
-    for attempt in range(3):
-        try:
+    import math
+    from urllib.parse import urlsplit
+    from modules.stock_swing_contract import session_close
+    from modules.momentum_daily_backtest import daily_bar_is_explicitly_incomplete
+
+    class DailyHistory(list):
+        def __init__(self, values=(), **quality):
+            super().__init__(values)
+            self.data_quality = {"status": "COMPLETE", "source": "polygon_adjusted_daily_aggregates",
+                                 "adjusted": True, "excluded_invalid_bars": 0, "invalid_dates": [], **quality}
+
+    def unavailable(code):
+        diagnostics = {"code": code, "ticker": str(ticker), "status": "UNAVAILABLE"}
+        fetch_backtest_daily_data._errors = (getattr(fetch_backtest_daily_data, "_errors", []) + [diagnostics])[-5:]
+        return DailyHistory(status="UNAVAILABLE", unavailable_tickers=[str(ticker)], error_code=code)
+
+    try:
+        start = dt.date.fromisoformat(str(start_date))
+        end = dt.date.fromisoformat(str(end_date))
+        if end < start or not re.fullmatch(r"[A-Za-z0-9._:-]{1,32}", str(ticker)):
+            return unavailable("backtest_request_invalid")
+        path_prefix = f"/v2/aggs/ticker/{ticker}/range/1/day/"
+        url = f"https://api.polygon.io{path_prefix}{start.isoformat()}/{end.isoformat()}"
+        params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": poly_key}
+        seen_urls, by_date = set(), {}
+        invalid_dates, invalid_count, total_rows = set(), 0, 0
+        excluded_open_future = 0
+        incomplete_dates = set()
+        cutoff = datetime.now(dt.timezone.utc)
+        started = time.monotonic()
+        for _page in range(30):
+            parts = urlsplit(url)
+            if (parts.scheme != "https" or parts.netloc != "api.polygon.io"
+                    or not parts.path.startswith(path_prefix) or parts.fragment
+                    or url in seen_urls or time.monotonic() - started > 120):
+                return unavailable("backtest_provider_pagination_invalid")
+            seen_urls.add(url)
             resp = rate_limited_get(url, params=params, timeout=15)
-            
-            if resp.status_code == 429:
-                time.sleep(12 + attempt * 5)
-                continue
-            
             if resp.status_code != 200:
-                # Speichere Fehler für Debug-Anzeige
-                _err = f"{ticker}: HTTP {resp.status_code}"
+                return unavailable(f"backtest_provider_http_{int(resp.status_code)}")
+            body = resp.json()
+            if (not isinstance(body, dict) or body.get("status") not in {"OK", "DELAYED"}
+                    or body.get("adjusted") is False or not isinstance(body.get("results", []), list)):
+                return unavailable("backtest_provider_payload_invalid")
+            for row in body.get("results", []):
+                total_rows += 1
+                if total_rows > 50000:
+                    return unavailable("backtest_provider_result_limit")
+                day = None
                 try:
-                    _err += f" | {resp.text[:150]}"
-                except:
-                    pass
-                if not hasattr(fetch_backtest_daily_data, '_errors'):
-                    fetch_backtest_daily_data._errors = []
-                fetch_backtest_daily_data._errors = (fetch_backtest_daily_data._errors + [_err])[-5:]
-                return []
-            
-            data = resp.json()
-            
-            if data.get("status") not in ("OK", "DELAYED") or not data.get("results"):
-                _err = f"{ticker}: status={data.get('status')} results={data.get('resultsCount',0)} | {data.get('error','')}{data.get('message','')}"
-                if not hasattr(fetch_backtest_daily_data, '_errors'):
-                    fetch_backtest_daily_data._errors = []
-                fetch_backtest_daily_data._errors = (fetch_backtest_daily_data._errors + [_err])[-5:]
-                return []
-            
-            bars = []
-            for r in data["results"]:
-                _c = r.get("c", 0)
-                if not _c or _c <= 0:
-                    continue  # Skip invalid zero-price bars
-                ts = r.get("t", 0)
-                dt = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
-                bars.append({
-                    "date": dt,
-                    "open": r.get("o", _c),
-                    "high": r.get("h", _c),
-                    "low": r.get("l", _c),
-                    "close": _c,
-                    "volume": r.get("v", 0),
-                    "vwap": r.get("vw", 0)
-                })
-            return bars
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(5)
-            continue
-    
-    return []
+                    if not isinstance(row, dict) or isinstance(row.get("t"), bool):
+                        raise ValueError("timestamp")
+                    day = datetime.fromtimestamp(float(row["t"]) / 1000, tz=dt.timezone.utc).date()
+                    raw_values = [row[key] for key in ("o", "h", "l", "c", "v")]
+                    if any(value is None or isinstance(value, bool) for value in raw_values):
+                        raise ValueError("OHLCV")
+                    o, h, l, c, v = map(float, raw_values)
+                    if (not all(math.isfinite(value) for value in (o, h, l, c, v))
+                            or min(o, h, l, c) <= 0 or v < 0 or h < max(o, c, l) or l > min(o, c, h)):
+                        raise ValueError("OHLCV")
+                    if not start <= day <= end:
+                        raise ValueError("outside_requested_period")
+                    # Even an unflagged current candle is not completed until
+                    # its regular US session closes. No UTC-midnight guess.
+                    if day >= cutoff.date():
+                        close_at = session_close(day.isoformat())
+                        if close_at is None or close_at > cutoff:
+                            excluded_open_future += 1
+                            continue
+                    normalized = {"date": day.isoformat(), "open": o, "high": h,
+                                  "low": l, "close": c, "volume": v}
+                    for flag in ("is_closed", "complete", "completed", "final"):
+                        if flag in row:
+                            normalized[flag] = row[flag]
+                    if daily_bar_is_explicitly_incomplete(normalized):
+                        incomplete_dates.add(day.isoformat())
+                    if "vw" in row and isinstance(row["vw"], (int, float)) and math.isfinite(row["vw"]):
+                        normalized["vwap"] = row["vw"]
+                    previous = by_date.get(normalized["date"])
+                    if previous is not None and previous != normalized:
+                        return unavailable("backtest_provider_conflicting_daily_rows")
+                    by_date[normalized["date"]] = normalized
+                except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                    invalid_count += 1
+                    if day is not None:
+                        invalid_dates.add(day.isoformat())
+            next_url = body.get("next_url")
+            if not next_url:
+                result = DailyHistory([by_date[key] for key in sorted(by_date)],
+                                      status="PARTIAL" if (invalid_count or incomplete_dates) else "COMPLETE",
+                                      excluded_invalid_bars=invalid_count, invalid_dates=sorted(invalid_dates),
+                                      excluded_open_future_sessions=excluded_open_future,
+                                      explicitly_incomplete_bars=len(incomplete_dates),
+                                      incomplete_dates=sorted(incomplete_dates),
+                                      data_cutoff_at=cutoff.isoformat(), completed_daily_bars_only=not incomplete_dates,
+                                      input_bars=total_rows, pages=len(seen_urls),
+                                      requested_start=start.isoformat(), requested_end=end.isoformat())
+                if invalid_count:
+                    fetch_backtest_daily_data._errors = (getattr(fetch_backtest_daily_data, "_errors", []) +
+                        [{"code": "backtest_invalid_daily_observations", "ticker": str(ticker),
+                          "invalid_count": invalid_count, "invalid_dates": sorted(invalid_dates)}])[-5:]
+                return result
+            if not isinstance(next_url, str):
+                return unavailable("backtest_provider_pagination_invalid")
+            url = next_url
+            params = {"apiKey": poly_key, "adjusted": "true"}
+        return unavailable("backtest_provider_pagination_limit")
+    except Exception:
+        return unavailable("backtest_provider_fetch_failed")
 
 
 # ── fetch_grouped_daily (originally line 12172) ──
