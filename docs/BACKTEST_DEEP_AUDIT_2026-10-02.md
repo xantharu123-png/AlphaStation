@@ -179,6 +179,18 @@ Eigener lokaler Playwright-Browser geschlossen und eigener Static-Server
 anhand Interpreter, vollständigem Startbefehl und PID 1982320 identifiziert
 und beendet. Nutzerbrowser und andere Prozesse nicht verändert.
 
+## Veröffentlichung
+
+Implementierungscommit: 7bfeb167898f0452de3bb5bfd7714c6c9da941e2.
+git push origin main erfolgreich; git ls-remote origin refs/heads/main
+bestätigte genau diesen Hash. Der anschließende Statusnachtrag in diesem
+Prüfbericht und TODO verändert ausschließlich Dokumentation.
+
+Server nicht verändert. Normaler Betreiberpull erst nach Abschluss laufender
+Scans/Versandvorgänge; kein Deployskript und keine Installationsumstellung.
+Nach Pull API und Hintergrunddienst neu starten, danach Strg+F5.
+Echte Cache-Wiederherstellung nach Betreiberupdate bleibt Betriebsabnahme.
+
 ## Abnahmegrenzen
 
 Feste Kosten-/Slippage-/Daily-Fillmodelle bleiben Modelle, keine historischen

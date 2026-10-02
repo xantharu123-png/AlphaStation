@@ -28,8 +28,11 @@ Ausgangsrevision `4ef6c9b284825686fef60913a2e932a8f9414202`.
   `tmp/qa-a8c5b525dfe2/results.xml`, 430,18 s; Deploy-Umstellungstests
   ausdrücklich nicht im Umfang. Erster Vollpaketlauf fand nur fünf alte
   gerundete R-Erwartungen; unabhängig hergeleitet, übrige Assertions erhalten.
-- [ ] Nur geprüften Backtest-Scope committen/pushen; bestehende Deploy-/Handbuch-
-  und Commerce-/Kalender-WIP nicht übernehmen.
+- [x] Nur geprüften Backtest-Scope committet und auf `main` gepusht:
+  `7bfeb167898f0452de3bb5bfd7714c6c9da941e2`, durch `git ls-remote`
+  bestätigt. Bestehende Deploy-/Handbuch- und Commerce-/Kalender-WIP,
+  private Exporte und Browserartefakte nicht übernommen.
+  Dieser abschließende Statusnachtrag verändert nur Dokumentation.
 - [ ] Nach Betreiberpull echten Backtest-Reopen kontrollieren;
   kein Serverupdate oder echter Provider-Backtest durch Codex.
 
