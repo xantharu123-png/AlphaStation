@@ -5,8 +5,10 @@
 Dieser Abschnitt ersetzt die früheren Anschlussanweisungen als aktuellen Einstieg.
 Die Abschnitte ab „01.10.“ bleiben historische Nachweise, keine neuen Pull-/
 Versandaufträge. Ausgangs-HEAD ist `796f8211a5692bb6cc98fb13075827926d30351d`.
-**Das heutige geprüfte Reparaturpaket ist lokal, noch nicht committet/gepusht oder
-auf Hetzner.** Geerbtes Deploy-/Handbuch-WIP und private Quellen bleiben erhalten.
+**Das heutige Reparaturpaket ist committet und gepusht:
+`93428a4998b0027740bea1f9c9df188f6743663f`, Remote `origin/main` separat bestätigt.
+Auf Hetzner noch nicht aktiviert.** Geerbtes Deploy-/Handbuch-WIP und private
+Quellen bleiben erhalten und wurden nicht veröffentlicht.
 Veröffentlichung durch „alles erledigen“ freigegeben. Unabhängig geprüftes
 93-Dateien-Paket im Git-Index, ohne private Exporte/Secrets/Deploy-WIP.
 Exakter Index-Gesamtlauf: **10.777 bestanden, 1 übersprungen, 0 Fehler**,
@@ -87,9 +89,9 @@ Private Ausgaben sind gitignored; nicht mit Source nach GitHub laden.
 
 ### Tatsächlich noch offen / nicht als erledigt übernehmen
 
-1. [ ] Scoped Veröffentlichung des heutigen Pakets: Freigabe, unabhängige
-   Prüfung, konkrete Stage-Auswahl und Index-Gesamtlauf abgeschlossen; Commit/
-   Push abschließen und Remotehash prüfen. Private Quellen/Exporte ausgeschlossen.
+1. [x] Scoped Veröffentlichung des heutigen Pakets: Freigabe, unabhängige
+   Prüfung,93 konkrete Stage-Pfade, Index-Gesamtlauf, Commit/Push und separater
+   Remotehashvergleich abgeschlossen. Private Quellen/Exporte ausgeschlossen.
    Kein safe_deploy, Ersatzinstaller oder Eigentumsumbau.
 2. [ ] Nach Betreiberupdate vollständige neue Scannerläufe unter neuen Verträgen
    prüfen: Aktiencache20, BIv8, Kryptoprofil3, Listing4, Zonenmodelle v2.
@@ -114,6 +116,22 @@ Private Ausgaben sind gitignored; nicht mit Source nach GitHub laden.
    unvollständig. 8H nicht als unterstützten Chartzeitrahmen behaupten;
    TradingView-Profil nicht mit unserem OHLCV-Rangeprofil gleichsetzen.
 
+### Nächste Betreiberaktion – kein erneuter Gesamtexport
+
+Direkter SSH-Batchzugang hier mit `Permission denied` abgewiesen. Nach Abschluss
+laufender Scanner und SMTP-Vorgänge im eigenen Server-Terminal ausführen:
+
+```bash
+sudo -u tradingbot git -C /home/tradingbot/app pull --ff-only origin main &&
+sudo systemctl restart tradingbot-api.service tradingbot-bg.service &&
+curl -fsS --retry 30 --retry-connrefused --retry-delay 2 --connect-timeout 2 --max-time 5 http://127.0.0.1:8000/api/health
+```
+
+Danach Healthausgabe/Revision schicken und Browser hart neu laden. Erwartetes
+Bundle `6a488c9c8f1a`; Quellcommit `93428a4` plus Abschlussdokumentation. Kein
+Deploy-Skript, keine Paketinstallation, Reminder-Migration, Unitkopie, chown,
+daemon-reload oder Cachelöschung. Stop/Pause ist kein Restart-Checkpoint.
+
 ### Quell-/Test-/Betriebscheckpoint
 
 - API-SHA256 `1118c313be477386fade5e10fcd1ffd0123c95e44df4cd7abea022ade7fa095f`.
@@ -126,8 +144,9 @@ Private Ausgaben sind gitignored; nicht mit Source nach GitHub laden.
 - Interpreter `.codex_pytest_env\Scripts\python.exe`; isolierter Launcher
   `scripts/run_offline_tests.py`, QA-Ausgabe nur in `tmp`. Der frühere private
   Launcher bleibt historisch, nicht Voraussetzung für einen frischen Checkout.
-- Keine echte Order, Testmail, Scanstart, Account-/Abo-/Dienständerung,
-  Veröffentlichung oder Entfernung privater History während dieses Auftrags.
+- Keine echte Order, erneute Testmail, Scanstart, Account-/Abo-/Dienständerung
+  oder Entfernung privater History während dieses Auftrags. Veröffentlichung
+  des geprüften Quellpakets erfolgte nach ausdrücklicher Abschlussfreigabe.
 
 ## Historischer Stand 01.10.2026 – nicht mehr maßgeblicher Einstieg
 

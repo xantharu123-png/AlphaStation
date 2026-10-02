@@ -8,8 +8,9 @@ anhand alter Chat-Zusagen als erledigt übernommen. Ausgangspunkt ist
 Geerbte Änderungen einschließlich der Entfernung von `deploy/safe_deploy.sh`
 bleiben erhalten. Kein Ersatz-Deployer oder Installationsumbau.
 
-**Lokal geprüft und repariert; noch nicht committet, gepusht oder auf Hetzner
-aktiviert.** Kein produktiver Scanstart, Neustart, Handel, erneuter Testmailversand
+**Geprüft, committet und gepusht: `93428a4998b0027740bea1f9c9df188f6743663f`.
+Remote `origin/main` separat bestätigt. Auf Hetzner noch nicht aktiviert.**
+Kein produktiver Scanstart, Neustart, Handel, erneuter Testmailversand
 oder Eingriff in Provider-Abos. Der Betreiber hat den Eingang der einmalig
 autorisierten technischen Testmail vom 01.10. bestätigt.
 
@@ -232,14 +233,27 @@ Die lokalen Quell-/Präzisionsreparaturen sind kein Beweis des damaligen Subcode
 Originalkerzen der alten achtVIAV-Strukturen und manuell gezeichnetenAST-Linien
 sind ebenfalls weiterhin nicht vollständig vorhanden.
 
-Die Veröffentlichungsfreigabe liegt nun vor. Scoped Änderungsprüfung und
-Index-Gesamtlauf sind abgeschlossen; Commit/Push und danach Betreiber-Pull ohne
-Deploy-Skript folgen. Private Quellen/Exporte und geerbtes Deploy-/Handbuch-WIP
+Die Veröffentlichungsfreigabe liegt vor. Scoped Änderungsprüfung,
+Index-Gesamtlauf, Commit und Push sind abgeschlossen; der Betreiber-Pull ohne
+Deploy-Skript steht noch aus. Private Quellen/Exporte und geerbtes Deploy-/Handbuch-WIP
 sind nicht Teil des93-Dateien-Pakets. Keine neuen Pakete oder Reminder-Migration
 erforderlich. Nach dem Betreiberupdate bleiben vollständige neue Läufe unter
 den neuen Cacheverträgen und getrennte reale Signal-/SMTP-/Postfachabnahme nötig.
 Laufende Scanner und SMTP-Versand vorher abschließen lassen: Pause ist kein
 persistenter Restart-Checkpoint. Keine Unit-/Eigentums-/Installationsumstellung.
+
+Normaler manueller Serverweg nach Abschluss aktiver Scans/SMTP-Vorgänge:
+
+```bash
+sudo -u tradingbot git -C /home/tradingbot/app pull --ff-only origin main &&
+sudo systemctl restart tradingbot-api.service tradingbot-bg.service &&
+curl -fsS --retry 30 --retry-connrefused --retry-delay 2 --connect-timeout 2 --max-time 5 http://127.0.0.1:8000/api/health
+```
+
+Health soll `healthy` und Frontend-Source `6a488c9c8f1a` zeigen. Die Git-Revision
+ist der neueste `origin/main`-Stand einschließlich der Abschlussdokumentation;
+der Quellcommit ist oben eindeutig angegeben. Kein Reset bei Serveränderungen,
+keine Cache-/DB-Löschung und keine erneute unautorisierte Testmail.
 
 Offizielle Daten-/Methodenreferenzen:
 [Massive/Polygon Aggregatefelder und Adjustierung](https://massive.com/docs/rest/stocks/aggregates/custom-bars?auth=login),
