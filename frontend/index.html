@@ -10105,17 +10105,6 @@ function CryptoTradeSignalsTab({ onSelectTicker, scanCache = {}, updateScanCache
                     {stats.scanner_note && <span>{stats.scanner_note}</span>}
                 </div>
             )}
-            {stats && (stats.result_count || 0) > 0 && (stats.long_count || 0) === 0 && (stats.short_count || 0) > 0 && (
-                <div className="text-xs rounded-lg border border-amber-100 bg-amber-50 text-amber-900 px-3 py-2">
-                    Aktuell 0 Long-Kandidaten: Die Long-Engine (Explosion) zeigt nur frische, bestaetigte 5m-Ausbrueche — keiner aktiv.
-                    Im Risk-Off-Markt ist typischerweise die Short-Seite (Pump-Exhaustion) aktiver. Das ist kein Fehler, sondern Marktlage.
-                </div>
-            )}
-            {stats && (stats.result_count || 0) > 0 && (stats.short_count || 0) === 0 && (stats.long_count || 0) > 0 && (
-                <div className="text-xs rounded-lg border border-amber-100 bg-amber-50 text-amber-900 px-3 py-2">
-                    Aktuell 0 Short-Kandidaten: Die Short-Engine (Pump/Dump) braucht frische Pumps (≥15-25%) mit Exhaustion — keiner im Monitoring.
-                </div>
-            )}
             <div className="card border border-gray-200 p-6 rounded-lg overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead className="border-b border-gray-200">
@@ -14475,6 +14464,7 @@ function AdminTab() {
                         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:16}}>
                             {[
                                 ['Swing-Empfänger',mailAudit.delivery.recipient_counts?.stocks_swing],
+                                ['Crypto-Empfänger',mailAudit.delivery.recipient_counts?.crypto],
                                 ['SMTP-Annahmen',mailAccepted(mailAudit.delivery.pipeline)],
                                 ['Ausgelassen',mailAudit.delivery.pipeline?.skipped],
                                 ['Versandfehler',mailAudit.delivery.pipeline?.errors],

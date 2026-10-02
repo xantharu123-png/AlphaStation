@@ -82,8 +82,12 @@ def test_crypto_explosion_armed_is_not_market_buy(monkeypatch):
 
     assert scored is not None
     assert scored["trade_signal"] == "EXPLOSION_ARMED"
-    assert scored["trade_decision"] == "WAIT_FOR_BREAK_RECLAIM"
-    assert scored["barrier_gate_active"] is True
+    # The rolling 24h ticker high is not a confirmed structural zone. The
+    # actual blocker here is the missing breakout, not a fictitious reclaim.
+    assert scored["trade_decision"] == "WAIT_FOR_TRIGGER"
+    assert scored["barrier_gate_active"] is False
+    assert scored["execution_trigger_ok"] is False
+    assert scored["alertable_crypto"] is False
     assert scored["tp2"] > scored["tp1"] > scored["entry"] > scored["stop"]
     assert scored["risk_reward"] >= 1.45
 

@@ -102,6 +102,17 @@ ALLOWED_SUPPRESSION_REASONS = frozenset({
     "bear_plan_contract_invalid",
     "btc_context_missing",
     "btc_context_blocks_short",
+    # Native Crypto-Long dispatcher: reviewed code branches, never row content.
+    "crypto_explosion_watch_only",
+    "crypto_explosion_data_or_risk_blocked",
+    "crypto_explosion_native_contract_missing_or_conflicting",
+    "crypto_explosion_execution_stale_or_source_unproven",
+    "crypto_explosion_btc_context_unknown_or_stale",
+    "crypto_explosion_funding_or_spread_unqualified",
+    "crypto_explosion_invalid_row",
+    "crypto_explosion_duplicate_identity",
+    "crypto_explosion_mail_quota_deferred",
+    "crypto_explosion_mail_dispatch_exception",
     # Stable fallback. It intentionally contains no fragment of the rejected
     # value, so an unexpected code reason cannot leak an identity.
     "unclassified_code_reason",

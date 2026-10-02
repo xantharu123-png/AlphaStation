@@ -1,8 +1,61 @@
 # Aktuelle Aufgaben / Übergabe
 
-## Maßgeblicher Abschlussstand 02.10.2026 – Tiefenaudit / Dreimonatsproben
+## Neue Livekontrolle 02.10.2026 – nach dem Betreiberupdate
 
-Dieser Abschnitt ersetzt die früheren Anschlussanweisungen als aktuellen Einstieg.
+Dieser Abschnitt hat Vorrang vor dem älteren Hinweis „auf Hetzner noch nicht
+aktiviert“. Öffentliches `/api/health` am02.10.10:53:47 UTC bestätigt
+**healthy / `7f6981f8e4f8` / Frontend `6a488c9c8f1a`**. Das vorherige Paket
+ist auf dem Server angekommen; kein erneuter Pull allein für dieses Paket.
+
+- [x] Betreiber hat den Eingang der technischen Testmail erneut bestätigt.
+  Keine weitere Testmail gesendet; Transport dieser Nachricht ist belegt,
+  noch nicht die Zustellung eines Handelssignals.
+- [x] Authentifizierte aktuelle UI geprüft, ohne Scans oder Einstellungen zu
+  ändern: Momentum vollständig12.582/12.582,32 Kandidaten, maximal Trade-Score78
+  bei Mailminimum80. Neuer Snapshot02.10.10:48:55 UTC. Nicht „Scan abgebrochen“.
+- [x] Die Fehlermeldung der Aktienrunde ist dem Cup-Lauf zugeordnet:
+ 5.712/12.582, `scan_data_unavailable`, Phase `history`,507s. Der alte Cup-
+  Ergebnisstand ist kein neuer abgeschlossener Nullscan. Innerer Abruffehler
+  noch nicht vorhanden; gezielter vorhandener Probeauftrag unten.
+- [x] Fehlender tatsächlicher Signal-Mailanschluss des Crypto-Long-Scanners
+  im aktuellen Code bestätigt: erfolgreicher Wrapper speichert nur Ergebnisse;
+  auch `_run_scan_safe` und der Combined-Merge dispatchen keine Long-Signale.
+  Early-Mover-Sender hat einen anderen Producer/Owner und ersetzt diesen Pfad
+  nicht. Das ist zusätzlich zu den aktuellen Ablehnungen ein echter Codefehler.
+- [x] Eigenen Crypto-Long-Dispatcher anschließen: unveränderte Grade-/Score-/
+  Struktur-/Funding-/Frischegrenzen, native Venue/Contract/Closed-Candle-Quelle,
+  finale Quote/Pfadprüfung, korrekter Crypto-Kanal, Durable-Intent/Receipt und
+  Doppelversandschutz. Kein zweiter Sender aus dem Combined-Cache.
+- [x] Latenten Crypto-Strategy-Kanalfehler korrigieren und prüfen: tatsächlich
+  Crypto-Kanal statt `stocks_swing`, auch bei beiden Watch-Seams. Bestehender
+  manueller Crypto-Watch-only-Vertrag bleibt deaktiviert für Trade-Mails.
+- [x] Rolling24h-Hoch als unbelegte Beobachtung behandeln, nicht als bestätigte
+  Strukturidentität. Echter Scorer → echte VRVP/Health → finale Quote/Pfad →
+  tatsächlicher Sender mit Mock-SMTP/temporärem Receipt getestet. Ohne echte
+  Gegenbarriere weiterhin Watch; keine Score-/Risiko-Lockerung.
+- [x] Native Long-Cachevorprüfung und Crypto-Empfängerzahl in Admin ergänzen;
+  zehn Gründe konsistent in API/SQLite-Telemetrie/privatem Collector.
+- [x] Pauschale Combined-Behauptung „kein Fehler, sondern Marktlage“ bei
+ 0Longs/Shorts entfernen; Quellenstatus/Zähler statt erfundener Erklärung.
+  Tatsächliche JSX-Komponente für beide Richtungen mit Fehlerstatus geprüft;
+  Crypto-Empfänger im Admin separat sichtbar. Bundle `806260a08809` gebaut und
+  Sourcehash/Syntax geprüft.
+- [x] Neue Korrektur unabhängig/offline geprüft: 96 unabhängige Tests grün;
+  eingefrorener Index-Gesamtlauf **10.842 bestanden, 1 übersprungen, 0 Fehler**,
+  479,69s; `tmp/qa-77f0423f384f/results.xml`. Externe Provider/SMTP gesperrt,
+  keine lokalen Secrets. Deploy-Tests ausdrücklich ausgeschlossen.
+- [ ] Geprüfte Korrektur scoped veröffentlichen und gesonderten normalen Pull
+  übergeben. Server nicht selbst verändert.
+- [ ] Cup-Abruffehler über `python3 -I /home/tradingbot/app/scripts/probe_stock_attempt_errors.py`
+  im vorhandenen Server-Terminal lesen. Kein Gesamtexport/Passwortloop nötig.
+- [ ] Aktueller Crypto-Long-Wiederholungslauf und echte Handelssignalannahme/
+  Posteingang bleiben offen. Letzter Admin-Stand nach Restart:0 angenommen,
+  6 ausgelassen,0 Fehler,0 Queue am02.10.13:18:02MESZ; begrenztes Prozessfenster,
+  keine Inboxhistorie. Automatischer Retry weiter aktiv, kein Start durch Codex.
+
+## Historischer Abschlussstand des ersten Pakets 02.10.2026 – Tiefenaudit / Dreimonatsproben
+
+Dieser Abschnitt dokumentiert den Abschluss vor der neuen Livekontrolle oben.
 Die Abschnitte ab „01.10.“ bleiben historische Nachweise, keine neuen Pull-/
 Versandaufträge. Ausgangs-HEAD ist `796f8211a5692bb6cc98fb13075827926d30351d`.
 **Das heutige Reparaturpaket ist committet und gepusht:

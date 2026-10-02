@@ -3015,6 +3015,16 @@ _ALERT_SUPPRESSION_LABELS = {
     "not_closing_near_low": "Short: Kurs schliesst nicht nahe Tagestief",
     "target_already_missed": "TP1 bereits verpasst",
     "early_mover_action_not_alertable": "Crypto: nur Watch/Retest, kein Long-Jetzt",
+    "crypto_explosion_watch_only": "Crypto Long: Setup wartet noch auf Freigabe",
+    "crypto_explosion_data_or_risk_blocked": "Crypto Long: Daten unvollstaendig oder Risiko nicht freigegeben",
+    "crypto_explosion_native_contract_missing_or_conflicting": "Crypto Long: Handelsplatz oder Kontrakt nicht eindeutig",
+    "crypto_explosion_execution_stale_or_source_unproven": "Crypto Long: Schlusskursbestaetigung veraltet oder unbelegt",
+    "crypto_explosion_btc_context_unknown_or_stale": "Crypto Long: aktueller BTC-Kontext fehlt",
+    "crypto_explosion_funding_or_spread_unqualified": "Crypto Long: Funding oder Spread nicht freigegeben",
+    "crypto_explosion_invalid_row": "Crypto Long: ungueltiger Ergebnisdatensatz",
+    "crypto_explosion_duplicate_identity": "Crypto Long: identisches Setup bereits geprueft",
+    "crypto_explosion_mail_quota_deferred": "Crypto Long: Maillimit dieses Laufs erreicht",
+    "crypto_explosion_mail_dispatch_exception": "Crypto Long: Signal-Mailpruefung fehlgeschlagen",
     "early_mover_no_chase": "Crypto: No-Chase",
     "early_mover_late_to_tp1": "Crypto: zu nah/ueber TP1",
     "early_mover_chased_from_entry": "Crypto: zu weit vom Entry",
@@ -10691,6 +10701,14 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str, *, read_onl
         if scanner_name in _STOCK_ALERT_SCANNERS and not read_only:
             row = _enrich_stock_alert_5m_state(scanner_name, row)
         state = _classify_alert_candidate(scanner_name, row, now, cache_only=True) if read_only else _classify_alert_candidate(scanner_name, row, now)
+        if scanner_name == "crypto_explosion":
+            # Same native source proof as the sender, but no executable quote
+            # or transport during diagnostics. A passed cache is no receipt.
+            native_reason = _crypto_explosion_mail_block_reason(row, now)
+            if native_reason:
+                reasons = list(dict.fromkeys([*state["suppression_reasons"], native_reason]))
+                state = {**state, "alertable_now": False, "suppression_reasons": reasons,
+                         **_alert_decision_from_reasons(scanner_name, reasons)}
         if has_gap_cache_rows:
             freshness = _gap_cache_freshness(row.get("Strategy") or row.get("strategy"), gap_metadata, [row],
                                            as_of=datetime.fromtimestamp(now, timezone.utc))
@@ -14623,6 +14641,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     trade_horizon="swing",
                     mail_class="watch",
                     mail_channel=(
+                        "crypto" if market_type == "crypto" else
                         "stocks_premarket" if all(a.get("premarket") for a in _market_watch_alerts) else "stocks_swing"
                     ),
                     delivery_dedupe_keys=[
@@ -14787,6 +14806,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     trade_horizon="swing",
                     mail_class="watch",
                     mail_channel=(
+                        "crypto" if market_type == "crypto" else
                         "stocks_premarket" if all(a.get("premarket") for a in _watch_alerts) else "stocks_swing"
                     ),
                     delivery_dedupe_keys=[
@@ -15228,7 +15248,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             trade_horizon="swing",
             mail_class=("watch" if _regime_shadow_tag else "swing_trade"),
             telegram_text=_safe_format_telegram_rows(_signal_rows),
-            mail_channel=("stocks_premarket" if premarket_mail_mode else "stocks_swing"),
+            mail_channel=("crypto" if market_type == "crypto" else
+                          "stocks_premarket" if premarket_mail_mode else "stocks_swing"),
             tracking_scanner=("" if _regime_shadow_tag else scanner_key),
             tracking_rows=(None if _regime_shadow_tag else _signal_rows),
             tracking_scope=("watch" if _regime_shadow_tag else "entry"),
@@ -30353,7 +30374,7 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
             "reasons": [{"code": code, "label": reviewed[code]} for code in codes[:4]],
         })
     recipients = {}
-    for channel, horizon in (("stocks_swing", "swing"), ("stocks_intraday", "intraday")):
+    for channel, horizon in (("stocks_swing", "swing"), ("stocks_intraday", "intraday"), ("crypto", "swing")):
         try:
             recipients[channel] = len(_readonly_diagnostic_call(_resolve_email_alert_recipients,
                 trade_horizon=horizon, mail_class="swing_trade" if horizon == "swing" else "trade",
@@ -30384,6 +30405,7 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
         "orb": ORB_CACHE,
         "new_listing": NEW_LISTING_CACHE,
         "early_movers": EARLY_MOVERS_CACHE,
+        "crypto_explosion": CRYPTO_EXPLOSION_CACHE,
         "strategy_scan": STRATEGY_SCAN_CACHE,
         "strat_gap_momentum_long": _strategy_cache_path("Gap Momentum Long"),
         "strat_gap_momentum_short": _strategy_cache_path("Gap Momentum Short"),
@@ -36014,8 +36036,13 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     observed_24h_barrier = high_24h if high_24h > entry else 0.0
     if observed_24h_barrier:
         raw_tp1 = observed_24h_barrier
-        raw_tp1_source = "observed_24h_high_liquidity"
-        raw_tp1_is_projection = False
+        # A rolling ticker high has neither a confirmed pivot nor a causal
+        # zone identity. Keep the price as an observed WATCH reference, not a
+        # structural claim that poisons a subsequently validated VRVP target.
+        # Only apply_vrvp_to_trade_setup may replace this unverified proposal
+        # with the actual completed-profile barrier and its own provenance.
+        raw_tp1_source = "observed_24h_high_unconfirmed"
+        raw_tp1_is_projection = True
     else:
         raw_tp1 = max(
             entry + risk * 1.8,
@@ -36037,8 +36064,8 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
         "tp2_is_projection": True,
         "target_quality": (
             "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
-            if raw_tp1_is_projection
-            else "STRUCTURAL_TP1_PROJECTION_TP2"
+            if not observed_24h_barrier
+            else "UNCONFIRMED_OBSERVED_24H_HIGH"
         ),
         "stop_source": "nearest support/VRVP invalidation",
     }
@@ -36133,6 +36160,19 @@ def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[
     result = {
         **row,
         "ticker": row.get("Symbol"),
+        "direction": "LONG",
+        "market_type": "crypto",
+        "strategy": "Explosion Long",
+        "scanner_source": "crypto_explosion",
+        "timeframe": "5m",
+        "venue": row.get("exchange"),
+        "contract_symbol": row.get("contract"),
+        "stable_ref": f"{row.get('exchange')}:{row.get('contract')}",
+        # The original plan price is this completed candle's close, not the
+        # bulk ticker or the later cache-write time. Final mail validation
+        # must inspect the entire market path from this actual observation.
+        "scan_price_observed_at": execution_freshness.get("closed_at"),
+        "scan_price_source": f"{row.get('exchange')}:{row.get('contract')}:5m:close",
         "Price": _ce_round_price(price),
         "price": price,
         "Change24h": round(change24, 2),
@@ -36359,6 +36399,173 @@ def _run_crypto_explosion_scan() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     return results, stats
 
 
+def _crypto_explosion_mail_block_reason(row: Dict[str, Any], now_ts: float) -> Optional[str]:
+    """Admit only current native long evidence; no cache or CG conversion."""
+    profile_reason = _crypto_profile_contract_reason(row)
+    if profile_reason:
+        return profile_reason
+    if (row.get("trade_signal") != "JETZT_TRADEN"
+            or row.get("trade_action") != "LONG_NOW"
+            or row.get("trade_decision") != "TRADEABLE"
+            or row.get("execution_trigger_ok") is not True
+            or row.get("alertable_crypto") is not True):
+        return "crypto_explosion_watch_only"
+    if (row.get("partial_data") or row.get("data_partial")
+            or str(row.get("risk_level") or "").upper() not in {"LOW", "MEDIUM"}):
+        return "crypto_explosion_data_or_risk_blocked"
+    venue = _normalize_crypto_exchange(row.get("exchange"))
+    contract = str(row.get("contract") or "").strip().upper()
+    if (venue not in {"bybit", "binance", "mexc", "bitget"} or not contract
+            or _normalize_crypto_exchange(row.get("venue")) != venue
+            or str(row.get("contract_symbol") or "").strip().upper() != contract):
+        return "crypto_explosion_native_contract_missing_or_conflicting"
+    freshness = _crypto_candle_freshness(
+        [{"timestamp": row.get("execution_candle_timestamp")}], "5m", now_ts=now_ts,
+    )
+    observed = _crypto_trade_observation_timestamp(row)
+    if (not freshness.get("fresh") or observed is None
+            or abs(observed - freshness["closed_at"]) > 2.0
+            or row.get("scan_price_source") != f"{venue}:{contract}:5m:close"):
+        return "crypto_explosion_execution_stale_or_source_unproven"
+    btc = row.get("btc_context") if isinstance(row.get("btc_context"), dict) else {}
+    btc_clock = _execution_candle_timestamp(btc.get("observed_at"))
+    btc_values = [_execution_candle_number(btc.get(field))
+                  for field in ("btc_24h", "coin_24h", "alpha_24h")]
+    if (btc.get("known") is not True or btc.get("data_status") != "ok"
+            or btc_clock is None or not -2.0 <= now_ts - btc_clock <= 300.0
+            or any(value is None for value in btc_values)
+            or not math.isclose(btc_values[2], btc_values[1] - btc_values[0],
+                                rel_tol=1e-9, abs_tol=1e-9)):
+        return "crypto_explosion_btc_context_unknown_or_stale"
+    funding = _funding_measurement(
+        row.get("funding_rate"), source=row.get("funding_source"),
+        unit=row.get("funding_rate_unit") or "percent",
+        interval_hours=row.get("funding_interval_hours"),
+    )
+    funding_pct = funding.get("funding_rate_pct_8h_equivalent")
+    spread = _execution_candle_number(row.get("spread_pct"))
+    if (row.get("funding_available") is not True or funding_pct is None
+            or funding_pct >= 0.08 or row.get("spread_execution_ok") is not True
+            or spread is None or not 0 <= spread * 100 <= _EARLY_MOVER_MAX_SPREAD_BPS):
+        return "crypto_explosion_funding_or_spread_unqualified"
+    structure_reason = _crypto_structure_block_reason(row)
+    if structure_reason:
+        return structure_reason
+    return None
+
+
+def _send_crypto_explosion_alerts(rows: List[Dict[str, Any]]) -> bool:
+    """Single native origin owns quotes, journal, delivery leases and crypto mail."""
+    scanner = "crypto_explosion"
+    suppressed: Dict[str, int] = {}
+    sent_any = False
+    attempted = 0
+    dispatch_errors = 0
+    seen = set()
+
+    def reject(reason: str) -> None:
+        suppressed[reason] = suppressed.get(reason, 0) + 1
+
+    for original in rows[:80]:
+        if not isinstance(original, dict):
+            reject("crypto_explosion_invalid_row")
+            continue
+        row = deepcopy(original)
+        now = time.time()
+        reason = _crypto_explosion_mail_block_reason(row, now)
+        if reason:
+            reject(reason)
+            continue
+        state = _classify_alert_candidate(scanner, row, now)
+        if not state["alertable_now"]:
+            for reason in state["suppression_reasons"]:
+                reject(reason)
+            continue
+        key = str(state.get("cooldown_key") or "")
+        if not key or key in seen:
+            reject("crypto_explosion_duplicate_identity")
+            continue
+        seen.add(key)
+        if attempted >= _ALERT_EMAIL_MAX_ROWS:
+            reject("crypto_explosion_mail_quota_deferred")
+            continue
+        if _has_open_equivalent_trade_safe(scanner, row):
+            reject("open_equivalent_trade")
+            continue
+        claimed_at = time.time()
+        if not _email_dedupe_claim(key, _alert_dedupe_ttl_seconds(scanner), now=claimed_at):
+            reject("dedupe_claim_not_owned")
+            continue
+        try:
+            # Reuse the exact-contract long gate, not the Early-Mover sender:
+            # final ask + continuous 1m path + live RR/distance/spread/depth.
+            validation = _revalidate_early_mover_mail_candidate(row)
+            if not validation.get("ok"):
+                reject(str(validation.get("reason") or "final_crypto_revalidation_failed"))
+                _email_dedupe_release(key, claimed_at=claimed_at)
+                continue
+            candidate = validation["candidate"]
+            candidate["Price"] = candidate["price"]
+            # A slow quote/path fetch must not refresh earlier trigger/BTC proof.
+            reason = _crypto_explosion_mail_block_reason(candidate, time.time())
+            if reason:
+                reject(reason)
+                _email_dedupe_release(key, claimed_at=claimed_at)
+                continue
+            final_health = _alert_trade_health_reasons(candidate, scanner)
+            if final_health:
+                for reason in final_health:
+                    reject(reason)
+                _email_dedupe_release(key, claimed_at=claimed_at)
+                continue
+            current = time.time()
+            if current - claimed_at >= 300:
+                if not _email_dedupe_renew(key, claimed_at=claimed_at, now=current):
+                    reject("dedupe_claim_not_owned")
+                    _email_dedupe_release(key, claimed_at=claimed_at)
+                    continue
+                claimed_at = current
+            rendered_at = datetime.now(timezone.utc)
+            identity = html.escape(f"{candidate['venue']}:{candidate['contract_symbol']}")
+            body = (
+                '<html><body><h2>Crypto Long</h2>'
+                f'<p>{identity} · {_mail_timestamp_dual(rendered_at)}</p>'
+                f'<p>Ausführbarer Ask: {_format_alert_price(candidate["price"])}</p>'
+                f'{_format_alert_plan_html(candidate)}'
+                f'{_breakout_retest_warning_html(candidate)}'
+                '</body></html>'
+            )
+            attempted += 1
+            sent = _send_email_alert(
+                f"Crypto Long: {candidate['contract_symbol']} ({candidate['venue']})",
+                body, trade_horizon="swing", mail_class="trade", mail_channel="crypto",
+                tracking_scanner=scanner, tracking_rows=[candidate], tracking_scope="entry",
+                delivery_dedupe_keys=[key], rendered_at=rendered_at,
+                telegram_text=_safe_format_telegram_rows([candidate]),
+            )
+            if sent:
+                sent_any = True
+                accepted_at = time.time()
+                _EMAIL_COOLDOWN[key] = accepted_at
+                _email_dedupe_mark(key, now=accepted_at)
+            else:
+                _email_dedupe_release_after_send(key, claimed_at=claimed_at)
+        except Exception as exc:
+            # This helper also preserves uncertain DATA receipts: never turn
+            # an unacknowledged SMTP attempt into permission to replay.
+            _email_dedupe_release_after_send(key, claimed_at=claimed_at)
+            reject("crypto_explosion_mail_dispatch_exception")
+            dispatch_errors += 1
+            _record_email_event("Crypto Long Alert", "error", "crypto_explosion_mail_dispatch_exception")
+            print(f"[Crypto Explosion Mail] {_sanitized_exception_text(exc)}", flush=True)
+    _record_suppression_counts(scanner, suppressed)
+    # A refused or uncertain SMTP attempt is not an absence of valid signals.
+    # Its real transport outcome is already journalled by the shared sender.
+    if not sent_any and not attempted and not dispatch_errors:
+        _record_email_event("Crypto Long Alert", "skipped", _format_alert_suppression_summary(suppressed))
+    return sent_any
+
+
 def _crypto_explosion_wrapper() -> None:
     # Also cover the manual combined-scan path, which calls this wrapper directly.
     if not _CE_RUN_LOCK.acquire(blocking=False):
@@ -36376,6 +36583,14 @@ def _crypto_explosion_wrapper() -> None:
         })
         _ce_progress_update(running=False, status="done")
         print(f"[Crypto Explosion] Done: {stats.get('result_count', 0)} results, {stats.get('chart_checked', 0)} chart checks", flush=True)
+        # Only this fresh, completed origin sends. The combined view only
+        # merges caches; it must not dispatch the same opportunity a second time.
+        try:
+            _send_crypto_explosion_alerts(rows)
+        except Exception as exc:
+            _record_suppression_counts("crypto_explosion", {"crypto_explosion_mail_dispatch_exception": 1})
+            _record_email_event("Crypto Long Alert", "error", "crypto_explosion_mail_dispatch_exception")
+            print(f"[Crypto Explosion Mail] {_sanitized_exception_text(exc)}", flush=True)
     except scan_control.ScanRestartRequired:
         _ce_progress_update(running=False, status="restart_required")
         raise

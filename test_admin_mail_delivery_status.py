@@ -118,8 +118,9 @@ def test_delivery_counts_are_channel_scoped_not_global_recipient_count(audit_env
     audit_environment.setattr(api, "_resolve_email_alert_recipients", recipients)
     response = api.get_email_alert_audit("Bearer admin")
     assert response["email_alerts"]["recipient_count"] == 1
-    assert response["delivery"]["recipient_counts"] == {"stocks_swing": 0, "stocks_intraday": 1}
+    assert response["delivery"]["recipient_counts"] == {"stocks_swing": 0, "stocks_intraday": 1, "crypto": 0}
     assert any(item["mail_class"] == "swing_trade" and item["trade_horizon"] == "swing" for item in calls)
+    assert any(item["mail_channel"] == "crypto" and item["trade_horizon"] == "swing" for item in calls)
 
 
 def test_recipient_resolver_failure_is_unknown_not_zero(audit_environment):
@@ -128,7 +129,7 @@ def test_recipient_resolver_failure_is_unknown_not_zero(audit_environment):
 
     audit_environment.setattr(api, "_resolve_email_alert_recipients", unavailable)
     status = api._admin_mail_delivery_status()
-    assert status["recipient_counts"] == {"stocks_swing": None, "stocks_intraday": None}
+    assert status["recipient_counts"] == {"stocks_swing": None, "stocks_intraday": None, "crypto": None}
 
 
 def test_entire_endpoint_redacts_smtp_exception_addresses_and_subject(audit_environment):

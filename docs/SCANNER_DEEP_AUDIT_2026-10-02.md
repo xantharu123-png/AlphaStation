@@ -1,6 +1,84 @@
 # Scanner-Tiefenprüfung und historische Stichproben – 02.10.2026
 
-## Maßgeblicher Abschlussstand
+## Nachtrag: Crypto-Long-Mailanbindung nach Betreiberupdate
+
+Dieser Nachtrag ersetzt die älteren Hinweise auf den ausstehenden Pull des
+ersten Pakets. `/api/health` am02.10.10:53:47 UTC bestätigt Hetzner
+**healthy / `7f6981f8e4f8` / Frontend `6a488c9c8f1a`**. Die folgenden neuen
+Reparaturen sind separat; hier wurde kein Server verändert. Die technische
+Testmail kam laut Betreiber an. Keine weitere Mail, kein Scanstart, keine
+Abo-/Schalteränderung durch Codex.
+
+### Aktuelle Befunde
+
+- Signal-Mails aktiv, alle Scannerkanäle AN, Mailmodus Swing. Separat
+  ausgeschaltete Watchlist-Mails nicht aktiviert.
+- Momentum-Snapshot02.10.10:48:55 UTC:12.582/12.582 geprüft,32 Kandidaten,
+  höchster Trade-Score78 bei Mailminimum80. Heutiges Versandjournal nennt
+  Ablehnungen vor SMTP durch Score/Tagesqualität/TP1-Nähe/20T-Liquidität.
+- Cup ist kein neuer Nullscan:5.712/12.582, `scan_data_unavailable`, Phase
+  `history`,507s. Innerer Providergrund weiterhin offen; gezielter vorhandener
+  Lesetest `scripts/probe_stock_attempt_errors.py` angefragt, kein Gesamtexport.
+- Admin-Snapshot02.10.13:18:02 MESZ:1 Swing-Empfänger,0 SMTP-Annahmen,
+  6 ausgelassene Entscheidungen,0 Versandfehler,0 Queue. Begrenztes
+  Prozessfenster, keine vollständige Inboxhistorie. Späterer automatischer
+  Crypto-Long-Retry lief weiter; noch kein tatsächlicher Signalzustellnachweis.
+
+### Reproduzierte Fehler und Korrekturen
+
+1. Erfolgreiche native Crypto-Long-Läufe speicherten Ergebnisse ohne Mailaufruf.
+   Worker und Combined-Ansicht ersetzten das nicht. Neuer Dispatcher gehört
+   ausschließlich zum frischen vollständig abgeschlossenen `crypto_explosion`.
+2. Rollierende24h-Hochs ohne bestätigte Zone wurden als strukturell bestätigt
+   markiert. Das sperrte auch nachfolgend wirklich bestätigte VRVP-Ziele. Jetzt
+   ist der Skalar nur unbelegte Watchreferenz; echte Profile/Zonen bestätigen
+   weiterhin allein den Strukturplan. Ohne echte Gegenbarriere bleibt Watch.
+3. Crypto-Strategy verwendete in Trade- und beiden Regime-Watch-Zweigen den
+   Aktienkanal. Routing bleibt jetzt im Crypto-Kanal. Der aktuelle manuelle
+   Watch-only-Producer bleibt dennoch Trade-Mail-deaktiviert.
+4. Admin-Cachevorprüfung und Empfängerzählung enthalten jetzt Crypto Long.
+   Gleicher Originalquellenvertrag wie der Sender, keine Quotes/SMTP während
+   Diagnose. Zehn Gründe konsistent in API, anonymer SQLite-Telemetrie und
+   privatem Evidence-Collector.
+5. Combined erklärte0 Longs/Shorts pauschal mit Marktlage oder fehlerfreier
+   Quelle. Diese Erklärblöcke entfallen; Richtungszähler und tatsächlicher
+   Scannerstatus bleiben maßgeblich.
+
+Grade/Score, Struktur, Funding/Spread und Risikogrenzen bleiben unverändert.
+Vor jeder Mail: native Venue/Contract, echter5m-Schlusszeitpunkt und BTC-
+Frische; keine Run-Zeit als Ersatzbeobachtung. Finale Ask-Quote und lückenloser
+1m-Pfad prüfen Stop-/TP1-Berührung, Tiefe, R:R und Einstiegsabstand. Kein
+CoinGecko-Ersatz, kein Versand aus altem/partiellem Cache oder Combined-Merge.
+Durable Intent/Receipt und Lease/Dedupe verhindern Doppelversand. SMTP-
+Ablehnung ändert keinen erfolgreichen Scan in einen Datenfehler; unklare
+DATA-Annahme bleibt ohne automatischen Replay.
+
+### Verifikation und produktive Grenze
+
+348 überlappende gezielte Tests bestanden; abschließend51 Dispatcher-Tests.
+Positiv: tatsächlicher Scorer → echte VRVP/Health → finale Quote/Pfad → echter
+Sender mit Mock-SMTP und realem temporärem Annahmejournal. Ohne bestätigte
+Gegenbarriere bleibt der echte Breakout Watch. Unabhängige Kanal-/Register-/
+Anonymitätstests grün; frische unabhängige Abschlussprüfung96/96 bestanden.
+Die tatsächliche JSX-Komponente ist für beide Richtungen mit Quellenfehler
+offline geprüft; keine neue Desktop-/Mobil-Browserabnahme behauptet.
+Frontend gebaut, Sourcehash/Syntax geprüft: Bundle `806260a08809`.
+
+Eingefrorener veröffentlichbarer Index-Gesamtlauf:
+**10.842 bestanden, 1 übersprungen, 0 Fehler**,479,69s;
+`tmp/qa-77f0423f384f/results.xml`. Quellpaket:
+`tmp/native-mail-publish-aafb744c1e94/source`. Der Skip betrifft POSIX-
+Dateirechte auf Windows; `test_deploy*.py` ausdrücklich ausgeschlossen.
+Fokusgruppen überlappen und werden nicht addiert. Offline-QA sperrt externe
+Anbieter/SMTP und liest keine lokalen Secrets. Danach ausschließlich
+Nachtrag-Dokumentation aktualisiert; Produktions-/Testquellen unverändert.
+
+Die historischen Dreimonatsproben unten bleiben an ihre damaligen Source-
+Fingerprints des ersten Pakets gebunden. Sie wurden nicht rückwirkend zu
+ausgeführten Trades oder einer neuen Gewinnquote erklärt. Echte vollständige
+Serverläufe, Handelssignalannahme und Inbox-Eingang bleiben separat zu prüfen.
+
+## Historischer Abschlussstand des ersten Pakets
 
 Die unterbrochene Übergabe wurde am tatsächlichen Checkout fortgesetzt, nicht
 anhand alter Chat-Zusagen als erledigt übernommen. Ausgangspunkt ist
@@ -207,7 +285,7 @@ Finale Rohberichte heißen ausschließlich `history-*-verified.json`; ältere
 Fehlende Herkunft/Ticker und damalige andere Verträge erlauben keine Quote des
 heutigen Pakets.
 
-## Livebetrieb und noch offene Abnahme
+## Frühere Livekontrolle vor dem Betreiberupdate
 
 Letzte rein lesende Liveprüfung am02.10.: API `healthy`, Revision
 `796f8211a569`, Frontend `41f168c9f109` – also **nicht** die heutigen lokalen
