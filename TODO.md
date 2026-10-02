@@ -44,14 +44,28 @@ ist auf dem Server angekommen; kein erneuter Pull allein für dieses Paket.
   eingefrorener Index-Gesamtlauf **10.842 bestanden, 1 übersprungen, 0 Fehler**,
   479,69s; `tmp/qa-77f0423f384f/results.xml`. Externe Provider/SMTP gesperrt,
   keine lokalen Secrets. Deploy-Tests ausdrücklich ausgeschlossen.
-- [ ] Geprüfte Korrektur scoped veröffentlichen und gesonderten normalen Pull
-  übergeben. Server nicht selbst verändert.
+- [x] Geprüfte Korrektur scoped committet und gepusht:
+  **`d2c14b1329aeb4099fc454c4ac9d9a0b0d6c9b72`**, Remote `origin/main`
+  unabhängig bestätigt. Genau12 Pfade, keine privaten Exporte/Deploy-WIP.
+  Normalen Pull unten verwenden; Server nicht selbst verändert.
 - [ ] Cup-Abruffehler über `python3 -I /home/tradingbot/app/scripts/probe_stock_attempt_errors.py`
   im vorhandenen Server-Terminal lesen. Kein Gesamtexport/Passwortloop nötig.
 - [ ] Aktueller Crypto-Long-Wiederholungslauf und echte Handelssignalannahme/
   Posteingang bleiben offen. Letzter Admin-Stand nach Restart:0 angenommen,
   6 ausgelassen,0 Fehler,0 Queue am02.10.13:18:02MESZ; begrenztes Prozessfenster,
   keine Inboxhistorie. Automatischer Retry weiter aktiv, kein Start durch Codex.
+
+Nach Abschluss laufender Scans und SMTP-Vorgänge im Server-Terminal:
+
+```bash
+sudo -u tradingbot git -C /home/tradingbot/app pull --ff-only origin main &&
+sudo systemctl restart tradingbot-api.service tradingbot-bg.service &&
+curl -fsS --retry 30 --retry-connrefused --retry-delay 2 --connect-timeout 2 --max-time 5 http://127.0.0.1:8000/api/health
+```
+
+Health: `healthy`, neueste `origin/main`-Revision einschließlich des reinen
+Dokumentationsnachtrags, Frontend `806260a08809`. Kein Deploy-Skript, keine
+Cache-/DB-Löschung. Danach Strg+F5. Echte neue Signalzustellung bleibt offen.
 
 ## Historischer Abschlussstand des ersten Pakets 02.10.2026 – Tiefenaudit / Dreimonatsproben
 

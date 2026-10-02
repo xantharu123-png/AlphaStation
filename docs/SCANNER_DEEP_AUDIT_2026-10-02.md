@@ -73,6 +73,16 @@ Fokusgruppen überlappen und werden nicht addiert. Offline-QA sperrt externe
 Anbieter/SMTP und liest keine lokalen Secrets. Danach ausschließlich
 Nachtrag-Dokumentation aktualisiert; Produktions-/Testquellen unverändert.
 
+### Veröffentlichung dieses Nachtrags
+
+Geprüft, committet und gepusht:
+**`d2c14b1329aeb4099fc454c4ac9d9a0b0d6c9b72`**. `git ls-remote origin
+refs/heads/main` bestätigt exakt diesen Commit. Zwölf freigegebene Pfade,
+keine privaten Exporte/Secrets und keine geerbten Deploy-/Handbuchänderungen.
+Dieser anschließende Abschlussnachtrag ändert ausschließlich Dokumentation.
+Hetzner wurde von Codex nicht aktualisiert; nach normalem Betreiber-Pull muss
+das Bundle `806260a08809` erscheinen. Kein Deploy-Skript oder Installationsumbau.
+
 Die historischen Dreimonatsproben unten bleiben an ihre damaligen Source-
 Fingerprints des ersten Pakets gebunden. Sie wurden nicht rückwirkend zu
 ausgeführten Trades oder einer neuen Gewinnquote erklärt. Echte vollständige
