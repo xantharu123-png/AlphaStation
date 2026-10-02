@@ -536,7 +536,8 @@ def test_new_listing_publishes_cache_before_sending_alerts(monkeypatch):
 
 
 def test_penny_scanner_publishes_final_state_before_trade_mails():
-    source = inspect.getsource(api._penny_stock_scanner_wrapper)
+    from qa_source_helpers import function_source
+    source = function_source(api, "_penny_stock_scanner_wrapper")
     publish_index = source.index("finalize_cache_file(PENNY_STOCKS_CACHE")
 
     assert publish_index < source.index("_penny_buy_email(")
@@ -636,7 +637,8 @@ def test_wolfe_wave_rr_never_uses_absolute_wrong_side_reward():
 
 
 def test_rule_backtest_rejects_non_positive_stop_percentages():
-    source = inspect.getsource(api._run_backtest)
+    from qa_source_helpers import function_source
+    source = function_source(api, "_run_backtest")
     assert "not math.isfinite(stop_pct) or stop_pct <= 0" in source
     assert "risk = abs(entry_p * stop_pct)" not in source
 

@@ -65,10 +65,16 @@ def test_wilder_atr_identisch_fuer_asc_und_desc_bars():
 
 
 def test_bear_history_wird_chronologisiert_source():
-    src = (REPO / "api.py").read_text(encoding="utf-8", errors="replace")
-    assert "history_bars = list(reversed(bars)) if isinstance(bars, list) else []" in src, (
-        "Bear-Pfad muss die sort=desc-Polygon-Bars vor der ATR-Berechnung umdrehen (N1)"
-    )
+    import api
+    from qa_source_helpers import function_source
+    from modules import bear_history
+    src = function_source(api, "_bear_scan_wrapper")
+    assert "reference = bear_reference_metrics(" in src
+    assert 'history_bars = reference["completed_bars"]' in src
+    # The causal adapter owns chronological normalization, independently of
+    # response order, instead of blindly reversing an assumed descending list.
+    adapter = function_source(bear_history, "bear_reference_metrics")
+    assert "completed_polygon_bars(prepared, as_of=as_of)" in adapter
 
 
 # ─────────────────────────────────────────────────────────────────────────────

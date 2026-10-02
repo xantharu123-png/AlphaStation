@@ -79,7 +79,7 @@ def test_daily_adapter_is_causal_and_keeps_legacy_shape_with_zone_metadata():
         assert row["provenance"]["adaptive_zone"] is True
 
     provenance = info["zone_provenance"]
-    assert provenance["model"] == "causal_level_zones_v1"
+    assert provenance["model"] == "causal_level_zones_v2"
     assert provenance["causal_completed_bars"] is True
     assert provenance["adaptive_zone_width"] is True
     assert provenance["fixed_percent_cluster_used"] is False

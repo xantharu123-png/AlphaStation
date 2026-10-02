@@ -1,4 +1,6 @@
 """CoinGecko watch-only six-day proxy math and threshold regressions."""
+from datetime import datetime, timezone
+
 import pytest
 import api
 
@@ -20,7 +22,8 @@ def test_crypto_flag_filter_uses_previous_six_days_not_seven_day_average(monkeyp
     coin = {"id": "test-coin", "symbol": "TEST", "name": "Test", "current_price": 100,
             "market_cap": 10_000_000, "total_volume": 1_000_000,
             "price_change_percentage_24h": today, "price_change_percentage_7d_in_currency": week,
-            "high_24h": 101, "low_24h": 99}
+            "high_24h": 101, "low_24h": 99,
+            "last_updated": datetime.now(timezone.utc).isoformat()}
     saved = {}
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda **_: [coin])
     monkeypatch.setattr(api, "_CG_MARKETS_STATUS", {})
@@ -54,9 +57,12 @@ def generic_crypto_scan(monkeypatch):
         coin = {"id": "test-coin", "symbol": "TEST", "name": "Test", "current_price": 100,
                 "market_cap": 10_000_000, "total_volume": 1_000_000,
                 "price_change_percentage_24h": today, "price_change_percentage_7d_in_currency": week,
-                "price_change_percentage_7d": alternate_week, "high_24h": 101, "low_24h": 99}
+                "price_change_percentage_7d": alternate_week, "high_24h": 101, "low_24h": 99,
+                "last_updated": datetime.now(timezone.utc).isoformat()}
         # BTC context needs no valid market row of its own in this fake response.
-        coins = [coin] + ([dict(btc, id="bitcoin")] if btc is not None else [])
+        coins = [coin] + ([dict(btc, id="bitcoin", price_change_percentage_24h=0,
+                              last_updated=datetime.now(timezone.utc).isoformat())]
+                         if btc is not None else [])
         monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda **_: coins)
         api._crypto_strategy_scan_wrapper(" Alle zeigen")
         return saved["rows"]

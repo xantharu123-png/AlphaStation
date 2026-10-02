@@ -1006,7 +1006,9 @@ def test_bear_structure_levels_are_native_and_can_pass_email_gate():
     setup = api._build_bear_structure_trade_setup(
         entry=17.33,
         day_high=18.15,
-        day_low=16.72,
+        # First real support provides enough space; the builder must not skip
+        # a nearer barrier simply to manufacture an alertable R:R.
+        day_low=15.80,
         day_open=17.95,
         ma20=18.05,
         ma50=19.20,
@@ -1724,6 +1726,14 @@ def test_extended_long_legacy_change_column_uses_no_chase_gate():
     assert api._long_entry_quality(row) == "WAIT_RETEST"
 
 
+def _measured_new_listing_btc_proof(btc=0.0, coin=-1.0):
+    completed = int(time.time()) // 3600 * 3600
+    return {"btc_context_known": True, "btc_context_status": "ok", "btc_context_ok": True,
+            "btc_change_pct": btc, "coin_change_pct": coin, "btc_divergence": coin - btc,
+            "btc_context_source": "binance:BTCUSDT:1H",
+            "btc_context_opened_at": completed - 24 * 3600, "btc_context_completed_at": completed}
+
+
 def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatch):
     api._EMAIL_COOLDOWN.clear()
     monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", str(tmp_path / "email_dedupe.json"))
@@ -1741,6 +1751,7 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
                 "symbol": "WLDUSDT",
                 "exchange": "mexc",
                 "signal": {
+                    **_measured_new_listing_btc_proof(btc=1.2, coin=-4.4),
                     "grade": "A",
                     "timing": "[-] JETZT SHORTEN",
                     "timing_quality": 5,
@@ -1761,11 +1772,9 @@ def test_new_listing_pipeline_alerts_only_active_top_grades(tmp_path, monkeypatc
                     "micro_required": True,
                     "micro_trigger_ok": True,
                     "pump_data": {
+                        **_measured_new_listing_btc_proof(btc=1.2, coin=-4.4),
                         "micro_score": 75,
                         "micro_trigger_ok": True,
-                        "btc_change_pct": 1.2,
-                        "coin_change_pct": -4.4,
-                        "btc_divergence": -5.6,
                     },
                     "exh_score": 85,
                 },
@@ -2097,6 +2106,7 @@ def test_new_listing_alert_audit_ignores_watchlist_rows(tmp_path):
         "cached_at": datetime.now().isoformat(),
         "results": [
             {
+                **_measured_new_listing_btc_proof(),
                 "symbol": "SHORT",
                 "grade": "A",
                 "signal": "SHORT",
@@ -2404,7 +2414,8 @@ def _early_mover_row(**overrides):
         "live_rr_ratio": 2.4,
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
-        "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        "btc_context": {"btc_24h": 1.2, "btc_7d": 1.0, "alpha_24h": 3.0, "tailwind": True,
+                        "known": True, "data_status": "ok", "observed_at": time.time()},
         "risk_flags": [],
         "trade_setup": {
             "trade_action": "LONG_TRIGGER",
@@ -2421,7 +2432,8 @@ def _early_mover_row(**overrides):
             "intraday_trigger": dict(intraday_trigger),
             "live_rr": 2.4,
             "distance_to_entry_r": 0,
-            "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+            "btc_context": {"btc_24h": 1.2, "btc_7d": 1.0, "alpha_24h": 3.0, "tailwind": True,
+                            "known": True, "data_status": "ok", "observed_at": time.time()},
         },
     }
     api._stamp_fresh_crypto_profile_contract(row)

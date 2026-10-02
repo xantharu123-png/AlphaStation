@@ -1,4 +1,6 @@
 """Funding/provenance regressions use mocked HTTP and synthetic candles only."""
+from datetime import datetime, timezone
+
 from types import SimpleNamespace
 import json
 
@@ -75,7 +77,14 @@ def test_explosion_profile_uses_its_actual_source_timeframe(monkeypatch, four_ho
     bars5 = _bars(90, start=9.48, step=.004, last={"open":9.93,"high":9.97,"low":9.90,"close":9.95,"volume":1200})
     bars15 = _bars(60, start=9.42, step=.009, interval=900, last={"open":9.92,"high":9.98,"low":9.88,"close":9.95,"volume":3600})
     bars4h = _bars(four_hour_count, start=9.4, step=.006, interval=14400)
-    api._score_crypto_explosion_candidate(_candidate(), bars5, bars15, bars4h)
+    result = api._score_crypto_explosion_candidate(_candidate(), bars5, bars15, bars4h)
+    if four_hour_count == 0:
+        # An absent HTF source cannot be replaced by a lower timeframe plan.
+        # Keep both measured fallback/profile cases below, but fail closed
+        # before profile construction when no current 4H evidence exists.
+        assert result is None
+        assert calls == []
+        return
     assert calls
     assert calls[0][1] == ("4H" if four_hour_count >= 20 else "15M")
 
@@ -259,7 +268,8 @@ def test_invalid_current_oi_is_unknown_not_nonfinite_delta(monkeypatch, tmp_path
 def _div_coin(cid, symbol, change24=None, change7=None):
     return {"id": cid, "symbol": symbol, "name": cid, "current_price": 10,
             "market_cap": 100_000_000, "total_volume": 10_000_000,
-            "price_change_percentage_24h": change24, "price_change_percentage_7d_in_currency": change7}
+            "price_change_percentage_24h": change24, "price_change_percentage_7d_in_currency": change7,
+            "last_updated": datetime.now(timezone.utc).isoformat()}
 
 
 @pytest.mark.parametrize("missing", ["price_change_percentage_24h", "price_change_percentage_7d_in_currency"])

@@ -21,6 +21,9 @@ alpha-time-*/
 Mailarchiv/
 output/playwright/
 output/profitability/
+output/scanner-deep-audit-20261002/
+output/scanner_deep_audit_20261002/
+output/scanner_reaudit_20260930/
 .playwright-cli/
 tmp/
 tmp_mail_*.json

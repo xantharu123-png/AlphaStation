@@ -398,7 +398,24 @@ def test_new_zero_without_coverage_never_gets_green_success_toast():
       await feed.start(); await settle();
       queue.push({body:payload(t2,null,{diagnostics:{}})}); await timer();
       assert.equal(feed.isScanning,false); assert.equal(toasts.length,0);
-      assert.match(feed.notice,/Pruefdetails fehlen/);
+      assert.equal(feed.notice,'Ergebnisstand noch nicht bestätigt. Datenprüfung offen.');
+      assert.doesNotMatch(feed.notice,/leer|Nulltreffer/);
+    """)
+
+
+def test_unverified_gap_with_candidates_never_claims_empty_success():
+    lifecycle("""
+      queue.push({body:payload(t1)}); render(options()); await settle();
+      queue.push({body:payload(t1)},{body:{status:'started',accepted:true}});
+      await feed.start(); await settle();
+      queue.push({body:payload(t2,'CANDIDATE',{
+        data_quality:{cache_status:'unknown',cache_stale_reason:'gap_cache_session_unverified'},
+        diagnostics:{coverage:'unknown'}
+      })}); await timer();
+      assert.equal(feed.isScanning,false); assert.equal(toasts.length,0);
+      assert.equal(feed.results.length,1);
+      assert.equal(feed.notice,'Ergebnisstand noch nicht bestätigt. Datenprüfung offen.');
+      assert.doesNotMatch(feed.notice,/leer|Nulltreffer/);
     """)
 
 

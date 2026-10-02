@@ -864,7 +864,7 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
 # Native profiles now require genuine contributing bars for their price range.
 # Prior profiles may have been distorted by invalid or zero-volume records.
-STOCK_STRATEGY_CACHE_VERSION = 18
+STOCK_STRATEGY_CACHE_VERSION = 20
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -1801,10 +1801,10 @@ _ALERT_TRADE_PLAN_GUARD_SCANNERS = {
 _ALERT_TRADE_HEALTH_GUARD_SCANNERS = set(_ALERT_TRADE_PLAN_GUARD_SCANNERS) | {"btc_divergenz"}
 _NEW_LISTING_MIN_ALERT_RR = 1.5
 _NEW_LISTING_MAX_SIGNAL_RISK_PCT = 35.0
-_NEW_LISTING_SHORT_CACHE_VERSION = 3
+_NEW_LISTING_SHORT_CACHE_VERSION = 4
 # The corrected profile excludes invalid/zero-volume bars before price bounds
 # and requires 20 genuine contributing bars. This is not a trade permission.
-_CRYPTO_PROFILE_CACHE_VERSION = 1
+_CRYPTO_PROFILE_CACHE_VERSION = 3
 _NEW_LISTING_MICRO_MAX_AGE_SECONDS = 600.0
 _NEW_LISTING_FINAL_MAX_SPREAD_BPS = 120.0
 _NEW_LISTING_FINAL_MIN_DEPTH_50BPS_USD = 10_000.0
@@ -3466,6 +3466,16 @@ def _extract_new_listing_signal_fields(row: Dict[str, Any]) -> Dict[str, Any]:
 def _new_listing_rule_reasons(row: Dict[str, Any]) -> List[str]:
     fields = _extract_new_listing_signal_fields(row)
     reasons: List[str] = []
+    sig = row.get("signal") if isinstance(row.get("signal"), dict) else row
+    pump = sig.get("pump_data") if isinstance(sig.get("pump_data"), dict) else {}
+    known = sig.get("btc_context_known", pump.get("btc_context_known")) is True
+    status = sig.get("btc_context_status", pump.get("btc_context_status"))
+    measured = all(_execution_candle_number(sig.get(key, pump.get(key))) is not None
+                   for key in ("btc_change_pct", "coin_change_pct", "btc_divergence"))
+    if not known or status != "ok" or not measured or not _new_listing_btc_observation_valid(sig):
+        reasons.append("btc_context_missing")
+    elif sig.get("btc_context_ok") is not True:
+        reasons.append("btc_context_blocks_short")
     timing_upper = fields["timing"].upper()
     row_source = fields["row_source"]
     listing_source = fields["listing_source"]
@@ -3506,13 +3516,16 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(risk_flags, list):
         risk_flags = [str(risk_flags)] if risk_flags else []
     distance_to_entry_r = _alert_float(row.get("distance_to_entry_r", setup.get("distance_to_entry_r")))
-    btc_24h = _alert_float(btc_context.get("btc_24h"), 0) or 0
-    btc_7d = _alert_float(btc_context.get("btc_7d"), 0) or 0
-    btc_status = str(btc_context.get("data_status") or btc_context.get("status") or "ok").lower()
+    btc_24h = _execution_candle_number(btc_context.get("btc_24h"))
+    btc_7d = _execution_candle_number(btc_context.get("btc_7d"))
+    btc_status = str(btc_context.get("data_status") or btc_context.get("status") or "unknown").lower()
+    btc_observed_at = _execution_candle_timestamp(btc_context.get("observed_at"))
     btc_context_known = bool(
         btc_context
-        and ("btc_24h" in btc_context or "btc_7d" in btc_context)
-        and btc_status not in {"error", "unknown", "missing", "stale"}
+        and btc_context.get("known") is True
+        and btc_24h is not None and btc_7d is not None
+        and btc_status == "ok"
+        and btc_observed_at is not None and -2 <= time.time() - btc_observed_at <= 300
     )
     alpha_24h = _alert_float(row.get("BtcRelative24h", btc_context.get("alpha_24h")), 0) or 0
     change24 = _alert_float(row.get("Change24h", row.get("change_24h", row.get("change24h"))), 0) or 0
@@ -3532,7 +3545,7 @@ def _extract_early_mover_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         "btc_context_known": btc_context_known,
         "btc_24h": btc_24h,
         "btc_7d": btc_7d,
-        "btc_hard_headwind": bool(btc_24h <= -3.0 or btc_7d <= -7.0),
+        "btc_hard_headwind": bool(btc_context_known and (btc_24h <= -3.0 or btc_7d <= -7.0)),
         "change24": change24,
         "vol_mcap": _alert_float(row.get("VolMCapRatio", row.get("vol_mcap", row.get("Vol/MCap"))), 0) or 0,
         "alpha_24h": alpha_24h,
@@ -3693,6 +3706,22 @@ def _alert_signal_identity_key(
         "tp2": _identity_number(_first_trade_level(row, ("tp2", "TP2", "take_profit_2"))),
         "reference": str(explicit_reference or "").strip().lower(),
     }
+    if scanner_name == "new_listing":
+        nested_signal = row.get("signal") if isinstance(row.get("signal"), dict) else {}
+        episode_id = row.get("producer_episode_id") or nested_signal.get("producer_episode_id")
+        episode_started = row.get("producer_episode_started_at") or nested_signal.get("producer_episode_started_at")
+        episode_model = row.get("producer_episode_model") or nested_signal.get("producer_episode_model")
+        venue = row.get("exchange") or nested_signal.get("exchange")
+        native_contract = row.get("contract") or nested_signal.get("contract") or row.get("symbol") or nested_signal.get("symbol")
+        from modules.new_listing_scanner import _producer_episode_id
+
+        expected_episode = _producer_episode_id(venue, native_contract, episode_started)
+        if (episode_model == "new_listing_episode_v4" and expected_episode is not None
+                and episode_id == expected_episode):
+            payload.update(reference=expected_episode, model=episode_model,
+                           venue=_normalize_crypto_exchange(venue), native_contract=str(native_contract).strip().upper())
+            for field in ("entry", "stop", "tp1", "tp2"):
+                payload.pop(field, None)
     evidence = row.get("wyckoff")
     if (scanner_name in {"stock_strategy", "strategy_scan"}
             and isinstance(evidence, dict)
@@ -5419,17 +5448,11 @@ def _early_mover_htf_armed_context(row: Dict[str, Any], bars: List[Dict[str, Any
     affects pre-breakout/armed state, not confirmed 5m trade triggers.
     """
     timeframe = str(timeframe or "4h").lower()
-    clean = []
-    for bar in _completed_candles_only(bars or [], timeframe):
-        try:
-            open_ = float(bar["open"])
-            high = float(bar["high"])
-            low = float(bar["low"])
-            close = float(bar["close"])
-            if open_ > 0 and close > 0 and high > low:
-                clean.append({"open": open_, "high": high, "low": low, "close": close})
-        except Exception:
-            continue
+    now_ts = time.time()
+    clean = _ce_completed_bars(bars or [], timeframe, now_ts=now_ts)
+    freshness = _crypto_candle_freshness(clean, timeframe, now_ts=now_ts)
+    if not freshness.get("known") or not freshness.get("fresh"):
+        return {"armed_ok": False, "reason": "htf_context_stale_or_unknown", "timeframe": timeframe, "bar_count": len(clean)}
 
     if len(clean) < 10:
         return {"armed_ok": False, "reason": "htf_not_enough_bars", "timeframe": timeframe, "bar_count": len(clean)}
@@ -5502,17 +5525,11 @@ def _early_mover_htf_execution_context(row: Dict[str, Any], bars: List[Dict[str,
     not JETZT_TRADEN.
     """
     timeframe = str(timeframe or "4h").lower()
-    clean = []
-    for bar in bars or []:
-        try:
-            open_ = float(bar["open"])
-            high = float(bar["high"])
-            low = float(bar["low"])
-            close = float(bar["close"])
-            if open_ > 0 and close > 0 and high > low:
-                clean.append({"open": open_, "high": high, "low": low, "close": close})
-        except Exception:
-            continue
+    clean = _ce_completed_bars(bars or [], timeframe)
+    freshness = _crypto_candle_freshness(clean, timeframe)
+    if not freshness.get("known") or not freshness.get("fresh"):
+        return {"ok": False, "reason": "htf_execution_context_stale_or_unknown",
+                "timeframe": timeframe, "bar_count": len(clean)}
 
     if len(clean) < 8:
         return {
@@ -6697,6 +6714,8 @@ def _structure_reminder_server_row(ticker: str, scanner: str, direction: str) ->
             raise ValueError("server_scanner_row_missing")
         return deepcopy(row)
     canonical = resolve_strategy_name(scanner_key, "stocks")
+    if _unsupported_stock_strategy(canonical):
+        raise ValueError("structure_reminder_scanner_not_supported")
     special = {"bear": BEAR_CACHE, "turtle": TURTLE_CACHE, "volume_spikes": VOLUME_SPIKES_CACHE}
     if canonical in STRATEGIES:
         path = _strategy_cache_path(canonical)
@@ -6921,7 +6940,8 @@ def _fetch_recent_stock_4h_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
     now = time.time()
     with _STOCK_SWING_EXECUTION_CACHE_LOCK:
         cached = _STOCK_SWING_EXECUTION_CACHE.get(symbol)
-        if cached and now - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC:
+        if (cached and 0 <= now - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC
+                and len(cached.get("bars", [])) >= limit):
             return list(cached.get("bars", []))[-limit:]
 
     try:
@@ -6940,10 +6960,16 @@ def _fetch_recent_stock_4h_bars(ticker: str, limit: int = 24) -> List[Dict[str, 
         if response.status_code != 200:
             return []
         raw_bars = response.json().get("results", []) or []
+        payload = response.json()
+        if (not isinstance(payload, dict) or payload.get("status") not in {"OK", "DELAYED"}
+                or payload.get("adjusted") is not True or not isinstance(payload.get("results"), list)):
+            return []
+        raw_bars = payload["results"]
         aggregated = aggregate_regular_session_4h_bars(
             raw_bars,
             timezone_et,
-            limit=max(limit, 24),
+            limit=max(limit, 40),
+            as_of=now_et,
         )
         with _STOCK_SWING_EXECUTION_CACHE_LOCK:
             if len(_STOCK_SWING_EXECUTION_CACHE) >= _STOCK_SWING_EXECUTION_CACHE_MAX:
@@ -7357,6 +7383,8 @@ def _evaluate_stock_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
 
 def _evaluate_trade_reminder(reminder: Dict[str, Any]) -> Dict[str, Any]:
     asset_type = str(reminder.get("asset_type", "crypto") or "crypto").lower()
+    if asset_type == "stock" and _unsupported_stock_strategy(reminder.get("scanner")):
+        return {"triggered": False, "reason": "structure_reminder_scanner_not_supported"}
     if asset_type == "crypto":
         row, unsupported_reason = _resolve_crypto_reminder_row(reminder)
         if unsupported_reason:
@@ -9764,19 +9792,27 @@ def _build_bear_structure_trade_setup(
     low_60d: Optional[float] = None,
     change_pct: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Build a native short plan from reclaim invalidation and lower support.
+    """Build a native short plan from observed invalidation and first supports.
 
-    This keeps Bear/Crash mails from using synthetic R-only targets while still
-    giving active flushes a concrete plan when structure is available.
+    R:R is evaluated downstream, never used to skip a nearer support or invent
+    a stop/target. Missing structure leaves the candidate without a native plan.
     """
     try:
-        entry = float(entry or 0)
-        day_high = float(day_high or entry)
-        day_low = float(day_low or entry)
-        day_open = float(day_open or entry)
-    except (TypeError, ValueError):
+        required = (entry, day_high, day_low, day_open)
+        if any(isinstance(value, bool) for value in required):
+            return None
+        entry, day_high, day_low, day_open = (float(value) for value in required)
+        optional = (ma20, ma50, low_20d, low_60d, change_pct)
+        if any(isinstance(value, bool) for value in optional):
+            return None
+        ma20, ma50, low_20d, low_60d, change_pct = (
+            float(value) if value is not None else None for value in optional)
+    except (TypeError, ValueError, OverflowError):
         return None
-    if entry <= 0:
+    if (any(not math.isfinite(value) or value <= 0 for value in (entry, day_high, day_low, day_open))
+            or not day_low <= day_open <= day_high
+            or any(value is not None and not math.isfinite(value)
+                   for value in (ma20, ma50, low_20d, low_60d, change_pct))):
         return None
 
     day_range = max(day_high - day_low, entry * 0.025)
@@ -9803,13 +9839,6 @@ def _build_bear_structure_trade_setup(
             stop_source = label
             break
     if stop is None:
-        fallback_risk = min(max(day_range * 0.35, entry * 0.025), max_risk)
-        if fallback_risk < min_risk:
-            return None
-        stop = entry + fallback_risk
-
-    risk = stop - entry
-    if risk <= 0:
         return None
 
     target_candidates: List[tuple[float, str]] = []
@@ -9819,28 +9848,16 @@ def _build_bear_structure_trade_setup(
         target_candidates.append((float(low_20d), "20d_low_support"))
     if low_60d and 0 < float(low_60d) < entry:
         target_candidates.append((float(low_60d), "60d_low_support"))
-    target_candidates.extend([
-        (entry - day_range * 0.80, "intraday_measured_move"),
-        (entry - day_range * 1.30, "extended_measured_move"),
-    ])
-
-    def _pick_short_target(min_rr: float, max_below: float, fallback_rr: float, fallback_label: str) -> tuple[float, str]:
-        min_price = entry - risk * min_rr
-        valid = sorted(
-            {round(p, 6): label for p, label in target_candidates if 0 < p < max_below}.items(),
-            reverse=True,
-        )
-        for level, label in valid:
-            if level <= min_price:
-                return level, label
-        return max(0.01, entry - risk * fallback_rr), fallback_label
-
-    tp1, tp1_source = _pick_short_target(1.25, entry, 1.5, "measured_move_fallback")
-    tp2, tp2_source = _pick_short_target(2.10, tp1 - risk * 0.20, 2.5, "measured_move_fallback")
-    if tp2 >= tp1:
-        tp2 = max(0.01, tp1 - max(risk, day_range * 0.50))
-        tp2_source = "measured_move_fallback"
-
+    unique_targets = {}
+    for level, label in target_candidates:
+        unique_targets.setdefault(level, label)
+    ordered_targets = sorted(unique_targets.items(), reverse=True)
+    if len(ordered_targets) < 2:
+        return None
+    (tp1, tp1_source), (tp2, tp2_source) = ordered_targets[:2]
+    # Evaluate the exact executable tick-grid levels. A tiny first barrier
+    # cannot be silently replaced by a farther target to improve economics.
+    entry, stop, tp1, tp2 = (_round_trade_price(value) for value in (entry, stop, tp1, tp2))
     geometry = trade_geometry(entry, stop, tp1, tp2, "SHORT")
     if not geometry.get("valid"):
         return None
@@ -9858,7 +9875,7 @@ def _build_bear_structure_trade_setup(
         "rr": geometry["rr"],
         "rr_tp1": geometry["rr_tp1"],
         "rr_tp2": geometry["rr_tp2"],
-        "level_model": "bear_structure_first_v1",
+        "level_model": "bear_structure_first_v2",
         "trade_setup_source": "native_bear_structure",
         "stop_source": stop_source,
         "tp1_source": tp1_source,
@@ -9995,8 +10012,12 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "orb_waiting_for_entry_confirmation",
     }
     no_trade_markers = {
+        "stock_strategy_not_implemented",
         "wyckoff_contract_invalid",
         "biotech_news_contract_invalid",
+        "bear_plan_contract_invalid",
+        "btc_context_missing",
+        "btc_context_blocks_short",
         "drop_too_extended_no_chase",
         "target_already_missed",
         "early_mover_no_chase",
@@ -10276,8 +10297,19 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     raw_score = score
     rvol = _extract_alert_rvol(row)
     reasons = []
+    if scanner_name in {"stock_strategy", "strategy_scan"} and _unsupported_stock_strategy(
+        row.get("Strategy") or row.get("strategy") or row.get("Strategie") or ""
+    ):
+        reasons.append("stock_strategy_not_implemented")
     if scanner_name == "biotech" and not biotech_news_contract_valid(row):
         reasons.append("biotech_news_contract_invalid")
+    if scanner_name == "bear":
+        native_source = str(row.get("trade_setup_source") or row.get("Trade_Setup_Source") or "")
+        plan_model = str(row.get("level_model") or "")
+        if ((native_source in {"native_bear_structure", "native_bear_vrvp_structure"}
+             or plan_model.startswith("bear_structure_first_"))
+                and plan_model not in {"bear_structure_first_v2", "bear_structure_first_v2+vrvp"}):
+            reasons.append("bear_plan_contract_invalid")
     if scanner_name in _BI_SIGNAL_SCANNERS and row.get("BI_PlanAccepted") is False:
         # A visible 17/20 setup does not override the producer's plan rejection.
         reasons.append("bi_plan_not_released")
@@ -10365,6 +10397,7 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         "wyckoff_contract_invalid",
         "bi_plan_not_released",
         "biotech_news_contract_invalid",
+        "bear_plan_contract_invalid",
     }
     cup_contract_blocked = any(reason.startswith("cup_contract_") for reason in reasons)
     base_actionable = not cup_contract_blocked and not any(reason in reasons for reason in base_blockers)
@@ -10536,6 +10569,9 @@ def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: O
     rvol = _extract_alert_rvol(row)
     reasons = []
 
+    if _unsupported_stock_strategy(row.get("Strategy") or row.get("strategy") or row.get("Strategie") or ""):
+        reasons.append("stock_strategy_not_implemented")
+
     if not ticker:
         reasons.append("missing_ticker")
     if not _alert_bool(row.get("Premarket") or row.get("premarket")):
@@ -10637,6 +10673,10 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str, *, read_onl
     rows = _extract_cache_rows_for_alert_audit(scanner_name, cache_file, exclude_dedicated_gap=read_only)
     rows = _filter_bi_signal_rows(scanner_name, rows)
     now = time.time()
+    has_gap_cache_rows = (scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS
+                          and any((row.get("Strategy") or row.get("strategy")) in {"Gap Momentum Long", "Gap Momentum Short"}
+                                  for row in rows))
+    gap_metadata = load_cache_metadata(cache_file) if has_gap_cache_rows else None
     grade_counts: Dict[str, int] = {}
     decision_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
@@ -10651,6 +10691,13 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str, *, read_onl
         if scanner_name in _STOCK_ALERT_SCANNERS and not read_only:
             row = _enrich_stock_alert_5m_state(scanner_name, row)
         state = _classify_alert_candidate(scanner_name, row, now, cache_only=True) if read_only else _classify_alert_candidate(scanner_name, row, now)
+        if has_gap_cache_rows:
+            freshness = _gap_cache_freshness(row.get("Strategy") or row.get("strategy"), gap_metadata, [row],
+                                           as_of=datetime.fromtimestamp(now, timezone.utc))
+            if freshness and freshness["cache_status"] != "fresh":
+                reasons = list(dict.fromkeys([*state["suppression_reasons"], freshness["cache_stale_reason"]]))
+                state = {**state, "alertable_now": False, "suppression_reasons": reasons,
+                         **_alert_decision_from_reasons(scanner_name, reasons)}
         grade_counts[state["grade"] or "UNKNOWN"] = grade_counts.get(state["grade"] or "UNKNOWN", 0) + 1
         decision = state.get("decision") or "UNKNOWN"
         decision_counts[decision] = decision_counts.get(decision, 0) + 1
@@ -14053,6 +14100,9 @@ def _regime_mail_decision(
 
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
+    if market_type == "stocks" and _unsupported_stock_strategy(strategy_name):
+        _record_suppression_counts("stock_strategy", {"stock_strategy_not_implemented": len(results)})
+        return
     results = [row for row in results if not is_elliott_pattern_context(row, strategy=strategy_name)]
     if not results:
         return
@@ -16081,16 +16131,72 @@ def _bear_empty_warning_from_results(results: List[Dict[str, Any]]) -> str:
     return "Short-Scan lief, aber nach Common-Stock-, Volumen-, History- und Breakdown-Filtern blieb keine handelbare Aktie uebrig."
 
 
-def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _gap_cache_freshness(strategy, metadata, rows, *, partial=False, as_of=None):
+    """Fixed-slot daily Gap evidence expires by session, never hourly age.
+
+    A zero-match result still needs the producer's completed-session proof.
+    This is a read contract only: it does not admit or send any trade.
+    """
+    if strategy not in {"Gap Momentum Long", "Gap Momentum Short"}:
+        return None
+    unknown = {"cache_status": "unknown", "cache_stale_reason": "gap_cache_session_unverified"}
+    if not isinstance(metadata, dict):
+        return unknown
+    if type(metadata.get("cache_version")) is not int or metadata["cache_version"] != STOCK_STRATEGY_CACHE_VERSION:
+        return {"cache_status": "stale", "cache_stale_reason": "strategy_cache_version_old_scan_again"}
+    diagnostics = metadata.get("diagnostics")
+    if (partial or not isinstance(diagnostics, dict)
+            or diagnostics.get("strategy") != strategy
+            or diagnostics.get("coverage") not in {"complete", "complete_with_exclusions"}):
+        return unknown
+    if any(not isinstance(row, dict) for row in rows or []):
+        return unknown
+    # Live snapshots have no completed-1D session contract. Preserve their
+    # existing hourly age policy only in explicit Live mode; a daily-marked
+    # row must never evade daily proof by relabelling its cache live_snapshot.
+    if (not stock_swing.enabled() and diagnostics.get("data_mode") == "live_snapshot"
+            and not any(stock_swing.is_swing(row) or "stock_swing_contract_version" in row
+                        or "swing_analysis_session" in row or row.get("swing_timeframe") == "1D"
+                        or row.get("scan_price_source") == stock_swing.SOURCE for row in rows or [])):
+        return None
+    if diagnostics.get("data_mode") != stock_swing.MODE:
+        return unknown
+    try:
+        clock = as_of or datetime.now(timezone.utc)
+        expected_session = stock_swing.completed_sessions(clock, 1)[0]
+        expected_close = stock_swing.session_close(expected_session)
+        observed = _stock_attempt_datetime(diagnostics.get("analysis_as_of"))
+        if observed is None or observed != stock_swing.session_close(observed.astimezone(stock_swing.NY).date().isoformat()):
+            return unknown
+        if observed < expected_close:
+            return {"cache_status": "stale", "cache_stale_reason": "gap_cache_session_stale"}
+        if observed > expected_close:
+            return unknown
+        if any(not isinstance(row, dict) or not stock_swing.validate(row, clock)
+               or any(row.get(key) not in (None, "", strategy) for key in ("Strategy", "strategy"))
+               for row in rows or []):
+            return unknown
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return unknown
+    return {"cache_status": "fresh", "cache_stale_reason": None}
+
+
+def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], results: List[Dict[str, Any]], *, cache_freshness=None) -> Dict[str, Any]:
     interval = _scan_status.get(scanner_name, {}).get("interval_min")
     stale_after = (interval * 60 * 2) if interval else None
     stale = bool(cache_age_seconds is not None and stale_after and cache_age_seconds > stale_after)
+    status = "unknown" if cache_age_seconds is None else ("stale" if stale else "fresh")
+    if cache_freshness is not None:
+        status = cache_freshness["cache_status"] if cache_age_seconds is not None and cache_age_seconds >= 0 else "unknown"
+        stale = status == "stale"
     warnings = []
     effective_count = _effective_scan_result_count(scanner_name, results)
     if cache_age_seconds is None:
         warnings.append("Cache-Zeit unbekannt")
     elif stale:
         warnings.append(f"Cache alt: {cache_age_seconds}s")
+    if cache_freshness is not None and status == "unknown":
+        warnings.append("Gap-Tagesstand nicht bestaetigt")
     if not effective_count:
         warnings.append("Keine Treffer im Cache")
         if scanner_name == "bear":
@@ -16108,7 +16214,9 @@ def _scan_quality_payload(scanner_name: str, cache_age_seconds: Optional[int], r
         "scanner": scanner_name,
         "data_source": SCAN_DATA_SOURCES.get(scanner_name, "Scanner cache"),
         "cache_age_seconds": cache_age_seconds,
-        "cache_status": "unknown" if cache_age_seconds is None else ("stale" if stale else "fresh"),
+        "cache_status": status,
+        **({"cache_stale_reason": "gap_cache_session_unverified" if status == "unknown"
+            else cache_freshness["cache_stale_reason"]} if cache_freshness is not None else {}),
         "result_count": effective_count,
         "warnings": warnings,
         "exclusion_policy": SCAN_EXCLUSION_POLICIES["common"] + SCAN_EXCLUSION_POLICIES.get(scanner_name, []),
@@ -18359,6 +18467,26 @@ def get_strategies_for_market(market_type: str) -> Dict[str, Any]:
 _UNSUPPORTED_SCAN_MARKETS = {"futures", "forex", "international"}
 
 
+def _unsupported_stock_strategy(strategy_name: str) -> bool:
+    # These retired labels lack the required source/filter/directional plan.
+    # The separate bullish/bearish harmonic scanners remain supported.
+    canonical = resolve_strategy_name(str(strategy_name or ""), "stocks")
+    return canonical.strip().lower() in {
+        "insider buying", "insider selling", "long wick up", "long wick down",
+        "harmonic all patterns",
+    }
+
+
+def _require_supported_stock_strategy(strategy_name: str) -> None:
+    if _unsupported_stock_strategy(strategy_name):
+        raise HTTPException(status_code=501, detail={
+            "code": "stock_strategy_not_implemented",
+            "strategy": strategy_name,
+            "scan_supported": False,
+            "message": "Diese Legacy-Strategie ist nicht vollständig implementiert; kein Ersatzscan gestartet.",
+        })
+
+
 def _unsupported_market_scan_detail(market_type: str) -> Dict[str, Any]:
     return {
         "code": "market_scanner_not_implemented",
@@ -18396,6 +18524,9 @@ def get_public_strategies_for_market(market_type: str, include_hidden: bool = Fa
         for name in sorted(STOCK_STRATEGY_HIDDEN):
             if name in STRATEGIES:
                 public_strategies[name] = deepcopy(STRATEGIES[name])
+                if _unsupported_stock_strategy(name):
+                    public_strategies[name].update(scan_supported=False,
+                                                  unsupported_reason="stock_strategy_not_implemented")
 
     return public_strategies
 
@@ -19099,7 +19230,7 @@ def _build_structured_trade_setup(
         seen: Dict[float, str] = {}
         for price, label in levels:
             if price and price > 0:
-                seen.setdefault(round(float(price), 6), label)
+                seen.setdefault(float(price), label)
         return sorted(seen.items(), reverse=reverse)
 
     nearest_barrier_meta: Optional[Dict[str, Any]] = None
@@ -19398,7 +19529,9 @@ def _build_structured_trade_setup(
         "rr_tp1": round(rr_tp1, 2),
         "rr_tp2": round(rr_tp2, 2),
         "risk": _round_trade_price(risk),
-        "atr": _round_trade_price(atr_value),
+        # ATR is a decision input, not an order price. Tick formatting can
+        # cross the unchanged percentage-volatility floor in either direction.
+        "atr": atr_value,
         "model": "Kausale Struktur-Invalidation + erste Gegenbarriere; R:R nur Filter",
         "level_model": (
             f"{structure_snapshot.model}+invalidation_first_v2"
@@ -19509,6 +19642,10 @@ def _build_structured_trade_setup(
 def _infer_strategy_direction(strategy_name: str, filters: Dict[str, Any]) -> str:
     """Infer whether a stock strategy should reward long or short price action."""
     name = _normalize_strategy_key(strategy_name)
+    # A buy-the-dip setup selects falling prices but has a LONG thesis. A
+    # negative discovery filter is not evidence for a bearish trade direction.
+    if name == _normalize_strategy_key("Dip Buy"):
+        return "long"
     bearish_tokens = ("short", "down", "bear", "breakdown", "distribution", "selling")
     if any(token in name for token in bearish_tokens):
         return "short"
@@ -19792,10 +19929,13 @@ def _score_strategy_candidate(
     meta = {
         "direction": direction,
         "setup_score": round(float(setup_score), 1) if setup_score is not None else None,
-        "atr_pct": round(atr_pct, 2),
-        "extension_atr": round(extension_ratio, 2),
-        "upper_wick_pct": round(upper_wick_pct, 1),
-        "lower_wick_pct": round(lower_wick_pct, 1),
+        # These are decision inputs, not formatted display values. Rounding
+        # 2.496 ATR to 2.50 before continuation quality falsely crosses its
+        # unchanged 2.5-ATR boundary; wick rounding can likewise lose a point.
+        "atr_pct": atr_pct,
+        "extension_atr": extension_ratio,
+        "upper_wick_pct": upper_wick_pct,
+        "lower_wick_pct": lower_wick_pct,
     }
     return int(_clamp_float(score, 0, 100)), meta
 
@@ -20301,7 +20441,7 @@ def _strategy_daily_history_metrics(
     raw_rvol20 = completed_bar_rvol(day_volume, vols20, lookback=20, minimum_periods=10)
     # Selection and scoring use the actual ratio. Rounding 1.496 to 1.50
     # before a 1.5 floor would manufacture qualifying volume evidence.
-    rvol20 = min(project_partial_rvol(raw_rvol20, volume_fraction), 50.0)
+    rvol20 = project_partial_rvol(raw_rvol20, volume_fraction)
     projected_day_volume = (
         float(day_volume or 0) / max(volume_fraction, 0.01)
         if volume_fraction < 1.0
@@ -21895,17 +22035,8 @@ def _cup_handle_watch_row(row: Dict[str, Any]) -> Dict[str, Any]:
 def _cup_handle_watch_expiry_ts(target_session_date: str) -> Optional[float]:
     """Expire shortly after the one permitted US regular session ends."""
     try:
-        from zoneinfo import ZoneInfo
-
-        target_date = datetime.fromisoformat(str(target_session_date)).date()
-        return datetime(
-            target_date.year,
-            target_date.month,
-            target_date.day,
-            16,
-            15,
-            tzinfo=ZoneInfo("America/New_York"),
-        ).timestamp()
+        close = stock_swing.session_close(target_session_date)
+        return close.timestamp() + 15 * 60 if close is not None else None
     except Exception:
         return None
 
@@ -22094,18 +22225,18 @@ def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[st
                 [promoted],
                 "stocks",
             )
-            delivered = bool(
-                cooldown_key
-                and (
-                    cooldown_key in _EMAIL_COOLDOWN
-                    or _email_dedupe_remaining(
-                        cooldown_key,
-                        _alert_dedupe_ttl_seconds("stock_strategy"),
-                        now=time.time(),
-                    )
-                    > 0
-                )
-            )
+            # A stale map key or a pending send lease is not a delivery receipt.
+            # The durable store uses a separate claim key; only a recent, finite
+            # accepted-send timestamp can complete this one-shot watch.
+            receipt_now = time.time()
+            receipt_ttl = _alert_dedupe_ttl_seconds("stock_strategy")
+            receipts = (_EMAIL_COOLDOWN.get(cooldown_key), _load_email_dedupe().get(cooldown_key))
+            delivered = bool(cooldown_key and any(
+                not isinstance(receipt, bool) and isinstance(receipt, (int, float))
+                and math.isfinite(receipt) and receipt > 0
+                and 0 <= receipt_now - receipt < receipt_ttl
+                for receipt in receipts
+            ))
             remove = delivered
             if delivered:
                 completed += 1
@@ -23576,6 +23707,7 @@ def _strategy_scan_wrapper(
 ) -> List[Dict[str, Any]]:
     """V2.2: Erweiterter Snapshot-Scanner für alle Strategien.
     Berechnet Gap%, Vortag%, Dollar-Volume und filtert korrekt."""
+    _require_supported_stock_strategy(strategy_name)
     if strategy_name == ELLIOTT_STRATEGY:
         return _elliott_scan_wrapper()
     _strat_cache = _strategy_cache_path(strategy_name)
@@ -23925,10 +24057,7 @@ def _strategy_scan_wrapper(
                     if rvol is None:
                         prev_vol = float(prev.get("v", 0) or 0)
                         if prev_vol > 1000:
-                            rvol = min(
-                                round(volume / max(prev_vol * session_volume_fraction, 1.0), 2),
-                                50.0,
-                            )
+                            rvol = volume / max(prev_vol * session_volume_fraction, 1.0)
                             rvol_source = (
                                 "fallback_prev_day_intraday_time_adjusted"
                                 if session_volume_fraction < 1.0
@@ -24184,59 +24313,55 @@ def _strategy_scan_wrapper(
                         "strategy": strategy_name,
                         "Ticker": ticker,
                         "ticker": ticker,
-                        "Preis": price if _is_wyckoff else round(price, 2),
-                        "price": price if _is_wyckoff else round(price, 2),
-                        "Change_Pct": round(change_pct, 2),
-                        "change_pct": round(change_pct, 2),
+                        "Preis": price,
+                        "price": price,
+                        "Change_Pct": change_pct,
+                        "change_pct": change_pct,
                         "Volume": volume,
                         "volume": volume,
-                        "RVOL": round(rvol_effective, 2) if premarket_mode else rvol,
-                        "rvol": round(rvol_effective, 2) if premarket_mode else rvol,
+                        "RVOL": rvol_effective if premarket_mode else rvol,
+                        "rvol": rvol_effective if premarket_mode else rvol,
                         "RVOL_Source": rvol_source,
                         "Premarket": premarket_mode,
                         "premarket": premarket_mode,
-                        "PM_DollarVol": round(dollar_vol) if premarket_mode else None,
-                        "RVOL_PM_Raw": round(rvol_pm_raw, 2) if (premarket_mode and isinstance(rvol_pm_raw, (int, float))) else None,
-                        "AvgVol20": round(history_metrics.get("avg_vol20") or 0),
-                        "MedianDollarVol20": round(history_metrics.get("median_dollar_vol20") or 0),
-                        "median_dollar_volume_20d": round(history_metrics.get("median_dollar_vol20") or 0),
-                        "Dollar_Volume": round(projected_dollar_vol),
-                        "Observed_Dollar_Volume": round(dollar_vol),
-                        "Projected_Dollar_Volume": round(projected_dollar_vol),
-                        "dollar_volume": round(dollar_vol),
-                        "Expected_Volume_Fraction": round(session_volume_fraction, 4),
+                        "PM_DollarVol": dollar_vol if premarket_mode else None,
+                        "RVOL_PM_Raw": rvol_pm_raw if premarket_mode else None,
+                        "AvgVol20": history_metrics.get("avg_vol20"),
+                        "MedianDollarVol20": history_metrics.get("median_dollar_vol20"),
+                        "median_dollar_volume_20d": history_metrics.get("median_dollar_vol20"),
+                        "Dollar_Volume": projected_dollar_vol,
+                        "Observed_Dollar_Volume": dollar_vol,
+                        "Projected_Dollar_Volume": projected_dollar_vol,
+                        "dollar_volume": dollar_vol,
+                        "Expected_Volume_Fraction": session_volume_fraction,
                         "RVOL_Raw": history_metrics.get("rvol20_raw"),
-                        "spread_pct": round(spread_pct, 3) if spread_pct is not None else None,
-                        "bid": round(bid, 4) if bid > 0 else None,
-                        "ask": round(ask, 4) if ask > 0 else None,
-                        "Prev_Close": round(prev_close, 2),
-                        "Day_Open": round(day_open, 2),
-                        "Day_High": round(day_high, 2),
-                        "Day_Low": round(day_low, 2),
-                        "High_20D": _round_trade_price(history_metrics.get("high_20d") or day_high),
-                        "High_10D": _round_trade_price(history_metrics.get("high_10d") or day_high),
-                        "Low_20D": _round_trade_price(history_metrics.get("low_20d") or day_low),
-                        "High_50D": _round_trade_price(history_metrics.get("high_50d") or day_high),
-                        "Low_50D": _round_trade_price(history_metrics.get("low_50d") or day_low),
-                        "Support_1": (
-                            _round_trade_price(history_metrics.get("support_1"))
-                            if history_metrics.get("support_1") else None
-                        ),
-                        "Resistance_1": (
-                            _round_trade_price(history_metrics.get("resistance_1"))
-                            if history_metrics.get("resistance_1") else None
-                        ),
-                        "Close_Position": round(close_pos, 2),
-                        "close_pos": round(close_pos, 2),
-                        "open_to_current_pct": round(((price - day_open) / day_open * 100), 2) if day_open > 0 else None,
-                        "Gap_Pct": round(gap_pct, 2),
-                        "gap_pct": round(gap_pct, 2),
-                        "Vortag_Pct": round(vortag_pct, 2),
+                        "spread_pct": spread_pct,
+                        "bid": bid if bid > 0 else None,
+                        "ask": ask if ask > 0 else None,
+                        # Preserve the original observation for subsequent
+                        # mail gates; formatting belongs to the UI/mail text.
+                        "Prev_Close": prev_close,
+                        "Day_Open": day_open,
+                        "Day_High": day_high,
+                        "Day_Low": day_low,
+                        "High_20D": history_metrics.get("high_20d"),
+                        "High_10D": history_metrics.get("high_10d"),
+                        "Low_20D": history_metrics.get("low_20d"),
+                        "High_50D": history_metrics.get("high_50d"),
+                        "Low_50D": history_metrics.get("low_50d"),
+                        "Support_1": history_metrics.get("support_1"),
+                        "Resistance_1": history_metrics.get("resistance_1"),
+                        "Close_Position": close_pos,
+                        "close_pos": close_pos,
+                        "open_to_current_pct": ((price - day_open) / day_open * 100) if day_open > 0 else None,
+                        "Gap_Pct": gap_pct,
+                        "gap_pct": gap_pct,
+                        "Vortag_Pct": vortag_pct,
                         "Vortag_Pct_Available": previous_change is not None,
                         "Vortag_Pct_Source": "completed_close_to_close" if previous_change is not None else "unavailable",
                         "ATR_Pct": _score_meta.get("atr_pct"),
-                        "ATR14": _round_trade_price(history_metrics.get("atr14") or price * prev_atr_pct / 100.0),
-                        "Swing_Range_Pos": round(history_metrics.get("range_pos") or close_pos * 100.0, 1),
+                        "ATR14": history_metrics.get("atr14") or price * prev_atr_pct / 100.0,
+                        "Swing_Range_Pos": history_metrics.get("range_pos"),
                         "History_Bars": history_metrics.get("completed_bars"),
                         "History_OK": bool(history_metrics.get("history_ok")),
                         "Level_Model": history_metrics.get("level_model"),
@@ -24245,16 +24370,16 @@ def _strategy_scan_wrapper(
                         "level_structure": history_metrics.get("level_structure"),
                         "Level_Legacy": history_metrics.get("level_legacy"),
                         "RSI": history_metrics.get("rsi14"),
-                        "EMA20": _round_trade_price(history_metrics.get("ema20")) if history_metrics.get("ema20") else None,
-                        "EMA50": _round_trade_price(history_metrics.get("ema50")) if history_metrics.get("ema50") else None,
-                        "EMA200": _round_trade_price(history_metrics.get("ema200")) if history_metrics.get("ema200") else None,
-                        "Change_5D": round(history_metrics.get("change_5d"), 2) if history_metrics.get("change_5d") is not None else None,
-                        "Change_20D": round(history_metrics.get("change_20d"), 2) if history_metrics.get("change_20d") is not None else None,
-                        "Breakout_10D_Pct": round(history_metrics.get("breakout_10d_pct"), 2) if history_metrics.get("breakout_10d_pct") is not None else None,
-                        "Breakout_20D_Pct": round(history_metrics.get("breakout_20d_pct"), 2) if history_metrics.get("breakout_20d_pct") is not None else None,
-                        "Breakout_50D_Pct": round(history_metrics.get("breakout_50d_pct"), 2) if history_metrics.get("breakout_50d_pct") is not None else None,
-                        "EMA20_Distance_Pct": round(history_metrics.get("ema20_distance_pct"), 2) if history_metrics.get("ema20_distance_pct") is not None else None,
-                        "EMA50_Distance_Pct": round(history_metrics.get("ema50_distance_pct"), 2) if history_metrics.get("ema50_distance_pct") is not None else None,
+                        "EMA20": history_metrics.get("ema20"),
+                        "EMA50": history_metrics.get("ema50"),
+                        "EMA200": history_metrics.get("ema200"),
+                        "Change_5D": history_metrics.get("change_5d"),
+                        "Change_20D": history_metrics.get("change_20d"),
+                        "Breakout_10D_Pct": history_metrics.get("breakout_10d_pct"),
+                        "Breakout_20D_Pct": history_metrics.get("breakout_20d_pct"),
+                        "Breakout_50D_Pct": history_metrics.get("breakout_50d_pct"),
+                        "EMA20_Distance_Pct": history_metrics.get("ema20_distance_pct"),
+                        "EMA50_Distance_Pct": history_metrics.get("ema50_distance_pct"),
                         "Momentum_Breakout_Gate": "passed",
                         "Momentum_Breakout_Type": _momentum_breakout_type,
                         "Breakout_Continuation_Score": _breakout_quality.get("score") if _breakout_quality else None,
@@ -24624,7 +24749,7 @@ def _crypto_prior_six_day_average(change_7d, change_24h):
     CoinGecko snapshots do not provide six individual daily returns. This is
     explicitly a compounded-window proxy, never yesterday's actual return.
     """
-    week, today = _alert_float(change_7d), _alert_float(change_24h)
+    week, today = _execution_candle_number(change_7d), _execution_candle_number(change_24h)
     if week is None or today is None or week <= -100 or today <= -100:
         return None
     try:
@@ -24657,16 +24782,22 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         cg_source = cg_status.get("source") or "unknown"
         cg_warning = cg_status.get("warning")
         results = []
+        scan_observed_at = time.time()
+        def _provider_observation(snapshot):
+            if not isinstance(snapshot, dict):
+                return None
+            stamp = _execution_candle_timestamp(snapshot.get("last_updated"))
+            return stamp if stamp is not None and -2 <= scan_observed_at - stamp <= 300 else None
         def _week_change(snapshot):
             raw = snapshot.get("price_change_percentage_7d_in_currency")
             if raw is None:
                 raw = snapshot.get("price_change_percentage_7d")
-            value = _alert_float(raw)
+            value = _execution_candle_number(raw)
             return value if value is not None and value > -100 else None
 
         btc_7d = None
         for coin in coins:
-            if coin.get("id") == "bitcoin":
+            if isinstance(coin, dict) and coin.get("id") == "bitcoin" and _provider_observation(coin) is not None:
                 btc_7d = _week_change(coin)
                 break
 
@@ -24705,40 +24836,51 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
         for checked, coin in enumerate(coins, start=1):
             _scan_control_point()
             _publish_partial(checked)
+            if not isinstance(coin, dict):
+                continue
             try:
                 cid = str(coin.get("id", "") or "")
                 symbol = str(coin.get("symbol", "") or "").upper()
                 name = str(coin.get("name", "") or "")
-                price = float(coin.get("current_price") or 0)
-                if not symbol or price <= 0:
+                price = _execution_candle_number(coin.get("current_price"))
+                observed_at = _provider_observation(coin)
+                if not symbol or price is None or price <= 0 or observed_at is None:
                     continue
                 if _is_excluded_crypto_asset(symbol, cid, name):
                     continue
 
-                mcap = float(coin.get("market_cap") or 0)
-                vol_24h = float(coin.get("total_volume") or 0)
-                change_24h = _alert_float(coin.get("price_change_percentage_24h"))
+                mcap = _execution_candle_number(coin.get("market_cap"))
+                vol_24h = _execution_candle_number(coin.get("total_volume"))
+                if any(coin.get(key) is not None and (value is None or value < 0)
+                       for key,value in (("market_cap",mcap),("total_volume",vol_24h))):
+                    continue
+                change_24h = _execution_candle_number(coin.get("price_change_percentage_24h"))
                 if change_24h is None or change_24h <= -100:
                     continue
                 change_7d = _week_change(coin)
-                high_24h = float(coin.get("high_24h") or price)
-                low_24h = float(coin.get("low_24h") or price)
-                range_24h = high_24h - low_24h
-                close_pos = _clamp_float((price - low_24h) / range_24h if range_24h > 0 else 0.5, 0.0, 1.0, 0.5)
+                high_24h = _execution_candle_number(coin.get("high_24h"))
+                low_24h = _execution_candle_number(coin.get("low_24h"))
+                if any(coin.get(key) is not None and (value is None or value <= 0)
+                       for key,value in (("high_24h",high_24h),("low_24h",low_24h))):
+                    continue
+                if high_24h is not None and low_24h is not None and not (low_24h <= price <= high_24h):
+                    continue
+                close_pos = ((price-low_24h)/(high_24h-low_24h) if high_24h is not None
+                             and low_24h is not None and high_24h>low_24h else None)
 
-                vol_mcap_ratio = (vol_24h / mcap * 100) if mcap > 0 else 0.0
-                turnover_intensity = vol_mcap_ratio / 10.0  # 15% Vol/MCap ~= 1.5 turnover intensity
+                vol_mcap_ratio = (vol_24h / mcap * 100) if mcap is not None and mcap>0 and vol_24h is not None else None
+                turnover_intensity = vol_mcap_ratio / 10.0 if vol_mcap_ratio is not None else None
                 trend_daily = _crypto_prior_six_day_average(change_7d, change_24h)
 
                 if not (change_min <= change_24h <= change_max):
                     continue
                 if not (price_min <= price <= price_max):
                     continue
-                if "MarketCap" in filters and not (mcap_min <= mcap <= mcap_max):
+                if "MarketCap" in filters and (mcap is None or not (mcap_min <= mcap <= mcap_max)):
                     continue
-                if ("Turnover Intensity" in filters or "RVOL" in filters) and not (turnover_min <= turnover_intensity <= turnover_max):
+                if ("Turnover Intensity" in filters or "RVOL" in filters) and (turnover_intensity is None or not (turnover_min <= turnover_intensity <= turnover_max)):
                     continue
-                if "Close Position" in filters and not (close_pos_min <= close_pos <= close_pos_max):
+                if "Close Position" in filters and (close_pos is None or not (close_pos_min <= close_pos <= close_pos_max)):
                     continue
                 if "Vortag %" in filters and (trend_daily is None or not (trend_min <= trend_daily <= trend_max)):
                     continue
@@ -24754,18 +24896,18 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 elif change_24h < -10:
                     score -= 8
 
-                if 15 <= vol_mcap_ratio <= 80:
+                if vol_mcap_ratio is not None and 15 <= vol_mcap_ratio <= 80:
                     score += 18
-                elif 5 <= vol_mcap_ratio < 15:
+                elif vol_mcap_ratio is not None and 5 <= vol_mcap_ratio < 15:
                     score += 8
-                elif vol_mcap_ratio > 150:
+                elif vol_mcap_ratio is not None and vol_mcap_ratio > 150:
                     score -= 10
 
-                if close_pos >= 0.75:
+                if close_pos is not None and close_pos >= 0.75:
                     score += 12
-                elif close_pos >= 0.55:
+                elif close_pos is not None and close_pos >= 0.55:
                     score += 6
-                elif close_pos <= 0.25 and change_24h > 0:
+                elif close_pos is not None and close_pos <= 0.25 and change_24h > 0:
                     score -= 8
 
                 btc_alpha_7d = change_7d - btc_7d if change_7d is not None and btc_7d is not None else None
@@ -24780,12 +24922,12 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 # Strategy-specific quality nudges.
                 key = _normalize_strategy_key(strategy_name)
                 if "low_cap" in key or "rocket" in key:
-                    if 5_000_000 <= mcap <= 500_000_000 and vol_24h >= 500_000:
+                    if mcap is not None and vol_24h is not None and 5_000_000 <= mcap <= 500_000_000 and vol_24h >= 500_000:
                         score += 12
-                    if mcap < 5_000_000:
+                    if mcap is not None and mcap < 5_000_000:
                         score -= 18
                 if "accumulation" in key:
-                    if abs(change_24h) <= 2 and 12 <= vol_mcap_ratio <= 30:
+                    if abs(change_24h) <= 2 and vol_mcap_ratio is not None and 12 <= vol_mcap_ratio <= 30:
                         score += 15
                     if abs(change_24h) > 5:
                         score -= 12
@@ -24799,33 +24941,39 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                 if cg_partial:
                     risk_flags.append("partial_crypto_data")
                 context_missing_fields = []
+                if close_pos is None:
+                    risk_flags.append("close_position_unavailable")
+                    context_missing_fields.append("close_position")
+                if vol_mcap_ratio is None:
+                    risk_flags.append("turnover_unavailable")
+                    context_missing_fields.append("volume_market_cap")
                 if change_7d is None:
                     context_missing_fields.append("coin_change_7d")
                 if btc_7d is None:
                     context_missing_fields.append("btc_change_7d")
-                if context_missing_fields:
+                if change_7d is None or btc_7d is None:
                     risk_flags.append("btc_relative_7d_unavailable")
                 results.append({
                     "Ticker": symbol,
                     "ticker": symbol,
                     "Name": name,
                     "ID": cid,
-                    "Preis": round(price, 6),
-                    "price": round(price, 6),
-                    "Change_Pct": round(change_24h, 2),
-                    "change_pct": round(change_24h, 2),
-                    "Change7d": round(change_7d, 2) if change_7d is not None else None,
+                    "Preis": price,
+                    "price": price,
+                    "Change_Pct": change_24h,
+                    "change_pct": change_24h,
+                    "Change7d": change_7d,
                     "Volume": vol_24h,
                     "volume": vol_24h,
-                    "MarketCap": round(mcap),
-                    "VolMCapRatio": round(vol_mcap_ratio, 2),
-                    "TurnoverIntensity": round(turnover_intensity, 2),
-                    "turnover_intensity": round(turnover_intensity, 2),
+                    "MarketCap": mcap,
+                    "VolMCapRatio": vol_mcap_ratio,
+                    "TurnoverIntensity": turnover_intensity,
+                    "turnover_intensity": turnover_intensity,
                     "RVOL": None,
                     "rvol": None,
-                    "Close_Position": round(close_pos, 2),
-                    "BtcRelative7d": round(btc_alpha_7d, 2) if btc_alpha_7d is not None else None,
-                    "btc_change_7d_pct": round(btc_7d, 2) if btc_7d is not None else None,
+                    "Close_Position": close_pos,
+                    "BtcRelative7d": btc_alpha_7d,
+                    "btc_change_7d_pct": btc_7d,
                     "btc_relative_7d_status": "available" if btc_alpha_7d is not None else "unavailable",
                     "context_data_status": "partial" if context_missing_fields else "ok",
                     "context_missing_fields": context_missing_fields,
@@ -24848,6 +24996,7 @@ def _crypto_strategy_scan_wrapper(strategy_name: str) -> None:
                     "data_source": f"CoinGecko markets ({cg_source})",
                     "scanner_note": "Crypto-Strategie-Score ist Beobachtung, kein Entry. JETZT_TRADEN braucht einen frischen Micro-/Execution-Trigger.",
                     "volume_model": "turnover_intensity=(24h_volume/market_cap_pct)/10; not_historical_rvol",
+                    "provider_observed_at": observed_at,
                 })
                 _publish_partial(checked, force=len(results) == 1)
             except Exception as item_err:
@@ -24945,8 +25094,8 @@ def _turtle_scan_wrapper() -> None:
         candidates = []
         for t in _all_tickers:
             ticker = t.get("ticker", "")
-            if not ticker or "." in ticker or len(ticker) > 5:
-                continue  # OTC / Warrants raus
+            if not valid_stock_symbol(ticker):
+                continue  # Asset type is verified below, not guessed from spelling.
             if _stock_alert_asset_exclusion_reason(
                 ticker,
                 common_stock_universe=_common_stock_universe,
@@ -24992,13 +25141,21 @@ def _turtle_scan_wrapper() -> None:
             try:
                 # 30 Tage Daily Bars holen (brauchen 21+ für Donchian 20)
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{_from}/{_to}"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 35, "sort": "asc"})
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "adjusted": "true", "limit": 35, "sort": "asc"})
                 if resp.status_code != 200:
                     raise ScannerDataError("scan_data_incomplete", data_diagnostics)
                 payload = resp.json()
                 if (_scanner_payload_error(payload) or not isinstance(payload, dict)
                         or not isinstance(payload.get("results"), list)):
                     raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                # Match the grouped split-adjusted reference. A missing legacy
+                # response flag stays compatible with the explicit request;
+                # contradictory or malformed metadata cannot prove that basis.
+                if "adjusted" in payload and payload["adjusted"] is not True:
+                    raise ScannerDataError(
+                        "scan_data_incomplete",
+                        dict(data_diagnostics, reason="history_adjustment_incompatible"),
+                    )
                 # A corrupted required history is not a legitimate no-pattern
                 # outcome. The causal adapter may still omit valid open bars.
                 for raw in payload["results"]:
@@ -25251,6 +25408,9 @@ def _turtle_scan_wrapper() -> None:
 
 def _bear_scan_wrapper() -> None:
     """Run bear scanner in background — finds inverse ETF opportunities and breakdown stocks."""
+    from modules.bear_history import bear_reference_metrics
+
+    bear_as_of = datetime.now(timezone.utc)
     try:
         result = {
             "inverse_etfs": [],
@@ -25271,14 +25431,38 @@ def _bear_scan_wrapper() -> None:
         }
 
         # --- Section 1: Inverse ETF performance ---
+        # The shared strict daily parser has no implicit provider delay. Apply
+        # this scan's single availability watermark here, never per request.
+        from modules.penny_stock_scanner import parse_penny_daily_aggregates
+        inverse_as_of = bear_as_of - timedelta(
+            seconds=stock_swing.DELAY_SECONDS if stock_swing.enabled() else 0
+        )
         for ticker, (desc, underlying) in INVERSE_ETFS.items():
             _scan_control_point()
             try:
                 url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
-                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 40, "sort": "desc"})
+                resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 40, "sort": "desc", "adjusted": True})
                 if resp.status_code != 200:
                     continue
-                bars = resp.json().get("results", [])
+                payload = resp.json()
+                # Provider order is not chronology. Validate timestamps before
+                # sorting: bool/seconds/unknown clocks cannot become valid bars.
+                if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                    for raw in payload["results"]:
+                        timestamp = raw.get("t") if isinstance(raw, dict) else None
+                        if (isinstance(timestamp, bool) or not isinstance(timestamp, (int, float))
+                                or not math.isfinite(timestamp) or timestamp <= 10_000_000_000
+                                or int(timestamp) != timestamp):
+                            raise ValueError("inverse_etf_invalid_timestamp")
+                    payload = dict(payload, results=sorted(payload["results"], key=lambda raw: raw["t"]))
+                canonical = parse_penny_daily_aggregates(payload, as_of=inverse_as_of)
+                # Penny resistance can use price-only evidence, but ETF RVOL
+                # needs actual measured volume; do not replace unknown with 0.
+                if any(bar["volume"] is None for bar in canonical):
+                    raise ValueError("inverse_etf_missing_volume")
+                bars = [{"t": bar["timestamp"], "o": bar["open"], "h": bar["high"],
+                         "l": bar["low"], "c": bar["close"], "v": bar["volume"]}
+                        for bar in reversed(canonical)]
                 if len(bars) < 2:
                     continue
 
@@ -25294,9 +25478,9 @@ def _bear_scan_wrapper() -> None:
                 if len(bars) >= 21:
                     chg_20d = ((close - bars[20]["c"]) / bars[20]["c"]) * 100
 
-                vol = bars[0].get("v", 0)
+                vol = bars[0]["v"]
                 avg_vol = historical_volume_baseline(
-                    (b.get("v", 0) for b in bars[1:21]),
+                    (b["v"] for b in bars[1:21]),
                     lookback=20,
                     minimum_periods=10,
                 )
@@ -25334,6 +25518,10 @@ def _bear_scan_wrapper() -> None:
                     "change_5d": round(chg_5d, 2) if chg_5d is not None else None,
                     "change_20d": round(chg_20d, 2) if chg_20d is not None else None,
                     "history_bars": len(bars),
+                    "analysis_as_of": bear_as_of.isoformat(),
+                    "available_cutoff": inverse_as_of.isoformat(),
+                    "analysis_session": datetime.fromtimestamp(bars[0]["t"] / 1000, timezone.utc).astimezone(stock_swing.NY).date().isoformat(),
+                    "source_contract": "inverse_etf_completed_daily_v2",
                     "data_status": "ok" if chg_20d is not None and rvol is not None else "partial",
                     "volume": vol, "rvol": rvol, "signal": signal,
                 }
@@ -25443,18 +25631,25 @@ def _bear_scan_wrapper() -> None:
                         day = t.get("day", {})
                         prev = t.get("prevDay", {})
                         # V3.4: Bei Extended Hours → AH-Preis und AH-Change nutzen
+                        day_measurements = {key: _execution_candle_number(day.get(key)) for key in ("o","h","l","c","v")}
+                        if (any(value is None for value in day_measurements.values())
+                                or min(day_measurements[key] for key in ("o","h","l","c")) <= 0
+                                or day_measurements["v"] < 0
+                                or day_measurements["h"] < max(day_measurements[key] for key in ("o","l","c"))
+                                or day_measurements["l"] > min(day_measurements[key] for key in ("o","h","c"))):
+                            _diagnostics["invalid_snapshot_symbols"] = _diagnostics.get("invalid_snapshot_symbols",0)+1
+                            continue
                         if _is_extended_hours and t.get("_ah_price"):
-                            price = t["_ah_price"]
-                            prev_close = day.get("c", 0) or prev.get("c", 0)  # Vergleich vs Regular Close
-                            chg_pct = t.get("_ah_change_pct", 0)
+                            price = _execution_candle_number(t["_ah_price"])
+                            prev_close = day_measurements["c"]  # Vergleich vs Regular Close
                         else:
-                            price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                            prev_close = prev.get("c", 0)
-                            chg_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
-                        if not price or not prev_close or price < 3:
+                            price = day_measurements["c"]
+                            prev_close = _execution_candle_number(prev.get("c"))
+                        if price is None or prev_close is None or prev_close <= 0 or price < 3:
                             _diagnostics["price_or_prev_close_filtered"] = int(_diagnostics.get("price_or_prev_close_filtered", 0) or 0) + 1
                             continue
-                        vol = day.get("v", 0)
+                        chg_pct = ((price - prev_close) / prev_close) * 100
+                        vol = day_measurements["v"]
                         dollar_vol = price * vol
                         if dollar_vol < 300_000 and not _is_extended_hours:
                             _diagnostics["dollar_volume_filtered"] = int(_diagnostics.get("dollar_volume_filtered", 0) or 0) + 1
@@ -25462,9 +25657,9 @@ def _bear_scan_wrapper() -> None:
                         if chg_pct > -3:
                             _diagnostics["drop_filtered"] = int(_diagnostics.get("drop_filtered", 0) or 0) + 1
                             continue
-                        day_open = day.get("o", 0) or prev_close
-                        day_high = day.get("h", 0) or max(price, day_open)
-                        day_low = day.get("l", 0) or min(price, day_open)
+                        day_open = day_measurements["o"]
+                        day_high = day_measurements["h"]
+                        day_low = day_measurements["l"]
                         open_to_current_pct = ((price - day_open) / day_open * 100) if day_open else None
                         close_pos = ((price - day_low) / (day_high - day_low)) if day_high > day_low else 0.5
 
@@ -25492,37 +25687,44 @@ def _bear_scan_wrapper() -> None:
                         history_bars: List[Dict[str, Any]] = []
 
                         try:
-                            url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/2024-01-01/2099-12-31"
-                            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc"})
+                            # The reference needs sixty PRIOR sessions, not
+                            # sixty responses including today's signal bar.
+                            # Bound the request to this scan clock and use the
+                            # same split-adjusted basis as the snapshot.
+                            history_end = bear_as_of.astimezone(stock_swing.NY).date()
+                            history_start = history_end - timedelta(days=365)
+                            url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_sym}/range/1/day/{history_start.isoformat()}/{history_end.isoformat()}"
+                            resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 64, "sort": "desc", "adjusted": "true"})
                             if resp.status_code == 200:
-                                bars = resp.json().get("results", [])
-                                # NACHAUDIT N1: Polygon liefert hier sort=desc (neueste zuerst).
-                                # Wilder-ATR und alle Indikatoren brauchen chronologische Bars,
-                                # sonst laeuft die Glaettung zeitlich rueckwaerts (ATR im
-                                # Crash-Fall ~0.45x zu klein -> Stops/TPs zu eng).
-                                history_bars = list(reversed(bars)) if isinstance(bars, list) else []
-                                if len(bars) >= 21:
-                                    has_history = True
-                                    ma20 = sum(b.get("c", 0) for b in bars[1:21]) / 20
-                                    ma20_dist = round((price - ma20) / ma20 * 100, 2) if ma20 > 0 else 0
-                                    if len(bars) >= 51:
-                                        ma50 = sum(b.get("c", 0) for b in bars[1:51]) / 50
-                                        ma50_dist = round((price - ma50) / ma50 * 100, 2) if ma50 > 0 else 0
-                                    else:
-                                        ma50 = None  # Nicht genug Daten — NICHT mit ma20 gleichsetzen
-                                        ma50_dist = 0
-
-                                    avg_vol = historical_volume_baseline(
-                                        (b.get("v", 0) for b in bars[1:21]),
-                                        lookback=20,
-                                        minimum_periods=10,
+                                payload = resp.json()
+                                if (_scanner_payload_error(payload) or not isinstance(payload, dict)
+                                        or not isinstance(payload.get("results"), list)):
+                                    raise ValueError("bear_history_payload_invalid")
+                                if "adjusted" in payload and payload["adjusted"] is not True:
+                                    raise ValueError("bear_history_adjustment_incompatible")
+                                bars = payload["results"]
+                                observed_ts = _stock_market_timestamp_from(day, ("t", "timestamp"))
+                                if observed_ts is not None:
+                                    signal_session = datetime.fromtimestamp(observed_ts, tz=timezone.utc).astimezone(stock_swing.NY).date().isoformat()
+                                else:
+                                    today_et = bear_as_of.astimezone(stock_swing.NY)
+                                    close_today = stock_swing.session_close(today_et.date().isoformat())
+                                    opening_today = today_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                                    signal_session = (
+                                        today_et.date().isoformat()
+                                        if close_today is not None and opening_today <= today_et <= close_today
+                                        else stock_swing.delayed_market_watermark(bear_as_of).astimezone(stock_swing.NY).date().isoformat()
                                     )
-                                    rvol_raw = (vol / avg_vol) if avg_vol else 0.0
-                                    rvol = round(_project_us_equity_rvol(rvol_raw), 2)
-                                    lows_20 = [b.get("l", b.get("c", 0)) for b in bars[1:21] if b.get("l", b.get("c", 0)) > 0]
-                                    lows_60 = [b.get("l", b.get("c", 0)) for b in bars[1:60] if b.get("l", b.get("c", 0)) > 0]
-                                    low_20d = min(lows_20) if lows_20 else None
-                                    low_60d = min(lows_60) if lows_60 else None
+                                reference = bear_reference_metrics(bars, signal_session=signal_session, as_of=bear_as_of)
+                                history_bars = reference["completed_bars"]
+                                has_history = True
+                                ma20, ma50 = reference["ma20"], reference["ma50"]
+                                ma20_dist = (price - ma20) / ma20 * 100
+                                ma50_dist = (price - ma50) / ma50 * 100 if ma50 is not None else 0
+                                avg_vol = reference["avg_volume20"]
+                                rvol_raw = (vol / avg_vol) if avg_vol else 0.0
+                                rvol = _project_us_equity_rvol(rvol_raw)
+                                low_20d, low_60d = reference["low_20d"], reference["low_60d"]
                         except Exception as e:
                             print(f"[Bear] History failed for {ticker_sym}: {e}")
                             _diagnostics["history_fetch_errors"] = int(_diagnostics.get("history_fetch_errors", 0) or 0) + 1
@@ -25619,8 +25821,8 @@ def _bear_scan_wrapper() -> None:
 
                         bear_row = {
                             "ticker": ticker_sym,
-                            "price": round(price, 2),
-                            "change_pct": round(chg_pct, 2),
+                            "price": price,
+                            "change_pct": chg_pct,
                             "volume": vol,
                             "dollar_volume": round(dollar_vol, 0),
                             "rvol": rvol,
@@ -25629,10 +25831,10 @@ def _bear_scan_wrapper() -> None:
                             "score": score,
                             "grade": grade,
                             "direction": "SHORT",
-                            "open_to_current_pct": round(open_to_current_pct, 2) if open_to_current_pct is not None else None,
-                            "close_pos": round(close_pos, 3),
-                            "DayHigh": round(day_high, 4) if day_high else None,
-                            "DayLow": round(day_low, 4) if day_low else None,
+                            "open_to_current_pct": open_to_current_pct,
+                            "close_pos": close_pos,
+                            "DayHigh": day_high if day_high else None,
+                            "DayLow": day_low if day_low else None,
                             "score_details": " | ".join(score_details),
                             "asset_check": "common_stock",
                         }
@@ -25648,7 +25850,7 @@ def _bear_scan_wrapper() -> None:
                             change_pct=chg_pct,
                         )
                         if trade_setup:
-                            bear_vrvp_as_of = datetime.now(timezone.utc)
+                            bear_vrvp_as_of = bear_as_of
                             bear_vrvp = build_vrvp_structure(
                                 history_bars,
                                 price,
@@ -25767,15 +25969,9 @@ def _bear_scan_wrapper() -> None:
                                 _bear_batch_suppressed.get(_reason, 0) + 1
                             )
                     continue
-                # ETF/ETP Filter — Ticker-Heuristik (3+ gleiche Buchstaben am Ende = oft ETF)
+                # The central gate above has already verified the asset identity.
+                # A spelling suffix is not evidence that a confirmed CS is an ETF.
                 _cs_tk_up = _cs_ticker.upper()
-                if len(_cs_tk_up) >= 4 and _cs_tk_up[-1] in ("X", "Q", "S") and _cs_tk_up[-2] in ("X", "Q", "S"):
-                    _bear_batch_suppressed["non_common_stock_product"] = (
-                        _bear_batch_suppressed.get(
-                            "non_common_stock_product", 0
-                        ) + 1
-                    )
-                    continue  # SOXS, SQQQ, SPXS, UVXY etc.
                 _crash_level_tickers.add(_cs_tk_up)
                 _crash_stocks.append(bd)
 
@@ -30304,6 +30500,8 @@ def create_trade_reminder(
     asset_type = str(request.asset_type or "crypto").strip().lower()
     if asset_type not in {"stock", "crypto"}:
         raise HTTPException(status_code=400, detail="Asset-Typ muss stock oder crypto sein")
+    if asset_type == "stock":
+        _require_supported_stock_strategy(request.scanner)
     condition = str(request.condition or "trigger_or_retest").strip().lower()
     if condition not in {"trigger", "retest", "continuation", "trigger_or_retest"}:
         raise HTTPException(status_code=400, detail="Unbekannte Reminder-Bedingung")
@@ -30731,7 +30929,7 @@ def get_ticker_detail(ticker: str = Query(..., description="Ticker symbol (e.g. 
         raise HTTPException(status_code=400, detail="direction must be LONG or SHORT")
     try:
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/2024-01-01/2099-12-31"
-        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 60, "sort": "desc", "adjusted": "true"})
+        resp = rate_limited_get(url, params={"apiKey": POLYGON_KEY, "limit": 64, "sort": "desc", "adjusted": "true"})
         if resp.status_code != 200:
             raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
         bars = resp.json().get("results", [])
@@ -32488,6 +32686,8 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
     # Validate strategy
     resolved_strategy = resolve_strategy_name(request.strategy, request.market_type)
+    if request.market_type == "stocks":
+        _require_supported_stock_strategy(resolved_strategy)
     strategies = get_strategies_for_market(request.market_type)
     if resolved_strategy not in strategies:
         raise HTTPException(
@@ -32501,9 +32701,10 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     if request.market_type == "crypto":
         _strat_name = resolved_strategy
         _safe_key = _strategy_scan_status_key(_strat_name, "crypto")
-        if _safe_key not in _scan_status:
-            with _scan_lock:
-                _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
+        with _scan_lock:
+            _scan_status.setdefault(_safe_key, {"running": False, "last_run": None, "next_run": None, "interval_min": 5})
+            SCAN_CACHE_MAP.setdefault(_safe_key, _strategy_cache_path(_strat_name, "crypto"))
+            SCAN_DATA_SOURCES.setdefault(_safe_key, SCAN_DATA_SOURCES["crypto_strategy"])
         accepted = _run_scan_safe(_safe_key, lambda: _crypto_strategy_scan_wrapper(_strat_name))
         return _manual_scan_ack(_safe_key, accepted, message=f"Crypto-Strategie-Scan gestartet: {resolved_strategy}",
                                 strategy=resolved_strategy, requested_strategy=request.strategy, market_type=request.market_type)
@@ -32520,7 +32721,7 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     elif "early" in strategy_lower or "movers" in strategy_lower:
         accepted = _run_scan_safe("early_movers", _early_movers_wrapper)
         return _manual_scan_ack("early_movers", accepted, message="Early Movers Scanner started", strategy=resolved_strategy)
-    elif "volume" in strategy_lower or "spike" in strategy_lower:
+    elif strategy_lower.strip() in {"volume", "volume spikes", "volume_spikes"}:
         accepted = _run_scan_safe("volume_spikes", _volume_spikes_wrapper)
         return _manual_scan_ack("volume_spikes", accepted, message="Volume Spikes Scanner started", strategy=resolved_strategy)
     elif "penny" in strategy_lower:
@@ -32555,9 +32756,10 @@ def run_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         _strat_name = resolved_strategy
         # V2.2: Separate scan-locks pro Strategie statt ein einziger "strategy_scan"
         _safe_key = _strategy_scan_status_key(_strat_name, "stocks")
-        if _safe_key not in _scan_status:
-            with _scan_lock:
-                _scan_status[_safe_key] = {"running": False, "last_run": None, "next_run": None, "interval_min": 5}
+        with _scan_lock:
+            _scan_status.setdefault(_safe_key, {"running": False, "last_run": None, "next_run": None, "interval_min": 5})
+            SCAN_CACHE_MAP.setdefault(_safe_key, _strategy_cache_path(_strat_name, "stocks"))
+            SCAN_DATA_SOURCES.setdefault(_safe_key, SCAN_DATA_SOURCES["stock_strategy"])
         accepted = _run_scan_safe(_safe_key, lambda: _strategy_scan_wrapper(_strat_name))
         return _manual_scan_ack(_safe_key, accepted, message=f"Strategie-Scan gestartet: {resolved_strategy}",
                                 strategy=resolved_strategy, requested_strategy=request.strategy)
@@ -32595,6 +32797,8 @@ def get_scan_results(
 
     if strategy:
         resolved_strategy = resolve_strategy_name(strategy, market_type)
+        if market_type == "stocks":
+            _require_supported_stock_strategy(resolved_strategy)
         strategy_lower = resolved_strategy.lower()
         if market_type == "crypto":
             cache_file = _strategy_cache_path(resolved_strategy, "crypto")
@@ -32610,7 +32814,7 @@ def get_scan_results(
             cache_file = BEAR_CACHE
         elif "early" in strategy_lower or "movers" in strategy_lower:
             cache_file = EARLY_MOVERS_CACHE
-        elif "volume" in strategy_lower or "spike" in strategy_lower:
+        elif strategy_lower.strip() in {"volume", "volume spikes", "volume_spikes"}:
             cache_file = VOLUME_SPIKES_CACHE
         elif "penny" in strategy_lower:
             cache_file = PENNY_STOCKS_CACHE
@@ -32665,14 +32869,14 @@ def get_scan_results(
             scanner_name = "bi_long"
         elif "biotech" in sl:
             scanner_name = "biotech"
-        elif "bear" in sl:
+        elif sl in {"bear", "bear scanner", "bear scan"}:
             scanner_name = "bear"
         elif "orb" in sl:
             scanner_name = "orb"
         elif "turtle" in sl:
             scanner_name = "turtle"
 
-        elif "volume" in sl or "spike" in sl:
+        elif sl.strip() in {"volume", "volume spikes", "volume_spikes"}:
             scanner_name = "volume_spikes"
         elif "penny" in sl:
             scanner_name = "penny_stocks"
@@ -32734,6 +32938,9 @@ def get_scan_results(
             print(f"[Warning] {e}")
 
     is_generic_stock_strategy = bool(strategy and market_type == "stocks" and scanner_name == "strategy_scan")
+    gap_cache_freshness = (_gap_cache_freshness(
+        resolved_strategy, cache_meta, results, partial=is_partial,
+    ) if is_generic_stock_strategy else None)
     stale_strategy_cache = (
         is_generic_stock_strategy
         and cache_meta.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION
@@ -32812,7 +33019,17 @@ def get_scan_results(
         diagnostics["decorated_results_before_signal_policy"] = decorated_count
         diagnostics["visible_results_after_signal_policy"] = visible_count
         diagnostics["suppressed_by_signal_policy"] = max(0, decorated_count - visible_count)
-    quality = _scan_quality_payload(scanner_name, cache_age, results)
+    quality = (_scan_quality_payload(scanner_name, cache_age, results,
+                                     cache_freshness=gap_cache_freshness)
+               if gap_cache_freshness is not None
+               else _scan_quality_payload(scanner_name, cache_age, results))
+    if (gap_cache_freshness is not None and quality["cache_status"] == "unknown"
+            and not is_partial and not scan_state.get("running")):
+        # An unverified daily cache is not proof of a successfully completed
+        # zero-match scan. Keep any rows for inspection, but do not claim full
+        # coverage or use this payload as a completed-attempt acknowledgement.
+        diagnostics = dict(diagnostics or {})
+        diagnostics.update(coverage="unknown", warning="gap_cache_session_unverified")
     warnings = list(quality["warnings"])
     if crypto_profile_warning:
         warnings.insert(0, crypto_profile_warning)
@@ -33306,6 +33523,14 @@ def _build_early_mover_long_setup(
     Early Movers gives tactical levels plus the confirmation that must happen
     before the app can mark the setup as JETZT_TRADEN.
     """
+    btc_24h_raw = _execution_candle_number(btc_24h)
+    btc_7d_raw = _execution_candle_number(btc_7d)
+    btc_known = (entry.get("btc_context_known") is not False
+                 and btc_24h_raw is not None and btc_7d_raw is not None)
+    # Neutral arithmetic keeps watch-candidates inspectable, but unknown BTC
+    # evidence is explicitly retained and can never grant a mail tailwind.
+    btc_24h = btc_24h_raw if btc_24h_raw is not None else 0.0
+    btc_7d = btc_7d_raw if btc_7d_raw is not None else 0.0
     price = float(entry.get("Price") or 0)
     if price <= 0:
         return {"direction": "LONG", "trade_action": "NO_TRADE", "warnings": ["missing price"]}
@@ -33323,8 +33548,8 @@ def _build_early_mover_long_setup(
     vol_mcap = float(entry.get("VolMCapRatio") or 0)
     c24 = float(entry.get("Change24h") or 0)
     c7d = float(entry.get("Change7d") or 0)
-    alpha_24h = round(c24 - (btc_24h or 0), 2)
-    alpha_7d = round(c7d - (btc_7d or 0), 2)
+    alpha_24h = c24 - btc_24h
+    alpha_7d = c7d - btc_7d
     extreme_turnover = vol_mcap >= _EARLY_MOVER_TURNOVER_CHURN_BLOCK_PCT
     turnover_without_alpha = bool(
         extreme_turnover
@@ -33339,7 +33564,7 @@ def _build_early_mover_long_setup(
         risk_pct = max(risk_pct, 0.065)
 
     liquidity = _early_mover_static_liquidity(entry)
-    warnings = []
+    warnings = [] if btc_known else ["BTC-Kontext fehlt oder ist veraltet"]
     notes = []
     trigger_conditions = [
         "5m Execution-Trigger abwarten",
@@ -33627,11 +33852,14 @@ def _build_early_mover_long_setup(
         "risk_flags": risk_flags,
         "execution_liquidity": liquidity,
         "btc_context": {
-            "btc_24h": round(btc_24h or 0, 2),
-            "btc_7d": round(btc_7d or 0, 2),
-            "alpha_24h": alpha_24h,
-            "alpha_7d": alpha_7d,
-            "tailwind": not btc_block and not btc_warn,
+            "btc_24h": btc_24h_raw,
+            "btc_7d": btc_7d_raw,
+            "alpha_24h": alpha_24h if btc_known else None,
+            "alpha_7d": alpha_7d if btc_known else None,
+            "known": btc_known,
+            "data_status": "ok" if btc_known else "unknown",
+            "observed_at": entry.get("btc_observed_at"),
+            "tailwind": btc_known and not btc_block and not btc_warn,
         },
     }
 
@@ -33645,12 +33873,16 @@ def _fetch_coingecko_markets(pages=4):
             if not os.path.exists(_CG_CACHE):
                 return []
             age = time.time() - os.path.getmtime(_CG_CACHE)
-            if max_age_seconds is not None and age > max_age_seconds:
+            if age < 0 or (max_age_seconds is not None and age > max_age_seconds):
                 return []
             with open(_CG_CACHE, "r") as _f:
                 _cached = json.load(_f)
             _coins = _cached.get("coins", [])
-            return _coins if isinstance(_coins, list) else []
+            coverage = _cached.get("pages")
+            if (type(coverage) is not int or coverage < pages
+                    or not isinstance(_coins, list) or len(_coins) < coverage * 250):
+                return []
+            return _coins[:pages * 250]
         except Exception:
             return []
 
@@ -34129,13 +34361,10 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
 
     perp_data = _prefetched_perps if _prefetched_perps is not None else fetch_multi_exchange_perps()
 
-    btc_7d = 0
-    btc_24h = 0
-    for c in all_coins:
-        if c.get("id") == "bitcoin":
-            btc_7d = c.get("price_change_percentage_7d_in_currency") or c.get("price_change_percentage_7d") or 0
-            btc_24h = c.get("price_change_percentage_24h") or 0
-            break
+    btc_row = next((c for c in all_coins if isinstance(c, dict) and c.get("id") == "bitcoin"), None)
+    btc_observation = _coingecko_btc_observation(btc_row, require_7d=True)
+    btc_7d = btc_observation["btc_7d"] if btc_observation["btc_7d"] is not None else 0.0
+    btc_24h = btc_observation["btc_24h"] if btc_observation["btc_24h"] is not None else 0.0
 
     # Fetch trending coins
     trending_ids = set()
@@ -34159,23 +34388,40 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
 
     for coin in all_coins:
         _scan_control_point()
+        if not isinstance(coin, dict):
+            continue
         try:
-            price = coin.get("current_price") or 0
-            if price <= 0:
+            price = _execution_candle_number(coin.get("current_price"))
+            if price is None or price <= 0:
                 continue
 
             cid = coin.get("id", "")
             symbol = coin.get("symbol", "").upper()
             name = coin.get("name", "")
-            mcap = coin.get("market_cap") or 0
-            vol_24h = coin.get("total_volume") or 0
-            change_1h = coin.get("price_change_percentage_1h_in_currency") or 0
-            change_24h = coin.get("price_change_percentage_24h") or 0
-            change_7d = coin.get("price_change_percentage_7d_in_currency") or coin.get("price_change_percentage_7d") or 0
-            change_14d = coin.get("price_change_percentage_14d_in_currency") or 0
-            change_30d = coin.get("price_change_percentage_30d_in_currency") or 0
-            high_24h = coin.get("high_24h") or price
-            low_24h = coin.get("low_24h") or price
+            mcap = _execution_candle_number(coin.get("market_cap"))
+            vol_24h = _execution_candle_number(coin.get("total_volume"))
+            change_24h = _execution_candle_number(coin.get("price_change_percentage_24h"))
+            weekly_raw = coin.get("price_change_percentage_7d_in_currency")
+            if weekly_raw is None:
+                weekly_raw = coin.get("price_change_percentage_7d")
+            change_7d = _execution_candle_number(weekly_raw)
+            high_24h = _execution_candle_number(coin.get("high_24h"))
+            low_24h = _execution_candle_number(coin.get("low_24h"))
+            if (mcap is None or mcap <= 0 or vol_24h is None or vol_24h < 0
+                    or change_24h is None or change_24h <= -100
+                    or change_7d is None or change_7d <= -100
+                    or high_24h is None or low_24h is None
+                    or not 0 < low_24h <= price <= high_24h):
+                continue
+            optional_changes = {key: _execution_candle_number(coin.get(key)) for key in (
+                "price_change_percentage_1h_in_currency", "price_change_percentage_14d_in_currency",
+                "price_change_percentage_30d_in_currency")}
+            if any(coin.get(key) is not None and (value is None or value <= -100)
+                   for key, value in optional_changes.items()):
+                continue
+            change_1h = optional_changes["price_change_percentage_1h_in_currency"]
+            change_14d = optional_changes["price_change_percentage_14d_in_currency"]
+            change_30d = optional_changes["price_change_percentage_30d_in_currency"]
 
             # Name alone is unsafe (e.g. COIN vs 1000COIN).  Require a live,
             # scaled price match before perp data can influence a signal.
@@ -34201,7 +34447,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
             narrative = CRYPTO_NARRATIVES.get(cid, "")
             is_trending = cid in trending_ids
             # BTC-relative Performance (zeigt Alpha vs. Markt)
-            btc_relative_7d = round(change_7d - btc_7d, 2) if btc_7d else round(change_7d, 2)
+            btc_relative_7d = change_7d - btc_7d
 
             chart_contract = perp_info.get("best_contract_symbol") if perp_info else None
             contract_multiplier = _crypto_contract_price_multiplier(symbol, chart_contract or perp_match_symbol)
@@ -34219,10 +34465,10 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 # incorrectly hide an intervening stop or TP1 touch.
                 "scan_price_observed_at": coin.get("last_updated"),
                 "scan_price_source": "coingecko:current_price",
-                "Change1h": round(change_1h, 2), "Change24h": round(change_24h, 2),
-                "Change7d": round(change_7d, 2), "Change14d": round(change_14d, 2),
-                "Change30d": round(change_30d, 2),
-                "VolMCapRatio": round(vol_mcap_ratio, 2),
+                "Change1h": change_1h, "Change24h": change_24h,
+                "Change7d": change_7d, "Change14d": change_14d,
+                "Change30d": change_30d,
+                "VolMCapRatio": vol_mcap_ratio,
                 "HasPerp": has_perp, "FundingRate": funding_rate,
                 **_funding_measurement(funding_rate, source=perp_info.get("funding_source"),
                                        interval_hours=perp_info.get("funding_interval_hours"),
@@ -34241,15 +34487,17 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                 "High24h": execution_high, "Low24h": execution_low,
                 "IsTrending": is_trending,
                 "BtcRelative7d": btc_relative_7d,
-                "Btc24h": round(btc_24h, 2),
-                "Btc7d": round(btc_7d, 2),
-                "BtcRelative24h": round(change_24h - btc_24h, 2),
+                "Btc24h": btc_24h,
+                "Btc7d": btc_7d,
+                "btc_context_known": btc_observation["known"],
+                "btc_observed_at": btc_observation["observed_at"],
+                "BtcRelative24h": change_24h - btc_24h,
                 "current_price": execution_price,
                 "direction": "LONG",
                 "dollar_volume": vol_24h,
-                "turnover_intensity": round(max(0, vol_mcap_ratio / 30), 2),
+                "turnover_intensity": max(0, vol_mcap_ratio / 30),
                 "volume_model": "turnover_proxy_pending_exchange_trigger",
-                "close_pos": round((execution_price - execution_low) / (execution_high - execution_low), 2) if execution_high > execution_low else 0.5,
+                "close_pos": (execution_price - execution_low) / (execution_high - execution_low) if execution_high > execution_low else 0.5,
                 "OI_ChangePct": perp_info.get("oi_change_pct") if perp_info else None,
                 "oi_snapshot_only": not perp_info or perp_info.get("oi_change_pct") is None,
                 "OI_HistoryAgeSeconds": perp_info.get("oi_history_age_seconds") if perp_info else None,
@@ -34327,7 +34575,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                             momentum_score = 12
                         elif change_7d <= 0:
                             # 7d negativ aber 24h/1h pumpt = Reversal-Signal, moderater Score
-                            if change_24h > 5 and change_1h > 1:
+                            if change_24h > 5 and change_1h is not None and change_1h > 1:
                                 momentum_score = 10
                             elif change_24h > 3:
                                 momentum_score = 5
@@ -34336,7 +34584,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
 
                         # Freshness: Leicht positive 24h = gut. Aber STARKE 24h = zu spät!
                         freshness_score = 0
-                        if 0 < change_24h <= 8 and change_1h > 0:
+                        if 0 < change_24h <= 8 and change_1h is not None and change_1h > 0:
                             freshness_score = 12  # Ideal: leicht positiv, gerade erst los
                         elif 0 < change_24h <= 8:
                             freshness_score = 7
@@ -34354,11 +34602,11 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                             perp_score += 3
 
                         recency_score = 0
-                        if change_1h > 5 and vol_mcap_ratio > 40:
+                        if change_1h is not None and change_1h > 5 and vol_mcap_ratio > 40:
                             recency_score = 12
-                        elif change_1h > 2 and vol_mcap_ratio > 30:
+                        elif change_1h is not None and change_1h > 2 and vol_mcap_ratio > 30:
                             recency_score = 8
-                        elif change_1h > 0 and change_24h > 3:
+                        elif change_1h is not None and change_1h > 0 and change_24h > 3:
                             recency_score = 4
 
                         trending_score = 7 if is_trending else 0
@@ -34376,15 +34624,15 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                         trend_penalty = 0
 
                         # 1) Downtrend-Penalty
-                        if change_30d < -30:
+                        if change_30d is not None and change_30d < -30:
                             trend_penalty = 30
-                        elif change_30d < -15:
+                        elif change_30d is not None and change_30d < -15:
                             trend_penalty = 20
-                        elif change_30d < -5:
+                        elif change_30d is not None and change_30d < -5:
                             trend_penalty = 12
-                        if change_14d < -15:
+                        if change_14d is not None and change_14d < -15:
                             trend_penalty = max(trend_penalty, 20)
-                        elif change_14d < -5:
+                        elif change_14d is not None and change_14d < -5:
                             trend_penalty = max(trend_penalty, 10)
 
                         # 2) PUMP-Penalty: Schon stark gepumpt = Einstieg zu spät
@@ -34409,7 +34657,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                             entry["PricePosition"] = round(price_position, 2)
                             entry["RecencyScore"] = recency_score
                             entry["TrendingBonus"] = trending_score
-                            if price_position >= 0.7 and change_1h > 3:
+                            if price_position >= 0.7 and change_1h is not None and change_1h > 3:
                                 entry["Signal"] = "Starker Kaufdruck + Live-Pump!"
                             elif price_position >= 0.7:
                                 entry["Signal"] = "Akkumulation (Preis nahe Hoch)"
@@ -34459,9 +34707,9 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                         degen_score += 5
 
                     # Frische Bestätigung: 24h UND 1h müssen positiv sein
-                    if change_1h > 2 and change_24h > 3:
+                    if change_1h is not None and change_1h > 2 and change_24h > 3:
                         degen_score += 8
-                    elif change_1h > 0 and change_24h > 0:
+                    elif change_1h is not None and change_1h > 0 and change_24h > 0:
                         degen_score += 3
 
                     if is_trending:
@@ -34488,15 +34736,15 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                     # Downtrend-Penalty: MicroCap im Abwärtstrend = Bagholding
                     # max() statt Stacking — konsistent mit Volume Spike Scanner
                     dt_penalty = 0
-                    if change_30d < -30:
+                    if change_30d is not None and change_30d < -30:
                         dt_penalty = 30
-                    elif change_30d < -15:
+                    elif change_30d is not None and change_30d < -15:
                         dt_penalty = 20
-                    elif change_30d < -5:
+                    elif change_30d is not None and change_30d < -5:
                         dt_penalty = 10
-                    if change_14d < -15:
+                    if change_14d is not None and change_14d < -15:
                         dt_penalty = max(dt_penalty, 15)
-                    elif change_14d < -5:
+                    elif change_14d is not None and change_14d < -5:
                         dt_penalty = max(dt_penalty, 8)
                     degen_score -= dt_penalty
                     # Low-Price = dünnes Orderbuch (unabhängig vom MCap-Bonus)
@@ -34583,7 +34831,7 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                     if change_24h > 3:
                         whale_score += 25  # Shorts zahlen + Preis steigt = Squeeze
                         signals.append(f"FR {fr_pct:.3f}% + Preis +{change_24h:.1f}% → Short-Squeeze!")
-                    elif change_1h > 1:
+                    elif change_1h is not None and change_1h > 1:
                         whale_score += 15
                         signals.append(f"FR negativ {fr_pct:.3f}% + 1h Pump → Squeeze-Aufbau")
                     else:
@@ -34614,13 +34862,13 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
                     signals.append(f"On {' + '.join(exchanges)}")
 
                 # Downtrend-Penalty: Langfristiger Abwärtstrend = OI sind wahrscheinlich Shorts
-                if change_30d < -30:
+                if change_30d is not None and change_30d < -30:
                     whale_score -= 25
                     signals.append(f"30d: {change_30d:+.0f}% — Langzeit-Downtrend")
-                elif change_30d < -15:
+                elif change_30d is not None and change_30d < -15:
                     whale_score -= 15
                     signals.append(f"30d: {change_30d:+.0f}% — Abwärtstrend")
-                elif change_30d < -5:
+                elif change_30d is not None and change_30d < -5:
                     whale_score -= 8
                 # Low-Price = dünne Orderbücher
                 if price < 1.0 and mcap < 100_000_000:
@@ -34660,12 +34908,8 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
     seen_symbols = {}  # Deduplizierung: Symbol → bester Eintrag
     seen_symbol_ids = {}  # NACHAUDIT M9: Symbol → CoinGecko-ID des Erst-Treffers
 
-    # BTC 24h Change für Alpha-Berechnung in Phase-Klassifikation
-    btc_24h = 0
-    for c in all_coins:
-        if c.get("id") == "bitcoin":
-            btc_24h = c.get("price_change_percentage_24h") or 0
-            break
+    # Reuse the same measured BTC context; do not turn a later missing value
+    # into a second, contradictory "flat market" decision.
 
     def _grade_for_score(score_value):
         return _score_grade_for_value(score_value)
@@ -35058,6 +35302,8 @@ def fetch_early_movers(_prefetched_perps=None, _progress_callback=None):
         "excluded_assets": excluded_assets,
         "btc_24h": btc_24h,
         "btc_7d": btc_7d,
+        "btc_context_known": btc_observation["known"],
+        "btc_observed_at": btc_observation["observed_at"],
         "perps_total": len(perp_data),
         "data_source": _CG_MARKETS_STATUS.get("source"),
         "data_warning": _CG_MARKETS_STATUS.get("warning"),
@@ -35568,6 +35814,22 @@ def _ce_green_streak(bars: List[Dict[str, Any]]) -> Tuple[int, float]:
     return streak, move
 
 
+def _coingecko_btc_observation(btc, *, require_7d=False, now_ts=None):
+    """Measured BTC context, with the provider's clock rather than receipt time."""
+    source = btc if isinstance(btc, dict) else {}
+    observed = _execution_candle_timestamp(source.get("last_updated"))
+    current = time.time() if now_ts is None else now_ts
+    change = _execution_candle_number(source.get("price_change_percentage_24h"))
+    weekly_raw = source.get("price_change_percentage_7d_in_currency")
+    if weekly_raw is None:
+        weekly_raw = source.get("price_change_percentage_7d")
+    weekly = _execution_candle_number(weekly_raw)
+    fresh = observed is not None and -2 <= current - observed <= 300
+    known = fresh and change is not None and (not require_7d or weekly is not None)
+    return {"btc_24h": change, "btc_7d": weekly, "known": bool(known),
+            "observed_at": observed, "data_status": "ok" if known else "unknown"}
+
+
 _CE_BTC_CONTEXT_CACHE = {"ts": 0.0, "btc_24h": None, "known": False, "data_status": "missing"}
 _CE_BTC_CONTEXT_LOCK = threading.Lock()
 
@@ -35583,51 +35845,63 @@ def _get_crypto_btc_context_locked(symbol: str, coin_change_24h: float) -> Dict[
     status = "error"
     error = None
     try:
-        if time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 120 and _CE_BTC_CONTEXT_CACHE.get("known"):
-            btc_change = _ce_float(_CE_BTC_CONTEXT_CACHE.get("btc_24h"))
+        current = time.time()
+        cached_observation = _execution_candle_timestamp(_CE_BTC_CONTEXT_CACHE.get("observed_at"))
+        cached_change = _execution_candle_number(_CE_BTC_CONTEXT_CACHE.get("btc_24h"))
+        if (0 <= current - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 120
+                and _CE_BTC_CONTEXT_CACHE.get("known") is True
+                and cached_change is not None and cached_observation is not None
+                and -2 <= current - cached_observation <= 300):
+            btc_change = cached_change
             known = True
             status = "ok"
         elif (0 <= time.time() - _CE_BTC_CONTEXT_CACHE.get("ts", 0) < 30
               and _CE_BTC_CONTEXT_CACHE.get("data_status") == "error"):
-            btc_change = 0.0
+            btc_change = None
             error = "BTC market context temporarily unavailable"
         else:
             markets = _fetch_coingecko_markets(pages=1)
-            btc = next((c for c in markets if c.get("id") == "bitcoin"), None)
-            if not btc or btc.get("price_change_percentage_24h") is None:
-                raise ValueError("BTC market context missing")
-            btc_change = _ce_float((btc or {}).get("price_change_percentage_24h"))
+            btc = next((c for c in markets if isinstance(c, dict) and c.get("id") == "bitcoin"), None)
+            observation = _coingecko_btc_observation(btc, now_ts=current)
+            if not observation["known"]:
+                raise ValueError("BTC market context stale, missing or invalid")
+            btc_change = observation["btc_24h"]
             known = True
             status = "ok"
-            _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": btc_change, "known": True, "data_status": "ok"})
+            _CE_BTC_CONTEXT_CACHE.update({"ts": current, **observation})
     except Exception as exc:
-        btc_change = 0.0
+        btc_change = None
         error = str(exc)[:120]
         _CE_BTC_CONTEXT_CACHE.update({"ts": time.time(), "btc_24h": None, "known": False, "data_status": "error"})
-    alpha = coin_change_24h - btc_change if known else 0.0
+    coin_change = _execution_candle_number(coin_change_24h)
+    alpha = coin_change - btc_change if known and coin_change is not None else None
     return {
-        "btc_24h": round(btc_change, 2),
-        "coin_24h": round(coin_change_24h, 2),
-        "alpha_24h": round(alpha, 2),
-        "tailwind": bool(known and (btc_change >= -1.25 or alpha >= 4.0)),
+        "btc_24h": btc_change,
+        "coin_24h": coin_change,
+        "alpha_24h": alpha,
+        "tailwind": bool(known and (btc_change >= -1.25 or (alpha is not None and alpha >= 4.0))),
         "known": known,
+        "observed_at": _CE_BTC_CONTEXT_CACHE.get("observed_at") if known else None,
         "data_status": status,
         "error": error,
     }
 
 
 def _score_crypto_explosion_candidate(row: Dict[str, Any], bars5_raw: List[Dict[str, Any]], bars15_raw: List[Dict[str, Any]], bars4h_raw: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    bars5 = _ce_completed_bars(bars5_raw, "5m")
-    bars15 = _ce_completed_bars(bars15_raw, "15m")
-    bars4h = _ce_completed_bars(bars4h_raw, "4h")
+    scan_now_ts = time.time()
+    bars5 = _ce_completed_bars(bars5_raw, "5m", now_ts=scan_now_ts)
+    bars15 = _ce_completed_bars(bars15_raw, "15m", now_ts=scan_now_ts)
+    bars4h = _ce_completed_bars(bars4h_raw, "4h", now_ts=scan_now_ts)
     if len(bars5) < 50 or len(bars15) < 24:
         return None
 
-    execution_freshness = _crypto_candle_freshness(bars5, "5m")
-    if not execution_freshness.get("known"):
-        return None
-    if execution_freshness.get("known") and not execution_freshness.get("fresh"):
-        return None
+    # Fresh execution bars do not make an old range or HTF context current.
+    # Never build a plan from a mixed-age set of venue measurements.
+    for measured, frame in ((bars5, "5m"), (bars15, "15m"), (bars4h, "4h")):
+        freshness = _crypto_candle_freshness(measured, frame, now_ts=scan_now_ts)
+        if not freshness.get("known") or not freshness.get("fresh"):
+            return None
+    execution_freshness = _crypto_candle_freshness(bars5, "5m", now_ts=scan_now_ts)
 
     price = bars5[-1]["close"]
     row["Price"] = row["price"] = price
@@ -36262,15 +36536,22 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
     if not coins:
         return []
 
-    btc = next((c for c in coins if c.get("id") == "bitcoin"), None)
+    btc = next((c for c in coins if isinstance(c, dict) and c.get("id") == "bitcoin"), None)
     if not btc:
         return []
 
-    btc_24h = _alert_float(btc.get("price_change_percentage_24h"))
-    btc_7d = _alert_float(btc.get("price_change_percentage_7d_in_currency"), _alert_float(btc.get("price_change_percentage_7d")))
-    btc_14d = _alert_float(btc.get("price_change_percentage_14d_in_currency"))
-    if btc_24h is None or btc_7d is None:
-        return []  # Missing reference is not a stagnant BTC regime.
+    observed_now = time.time()
+    btc_observation = _coingecko_btc_observation(btc, require_7d=True, now_ts=observed_now)
+    btc_24h, btc_7d = btc_observation["btc_24h"], btc_observation["btc_7d"]
+    btc_14d = _execution_candle_number(btc.get("price_change_percentage_14d_in_currency"))
+    if not btc_observation["known"] or btc_24h <= -100 or btc_7d <= -100:
+        return []  # Missing/stale/corrupt reference is not a stagnant BTC regime.
+
+    def weekly_change(snapshot):
+        value = snapshot.get("price_change_percentage_7d_in_currency")
+        if value is None:
+            value = snapshot.get("price_change_percentage_7d")
+        return _execution_candle_number(value)
     btc_regime = (
         "RISK_OFF" if btc_24h <= -1.5 or btc_7d <= -4
         else "STAGNANT" if abs(btc_24h) <= 1.5 and abs(btc_7d) <= 4
@@ -36286,6 +36567,8 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for coin in coins:
         _scan_control_point()
+        if not isinstance(coin, dict):
+            continue
         try:
             cid = str(coin.get("id") or "")
             symbol = str(coin.get("symbol") or "").upper().strip()
@@ -36293,22 +36576,25 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
             if not symbol or symbol == "BTC" or _is_excluded_crypto_asset(symbol, cid, name):
                 continue
 
-            price = float(coin.get("current_price") or 0)
-            mcap = float(coin.get("market_cap") or 0)
-            volume = float(coin.get("total_volume") or 0)
-            if price <= 0 or mcap < 5_000_000 or volume < 250_000:
+            price = _execution_candle_number(coin.get("current_price"))
+            mcap = _execution_candle_number(coin.get("market_cap"))
+            volume = _execution_candle_number(coin.get("total_volume"))
+            coin_observed_at = _execution_candle_timestamp(coin.get("last_updated"))
+            if (price is None or price <= 0 or mcap is None or mcap < 5_000_000
+                    or volume is None or volume < 250_000 or coin_observed_at is None
+                    or not -2 <= observed_now - coin_observed_at <= 300):
                 continue
 
-            change_1h = _alert_float(coin.get("price_change_percentage_1h_in_currency"))
-            change_24h = _alert_float(coin.get("price_change_percentage_24h"))
-            change_7d = _alert_float(coin.get("price_change_percentage_7d_in_currency"), _alert_float(coin.get("price_change_percentage_7d")))
-            change_14d = _alert_float(coin.get("price_change_percentage_14d_in_currency"))
-            if change_24h is None or change_7d is None:
+            change_1h = _execution_candle_number(coin.get("price_change_percentage_1h_in_currency"))
+            change_24h = _execution_candle_number(coin.get("price_change_percentage_24h"))
+            change_7d = weekly_change(coin)
+            change_14d = _execution_candle_number(coin.get("price_change_percentage_14d_in_currency"))
+            if change_24h is None or change_7d is None or change_24h <= -100 or change_7d <= -100:
                 continue
-            alpha_24h = round(change_24h - btc_24h, 2)
-            alpha_7d = round(change_7d - btc_7d, 2)
-            alpha_14d = round(change_14d - btc_14d, 2) if change_14d is not None and btc_14d is not None else None
-            vol_mcap = round((volume / mcap * 100), 2) if mcap > 0 else 0
+            alpha_24h = change_24h - btc_24h
+            alpha_7d = change_7d - btc_7d
+            alpha_14d = change_14d - btc_14d if change_14d is not None and btc_14d is not None else None
+            vol_mcap = volume / mcap * 100
 
             perp_match_symbol, perp_lookup, perp_price_gap_pct = _select_price_validated_perp(
                 symbol,
@@ -36372,7 +36658,7 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "ticker": symbol,
                 "symbol": symbol,
                 "name": name,
-                "price": _round_crypto_price(price),
+                "price": price,
                 "change_1h": round(change_1h, 2) if change_1h is not None else None,
                 "change_1d": round(change_24h, 2),
                 "change_5d": round(change_7d, 2),
@@ -36419,6 +36705,8 @@ def _build_crypto_btc_divergence_results() -> List[Dict[str, Any]]:
                 "partial_data": source_status["partial"],
                 "data_warning": source_status["warning"],
                 "source_status": dict(source_status),
+                "provider_observed_at": coin_observed_at,
+                "btc_observed_at": btc_observation["observed_at"],
                 "isCrypto": True,
             })
         except Exception as e:
@@ -37165,6 +37453,39 @@ def get_narrative_email_status():
 NEW_LISTING_CACHE = "/tmp/new_listing_scanner.json"
 
 
+def _new_listing_btc_observation_valid(row: Dict[str, Any]) -> bool:
+    """Require synchronous closed BTC/coin evidence, never flags alone."""
+    if not isinstance(row, dict):
+        return False
+    pump = row.get("pump_data") if isinstance(row.get("pump_data"), dict) else {}
+    numeric_proof = {"btc_change_pct", "coin_change_pct", "btc_divergence",
+                     "btc_context_opened_at", "btc_context_completed_at"}
+    for key in numeric_proof | {"btc_context_source", "btc_context_known", "btc_context_status", "btc_context_ok"}:
+        if key not in row or key not in pump:
+            continue
+        if key in numeric_proof:
+            outer = _execution_candle_number(row[key])
+            inner = _execution_candle_number(pump[key])
+            if outer is None or inner is None or outer != inner:
+                return False
+        elif row[key] != pump[key] or type(row[key]) is not type(pump[key]):
+            return False
+    def field(key):
+        return row.get(key) if key in row else pump.get(key)
+    btc, coin, divergence = (_execution_candle_number(field(key)) for key in
+                             ("btc_change_pct", "coin_change_pct", "btc_divergence"))
+    opening = _execution_candle_number(field("btc_context_opened_at"))
+    closing = _execution_candle_number(field("btc_context_completed_at"))
+    if (any(value is None for value in (btc, coin, divergence, opening, closing))
+            or field("btc_context_source") != "binance:BTCUSDT:1H"):
+        return False
+    duration = closing - opening
+    age = time.time() - closing
+    return bool(opening > 0 and opening % 3600 == 0 and closing % 3600 == 0
+                and 3*3600 <= duration <= 24*3600 and -2 <= age < 3600
+                and math.isclose(divergence, coin-btc, rel_tol=1e-8, abs_tol=1e-8))
+
+
 def _new_listing_short_safety_contract(row: Dict[str, Any]) -> bool:
     """Mirror the safety-critical producer predicate at the cache boundary."""
     if not isinstance(row, dict):
@@ -37183,7 +37504,12 @@ def _new_listing_short_safety_contract(row: Dict[str, Any]) -> bool:
         and grade in {"S", "A", "A+"}
         and row.get("safety_ok") is True
         and row.get("confirmation_ok") is True
-        and row.get("btc_context_ok", True) is True
+        and row.get("btc_context_known") is True
+        and row.get("btc_context_status") == "ok"
+        and row.get("btc_context_ok") is True
+        and _new_listing_btc_observation_valid(row)
+        and all(_execution_candle_number(row.get(key)) is not None
+                for key in ("btc_change_pct", "coin_change_pct", "btc_divergence"))
         and (not micro_required or row.get("micro_trigger_ok") is True)
         and not row.get("continuation_risk")
         and not row.get("tp1_missed")
@@ -37427,7 +37753,16 @@ def _flatten_new_listing_pipeline_results(payload: Dict[str, Any]) -> List[Dict[
             "coin_change_pct": pump.get("coin_change_pct", sig.get("coin_change_pct")),
             "btc_short_context": pump.get("btc_short_context", sig.get("btc_short_context", "")),
             "btc_tailwind_risk": pump.get("btc_tailwind_risk", sig.get("btc_tailwind_risk", False)),
-            "btc_context_ok": sig.get("btc_context_ok", True),
+            "btc_context_known": sig.get("btc_context_known", pump.get("btc_context_known")),
+            "btc_context_status": sig.get("btc_context_status", pump.get("btc_context_status")),
+            "btc_context_source": sig.get("btc_context_source", pump.get("btc_context_source")),
+            "btc_context_opened_at": sig.get("btc_context_opened_at", pump.get("btc_context_opened_at")),
+            "btc_context_completed_at": sig.get("btc_context_completed_at", pump.get("btc_context_completed_at")),
+            "btc_context_ok": sig.get("btc_context_ok") is True,
+            "producer_episode_id": entry.get("producer_episode_id") or sig.get("producer_episode_id"),
+            "producer_episode_started_at": entry.get("producer_episode_started_at") or sig.get("producer_episode_started_at"),
+            "producer_episode_model": entry.get("producer_episode_model") or sig.get("producer_episode_model"),
+            "delivery_retry_candidate": entry.get("delivery_retry_candidate", sig.get("delivery_retry_candidate", False)) is True,
             "rr1": sig.get("rr1", 0),
             "rr2": sig.get("rr2", 0),
             "rr_effective": sig.get("rr_effective", sig.get("rr1", 0)),
@@ -39356,8 +39691,11 @@ def _penny_revalidate_buy_candidate(
 
 
 def _penny_fetch_daily_bars(ticker: str) -> List[Dict[str, Any]]:
-    end_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    start_day = (datetime.now(timezone.utc) - timedelta(days=240)).strftime("%Y-%m-%d")
+    from modules.penny_stock_scanner import parse_penny_daily_aggregates
+
+    observed_at = datetime.now(timezone.utc)
+    end_day = observed_at.strftime("%Y-%m-%d")
+    start_day = (observed_at - timedelta(days=240)).strftime("%Y-%m-%d")
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_day}/{end_day}"
     try:
         response = rate_limited_get(
@@ -39367,22 +39705,7 @@ def _penny_fetch_daily_bars(ticker: str) -> List[Dict[str, Any]]:
         )
         if response.status_code != 200:
             return []
-        bars = []
-        for raw in response.json().get("results", []) or []:
-            bar = {
-                "open": _alert_float(raw.get("o"), 0.0) or 0.0,
-                "high": _alert_float(raw.get("h"), 0.0) or 0.0,
-                "low": _alert_float(raw.get("l"), 0.0) or 0.0,
-                "close": _alert_float(raw.get("c"), 0.0) or 0.0,
-                "volume": _alert_float(raw.get("v"), 0.0) or 0.0,
-                "timestamp": raw.get("t"),
-            }
-            # Keep valid price bars even when volume is missing. Dropping such
-            # bars would let older volume observations slide into a nominal
-            # 20-session RVOL window and overstate current evidence quality.
-            if bar["close"] > 0 and bar["high"] >= bar["low"]:
-                bars.append(bar)
-        return bars
+        return parse_penny_daily_aggregates(response.json(), as_of=observed_at)
     except Exception as exc:
         print(
             f"[Penny] daily bars error {ticker}: "
@@ -42073,12 +42396,15 @@ def _volume_spikes_wrapper() -> None:
                     day = t.get("day", {})
                     prev = t.get("prevDay", {})
 
-                    price = day.get("c", 0) or t.get("lastTrade", {}).get("p", 0)
-                    if not price or price < 2:
+                    price = _execution_candle_number(day.get("c"))
+                    if price is None or price < 2:
                         continue
 
-                    vol = day.get("v", 0)
-                    prev_vol = prev.get("v", 0)
+                    vol = _execution_candle_number(day.get("v"))
+                    prev_vol = _execution_candle_number(prev.get("v"))
+                    prev_close = _execution_candle_number(prev.get("c"))
+                    if vol is None or vol < 0 or prev_vol is None or prev_vol <= 0 or prev_close is None or prev_close <= 0:
+                        continue
 
                     # Fix 2a: RVOL Baseline — use prevDay volume as quick baseline
                     # Snapshot only has day + prevDay; 20-day median would need extra API call per ticker
@@ -42090,8 +42416,7 @@ def _volume_spikes_wrapper() -> None:
                         continue
 
                     if rvol > 3.0:
-                        prev_close = prev.get("c", 0)
-                        chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
+                        chg = ((price - prev_close) / prev_close * 100)
 
                         # Fix 2b: Dollar Volume Minimum
                         dollar_volume = price * vol
@@ -42100,7 +42425,7 @@ def _volume_spikes_wrapper() -> None:
                             continue
 
                         # Fix 2c: Breakout vs Absorption
-                        price_change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                        price_change_pct = ((price - prev_close) / prev_close * 100)
                         if abs(price_change_pct) > 2:
                             signal_type = "BREAKOUT" if price_change_pct > 0 else "BREAKDOWN"
                         elif abs(price_change_pct) < 0.5:
@@ -42110,15 +42435,15 @@ def _volume_spikes_wrapper() -> None:
 
                         spikes.append({
                             "ticker": symbol,
-                            "price": round(price, 2),
-                            "change_pct": round(chg, 2),
+                            "price": price,
+                            "change_pct": chg,
                             "volume": vol,
-                            "rvol": round(rvol, 2),
-                            "rvol_raw": round(rvol_raw, 2),
+                            "rvol": rvol,
+                            "rvol_raw": rvol_raw,
                             "rvol_source": "prev_day_intraday_time_adjusted_proxy" if volume_fraction < 1.0 else "prev_day_completed_session_proxy",
-                            "dollar_volume": round(dollar_volume, 0),
-                            "projected_dollar_volume": round(projected_dollar_volume, 0),
-                            "expected_volume_fraction": round(volume_fraction, 4),
+                            "dollar_volume": dollar_volume,
+                            "projected_dollar_volume": projected_dollar_volume,
+                            "expected_volume_fraction": volume_fraction,
                             "signal_type": signal_type,
                             "asset_class": "stock",
                             "trade_signal": "BEOBACHTEN",
@@ -42333,10 +42658,7 @@ def _orb_scanner_wrapper() -> None:
         candidates = []
         for ticker, prev in prev_data.items():
             ticker = str(ticker or "").upper().strip()
-            if len(ticker) > 5 or "." in ticker:
-                continue
-            non_stock_reason = _looks_like_non_stock_etp_symbol(ticker)
-            if non_stock_reason:
+            if not valid_stock_symbol(ticker):
                 continue
             prev_close = prev.get("c", 0)
             if prev_close < 5 or prev_close > 2000:
@@ -42364,11 +42686,11 @@ def _orb_scanner_wrapper() -> None:
                 continue
 
             candidates.append({
-                "ticker": ticker, "prev_close": round(prev_close, 2),
-                "open": round(today_open, 2), "current": round(today_close or today_open, 2),
-                "high": round(today_high, 2), "low": round(today_low, 2),
-                "gap_pct": round(gap_pct, 2), "rvol": round(rvol, 2), "volume": today_vol,
-                "prev_atr_pct": round(prev_atr_pct, 2), "prev_vol": prev_vol,
+                "ticker": ticker, "prev_close": prev_close,
+                "open": today_open, "current": today_close or today_open,
+                "high": today_high, "low": today_low,
+                "gap_pct": gap_pct, "rvol": rvol, "volume": today_vol,
+                "prev_atr_pct": prev_atr_pct, "prev_vol": prev_vol,
             })
 
         candidates.sort(key=lambda x: abs(x["gap_pct"]) * 0.5 + min(x["rvol"], 5) * 0.3 + min(abs(x["prev_atr_pct"]), 5) * 0.2, reverse=True)
@@ -42805,24 +43127,24 @@ def _orb_scanner_wrapper() -> None:
                         confirmed_close=breakout_confirmed,
                         retest_confirmed=volume_context.get("retest_confirmed") is True,
                     ),
-                    "or_high": round(or_high, 2), "or_low": round(or_low, 2),
-                    "or_mid": round(or_mid, 2),
-                    "or_size": round(or_size, 2),
-                    "or_size_pct": round(or_size_pct, 2),
-                    "atr_pct": round(atr_pct, 2),
+                    "or_high": or_high, "or_low": or_low,
+                    "or_mid": or_mid,
+                    "or_size": or_size,
+                    "or_size_pct": or_size_pct,
+                    "atr_pct": atr_pct,
                     "atr_model": atr_model,
-                    "vwap": round(vwap, 2), "direction": breakout_dir,
+                    "vwap": vwap, "direction": breakout_dir,
                     "breakout_state": breakout_state,
                     "late_session": is_late_orb_session,
                     "session_quality": session_quality,
-                    "current_price": round(current_price, 2),
-                    "signal_price": round(signal_price, 2),
+                    "current_price": current_price,
+                    "signal_price": signal_price,
                     "signal_bar_timestamp": latest_bar.get("t"),
                     "bar_state": "completed_5m",
-                    "close_pos": round(latest_close_pos, 3),
-                    "upper_wick_pct": round(latest_upper_wick_pct, 1),
-                    "lower_wick_pct": round(latest_lower_wick_pct, 1),
-                    "entry": entry, "live_entry": round(live_entry, 2), "stop": stop,
+                    "close_pos": latest_close_pos,
+                    "upper_wick_pct": latest_upper_wick_pct,
+                    "lower_wick_pct": latest_lower_wick_pct,
+                    "entry": entry, "live_entry": live_entry, "stop": stop,
                     "invalidation_stop": invalidation_stop,
                     "target1": target1, "target2": target2,
                     "trade_setup": _orb_setup,
@@ -42844,17 +43166,17 @@ def _orb_scanner_wrapper() -> None:
                     "target_plan_issues": target_plan.get("issues"),
                     "live_rr_ratio": live_rr_ratio,
                     "rr_model": "50/50 TP1/TP2",
-                    "distance_to_entry_r": round(distance_to_entry_r, 2),
+                    "distance_to_entry_r": distance_to_entry_r,
                     "entry_quality": entry_quality,
                     "entry_quality_score": entry_quality_score,
                     "late_to_tp1": late_to_tp1,
                     "vol_confirmed": breakout_confirmed,
-                    "breakout_bar_volume": round(breakout_bar_vol, 2),
-                    "volume_baseline": round(breakout_volume_baseline, 2),
-                    "volume_ratio": round(breakout_volume_ratio, 2),
+                    "breakout_bar_volume": breakout_bar_vol,
+                    "volume_baseline": breakout_volume_baseline,
+                    "volume_ratio": breakout_volume_ratio,
                     "breakout_age_bars": breakout_age_bars,
-                    "hold_pct": round(hold_pct, 3),
-                    "recent_hold_pct": round(recent_hold_pct, 3),
+                    "hold_pct": hold_pct,
+                    "recent_hold_pct": recent_hold_pct,
                     "volume_scope": volume_scope,
                     "vwap_aligned": vwap_aligned,
                     "score": score, "grade": grade,

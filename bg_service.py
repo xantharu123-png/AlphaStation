@@ -1112,7 +1112,7 @@ def _fetch_stock_swing_execution_state(ticker, poly_key):
     now_ts = time.time()
     with _STOCK_SWING_EXECUTION_CACHE_LOCK:
         cached = _STOCK_SWING_EXECUTION_CACHE.get(symbol)
-        if cached and now_ts - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC:
+        if cached and 0 <= now_ts - float(cached.get("timestamp", 0) or 0) < _STOCK_SWING_EXECUTION_CACHE_TTL_SEC:
             return dict(cached.get("state", {}))
 
     try:
@@ -1134,6 +1134,7 @@ def _fetch_stock_swing_execution_state(ticker, poly_key):
             response.json().get("results", []) or [],
             timezone_et,
             limit=24,
+            as_of=now_et,
         )
         state = stock_swing_4h_execution_state(bars)
         with _STOCK_SWING_EXECUTION_CACHE_LOCK:

@@ -104,7 +104,7 @@ def test_invalid_or_stale_provider_data_cannot_trigger(damage):
 
 def server_row():
     return {"Ticker": "XYZ", "Signal_Direction": "LONG", "level_structure": {
-        "model": "causal_level_zones_v1", "symbol": "XYZ", "asset_class": "stock", "horizon": "swing",
+        "model": "causal_level_zones_v2", "symbol": "XYZ", "asset_class": "stock", "horizon": "swing",
         "as_of": "2026-09-16T20:00:00Z", "current_price": 104, "completed_bar_counts": {"1D": 100},
         "zones": [{"zone_id": "server-zone", "lower": 99, "upper": 101, "origin_roles": ["resistance"],
                    "confirmed_at": "2026-09-14T20:00:00Z", "evidence": [{"timeframe": "1D"}]}]}}

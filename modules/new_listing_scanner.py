@@ -30,6 +30,7 @@ import logging
 import traceback
 import re
 import html as html_lib
+import hashlib
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -163,6 +164,49 @@ def _to_float(value, default=0.0):
         return default
 
 
+def _provider_number(value):
+    """Preserve invalid/missing exchange measurements as unknown, not 0/1."""
+    return None if isinstance(value, bool) else _to_float(value, None)
+
+
+def _provider_fields_invalid(payload, names):
+    return any(name in payload and payload[name] not in (None, "")
+               and _provider_number(payload[name]) is None for name in names)
+
+
+def _measured_listing_quote_volume(candle):
+    """An explicit display proxy is not a measured trading-volume witness."""
+    if candle.get("volume_usd_measured") is False:
+        return None
+    return _provider_number(candle.get("volume_usd"))
+
+
+def _listing_btc_observation_valid(row, now_ts=None):
+    """Same finite synchronous native-BTC contract as the API mail boundary."""
+    if not isinstance(row, dict):
+        return False
+    pump = row.get("pump_data") if isinstance(row.get("pump_data"), dict) else {}
+    for key in ("btc_change_pct", "coin_change_pct", "btc_divergence", "btc_context_opened_at", "btc_context_completed_at"):
+        if key in row and key in pump:
+            top, nested = _provider_number(row[key]), _provider_number(pump[key])
+            if top is None or nested is None or top != nested:
+                return False
+    if ("btc_context_source" in row and "btc_context_source" in pump
+            and row["btc_context_source"] != pump["btc_context_source"]):
+        return False
+    def field(key):
+        return row.get(key) if key in row else pump.get(key)
+    numbers = [_provider_number(field(key)) for key in
+               ("btc_change_pct", "coin_change_pct", "btc_divergence", "btc_context_opened_at", "btc_context_completed_at")]
+    if any(number is None for number in numbers) or field("btc_context_source") != "binance:BTCUSDT:1H":
+        return False
+    btc, coin, divergence, opened, closed = numbers
+    now = _provider_number(time.time() if now_ts is None else now_ts)
+    return bool(now is not None and opened > 0 and opened % 3600 == 0 and closed % 3600 == 0
+                and 3 * 3600 <= closed - opened <= 24 * 3600 and -2 <= now - closed < 3600
+                and math.isclose(divergence, coin - btc, rel_tol=1e-8, abs_tol=1e-8))
+
+
 def _funding_fields(rate=None, interval=None, source=None, source_timestamp=None):
     """Raw fraction and measured settlement period; unknown is never zero/8h."""
     rate = None if isinstance(rate, bool) else _to_float(rate, None)
@@ -232,15 +276,25 @@ def fetch_funding_measurement(exchange, symbol):
 
 
 def _normalize_epoch_seconds(ts):
-    """Normalize exchange timestamps in seconds or milliseconds to seconds."""
+    """Normalize measured exchange clocks; booleans are not timestamps."""
+    if isinstance(ts, bool):
+        return 0
     try:
         ts_float = float(ts)
     except (TypeError, ValueError):
         return 0
-    if not math.isfinite(ts_float):
+    if not math.isfinite(ts_float) or ts_float <= 0:
         return 0
-    if ts_float > 10_000_000_000:
+    if ts_float >= 1e18:
+        ts_float /= 1e9
+    elif ts_float >= 1e15:
+        ts_float /= 1e6
+    elif ts_float >= 1e12:
         ts_float /= 1000
+    try:
+        datetime.fromtimestamp(ts_float, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return 0
     return int(ts_float)
 
 
@@ -248,7 +302,11 @@ def _data_age_seconds(ts):
     ts_sec = _normalize_epoch_seconds(ts)
     if ts_sec <= 0:
         return None
-    return max(0, int(time.time()) - ts_sec)
+    age = time.time() - ts_sec
+    # Receipt time cannot turn a future provider observation into fresh data.
+    if age < -2:
+        return None
+    return max(0, int(age))
 
 
 def _exchange_timestamp_iso(ts):
@@ -342,16 +400,28 @@ def _parse_book_side(side):
     for row in side or []:
         try:
             if isinstance(row, dict):
-                price = _to_float(row.get("price") or row.get("p"))
-                qty = _to_float(row.get("quantity") or row.get("qty") or row.get("q"))
+                raw_price = row.get("price", row.get("p"))
+                raw_qty = row.get("quantity", row.get("qty", row.get("q")))
             else:
-                price = _to_float(row[0])
-                qty = _to_float(row[1])
+                raw_price, raw_qty = row[0], row[1]
+            if isinstance(raw_price, bool) or isinstance(raw_qty, bool):
+                continue
+            price, qty = _to_float(raw_price), _to_float(raw_qty)
             if price > 0 and qty > 0:
                 parsed.append((price, qty))
         except Exception:
             continue
     return parsed
+
+
+def _provider_orderbook(raw_bids, raw_asks, depth):
+    """Never turn a partly corrupt provider book into claimed complete depth."""
+    if not isinstance(raw_bids, (list, tuple)) or not isinstance(raw_asks, (list, tuple)):
+        return None
+    bids, asks = _parse_book_side(raw_bids), _parse_book_side(raw_asks)
+    if not bids or not asks or len(bids) != len(raw_bids) or len(asks) != len(raw_asks):
+        return None
+    return {"bids": bids[:depth], "asks": asks[:depth]}
 
 
 _SUPPORTED_MARKET_VENUES = frozenset({
@@ -374,6 +444,22 @@ def _monitor_key(symbol, exchange):
     if venue is None:
         raise ValueError("unsupported_market_venue")
     return f"{venue}:{symbol}"
+
+
+def _producer_episode_id(exchange, contract, started_at):
+    """Bind one detection episode to its native venue, contract and UTC start.
+
+    API mail dedupe can independently recompute this proof; changing quote/
+    derived levels cannot create a second accepted delivery in this episode.
+    """
+    venue = _normalize_market_venue(exchange)
+    native_contract = str(contract or "").strip().upper()
+    started = _coerce_utc_datetime(started_at)
+    if (venue is None or not re.fullmatch(r"[A-Z0-9_.-]{3,80}", native_contract)
+            or started is None or started > datetime.now(timezone.utc)):
+        return None
+    source = f"{venue}:{native_contract}:{started.isoformat()}".encode("utf-8")
+    return "nls4:" + hashlib.sha256(source).hexdigest()
 
 
 def _structure_trade_state(signal):
@@ -453,7 +539,8 @@ def _is_tradeable_short_signal(signal):
         and signal.get("grade") in ("S", "A", "A+")
         and signal.get("safety_ok") is True
         and signal.get("confirmation_ok") is True
-        and signal.get("btc_context_ok", True) is True
+        and signal.get("btc_context_ok") is True
+        and _listing_btc_observation_valid(signal)
         and (not signal.get("micro_required", bool(CONFIG.get("micro_crack_enabled"))) or signal.get("micro_trigger_ok") is True)
         and not signal.get("continuation_risk")
         and not signal.get("tp1_missed")
@@ -500,6 +587,13 @@ def fetch_cryptocom_ticker(instrument_name):
     tickers = data["result"].get("data", [])
     if tickers:
         t = tickers[0]
+        if not isinstance(t, dict) or _provider_fields_invalid(t, ("a", "last", "b", "k", "h", "l", "v", "vv", "c", "oi")):
+            return None
+        quote_supplied = t.get("vv") not in (None, "")
+        quote_volume = _provider_number(t.get("vv"))
+        if not quote_supplied:
+            base_volume, last_price = _provider_number(t.get("v")), _provider_number(t.get("a", t.get("last")))
+            quote_volume = base_volume * last_price if base_volume is not None and last_price is not None else None
         return {
             "price": float(t.get("a", t.get("last", 0))),
             "bid": float(t.get("b", 0)),
@@ -507,18 +601,17 @@ def fetch_cryptocom_ticker(instrument_name):
             "high_24h": float(t.get("h", 0)),
             "low_24h": float(t.get("l", 0)),
             "volume_24h": float(t.get("v", 0)),
-            # H-8 AUDIT FIX: Crypto.com liefert "vv" (USD-Volumen) nicht immer —
-            # Fallback: Basis-Volumen * letzter Preis statt stillem 0-Wert.
-            "volume_usd_24h": (
-                float(t.get("vv") or 0)
-                or (float(t.get("v") or 0) * float(t.get("a", t.get("last", 0)) or 0))
-            ),
+            # A measured zero remains zero; only absent quote volume retains
+            # the explicit historical display proxy, never a measured claim.
+            "volume_usd_24h": quote_volume,
+            "volume_usd_24h_basis": "provider_quote_volume" if quote_supplied else "base_volume_close_proxy",
+            "volume_usd_24h_measured": bool(quote_supplied and quote_volume is not None),
             "change_24h": float(t.get("c", 0)) * 100 if t.get("c") else 0,
             "open_interest": float(t.get("oi", 0)),
             "open_interest_available": "oi" in t and t.get("oi") not in (None, ""),
             "funding_available": False,
             "long_short_ratio_available": False,
-            "timestamp": t.get("t", 0),
+            "timestamp": _normalize_epoch_seconds(t.get("t")),
         }
     return None
 
@@ -536,20 +629,30 @@ def fetch_cryptocom_candles(instrument_name, timeframe="1h", count=50):
     raw = data["result"].get("data", [])
     candles = []
     for c in raw:
+        if not isinstance(c, dict):
+            candles.append({"timestamp": 0})
+            continue
+        quote_volume = _provider_number(c.get("vv"))
+        base_volume = _provider_number(c.get("v"))
+        close = _provider_number(c.get("c"))
+        quote_supplied = c.get("vv") not in (None, "")
+        # Retain the existing explicitly identified proxy only when the quote
+        # field is absent. A present corrupt/zero field must not be repaired.
+        if not quote_supplied and base_volume is not None and close is not None:
+            quote_volume = base_volume * close
         candles.append({
-            "timestamp": c.get("t", 0),
-            "open": float(c.get("o", 0)),
-            "high": float(c.get("h", 0)),
-            "low": float(c.get("l", 0)),
-            "close": float(c.get("c", 0)),
-            "volume": float(c.get("v", 0)),
+            "timestamp": _normalize_epoch_seconds(c.get("t")),
+            "open": _provider_number(c.get("o")),
+            "high": _provider_number(c.get("h")),
+            "low": _provider_number(c.get("l")),
+            "close": close,
+            "volume": base_volume,
             # H-8 AUDIT FIX: "vv" fehlt bei Crypto.com-Candles teils komplett —
             # ohne Fallback waren micro/sell_volume-Pfade stumm (alles 0).
             # Fallback: v * close als USD-Approximation.
-            "volume_usd": (
-                float(c.get("vv") or 0)
-                or (float(c.get("v") or 0) * float(c.get("c") or 0))
-            ),
+            "volume_usd": quote_volume,
+            "volume_usd_basis": "provider_quote_volume" if quote_supplied else "base_volume_close_proxy",
+            "volume_usd_measured": bool(quote_supplied and quote_volume is not None),
         })
     # Chronologisch sortieren (älteste zuerst)
     candles.sort(key=lambda x: x["timestamp"])
@@ -567,10 +670,7 @@ def fetch_cryptocom_orderbook(instrument_name, depth=10):
     book = data["result"].get("data", [])
     if book:
         b = book[0]
-        return {
-            "bids": [(float(x[0]), float(x[1])) for x in b.get("bids", [])],
-            "asks": [(float(x[0]), float(x[1])) for x in b.get("asks", [])],
-        }
+        return _provider_orderbook(b.get("bids"), b.get("asks"), depth)
     return None
 
 
@@ -582,9 +682,7 @@ def fetch_mexc_orderbook(symbol, depth=20):
     if not data or not data.get("success"):
         return None
     book = data.get("data", {})
-    bids = _parse_book_side(book.get("bids") or book.get("Bids"))
-    asks = _parse_book_side(book.get("asks") or book.get("Asks"))
-    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+    return _provider_orderbook(book.get("bids") or book.get("Bids"), book.get("asks") or book.get("Asks"), depth)
 
 
 def fetch_binance_orderbook(symbol, depth=20):
@@ -592,9 +690,7 @@ def fetch_binance_orderbook(symbol, depth=20):
     data = _api_get(f"{BINANCE_FUTURES_BASE}/depth", {"symbol": symbol, "limit": depth})
     if not data:
         return None
-    bids = _parse_book_side(data.get("bids"))
-    asks = _parse_book_side(data.get("asks"))
-    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+    return _provider_orderbook(data.get("bids"), data.get("asks"), depth)
 
 
 def fetch_bitget_orderbook(symbol, depth=20):
@@ -607,9 +703,7 @@ def fetch_bitget_orderbook(symbol, depth=20):
     if not data or data.get("code") not in (None, "00000"):
         return None
     book = data.get("data", {})
-    bids = _parse_book_side(book.get("bids"))
-    asks = _parse_book_side(book.get("asks"))
-    return {"bids": bids[:depth], "asks": asks[:depth]} if bids and asks else None
+    return _provider_orderbook(book.get("bids"), book.get("asks"), depth)
 
 
 MEXC_FUTURES_BASE = "https://contract.mexc.com/api/v1/contract"
@@ -629,11 +723,8 @@ def fetch_mexc_contract_sizes(force=False):
     sizes = {}
     for contract in data.get("data", []) or []:
         symbol = str(contract.get("symbol") or "")
-        try:
-            contract_size = float(contract.get("contractSize") or 0)
-        except (TypeError, ValueError):
-            contract_size = 0.0
-        if symbol and contract_size > 0:
+        contract_size = _provider_number(contract.get("contractSize"))
+        if symbol and contract_size is not None and contract_size > 0:
             sizes[symbol] = contract_size
     if sizes:
         _MEXC_CONTRACT_SIZE_CACHE.update({"ts": now, "data": sizes})
@@ -653,11 +744,8 @@ def fetch_mexc_futures_instruments():
     perps = []
     for c in contracts:
         if c.get("quoteCoin") == "USDT" and c.get("state") == 0:  # state 0 = aktiv
-            try:
-                contract_size = float(c.get("contractSize") or 0)
-            except (TypeError, ValueError):
-                contract_size = 0.0
-            if c.get("symbol") and contract_size > 0:
+            contract_size = _provider_number(c.get("contractSize"))
+            if c.get("symbol") and contract_size is not None and contract_size > 0:
                 contract_sizes[c.get("symbol")] = contract_size
             perps.append({
                 "symbol": c.get("symbol", ""),
@@ -669,7 +757,7 @@ def fetch_mexc_futures_instruments():
                 "exchange": "mexc",
                 "is_new": c.get("isNew", False),
                 "create_time": c.get("createTime", 0),
-                "contract_size": contract_size or None,
+                "contract_size": contract_size if contract_size is not None and contract_size > 0 else None,
             })
     if contract_sizes:
         _MEXC_CONTRACT_SIZE_CACHE.update({"ts": time.time(), "data": contract_sizes})
@@ -683,6 +771,9 @@ def fetch_mexc_ticker(symbol):
         return None
     t = data.get("data", {})
     if not t or not isinstance(t, dict):
+        return None
+    if _provider_fields_invalid(t, ("lastPrice", "bid1", "ask1", "high24Price", "lower24Price",
+                                    "volume24", "amount24", "riseFallRate", "holdVol", "contractSize", "contract_size")):
         return None
 
     # H-1 AUDIT FIX (MEXC-Einheiten):
@@ -732,7 +823,7 @@ def fetch_mexc_ticker(symbol):
         **funding,
         "open_interest_available": oi_data_status == "ok",
         "long_short_ratio_available": False,
-        "timestamp": t.get("timestamp", 0),
+        "timestamp": _normalize_epoch_seconds(t.get("timestamp")),
     }
 
 
@@ -761,14 +852,14 @@ def fetch_mexc_candles(symbol, timeframe="1h", count=50):
     for i in range(len(times)):
         # MEXC vol is contracts, not coins. Without amount, quote volume is
         # unavailable; contracts * price would fabricate liquidity.
-        vol_usd = _to_float(amounts[i], None) if i < len(amounts) else None
+        vol_usd = _provider_number(amounts[i]) if i < len(amounts) else None
         candles.append({
-            "timestamp": int(times[i]) if i < len(times) else 0,
-            "open": float(opens[i]) if i < len(opens) else 0,
-            "high": float(highs[i]) if i < len(highs) else 0,
-            "low": float(lows[i]) if i < len(lows) else 0,
-            "close": float(closes[i]) if i < len(closes) else 0,
-            "volume": float(vols[i]) if i < len(vols) else 0,
+            "timestamp": _normalize_epoch_seconds(times[i]) if i < len(times) else 0,
+            "open": _provider_number(opens[i]) if i < len(opens) else None,
+            "high": _provider_number(highs[i]) if i < len(highs) else None,
+            "low": _provider_number(lows[i]) if i < len(lows) else None,
+            "close": _provider_number(closes[i]) if i < len(closes) else None,
+            "volume": _provider_number(vols[i]) if i < len(vols) else None,
             "volume_usd": vol_usd,
             "volume_usd_available": vol_usd is not None,
         })
@@ -811,6 +902,8 @@ def fetch_binance_ticker(symbol):
     data = _api_get(f"{BINANCE_FUTURES_BASE}/ticker/24hr", {"symbol": symbol})
     if not data or not isinstance(data, dict):
         return None
+    if _provider_fields_invalid(data, ("lastPrice", "highPrice", "lowPrice", "volume", "quoteVolume", "priceChangePercent")):
+        return None
 
     result = {
         "price": float(data.get("lastPrice", 0)),
@@ -827,7 +920,7 @@ def fetch_binance_ticker(symbol):
         "open_interest_available": False,
         "funding_available": False,
         "long_short_ratio_available": False,
-        "timestamp": int(data.get("closeTime", 0)),
+        "timestamp": _normalize_epoch_seconds(data.get("closeTime")),
     }
 
     # OI separat holen
@@ -873,14 +966,16 @@ def fetch_binance_candles(symbol, timeframe="1h", count=50):
         # Format: [openTime, open, high, low, close, volume, closeTime, quoteVolume, ...]
         if isinstance(c, list) and len(c) >= 8:
             candles.append({
-                "timestamp": int(c[0]) // 1000,
-                "open": float(c[1]),
-                "high": float(c[2]),
-                "low": float(c[3]),
-                "close": float(c[4]),
-                "volume": float(c[5]),
-                "volume_usd": float(c[7]),
+                "timestamp": _normalize_epoch_seconds(c[0]),
+                "open": _provider_number(c[1]),
+                "high": _provider_number(c[2]),
+                "low": _provider_number(c[3]),
+                "close": _provider_number(c[4]),
+                "volume": _provider_number(c[5]),
+                "volume_usd": _provider_number(c[7]),
             })
+        else:
+            candles.append({"timestamp": 0})
     candles.sort(key=lambda x: x["timestamp"])
     return candles
 
@@ -931,6 +1026,9 @@ def fetch_bitget_ticker(symbol):
     t = tickers[0] if isinstance(tickers, list) else tickers
     if not isinstance(t, dict):
         return None
+    if _provider_fields_invalid(t, ("lastPr", "bidPr", "askPr", "high24h", "low24h", "baseVolume",
+                                    "usdtVolume", "change24h", "holdingAmount")):
+        return None
     funding = fetch_funding_measurement("bitget", symbol)
     if funding["funding_rate"] is None:
         funding.update(_funding_fields(t.get("fundingRate"), source="bitget:ticker", source_timestamp=t.get("ts")))
@@ -947,7 +1045,7 @@ def fetch_bitget_ticker(symbol):
         **funding,
         "open_interest_available": "holdingAmount" in t and t.get("holdingAmount") not in (None, ""),
         "long_short_ratio_available": False,
-        "timestamp": int(t.get("ts", 0)),
+        "timestamp": _normalize_epoch_seconds(t.get("ts")),
     }
 
 
@@ -968,14 +1066,16 @@ def fetch_bitget_candles(symbol, timeframe="1h", count=50):
         # Format: [ts, open, high, low, close, vol, quoteVol]
         if isinstance(c, list) and len(c) >= 7:
             candles.append({
-                "timestamp": int(c[0]) // 1000,  # ms → sec
-                "open": float(c[1]),
-                "high": float(c[2]),
-                "low": float(c[3]),
-                "close": float(c[4]),
-                "volume": float(c[5]),
-                "volume_usd": float(c[6]),
+                "timestamp": _normalize_epoch_seconds(c[0]),
+                "open": _provider_number(c[1]),
+                "high": _provider_number(c[2]),
+                "low": _provider_number(c[3]),
+                "close": _provider_number(c[4]),
+                "volume": _provider_number(c[5]),
+                "volume_usd": _provider_number(c[6]),
             })
+        else:
+            candles.append({"timestamp": 0})
     candles.sort(key=lambda x: x["timestamp"])
     return candles
 
@@ -1514,6 +1614,32 @@ def calculate_listing_exhaustion(
     score = 0
     details = []
 
+    cutoff = _coerce_utc_datetime(as_of) if as_of is not None else datetime.now(timezone.utc)
+    if cutoff is None:
+        return 0, ["[X] Ungueltiger 1H-Analysezeitpunkt"], {"hourly_data_status": "invalid_as_of"}
+    candles, hourly_quality = _completed_fresh_listing_candles(
+        candles, "1h", now_ts=cutoff.timestamp(),
+    )
+    hourly_status = (
+        "invalid_or_conflicting_candles" if not hourly_quality.get("integrity_ok")
+        else "missing_completed_candles" if not hourly_quality.get("known")
+        else "stale_completed_candles" if not hourly_quality.get("fresh")
+        else "gapped_completed_candles" if any(
+            right["timestamp"] - left["timestamp"] != 3600
+            for left, right in zip(candles, candles[1:])
+        ) else "ok"
+    )
+    if hourly_status != "ok":
+        return 0, [f"[X] 1H-Evidenz nicht belastbar: {hourly_status}"], {
+            "hourly_data_status": hourly_status,
+            "btc_context_known": False,
+            "btc_context_status": "hourly_data_unavailable",
+            "btc_short_context": "UNKNOWN",
+            "vrvp_as_of": cutoff.isoformat(),
+            "vrvp_timeframe": "1H",
+            "vrvp_bars": [],
+        }
+
     if not candles or len(candles) < 3:
         return 0, ["[X] Zu wenige Candles (<3)"], {}
 
@@ -1559,8 +1685,11 @@ def calculate_listing_exhaustion(
     last_ath_index = max(i for i, c in enumerate(candles) if c["high"] == ath)
     bars_since_ath = max(0, n - 1 - last_ath_index)
 
-    vrvp_as_of = _stable_utc_iso(as_of)
+    vrvp_as_of = cutoff.isoformat()
     pump_data = {
+        "hourly_data_status": "ok",
+        "hourly_candle_closed_at": hourly_quality.get("closed_at"),
+        "hourly_data_age_seconds": hourly_quality.get("age_seconds"),
         "first_price": first_price,
         "current_price": current_price,
         "ath": ath,
@@ -1642,19 +1771,19 @@ def calculate_listing_exhaustion(
     #    Vergleiche Volume erste Hälfte vs zweite Hälfte.
     #    Sinkend = Distribution (Smart Money verkauft)
     # ═══════════════════════════════════════════════════════════════════════
-    # The newest exchange candle can still be forming. Treating its partial
-    # volume as a completed collapse creates false pump-exhaustion shorts.
-    volume_candles = candles[:-1] if len(candles) >= 6 else candles
+    # All components use the same verified completed 1H history. Dropping the
+    # newest *closed* candle would shift only this comparison by another hour.
+    volume_candles = candles
     volume_mid = max(1, len(volume_candles) // 2)
     first_half = volume_candles[:volume_mid]
     second_half = volume_candles[volume_mid:]
     vol_first = historical_volume_baseline(
-        (c.get("volume_usd") for c in first_half),
+        (_measured_listing_quote_volume(c) for c in first_half),
         lookback=len(first_half),
         minimum_periods=max(2, int(len(first_half) * 0.6)),
     )
     vol_second = historical_volume_baseline(
-        (c.get("volume_usd") for c in second_half),
+        (_measured_listing_quote_volume(c) for c in second_half),
         lookback=len(second_half),
         minimum_periods=max(2, int(len(second_half) * 0.6)),
     )
@@ -2050,17 +2179,31 @@ def calculate_listing_exhaustion(
     # ═══════════════════════════════════════════════════════════════════════
     btc_divergence_pts = 0
     try:
-        btc_candles = fetch_binance_candles("BTCUSDT", "1h", min(n, 24))
-        if btc_candles and len(btc_candles) >= 3:
+        btc_candles, btc_quality = _completed_fresh_listing_candles(
+            fetch_binance_candles("BTCUSDT", "1h", min(n, 24) + 1),
+            "1h", now_ts=cutoff.timestamp(),
+        )
+        coin_recent = candles[-min(n, 24):]
+        btc_by_open = {row["timestamp"]: row for row in btc_candles}
+        same_window = (
+            btc_quality.get("integrity_ok") is True
+            and btc_quality.get("known") is True
+            and btc_quality.get("fresh") is True
+            and len(coin_recent) >= 3
+            and all(row["timestamp"] % 3600 == 0 for row in coin_recent)
+            and 0 <= cutoff.timestamp() - (coin_recent[-1]["timestamp"] + 3600) < 3600
+            and all(row["timestamp"] in btc_by_open for row in coin_recent)
+        )
+        if same_window:
+            btc_candles = [btc_by_open[row["timestamp"]] for row in coin_recent]
             btc_context_available = True
             btc_first = btc_candles[0]["open"]
             btc_last = btc_candles[-1]["close"]
-            btc_change = ((btc_last - btc_first) / btc_first * 100) if btc_first > 0 else 0
+            btc_change = (btc_last - btc_first) / btc_first * 100
 
-            # Coin-Change über gleichen Zeitraum
-            coin_recent = candles[-min(len(candles), len(btc_candles)):]
-            coin_first = coin_recent[0]["open"] if coin_recent else first_price
-            coin_change = ((current_price - coin_first) / coin_first * 100) if coin_first > 0 else 0
+            # The same opening and closing instants, not merely equal lengths.
+            coin_first = coin_recent[0]["open"]
+            coin_change = (coin_recent[-1]["close"] - coin_first) / coin_first * 100
 
             divergence = coin_change - btc_change  # negativ = Coin underperformt BTC
 
@@ -2090,16 +2233,25 @@ def calculate_listing_exhaustion(
             else:
                 btc_context = "NEUTRAL"
 
-            pump_data["btc_change_pct"] = round(btc_change, 1)
-            pump_data["coin_change_pct"] = round(coin_change, 1)
-            pump_data["btc_divergence"] = round(divergence, 1)
+            pump_data["btc_change_pct"] = btc_change
+            pump_data["coin_change_pct"] = coin_change
+            pump_data["btc_divergence"] = divergence
             pump_data["btc_tailwind_risk"] = btc_tailwind_risk
             pump_data["btc_short_context"] = btc_context
+            pump_data["btc_context_known"] = True
+            pump_data["btc_context_status"] = "ok"
+            pump_data["btc_context_source"] = "binance:BTCUSDT:1H"
+            pump_data["btc_context_opened_at"] = coin_recent[0]["timestamp"]
+            pump_data["btc_context_completed_at"] = coin_recent[-1]["timestamp"] + 3600
             details.append(f"₿ BTC Divergenz: BTC {btc_change:+.1f}% vs Coin {coin_change:+.1f}% (Div: {divergence:+.1f}%) → {btc_divergence_pts}/10")
         else:
+            pump_data["btc_context_known"] = False
+            pump_data["btc_context_status"] = "missing_or_invalid_synchronous_window"
             pump_data["btc_short_context"] = "UNKNOWN"
-            details.append("₿ BTC Divergenz: keine BTC-Daten")
+            details.append("₿ BTC Divergenz: kein belastbares synchrones 1H-Fenster")
     except Exception as e:
+        pump_data["btc_context_known"] = False
+        pump_data["btc_context_status"] = "request_failed"
         pump_data["btc_short_context"] = "UNKNOWN"
         details.append(f"₿ BTC Divergenz: Fehler ({e})")
 
@@ -2169,7 +2321,7 @@ def check_safety(ticker, book, candles):
     warnings = []
     is_safe = True
 
-    if not ticker:
+    if not isinstance(ticker, dict) or not ticker:
         return False, ["[!] Kein frischer Ticker - kein Live-Short-Signal"]
 
     ticker_age = _data_age_seconds(ticker.get("timestamp"))
@@ -2192,19 +2344,23 @@ def check_safety(ticker, book, candles):
         warnings.append("[!] Keine Candles - kein Setup")
         is_safe = False
 
-    bid = _to_float(ticker.get("bid"))
-    ask = _to_float(ticker.get("ask"))
+    bid = _to_float(ticker.get("bid")) if not isinstance(ticker.get("bid"), bool) else 0
+    ask = _to_float(ticker.get("ask")) if not isinstance(ticker.get("ask"), bool) else 0
     if bid <= 0 or ask <= 0 or ask < bid:
         warnings.append("[!] Kein belastbarer Bid/Ask - Spread unbekannt")
         is_safe = False
 
-    if not book:
+    if not isinstance(book, dict) or not book:
         warnings.append("[!] Kein Orderbook - Liquiditaet nicht verifizierbar")
         is_safe = False
 
     # 1. Volume Minimum
-    vol_24h = _to_float(ticker.get("volume_usd_24h"))
-    if vol_24h < CONFIG["min_volume_24h_usd"]:
+    raw_volume = ticker.get("volume_usd_24h")
+    vol_24h = None if isinstance(raw_volume, bool) or ticker.get("volume_usd_24h_measured") is False else _to_float(raw_volume, None)
+    if vol_24h is None:
+        warnings.append("[!] 24H-Volumen unbekannt oder ungueltig")
+        is_safe = False
+    elif vol_24h < CONFIG["min_volume_24h_usd"]:
         warnings.append(f"[!] Volume zu niedrig: ${vol_24h:,.0f} (min ${CONFIG['min_volume_24h_usd']:,})")
         is_safe = False
 
@@ -2217,11 +2373,20 @@ def check_safety(ticker, book, candles):
             is_safe = False
 
     # 3. Orderbook Depth
-    if book:
-        bid_depth = sum(p * q for p, q in book.get("bids", []))
-        ask_depth = sum(p * q for p, q in book.get("asks", []))
-        min_side = min(bid_depth, ask_depth)
-        if min_side < CONFIG["min_book_depth_usd"]:
+    if isinstance(book, dict) and book:
+        sides = [book.get("bids"), book.get("asks")]
+        parsed = [_parse_book_side(side) for side in sides]
+        depths = [sum(p * q for p, q in side) for side in parsed]
+        book_known = (
+            all(isinstance(side, (list, tuple)) and side for side in sides)
+            and all(len(side) == len(clean) for side, clean in zip(sides, parsed))
+            and all(math.isfinite(value) for value in depths)
+        )
+        min_side = min(depths) if book_known else None
+        if not book_known:
+            warnings.append("[!] Orderbuch-Tiefe unbekannt oder ungueltig")
+            is_safe = False
+        elif min_side < CONFIG["min_book_depth_usd"]:
             warnings.append(f"[!] Orderbuch dünn: ${min_side:,.0f}/Seite (min ${CONFIG['min_book_depth_usd']:,})")
             is_safe = False
 
@@ -2271,24 +2436,92 @@ def _close_position(candle):
     return (_to_float(candle.get("close")) - _to_float(candle.get("low"))) / rng
 
 
-def _completed_fresh_micro_candles(candles, timeframe="5m", now_ts=None):
+def _completed_fresh_listing_candles(candles, timeframe="5m", now_ts=None):
     """Return closed execution candles and freshness diagnostics.
 
     Exchange candle timestamps are open times. Forming 5m candles must never
     create a live short signal, and a closed candle older than two bars is no
     longer a current micro-crack confirmation.
     """
-    seconds = {"5m": 300}.get(str(timeframe or "").lower())
-    rows = list(candles or [])
-    if not seconds or not rows:
-        return rows, {"known": False, "fresh": False, "age_seconds": None, "dropped_open": False}
-    now_value = float(now_ts if now_ts is not None else time.time())
-    last_ts = _normalize_epoch_seconds(rows[-1].get("timestamp"))
-    dropped_open = bool(last_ts and last_ts + seconds > now_value)
-    if dropped_open:
-        rows = rows[:-1]
+    seconds = {"5m": 300, "1h": 3600}.get(str(timeframe or "").lower())
+    raw_rows = list(candles or [])
+    if not seconds or not raw_rows:
+        return [], {"known": False, "fresh": False, "age_seconds": None, "dropped_open": False, "integrity_ok": False}
+    now_value = _to_float(now_ts if now_ts is not None else time.time(), None)
+    if isinstance(now_ts, bool) or now_value is None or now_value <= 0:
+        return [], {"known": False, "fresh": False, "age_seconds": None, "dropped_open": False, "integrity_ok": False}
+    # A provider array's last item must never choose the winner of an ambiguous
+    # timestamp. Exact repeated observations collapse; conflicting observations
+    # poison their own timestamp rather than inventing a repaired price/volume.
+    observations = {}
+    invalid_count = 0
+    conflict_count = 0
+    dropped_open = False
+    true_flags = {"true", "1", "yes", "y", "closed", "complete", "completed", "final"}
+    false_flags = {"false", "0", "no", "n", "open", "incomplete"}
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            invalid_count += 1
+            continue
+        stamps = [_normalize_epoch_seconds(raw[key]) for key in
+                  ("timestamp", "open_time", "openTime", "time", "t", "ts", "start")
+                  if raw.get(key) not in (None, "")]
+        if not stamps or any(stamp <= 0 for stamp in stamps) or len(set(stamps)) != 1:
+            invalid_count += 1
+            continue
+        opened_at = stamps[0]
+        if opened_at + seconds > now_value:
+            dropped_open = True
+            continue
+        bucket = observations.setdefault(opened_at, [])
+        closes = [_normalize_epoch_seconds(raw[key]) for key in
+                  ("close_time", "closeTime", "close_timestamp", "end_time", "end", "T")
+                  if raw.get(key) not in (None, "")]
+        invalid = any(stamp < opened_at or stamp > now_value for stamp in closes)
+        invalid = invalid or len(set(closes)) > 1
+        for key in ("is_closed", "complete", "completed", "final", "is_final", "confirm"):
+            if key in raw and str(raw[key]).strip().lower() not in true_flags:
+                invalid = True
+        for key in ("partial_source_bar", "partial", "is_partial"):
+            if key in raw and str(raw[key]).strip().lower() not in false_flags:
+                invalid = True
+        values = {}
+        for name, alias in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"),
+                            ("volume", "v"), ("volume_usd", "quote_volume")):
+            supplied = [raw[key] for key in (name, alias) if key in raw]
+            if not supplied:
+                if name not in {"volume", "volume_usd"}:
+                    invalid = True
+                continue
+            numbers = [None if isinstance(value, bool) else _to_float(value, None) for value in supplied]
+            if any(value is None for value in numbers) or len(set(numbers)) != 1:
+                invalid = True
+                continue
+            value = numbers[0]
+            if value < 0 or (name not in {"volume", "volume_usd"} and value == 0):
+                invalid = True
+            values[name] = value
+        if all(key in values for key in ("open", "high", "low", "close")):
+            if (values["high"] < max(values["open"], values["close"], values["low"])
+                    or values["low"] > min(values["open"], values["close"])):
+                invalid = True
+        if invalid:
+            invalid_count += 1
+            bucket.append(None)
+            continue
+        normalized = {**raw, **values, "timestamp": opened_at}
+        signature = (max([opened_at + seconds, *closes]), tuple(sorted(values.items())))
+        bucket.append((signature, normalized))
+    rows = []
+    for opened_at in sorted(observations):
+        bucket = observations[opened_at]
+        if any(item is None for item in bucket) or len({item[0] for item in bucket}) != 1:
+            conflict_count += 1
+            continue
+        # Price decisions do not depend on provider metadata ordering.
+        rows.append(min(bucket, key=lambda item: json.dumps(item[1], sort_keys=True, default=str))[1])
     if not rows:
-        return [], {"known": bool(last_ts), "fresh": False, "age_seconds": None, "dropped_open": dropped_open}
+        return [], {"known": False, "fresh": False, "age_seconds": None, "dropped_open": dropped_open, "integrity_ok": False}
     completed_ts = _normalize_epoch_seconds(rows[-1].get("timestamp"))
     if completed_ts <= 0:
         return rows, {"known": False, "fresh": False, "age_seconds": None, "dropped_open": dropped_open}
@@ -2300,7 +2533,17 @@ def _completed_fresh_micro_candles(candles, timeframe="5m", now_ts=None):
         "age_seconds": age_seconds,
         "closed_at": int(closed_at),
         "dropped_open": dropped_open,
+        "integrity_ok": invalid_count == 0 and conflict_count == 0,
+        "invalid_observation_count": invalid_count,
+        "conflicting_timestamp_count": conflict_count,
     }
+
+
+def _completed_fresh_micro_candles(candles, timeframe="5m", now_ts=None):
+    # The shared integrity parser does not re-enable 1m or HTF execution.
+    if str(timeframe or "").lower() != "5m":
+        return [], {"known": False, "fresh": False, "age_seconds": None, "dropped_open": False, "integrity_ok": False}
+    return _completed_fresh_listing_candles(candles, timeframe, now_ts)
 
 
 def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timeframe=None):
@@ -2332,6 +2575,9 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     result["micro_dropped_open_candle"] = bool(freshness.get("dropped_open"))
     result["micro_data_age_seconds"] = freshness.get("age_seconds")
     result["micro_candle_closed_at"] = freshness.get("closed_at")
+    if not freshness.get("integrity_ok"):
+        result["micro_warnings"].append("micro_execution_candles_invalid_or_conflicting")
+        return result
     if not freshness.get("known"):
         result["micro_warnings"].append("micro_execution_timestamp_missing")
         return result
@@ -2349,6 +2595,12 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
         return result
 
     window = clean[-min(len(clean), int(CONFIG["micro_candle_count"])):]
+    if any(right["timestamp"] - left["timestamp"] != 300
+           for left, right in zip(window, window[1:])):
+        # Bar-count windows (pump, streak, volume) describe elapsed 5m time.
+        # Missing intervals must not silently become adjacent observations.
+        result["micro_warnings"].append("micro_execution_history_incomplete")
+        return result
     last = window[-1]
     entry = _to_float(last.get("close"))
     if entry <= 0:
@@ -2395,15 +2647,16 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     avg_upper_wick = sum(_upper_wick_pct(c) for c in recent_3) / max(1, len(recent_3))
     avg_vol_window = window[-25:-5]
     avg_vol = historical_volume_baseline(
-        (_to_float(c.get("volume_usd")) for c in avg_vol_window),
+        (_measured_listing_quote_volume(c) for c in avg_vol_window),
         lookback=20,
         minimum_periods=10,
     )
     recent_vol = historical_volume_baseline(
-        (_to_float(c.get("volume_usd")) for c in recent_3),
+        (_measured_listing_quote_volume(c) for c in recent_3),
         lookback=3,
         minimum_periods=2,
     )
+    volume_available = bool(avg_vol and recent_vol)
     sell_volume = bool(avg_vol and recent_vol and recent_vol >= avg_vol * 1.15)
 
     pump_ref = window[-13]["open"] if len(window) >= 13 else window[0]["open"]
@@ -2461,6 +2714,8 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
     rr_preview = float(preview_geometry["rr_tp1"]) if preview_geometry.get("valid") else 0
 
     warnings = []
+    if not volume_available:
+        warnings.append("micro_volume_missing_or_incomplete")
     if too_early:
         warnings.append("micro_too_early_no_crack")
     if too_late:
@@ -2472,6 +2727,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
 
     trigger_ok = (
         score >= min_score
+        and volume_available
         and not too_early
         and not too_late
         and not still_squeezing
@@ -2498,6 +2754,7 @@ def calculate_micro_crack_trigger(candles, pump_data=None, ticker=None, timefram
         "micro_last_change_pct": round(last_change_pct, 2),
         "micro_avg_upper_wick_pct": round(avg_upper_wick, 1),
         "micro_sell_volume": sell_volume,
+        "micro_volume_available": volume_available,
         "micro_pump_pct": round(micro_pump_pct, 2),
         "micro_bars_since_high": bars_since_high,
         "micro_timeframe": tf,
@@ -2740,7 +2997,16 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     micro_required = bool(CONFIG.get("micro_crack_enabled"))
     micro_execution_ok = (not micro_required) or micro_trigger_ok
     btc_tailwind_risk = bool(pump_data.get("btc_tailwind_risk"))
-    btc_divergence = _to_float(pump_data.get("btc_divergence"))
+    btc_divergence = _to_float(pump_data.get("btc_divergence"), None)
+    btc_context_known = (
+        pump_data.get("btc_context_known") is True
+        and pump_data.get("btc_context_status") == "ok"
+        and _listing_btc_observation_valid(pump_data)
+        and not isinstance(pump_data.get("btc_divergence"), bool)
+        and btc_divergence is not None
+        and not isinstance(pump_data.get("btc_change_pct"), bool)
+        and _to_float(pump_data.get("btc_change_pct"), None) is not None
+    )
     listing_gate_present = "listing_source" in pump_data or "listing_age_hours" in pump_data
     listing_source = str(pump_data.get("listing_source", "") or "").lower()
     listing_age_raw = pump_data.get("listing_age_hours")
@@ -2788,10 +3054,10 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
     risk_ok = risk_pct <= CONFIG["max_signal_risk_pct"]
     btc_tailwind_override = (
         from_ath >= CONFIG["btc_tailwind_min_crack_pct"]
-        or btc_divergence <= CONFIG["btc_tailwind_min_divergence_pct"]
+        or (btc_divergence is not None and btc_divergence <= CONFIG["btc_tailwind_min_divergence_pct"])
         or (micro_trigger_ok and micro_score >= 85 and recent_crack_depth >= 5)
     )
-    btc_context_ok = (not btc_tailwind_risk) or btc_tailwind_override
+    btc_context_ok = btc_context_known and ((not btc_tailwind_risk) or btc_tailwind_override)
     early_crack_ok = (
         (exh_score >= CONFIG["early_crack_entry_score"] or (micro_trigger_ok and micro_score >= CONFIG["micro_min_score"]))
         and early_crack_window_ok
@@ -2847,7 +3113,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         risk_flags.append("early_crack_score_too_low")
     if micro_required and not micro_trigger_ok:
         risk_flags.append("micro_trigger_missing")
-    if not btc_context_ok:
+    if not btc_context_known:
+        risk_flags.append("btc_context_missing")
+    elif not btc_context_ok:
         risk_flags.append("btc_risk_on_wait_for_deeper_crack")
     if listing_info_missing:
         risk_flags.append("listing_info_missing")
@@ -2888,6 +3156,9 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         timing_quality = 2 if safety_ok and exh_score >= CONFIG["exh_watch"] else 1
     elif listing_info_missing:
         timing = "[~] BEOBACHTEN - Listing-Kontext fehlt, keine Short-Mail"
+        timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
+    elif not btc_context_known:
+        timing = "[~] BEOBACHTEN - synchroner BTC-Kontext nicht verfuegbar"
         timing_quality = 2 if exh_score >= CONFIG["exh_watch"] or early_crack_window_ok else 1
     elif not btc_context_ok:
         timing = "[~] BEOBACHTEN - BTC risk-on, erst klare Underperformance/deeper crack abwarten"
@@ -2963,6 +3234,7 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         grade_label = "[X] D — NO TRADE"
 
     tradeability_probe = {
+        "pump_data": pump_data,
         "direction": "SHORT",
         "timing_quality": timing_quality,
         "grade": grade,
@@ -3062,6 +3334,11 @@ def generate_short_signal(symbol, pump_data, exh_score, exh_details, safety_ok, 
         "micro_candle_closed_at": pump_data.get("micro_candle_closed_at"),
         "micro_dropped_open_candle": bool(pump_data.get("micro_dropped_open_candle")),
         "btc_tailwind_risk": btc_tailwind_risk,
+        "btc_context_known": btc_context_known,
+        "btc_context_status": pump_data.get("btc_context_status", "unknown"),
+        "btc_context_source": pump_data.get("btc_context_source"),
+        "btc_context_opened_at": pump_data.get("btc_context_opened_at"),
+        "btc_context_completed_at": pump_data.get("btc_context_completed_at"),
         "btc_context_ok": btc_context_ok,
         "btc_short_context": pump_data.get("btc_short_context", "UNKNOWN"),
         "btc_change_pct": pump_data.get("btc_change_pct"),
@@ -3943,12 +4220,13 @@ def run_new_listing_scanner():
                 )
 
                 if _is_tradeable_short_signal(signal):
-                    # H-15 AUDIT FIX: Nur beim ERSTEN Uebergang zu "signal" mailen
-                    # (bestehender Cooldown). Danach bleibt der Coin in Ueberwachung,
-                    # aber ohne zweites Mail-Signal; die Original-Level bleiben die
-                    # Referenz fuer Invalidation/Expiry.
+                    # Detection is not SMTP acceptance. A failed first publish/
+                    # delivery must not permanently erase a fresh retry candidate.
+                    # The mail layer owns durable acceptance + episode dedupe;
+                    # every retry below has just passed current micro/BTC/safety/
+                    # structure checks, while lifecycle still uses original levels.
+                    repeat_episode = mon_data.get("status") == "signal"
                     if mon_data.get("status") != "signal":
-                        results["signals"].append(entry)
                         mon_data["status"] = "signal"
                         mon_data["signal_at"] = datetime.now(timezone.utc).isoformat()
                         mon_data["signal_direction"] = signal.get("direction", "SHORT")
@@ -3957,6 +4235,18 @@ def run_new_listing_scanner():
                         log.info(f"[-] NLS SHORT SIGNAL: {symbol} — ExhScore {exh_score}, "
                                  f"Pump {pump_data.get('pump_pct', 0):.0f}%, "
                                  f"RR {signal['rr_effective']:.1f}x, Grade {signal['grade']}")
+                    episode_started = _coerce_utc_datetime(mon_data.get("signal_at"))
+                    episode_id = _producer_episode_id(exchange, symbol, episode_started)
+                    if episode_id is not None:
+                        mon_data["producer_episode_id"] = episode_id
+                        entry["producer_episode_id"] = episode_id
+                        entry["producer_episode_started_at"] = episode_started.isoformat()
+                        entry["producer_episode_model"] = "new_listing_episode_v4"
+                        entry["delivery_retry_candidate"] = repeat_episode
+                        signal["producer_episode_id"] = episode_id
+                        signal["producer_episode_started_at"] = episode_started.isoformat()
+                        signal["producer_episode_model"] = "new_listing_episode_v4"
+                        results["signals"].append(entry)
                 elif signal["timing_quality"] >= 2:
                     results["watchlist"].append(entry)
 

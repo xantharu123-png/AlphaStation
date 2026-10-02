@@ -1,7 +1,9 @@
 import api
+from datetime import datetime, timezone
 
 
 def test_crypto_trade_signals_prefers_confirmed_short_over_long_watch():
+    btc_completed = int(datetime.now(timezone.utc).timestamp()) // 3600 * 3600
     long_rows = [{
         "Symbol": "PUMP",
         "trade_signal": "EXPLOSION_ARMED",
@@ -28,6 +30,14 @@ def test_crypto_trade_signals_prefers_confirmed_short_over_long_watch():
         "safety_ok": True,
         "confirmation_ok": True,
         "btc_context_ok": True,
+        "btc_context_known": True,
+        "btc_context_status": "ok",
+        "btc_change_pct": 0.0,
+        "coin_change_pct": -1.0,
+        "btc_divergence": -1.0,
+        "btc_context_source": "binance:BTCUSDT:1H",
+        "btc_context_opened_at": btc_completed - 24 * 3600,
+        "btc_context_completed_at": btc_completed,
         "continuation_risk": False,
         "tp1_missed": False,
         "tp2_missed": False,

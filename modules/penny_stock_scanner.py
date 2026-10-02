@@ -24,6 +24,7 @@ from modules.breakout_warnings import breakout_warning_fields
 from modules.trade_levels import trade_geometry
 from modules.vrvp_levels import calculate_wilder_atr
 from modules.volume_metrics import historical_volume_baseline
+from modules.stock_swing_contract import session_close
 
 
 PENNY_MIN_PRICE = 0.20
@@ -120,6 +121,114 @@ def _timestamp_seconds(value: Any) -> float:
     return timestamp
 
 
+def _penny_daily_prices(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate price evidence without inventing an unknown daily volume."""
+    result = {}
+    for field, alias in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c")):
+        value = raw.get(field, raw.get(alias))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("penny_daily_invalid_price")
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            raise ValueError("penny_daily_invalid_price") from None
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError("penny_daily_invalid_price")
+        result[field] = number
+    if (result["high"] < max(result["open"], result["low"], result["close"])
+            or result["low"] > min(result["open"], result["high"], result["close"])):
+        raise ValueError("penny_daily_invalid_geometry")
+    volume = raw.get("volume", raw.get("v"))
+    if volume is not None:
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)):
+            raise ValueError("penny_daily_invalid_volume")
+        try:
+            volume = float(volume)
+        except (OverflowError, ValueError):
+            raise ValueError("penny_daily_invalid_volume") from None
+        if not math.isfinite(volume) or volume < 0:
+            raise ValueError("penny_daily_invalid_volume")
+    result["volume"] = volume
+    return result
+
+
+def parse_penny_daily_aggregates(payload: Any, *, as_of: datetime) -> List[Dict[str, Any]]:
+    """Validate one complete adjusted daily response against a fixed clock.
+
+    Only completed exchange sessions are consumed. Unknown timestamps,
+    contradictory duplicates and defective closed prices invalidate the series;
+    they must never silently shorten a resistance/volume window. Missing daily
+    volume remains ``None``: prices can still establish resistance, but the
+    volume-baseline consumer must treat that observation as unknown.
+    The request must explicitly ask for adjusted data; a response flag, when
+    present, must confirm it. No provider delay is implicitly added to this
+    live Penny path.
+    """
+    if (not isinstance(as_of, datetime) or as_of.tzinfo is None
+            or as_of.utcoffset() is None):
+        raise ValueError("penny_daily_invalid_clock")
+    if not isinstance(payload, dict):
+        raise ValueError("penny_daily_invalid_payload")
+    if payload.get("status") not in {"OK", "DELAYED"}:
+        raise ValueError("penny_daily_provider_status")
+    if "adjusted" in payload and payload["adjusted"] is not True:
+        raise ValueError("penny_daily_unadjusted")
+    if payload.get("next_url") not in (None, ""):
+        raise ValueError("penny_daily_truncated_history")
+    for field in ("resultsCount", "queryCount"):
+        if field in payload and (type(payload[field]) is not int or payload[field] < 0):
+            raise ValueError("penny_daily_invalid_count")
+    if "results" not in payload:
+        if payload.get("resultsCount") == 0 and payload.get("queryCount", 0) == 0:
+            return []
+        raise ValueError("penny_daily_missing_results")
+    bars = payload["results"]
+    if not isinstance(bars, list):
+        raise ValueError("penny_daily_invalid_results")
+    if "resultsCount" in payload and payload["resultsCount"] != len(bars):
+        raise ValueError("penny_daily_count_mismatch")
+    if "queryCount" in payload and payload["queryCount"] < len(bars):
+        raise ValueError("penny_daily_invalid_count")
+    if not bars and payload.get("queryCount", 0) != 0:
+        raise ValueError("penny_daily_contradictory_empty")
+
+    result = []
+    prior_timestamp = 0
+    prior_raw = None
+    seen_sessions = set()
+    for raw in bars:
+        if not isinstance(raw, dict):
+            raise ValueError("penny_daily_invalid_bar")
+        timestamp = raw.get("t", raw.get("timestamp"))
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            raise ValueError("penny_daily_invalid_timestamp")
+        try:
+            if (not math.isfinite(timestamp) or timestamp <= 10_000_000_000
+                    or int(timestamp) != timestamp):
+                raise ValueError("penny_daily_invalid_timestamp")
+            observed = datetime.fromtimestamp(timestamp / 1000, timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            raise ValueError("penny_daily_invalid_timestamp") from None
+        if timestamp < prior_timestamp:
+            raise ValueError("penny_daily_nonascending_timestamp")
+        if timestamp == prior_timestamp:
+            if raw == prior_raw:
+                continue
+            raise ValueError("penny_daily_conflicting_timestamp")
+        prior_timestamp, prior_raw = timestamp, raw
+        session = observed.astimezone(_NEW_YORK).date().isoformat()
+        if session in seen_sessions:
+            raise ValueError("penny_daily_multiple_session_bars")
+        seen_sessions.add(session)
+        close = session_close(session)
+        if close is None or close > as_of:
+            continue
+        prices = _penny_daily_prices(raw)
+        prices["timestamp"] = int(timestamp)
+        result.append(prices)
+    return result
+
+
 def _completed_bars(
     bars: Sequence[Dict[str, Any]],
     *,
@@ -128,19 +237,24 @@ def _completed_bars(
 ) -> List[Dict[str, float]]:
     """Return sorted, de-duplicated bars whose interval has fully closed."""
     completed: Dict[float, Dict[str, float]] = {}
-    conflicted = set()
-    for item in _valid_bars(bars):
+    for raw in bars or []:
+        if not isinstance(raw, dict):
+            return []  # Unknown observation must not disappear from the path.
+        raw_timestamp = raw.get("timestamp", raw.get("t"))
+        timestamp = _timestamp_seconds(raw_timestamp)
+        if isinstance(raw_timestamp, bool) or timestamp <= 0:
+            return []
+        if timestamp + timeframe_seconds > now_ts:
+            continue  # An open/future observation is not consumed.
+        valid = _valid_bars([raw])
+        if not valid:
+            return []  # Fail this history, never skip a defective closed bar.
+        item = valid[0]
         timestamp = _timestamp_seconds(item.get("timestamp"))
-        if timestamp <= 0 or timestamp + timeframe_seconds > now_ts:
-            continue
         normalized = dict(item)
         normalized["timestamp"] = timestamp
-        if timestamp in conflicted:
-            continue
         if timestamp in completed and completed[timestamp] != normalized:
-            completed.pop(timestamp)
-            conflicted.add(timestamp)
-            continue
+            return []  # Conflicting evidence is a data gap, not a shorter path.
         completed[timestamp] = normalized
     return [completed[key] for key in sorted(completed)]
 
@@ -468,19 +582,36 @@ def _daily_resistance_levels(
     *,
     now_ts: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    data = _valid_bars(daily_bars)
-    if not data or entry <= 0:
+    if not daily_bars or entry <= 0:
         return []
-    # Exclude only a demonstrably incomplete current-day candle. Previously
-    # the final *completed* daily candle was always discarded as well.
-    history = data
-    last_timestamp = _timestamp_seconds(data[-1].get("timestamp"))
-    if last_timestamp > 0 and len(data) > 1:
-        now_value = float(now_ts if now_ts is not None else time.time())
-        today_et = datetime.fromtimestamp(now_value, tz=timezone.utc).astimezone(_NEW_YORK).date()
-        last_day_et = datetime.fromtimestamp(last_timestamp, tz=timezone.utc).astimezone(_NEW_YORK).date()
-        if last_day_et >= today_et:
-            history = data[:-1]
+    # Filter every incomplete/future session before computing any level. The
+    # old data[:-1] removed just one such candle and leaked additional future
+    # highs into the plan. Use actual exchange closes, including early closes.
+    now_value = float(now_ts if now_ts is not None else time.time())
+    history = []
+    previous_timestamp = 0.0
+    for raw in daily_bars:
+        if not isinstance(raw, dict):
+            return []
+        raw_timestamp = raw.get("timestamp", raw.get("t"))
+        timestamp = _timestamp_seconds(raw_timestamp)
+        if isinstance(raw_timestamp, bool) or timestamp <= previous_timestamp:
+            return []
+        previous_timestamp = timestamp
+        try:
+            observed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            close = session_close(observed.astimezone(_NEW_YORK).date().isoformat())
+        except (ValueError, OverflowError, OSError):
+            return []
+        if close is None or close.timestamp() > now_value:
+            continue
+        try:
+            valid = _penny_daily_prices(raw)
+        except ValueError:
+            return []
+        history.append(valid)
+    if not history:
+        return []
     levels: List[Dict[str, Any]] = []
     for lookback, label, weight in ((20, "20D High", 1.6), (60, "60D High", 1.9), (120, "120D High", 2.1)):
         subset = history[-lookback:]

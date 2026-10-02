@@ -43,6 +43,14 @@ def test_nonstock_catalog_and_result_route_publish_unsupported_capability():
 
 def _valid_short_payload():
     micro_closed_at = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    btc_completed = int(datetime.now(timezone.utc).timestamp()) // 3600 * 3600
+    btc_proof = {
+        "btc_context_known": True, "btc_context_status": "ok",
+        "btc_change_pct": 0.0, "coin_change_pct": -1.0, "btc_divergence": -1.0,
+        "btc_context_source": "binance:BTCUSDT:1H",
+        "btc_context_opened_at": btc_completed - 24 * 3600,
+        "btc_context_completed_at": btc_completed,
+    }
     setup = {
         "direction": "SHORT",
         "entry": 1.0,
@@ -55,6 +63,7 @@ def _valid_short_payload():
         "structure_status": "ACCEPT",
     }
     pump = {
+        **btc_proof,
         "current_price": 1.0,
         "pump_pct": 45.0,
         "from_ath_pct": 12.0,
@@ -65,6 +74,7 @@ def _valid_short_payload():
     }
     signal = {
         **setup,
+        **btc_proof,
         "symbol": "TESTUSDT",
         "stop_loss": 1.08,
         "rr_effective": 2.25,
@@ -339,6 +349,11 @@ def test_btc_divergence_preserves_partial_source_provenance(monkeypatch):
          "market_cap": 100_000_000, "total_volume": 10_000_000,
          "price_change_percentage_24h": 15.0, "price_change_percentage_7d_in_currency": 30.0},
     ]
+    # Cache provenance can be partial while these individual observations are
+    # still within the 300-second context budget; do not confuse receipt with
+    # the provider clock or silently remove the partial-source warning.
+    for coin in coins:
+        coin["last_updated"] = (datetime.now(timezone.utc) - timedelta(seconds=180)).isoformat()
 
     monkeypatch.setattr(
         api,

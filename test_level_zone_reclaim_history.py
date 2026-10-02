@@ -12,6 +12,7 @@ from modules.level_zones import (
     build_structure_snapshot,
     evaluate_break_reclaim,
     legacy_level_adapter,
+    _connected_role_history,
 )
 
 
@@ -111,18 +112,23 @@ def test_only_breakout_edge_extension_resets_directional_history(direction, lowe
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_new_disconnected_component_invalidates_earlier_edge_until_late_bridge(direction):
+def test_connected_role_history_resets_new_island_until_late_bridge(direction):
     # The edge itself existed on day 0. A new island on day 1 must still reset
     # proof; looking only for the earliest edge would incorrectly borrow it.
     role = _role(direction)
     edge, other = (100.05, 99.95) if direction == "LONG" else (99.95, 100.05)
-    zone = _zone(_snapshot(direction, [
+    items = [
         _evidence(role, lower=edge),
         _evidence(role, day=1, lower=other),
         _evidence(role, day=2, lower=99.97, upper=100.03),
-    ]))
-    assert zone.break_state == "intact"
-    assert zone.break_reclaim_evidence.zone_confirmed_at == BASE + timedelta(days=2)
+    ]
+    # Local clusters no longer join this three-interval chain. Exercise the
+    # underlying chronology guard directly, preserving its stricter reset
+    # contract if it is ever asked to validate full connected geometry.
+    expanded = [(e, e.midpoint-max((e.upper-e.lower)/2, .02),
+                    e.midpoint+max((e.upper-e.lower)/2, .02)) for e in items]
+    history = _connected_role_history(expanded, min(r[1] for r in expanded), max(r[2] for r in expanded))
+    assert dict((side, at) for side, at, width in history)[direction] == BASE + timedelta(days=2)
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
@@ -152,13 +158,14 @@ def test_opposite_edge_growth_does_not_hide_a_subsequent_failed_close(direction)
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
-def test_late_bridge_between_old_disjoint_members_cannot_backdate_geometry(direction):
+def test_connected_role_history_late_bridge_cannot_backdate_disjoint_geometry(direction):
     role = _role(direction)
     members = [_evidence(role, lower=99.95), _evidence(role, lower=100.05),
                _evidence(role, day=2, lower=99.97, upper=100.03)]
-    zone = _zone(_snapshot(direction, members))
-    assert zone.break_state == "intact"
-    assert zone.break_reclaim_evidence.zone_confirmed_at == BASE + timedelta(days=2)
+    expanded = [(e, e.midpoint-max((e.upper-e.lower)/2, .02),
+                    e.midpoint+max((e.upper-e.lower)/2, .02)) for e in members]
+    history = _connected_role_history(expanded, min(r[1] for r in expanded), max(r[2] for r in expanded))
+    assert dict((side, at) for side, at, width in history)[direction] == BASE + timedelta(days=2)
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

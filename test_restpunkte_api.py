@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import api  # noqa: E402  (Import ist zugleich der Smoke-Test fuer Fix 3)
+from qa_source_helpers import function_source
 
 _HEAVY_ENTRY_SCANNERS = ("bi_long", "bi_short", "biotech")
 
@@ -54,9 +55,9 @@ def test_only_scheduler_skips_manual_scan_routes_untouched():
     POST /api/scan (run_scan) dispatcht bi_long weiterhin direkt via
     _run_scan_safe und kennt den Skip-Helper bewusst NICHT.
     """
-    scheduler_src = inspect.getsource(api._scheduler_loop)
+    scheduler_src = function_source(api, "_scheduler_loop")
     assert "_api_scheduler_should_skip" in scheduler_src
-    manual_src = inspect.getsource(api.run_scan)
+    manual_src = function_source(api, "run_scan")
     assert "_api_scheduler_should_skip" not in manual_src
     assert '"bi_long"' in manual_src and "_run_scan_safe" in manual_src
     assert api._api_scheduler_should_skip("new_listing") is False
@@ -92,7 +93,7 @@ def test_grade_ladder_thresholds():
 def test_crypto_explosion_uses_central_ladder():
     """Das Inline-Duplikat (S>=88 else A>=80 else B) ist durch die zentrale
     Funktion ersetzt; identisch, weil explosion_score<70 vorher None liefert."""
-    src = inspect.getsource(api._score_crypto_explosion_candidate)
+    src = function_source(api, "_score_crypto_explosion_candidate")
     assert "_score_grade_for_value" in src
     assert '>= 88 else "A"' not in src
     assert "if explosion_score < 70" in src  # Gate, das die Aequivalenz sichert

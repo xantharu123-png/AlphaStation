@@ -222,7 +222,7 @@ def test_h8_cryptocom_candles_fall_back_to_v_times_close_when_vv_missing(monkeyp
     fake = {"result": {"data": [
         {"t": 1, "o": "1", "h": "2", "l": "0.5", "c": "1.5", "v": "100", "vv": "250"},
         {"t": 2, "o": "1", "h": "2", "l": "0.5", "c": "2.0", "v": "100"},
-        {"t": 3, "o": "1", "h": "2", "l": "0.5", "c": "3.0", "v": "10", "vv": 0},
+        {"t": 3, "o": "1", "h": "4", "l": "0.5", "c": "3.0", "v": "10", "vv": 0},
     ]}}
     monkeypatch.setattr(nls, "_api_get", lambda *a, **k: fake)
 
@@ -231,7 +231,15 @@ def test_h8_cryptocom_candles_fall_back_to_v_times_close_when_vv_missing(monkeyp
 
     assert by_ts[1]["volume_usd"] == 250.0           # vv vorhanden -> vv
     assert by_ts[2]["volume_usd"] == 100 * 2.0       # vv fehlt -> v * close
-    assert by_ts[3]["volume_usd"] == 10 * 3.0        # vv == 0 -> v * close
+    # Quote turnover is sum(price_i * volume_i), not last_close * sum(volume_i).
+    # The latter remains a labelled display approximation only; measured zero
+    # must never be replaced by that positive approximation.
+    assert by_ts[1]["volume_usd_measured"] is True
+    assert by_ts[2]["volume_usd_measured"] is False
+    assert nls._measured_listing_quote_volume(by_ts[2]) is None
+    assert by_ts[3]["volume_usd"] == 0.0
+    assert by_ts[3]["volume_usd_measured"] is True
+    assert nls._measured_listing_quote_volume(by_ts[3]) == 0.0
 
 
 def test_h8_cryptocom_ticker_falls_back_to_v_times_price(monkeypatch):
@@ -244,6 +252,7 @@ def test_h8_cryptocom_ticker_falls_back_to_v_times_price(monkeypatch):
     ticker = nls.fetch_cryptocom_ticker("X_USDT")
 
     assert ticker["volume_usd_24h"] == 1000 * 2.5
+    assert ticker["volume_usd_24h_measured"] is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

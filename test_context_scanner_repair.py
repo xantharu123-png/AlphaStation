@@ -196,12 +196,18 @@ def bear_dependencies(monkeypatch):
 
 def test_inverse_etf_unknowns_sort_without_crashing_or_inventing_zero(monkeypatch):
     bear_dependencies(monkeypatch)
+    clock(monkeypatch, datetime(2026, 9, 23, 20, 15, tzinfo=timezone.utc))
     monkeypatch.setattr(api, "INVERSE_ETFS", {"SHORT": ("Short index", "SPY"), "KNOWN": ("3x Short index", "QQQ"), "OTHER": ("Short index", "SPY")})
     def get(url, **kw):
         if "/aggs/" not in url:
             return Response(status=503)
         count = 6 if "/KNOWN/" in url else 2
-        return Response({"results": [{"c": 12 if index == 0 else 10, "v": 1000000} for index in range(count)]})
+        days = ["2026-09-23", "2026-09-22", "2026-09-21", "2026-09-18", "2026-09-17", "2026-09-16"]
+        rows = [{"t": int(datetime.fromisoformat(day).replace(tzinfo=ZoneInfo("America/New_York")).timestamp()*1000),
+                 "o": 12 if index == 0 else 10, "h": 13 if index == 0 else 11,
+                 "l": 11 if index == 0 else 9, "c": 12 if index == 0 else 10, "v": 1000000}
+                for index, day in enumerate(days[:count])]
+        return Response({"status": "OK", "adjusted": True, "results": rows})
     monkeypatch.setattr(api, "rate_limited_get", get)
     saved = []
     monkeypatch.setattr(api, "save_cache_file", lambda path, rows: saved.extend(rows))
@@ -271,11 +277,17 @@ def test_biotech_required_technical_provider_failure_is_not_zero_score(monkeypat
 def test_biotech_valid_technical_history_keeps_existing_score_contract(monkeypatch, count):
     bars = technical_bars(count)
     monkeypatch.setattr(scanners, "rate_limited_get", lambda *a, **kw: Response({"results": bars}))
-    result = scanners._biotech_technical_score("offline", "BIO")
+    result = scanners._biotech_technical_score("offline", "BIO", as_of=NOW)
     if count < 21:
         assert result["technical_score"] == 0 and result["details"] == {}
     else:
-        assert result == scanners._compute_biotech_technical_from_bars(bars)
+        assert result["details"]["analysis_as_of"] == NOW.isoformat()
+        assert result["details"]["analysis_session"] == api.stock_swing.completed_sessions(NOW, 1)[0]
+        scored_result = {**result, "details": {
+            key: value for key, value in result["details"].items()
+            if key not in {"analysis_as_of", "analysis_session"}
+        }}
+        assert scored_result == scanners._compute_biotech_technical_from_bars(bars)
 
 
 def test_biotech_technical_error_propagates_through_actual_full_scan_owner(monkeypatch):

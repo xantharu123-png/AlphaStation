@@ -233,7 +233,8 @@ _BIOTECH_NEGATION_AFTER_RE = re.compile(
 
 def _biotech_clause_prefix(text, start):
     # A negation in another sentence/headline must not reverse this event.
-    return re.split(r"[.!?;\n]", text[max(0, start - 80):start])[-1]
+    return re.split(r"[.!?;\n]|\b(?:but|however|whereas|nevertheless)\b",
+                    text[max(0, start - 80):start])[-1]
 
 # K-1a: Roman→Arabisch-Normalisierung fuer Phasen (Reihenfolge: iii vor ii vor i).
 _BIOTECH_ROMAN_PHASES = [
@@ -1783,7 +1784,9 @@ def _bi_background_scan(poly_key, direction="long", candidates=None):
 
                 candidate["Volumen"] = int(_last_vol)
                 candidate["AvgVolumen"] = int(_avg_vol_20)
-                candidate["RVOL"] = round(_last_vol / _avg_vol_20, 2) if _avg_vol_20 > 0 else 0
+                # This value feeds the grade and mail gates. Display rounding
+                # must not turn 0.696 into the 0.70 minimum confirmation.
+                candidate["RVOL"] = _last_vol / _avg_vol_20 if _avg_vol_20 > 0 else 0
                 candidate["RVOL_Basis"] = "completed_signal_vs_prior_20_sessions"
                 candidate["signal_bar_date"] = _session_bars[-1].get("date")
                 if swing_mode:
@@ -2631,13 +2634,32 @@ def _check_clinical_trials(company_name, ticker):
                 "catalyst_readouts": [], "trials": [], "phase_summary": {}, "total_active": 0}
 
 
-def _biotech_technical_score(poly_key, ticker):
+def _biotech_technical_score(poly_key, ticker, *, as_of=None):
     """
     Technische Analyse für Biotech: Unusual Volume, Akkumulation, Price Action.
     Returns: dict mit technical_score (max 20), details
     """
     try:
-        end_date = datetime.now()
+        analysis_as_of = as_of if as_of is not None else datetime.now(dt.timezone.utc)
+        if (not isinstance(analysis_as_of, dt.datetime) or analysis_as_of.tzinfo is None
+                or analysis_as_of.utcoffset() is None):
+            raise ScannerDataError("scan_data_invalid", {"stage": "biotech_technical_clock"})
+        analysis_as_of = analysis_as_of.astimezone(dt.timezone.utc)
+        if stock_swing.enabled():
+            completed_through = stock_swing.completed_sessions(analysis_as_of, 1)[0]
+        else:
+            # Other data plans need no implicit Starter delay, but
+            # this Biotech score still consumes only completed daily sessions.
+            session_day = analysis_as_of.astimezone(stock_swing.NY).date()
+            for _ in range(40):
+                closed = stock_swing.session_close(session_day.isoformat())
+                if closed is not None and closed <= analysis_as_of:
+                    completed_through = session_day.isoformat()
+                    break
+                session_day -= timedelta(days=1)
+            else:
+                raise ScannerDataError("scan_data_invalid", {"stage": "biotech_technical_calendar"})
+        end_date = analysis_as_of.astimezone(stock_swing.NY)
         start_date = end_date - timedelta(days=90)
         url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
         resp = rate_limited_get(url, params={"adjusted": "true", "sort": "asc", "apiKey": poly_key}, timeout=10)
@@ -2654,7 +2676,8 @@ def _biotech_technical_score(poly_key, ticker):
         # may omit the optional array. It is an excluded symbol, not an outage.
         # Do not use .get('results', []): malformed/unauthorized envelopes must
         # still fail, including contradictory counts and truncated responses.
-        bars = parse_bi_daily_aggregates(payload)
+        bars = parse_bi_daily_aggregates(
+            payload, completed_through=completed_through, as_of=analysis_as_of)
         normalized_bars = []
         for raw_bar in bars:
             if not isinstance(raw_bar, dict):
@@ -2679,7 +2702,7 @@ def _biotech_technical_score(poly_key, ticker):
             except (TypeError, ValueError, OverflowError):
                 pass
             normalized_bars.append(bar)
-        bars = _bi_strip_partial_bar(normalized_bars)
+        bars = _bi_strip_partial_bar(normalized_bars, as_of=analysis_as_of)
         if len(bars) < 21:
             return {"technical_score": 0, "details": {}, "bar_count": len(bars),
                     "data_status": "no_history" if not bars else "insufficient_history"}
@@ -2687,6 +2710,8 @@ def _biotech_technical_score(poly_key, ticker):
         result = _compute_biotech_technical_from_bars(bars)
         if result.get("data_status") == "invalid_ohlcv":
             raise ScannerDataError("scan_data_invalid")
+        result["details"]["analysis_as_of"] = analysis_as_of.isoformat()
+        result["details"]["analysis_session"] = completed_through
         return result
     except BIAggregateDataError as exc:
         raise ScannerDataError("scan_data_invalid", diagnostics={
@@ -2798,13 +2823,92 @@ def _news_text_blob(news_data):
     for flag in news_data.get("negative_flags", [])[:10]:
         if isinstance(flag, dict):
             parts.append(flag.get("flag", "") or "")
-    return " ".join(parts).lower()
+    # Headlines are independent semantic scopes. A negation in one headline
+    # cannot erase a real risk in the next headline or in an explicit flag.
+    return _biotech_normalize_text("\n".join(parts))
 
 
 def _has_any_keyword(text, keywords):
     # N-d (10.06.): Lookaround-Wortgrenzen + optionales Plural-s —
     # "safety concern" matcht jetzt auch "safety concerns" (vorher \b-Miss).
-    return any(re.search(r"(?<!\w)" + re.escape(keyword) + r"s?(?!\w)", text) for keyword in keywords)
+    return any(_biotech_negative_match(text, keyword) for keyword in keywords)
+
+
+def _biotech_event_result(news_data, calendar_data=None):
+    """One negation-aware result interpretation for full and quick refresh."""
+    positives = {
+        "positive results", "primary endpoint met", "statistically significant",
+        "complete remission", "overall survival", "fda approved", "fda approval",
+        "breakthrough therapy", "accelerated approval", "fast track",
+        "pivotal trial success", "topline results positive", "met primary",
+        "exceeded expectations", "superior efficacy", "approval granted",
+        "nda approved", "bla approved", "marketing authorization",
+        "complete response", "durable response", "objective response rate",
+        "favorable safety", "well tolerated", "recommended for approval",
+    }
+    negatives = {
+        "clinical hold", "fda rejection", "complete response letter",
+        "trial failure", "missed endpoint", "failed to meet", "did not meet",
+        "discontinued", "terminated", "negative results", "adverse events",
+        "safety concern", "partial clinical hold", "refuse to file",
+        "not approved", "withdrawal", "halted", "futility", "did not achieve",
+        "failed to demonstrate", "serious adverse", "dose limiting toxicity",
+        "lack of efficacy",
+    }
+    positive, negative = False, bool(news_data.get("negative_flags"))
+    for article in (news_data.get("news") or [])[:10]:
+        if not isinstance(article, dict):
+            continue
+        text = _biotech_normalize_text(
+            (article.get("title") or "") + ". " + (article.get("description") or ""))
+        negative = negative or _has_any_keyword(text, negatives)
+        # 'Complete response letter' is a regulatory rejection, not remission.
+        # Remove only that phrase from the positive view; other genuine
+        # positive outcomes in the same article still produce a mixed result.
+        positive_text = re.sub(r"\bcomplete response letters?\b", "", text)
+        if not (_BIOTECH_FORWARD_RE.search(text) and _BIOTECH_FORWARD_RESULT_RE.search(text)):
+            positive = positive or any(_biotech_positive_match(positive_text, key) for key in positives)
+    if negative:
+        return " Gemischt" if positive else " Negativ"
+    if positive:
+        return " Positiv"
+    best = news_data.get("best_catalyst") or {}
+    if best:
+        keyword = (best.get("keyword") or "").lower()
+        definitive = {
+            "fda approved", "fda approval", "fda clearance", "breakthrough therapy",
+            "fast track", "priority review", "accelerated approval", "orphan drug",
+            "emergency use", "eua granted", "positive results", "primary endpoint met",
+            "statistically significant", "overall survival", "progression-free survival",
+            "complete remission", "topline results", "topline data", "late-breaking",
+            "licensing agreement", "partnership", "collaboration", "acquisition target",
+            "buyout", "merger", "label expansion", "expanded access", "compassionate use",
+            "patent granted",
+        }
+        if keyword in definitive:
+            return " Positiv"
+        forward = {
+            "pdufa", "nda accepted", "bla accepted", "adcom", "advisory committee",
+            "fda decision", "fda action date", "phase 3 results", "phase 3 data",
+            "phase iii", "pivotal trial", "primary endpoint", "interim analysis",
+            "interim data", "phase 2 results", "phase ii data", "ind filed",
+            "ind accepted", "clinical trial initiation", "patient enrollment",
+            "first patient dosed", "dosing initiated", "preclinical", "phase 1",
+            "phase i", "proof of concept", "patent filed", "ip protection",
+            "data presentation", "conference presentation", "manuscript published", "peer review",
+        }
+        articles = [item for item in (news_data.get("news") or []) if isinstance(item, dict)]
+        pos = sum(item.get("sentiment") == "positive" for item in articles)
+        neg = sum(item.get("sentiment") == "negative" for item in articles)
+        if keyword in forward:
+            return " Risiko" if neg > pos and neg >= 2 else " Ausstehend"
+        return " Positiv" if pos > neg else " Risiko" if neg > pos else " Ausstehend"
+    result = " Catalyst" if news_data.get("catalysts") else "—"
+    if calendar_data and calendar_data.get("bpiq_available") and calendar_data.get("catalyst_readouts"):
+        category = calendar_data["catalyst_readouts"][0].get("category")
+        return {"OVERDUE": "⏰ Überfällig", "IMMINENT": "⏳ Ausstehend",
+                "UPCOMING": "📅 Geplant", "LATER": "📋 Später"}.get(category, result)
+    return " Ausstehend" if news_data.get("forward_catalyst") else result
 
 
 def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
@@ -2910,6 +3014,11 @@ def _calculate_biotech_catalyst_edge(trial_data, news_data, tech_data, details):
         "fda rejection", "refuse to file", "safety concern", "adverse events",
         "discontinued", "terminated", "going concern", "delisting",
     }
+    # The semantic news classifier also emits verb-form labels (e.g. approval
+    # denied / endpoint not met). Consume those very labels instead of losing
+    # a confirmed failure merely because this risk layer uses a shorter list.
+    regulatory_keywords.update(label for label, _, _ in BIOTECH_NEGATIVE_PATTERNS
+                               if label not in {"public offering", "dilution", "shares plunge"})
     if _has_any_keyword(news_blob, regulatory_keywords):
         regulatory_risk += 35
         risk_flags.append("regulatory_or_trial_failure_risk")
@@ -3069,6 +3178,7 @@ def _biotech_background_scan(poly_key):
     Hintergrund-Scan: Findet alle Biotech-Aktien mit FDA-Katalysatoren.
     Läuft als Thread — schreibt Progress in /tmp/.
     """
+    run_as_of = datetime.now(dt.timezone.utc)
     try:
         _biotech_clear_stop()  # Altes Stop-Signal löschen
         _biotech_progress_write("running", checked=0, total=0, hits=0, detail="Lade Biotech-Universum...")
@@ -3159,7 +3269,7 @@ def _biotech_background_scan(poly_key):
             analysis_attempts += 1
             try:
                 # A) News + Catalyst Scan
-                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5, as_of=run_as_of)
                 catalyst_score = news_data["catalyst_score"]
 
                 # B) News Momentum
@@ -3213,7 +3323,7 @@ def _biotech_background_scan(poly_key):
                         trial_data["pipeline_score"] = min(20, int(bpiq_data["readout_score"] * 20 / 15))
 
                 # E) Technical Score
-                tech_data = _biotech_technical_score(poly_key, ticker)
+                tech_data = _biotech_technical_score(poly_key, ticker, as_of=run_as_of)
                 history_status = tech_data.get("data_status")
                 if history_status in history_exclusions:
                     history_exclusions[history_status] += 1
@@ -3382,125 +3492,9 @@ def _biotech_background_scan(poly_key):
                         if _fb_hl:
                             _readout_lbl += f" — {_fb_hl}"
 
-                # ── Event Result Sentiment: Positiv/Negativ/Ausstehend ──
-                # V71-FIX: Alte Logik nutzte News-Publikationsdatum als Event-Datum
-                # → fast alles "in der Vergangenheit" → fast alles " Unbekannt"
-                # Neue Logik: Catalyst-Keyword selbst bestimmt das Ergebnis:
-                #   - "fda approved" = Positiv (Ergebnis liegt vor)
-                #   - "pdufa" = Ausstehend (Event angekündigt)
-                #   - negative_flags = Negativ
-                #   - Polygon Sentiment als Tiebreaker
-                _event_result = ""
-                _all_catalysts = news_data.get("catalysts", [])
-                _neg_flags_ev = news_data.get("negative_flags", [])
-
-                # Schritt 1: News-Titel nach expliziten Result-Keywords durchsuchen
-                _has_positive_result = False
-                _has_negative_result = False
-                _positive_result_kws = {
-                    "positive results", "primary endpoint met", "statistically significant",
-                    "complete remission", "overall survival", "fda approved", "fda approval",
-                    "breakthrough therapy", "accelerated approval", "fast track",
-                    "pivotal trial success", "topline results positive", "met primary",
-                    "exceeded expectations", "superior efficacy", "approval granted",
-                    "nda approved", "bla approved", "marketing authorization",
-                    "complete response", "durable response", "objective response rate",
-                    "favorable safety", "well tolerated", "recommended for approval",
-                }
-                _negative_result_kws = {
-                    "clinical hold", "fda rejection", "complete response letter",
-                    "trial failure", "missed endpoint", "failed to meet",
-                    "did not meet", "discontinued", "terminated", "negative results",
-                    "adverse events", "safety concern", "partial clinical hold",
-                    "refuse to file", "not approved", "withdrawal", "halted",
-                    "futility", "did not achieve", "failed to demonstrate",
-                    "serious adverse", "dose limiting toxicity", "lack of efficacy",
-                }
-                for _nws in news_data.get("news", [])[:10]:
-                    _nws_title = (_nws.get("title", "") or "").lower()
-                    _nws_desc = (_nws.get("description", "") or "").lower() if isinstance(_nws, dict) else ""
-                    _nws_combined = _nws_title + " " + _nws_desc
-                    for _pk in _positive_result_kws:
-                        if _pk in _nws_combined:
-                            _has_positive_result = True
-                            break
-                    for _nk in _negative_result_kws:
-                        if _nk in _nws_combined:
-                            _has_negative_result = True
-                            break
-
-                # Auch negative_flags auswerten
-                if _neg_flags_ev:
-                    _has_negative_result = True
-
-                # Schritt 2: Ergebnis bestimmen — priorisiert
-                if _has_negative_result and not _has_positive_result:
-                    _event_result = " Negativ"
-                elif _has_positive_result and not _has_negative_result:
-                    _event_result = " Positiv"
-                elif _has_positive_result and _has_negative_result:
-                    _event_result = " Gemischt"
-                elif best_cat:
-                    # Schritt 3: Kein explizites Result-Keyword gefunden
-                    # → Nutze den Catalyst-Keyword-Typ um Ergebnis abzuleiten
-                    _best_kw = (best_cat.get("keyword", "") or "").lower()
-
-                    # Keywords die ein DEFINITIVES positives Ergebnis anzeigen
-                    _definitive_positive_kws = {
-                        "fda approved", "fda approval", "fda clearance",
-                        "breakthrough therapy", "fast track", "priority review",
-                        "accelerated approval", "orphan drug", "emergency use",
-                        "eua granted", "positive results", "primary endpoint met",
-                        "statistically significant", "overall survival",
-                        "progression-free survival", "complete remission",
-                        "topline results", "topline data", "late-breaking",
-                        "licensing agreement", "partnership", "collaboration",
-                        "acquisition target", "buyout", "merger",
-                        "label expansion", "expanded access", "compassionate use",
-                        "patent granted",
-                    }
-
-                    # Keywords die ein BEVORSTEHENDES Event anzeigen (noch kein Ergebnis)
-                    _forward_looking_kws = {
-                        "pdufa", "nda accepted", "bla accepted", "adcom",
-                        "advisory committee", "fda decision", "fda action date",
-                        "phase 3 results", "phase 3 data", "phase iii",
-                        "pivotal trial", "primary endpoint", "interim analysis",
-                        "interim data", "phase 2 results", "phase ii data",
-                        "ind filed", "ind accepted", "clinical trial initiation",
-                        "patient enrollment", "first patient dosed", "dosing initiated",
-                        "preclinical", "phase 1", "phase i", "proof of concept",
-                        "patent filed", "ip protection", "data presentation",
-                        "conference presentation", "manuscript published", "peer review",
-                    }
-
-                    if _best_kw in _definitive_positive_kws:
-                        _event_result = " Positiv"
-                    elif _best_kw in _forward_looking_kws:
-                        # Forward-looking: Polygon-Sentiment als Indikator nutzen
-                        _ev_news = news_data.get("news", [])
-                        _ev_pos = sum(1 for n in _ev_news if n.get("sentiment") == "positive")
-                        _ev_neg = sum(1 for n in _ev_news if n.get("sentiment") == "negative")
-                        if _ev_neg > _ev_pos and _ev_neg >= 2:
-                            _event_result = " Risiko"
-                        else:
-                            _event_result = " Ausstehend"
-                    else:
-                        # Unbekanntes Keyword — Polygon-Sentiment als Fallback
-                        _ev_news = news_data.get("news", [])
-                        _ev_pos = sum(1 for n in _ev_news if n.get("sentiment") == "positive")
-                        _ev_neg = sum(1 for n in _ev_news if n.get("sentiment") == "negative")
-                        if _ev_pos > _ev_neg:
-                            _event_result = " Positiv"
-                        elif _ev_neg > _ev_pos:
-                            _event_result = " Risiko"
-                        else:
-                            _event_result = " Ausstehend"
-                elif _all_catalysts:
-                    # Hat Catalysts aber kein best_cat (nach Decay alle auf 0)
-                    _event_result = " Catalyst"
-                else:
-                    _event_result = "—"
+                # Shared with quick refresh; publication time is never an
+                # event date and negated risks cannot return via substrings.
+                _event_result = _biotech_event_result(news_data, bpiq_data)
 
                 # ── V2.6: BPIQ-Daten für Catalyst_Date + Event_Result nutzen ──
                 # Wenn BPIQ echte FDA-Dates hat, IMMER diese bevorzugen (statt News-Datum)
@@ -3510,7 +3504,6 @@ def _biotech_background_scan(poly_key):
                     _top_bpiq = bpiq_data["catalyst_readouts"][0]
                     _bpiq_cat_date = _top_bpiq.get("catalyst_date_text", "")
                     _bpiq_days = _top_bpiq.get("days_until")
-                    _bpiq_category = _top_bpiq.get("category", "")
                     _bpiq_stage = _top_bpiq.get("full_label", "")
                     _bpiq_drug = _top_bpiq.get("drug_name", "")[:25]
 
@@ -3525,17 +3518,6 @@ def _biotech_background_scan(poly_key):
                         _bpiq_event_label = f"{_bpiq_stage}"
                         if _bpiq_drug:
                             _bpiq_event_label += f" — {_bpiq_drug}"
-
-                    # Event_Result aus BPIQ-Kategorie ableiten (wenn News kein Result hatte)
-                    if _event_result in ("—", " Catalyst", ""):
-                        if _bpiq_category == "OVERDUE":
-                            _event_result = "⏰ Überfällig"
-                        elif _bpiq_category == "IMMINENT":
-                            _event_result = "⏳ Ausstehend"
-                        elif _bpiq_category == "UPCOMING":
-                            _event_result = "📅 Geplant"
-                        elif _bpiq_category == "LATER":
-                            _event_result = "📋 Später"
 
                     # Catalyst-Label mit BPIQ anreichern wenn besser
                     if _bpiq_event_label and (not catalyst_label or catalyst_label == " Pipeline"):
@@ -3686,6 +3668,7 @@ def _biotech_quick_scan(poly_key):
     - Keine Technical Score Neuberechnung (ändert sich nicht stündlich)
     - NUR: Neue News scannen → Catalyst Score + Momentum aktualisieren
     """
+    run_as_of = datetime.now(dt.timezone.utc)
     try:
         # Lade bestehende Ergebnisse
         existing = _biotech_cache_load(max_age_hours=24)  # Alte Daten als Basis
@@ -3751,7 +3734,7 @@ def _biotech_quick_scan(poly_key):
             try:
                 _in_catalyst_calendar = ticker.upper() in catalyst_calendar_tickers
                 # NUR News neu scannen
-                news_data = _scan_biotech_news(poly_key, ticker, limit=5)
+                news_data = _scan_biotech_news(poly_key, ticker, limit=5, as_of=run_as_of)
                 catalyst_score = news_data["catalyst_score"]
                 momentum_data = _biotech_news_momentum(news_data["news"])
                 momentum_score = momentum_data["momentum_score"]
@@ -3784,11 +3767,35 @@ def _biotech_quick_scan(poly_key):
                         old["BPIQ_Available"] = True
                         old["BPIQ_Catalysts"] = bpiq_data.get("catalyst_readouts", [])[:5]
                         old["Pipeline_Score"] = min(20, int(bpiq_data.get("readout_score", 0) * 20 / 15))
+                    else:
+                        # A fresh unavailable calendar response cannot inherit
+                        # yesterday's positive provider evidence (e.g. expired
+                        # subscription). Keep news/technical analysis operating,
+                        # but clear every calendar-derived score and event.
+                        old.update(BPIQ_Available=False, Pipeline_Score=0,
+                                   Readout_Score=0, Readout_Label="",
+                                   Readout_Details=[], BPIQ_Catalysts=[])
 
                     # Best Catalyst aktualisieren
                     best_cat = news_data.get("best_catalyst")
-                    old["Catalyst"] = best_cat["label"] if best_cat else old.get("Catalyst", " Pipeline")
-                    old["Headline"] = best_cat["headline"] if best_cat else old.get("Headline", "")
+                    old["Catalyst"] = (best_cat["label"] if best_cat else
+                                       bpiq_data.get("readout_label") or " Pipeline")
+                    old["Headline"] = best_cat["headline"] if best_cat else ""
+                    old["Catalyst_Keyword"] = best_cat.get("keyword", "") if best_cat else ""
+                    old["Catalyst_Date"] = best_cat.get("date", "") if best_cat else ""
+                    if bpiq_data.get("bpiq_available") and bpiq_data.get("catalyst_readouts"):
+                        date_text = bpiq_data["catalyst_readouts"][0].get("catalyst_date_text", "")
+                        if date_text and date_text != "TBA":
+                            old["Catalyst_Date"] = date_text
+                    old["Event_Result"] = _biotech_event_result(news_data, bpiq_data)
+                    risk_data = _biotech_risk_score(
+                        market_cap_m=old.get("MCap_M", 0), shares_m=old.get("Shares_M", 0),
+                        negative_flags=news_data.get("negative_flags", []),
+                        price=(old.get("Tech_Details") or {}).get("price", old.get("Preis", 0)),
+                        catalyst_score=catalyst_score,
+                    )
+                    old["Risk_Score"] = risk_data["risk_score"]
+                    old["Risk_Details"] = risk_data.get("risk_details", [])
 
                     # Score neu berechnen mit alten Pipeline/Technical/Risk + neuen News
                     old["Score"] = _calculate_biotech_catalyst_score(
@@ -3865,6 +3872,7 @@ def _biotech_quick_scan(poly_key):
                 else:
                     # Neuer Ticker — minimal-Eintrag (wird beim nächsten Full Scan vervollständigt)
                     if catalyst_score >= 15 and momentum_score >= 6 or bpiq_data.get("bpiq_available"):
+                        best_cat = news_data.get("best_catalyst") or {}
                         _readout_score = bpiq_data.get("readout_score", 0)
                         _pipeline_score = min(20, int(_readout_score * 20 / 15))
                         _score = _calculate_biotech_catalyst_score(
@@ -3884,14 +3892,15 @@ def _biotech_quick_scan(poly_key):
                             "News_Contract_Version": BIOTECH_NEWS_CONTRACT_VERSION,
                             "News_Publication_Exclusions": news_data.get("publication_exclusions", {}),
                             "Grade": _grade, "Risk_Flag": "",
-                            "Catalyst": bpiq_data.get("readout_label") or news_data.get("best_catalyst", {}).get("label", " Catalyst"),
+                            "Catalyst": bpiq_data.get("readout_label") or best_cat.get("label", " Catalyst"),
                             "Catalyst_Score": catalyst_score, "Pipeline_Score": _pipeline_score,
                             "Readout_Score": _readout_score,
                             "Readout_Label": bpiq_data.get("readout_label", ""),
                             "Readout_Details": bpiq_data.get("catalyst_readouts", [])[:3],
                             "Technical_Score": 0, "Risk_Score": 5, "Momentum_Score": momentum_score,
                             "Preis": 0, "MCap_M": 0, "Shares_M": 0, "RVOL": 0, "Float_Cat": "UNKNOWN",
-                            "Headline": news_data.get("best_catalyst", {}).get("headline", ""),
+                            "Headline": best_cat.get("headline", ""),
+                            "Event_Result": _biotech_event_result(news_data, bpiq_data),
                             "Phase3": 0, "Phase2": 0, "Phase1": 0, "Active_Trials": 0,
                             "Chart": " Neu", "Chart_Health": 5, "Drawdown": 0, "Selloff_Reason": "",
                             "Trials": [], "News": news_data.get("news", [])[:5],
@@ -3938,9 +3947,15 @@ def _compute_biotech_technical_from_bars(bars):
     normalized = []
     try:
         for raw in bars or []:
-            bar = {key: float(raw.get(key, raw.get(alias, 0)) or 0)
-                   for key, alias in (("o", "open"), ("h", "high"), ("l", "low"),
-                                      ("c", "close"), ("v", "volume"))}
+            if not isinstance(raw, dict):
+                raise ValueError("invalid_ohlcv")
+            bar = {}
+            for key, alias in (("o", "open"), ("h", "high"), ("l", "low"),
+                               ("c", "close"), ("v", "volume")):
+                value = raw.get(key, raw.get(alias))
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("invalid_ohlcv")
+                bar[key] = float(value)
             if (not all(math.isfinite(value) for value in bar.values())
                     or min(bar[key] for key in ("o", "h", "l", "c")) <= 0
                     or bar["h"] < max(bar["o"], bar["c"], bar["l"])
@@ -3953,7 +3968,7 @@ def _compute_biotech_technical_from_bars(bars):
                          (("o", "open"), ("h", "high"), ("l", "low"),
                           ("c", "close"), ("v", "volume"))}
             normalized.append({**raw, **bar, **canonical})
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"technical_score": 0, "rvol": 0, "details": {}, "data_status": "invalid_ohlcv"}
     bars = normalized
     if len(bars) < 21:
@@ -3974,7 +3989,7 @@ def _compute_biotech_technical_from_bars(bars):
 
     # 1. Unusual Volume with Direction Check (max 6 pts) — FIX 2: Volume + Direction
     rvol = last_vol / avg_vol_20 if last_vol > 0 and avg_vol_20 else 0.0
-    details["RVOL"] = round(rvol, 2)
+    details["RVOL"] = rvol
     # FIX 1: Track RVOL direction for bonus calculation
     details["rvol_up_day"] = closes[-1] > closes[-2] if len(closes) >= 2 else True
     if rvol >= 3.0:
@@ -4020,7 +4035,7 @@ def _compute_biotech_technical_from_bars(bars):
     range_90d = high_90d - low_90d
     if range_90d > 0:
         pos_90d = (current_price - low_90d) / range_90d * 100
-        details["pos_90d"] = round(pos_90d, 1)
+        details["pos_90d"] = pos_90d
         if pos_90d >= 80:
             tech_score += 4
         elif pos_90d >= 60:
@@ -4032,7 +4047,7 @@ def _compute_biotech_technical_from_bars(bars):
     if len(closes) >= 10:
         recent_closes = closes[-10:]
         range_10d = (max(recent_closes) - min(recent_closes)) / max(0.01, min(recent_closes)) * 100
-        details["range_10d%"] = round(range_10d, 1)
+        details["range_10d%"] = range_10d
         if range_10d <= 5:
             tech_score += 3
             details["consolidation"] = " Tight Consolidation"
@@ -4146,7 +4161,7 @@ def _compute_biotech_technical_from_bars(bars):
         _candle_bonus -= 2  # Nur bearisch = Vorsicht
     tech_score += max(-2, _candle_bonus)
 
-    return {"technical_score": min(20, max(0, tech_score)), "rvol": round(rvol, 2),
-            "details": details, "technical_model": "biotech_completed_bar_v2"}
+    return {"technical_score": min(20, max(0, tech_score)), "rvol": rvol,
+            "details": details, "technical_model": "biotech_completed_bar_v3"}
 
 

@@ -9,7 +9,7 @@ import pytest
 from modules.bi_diagnostics import create_bi_diagnostics, observe_bi_analysis
 from modules.patterns import (
     BI_STOCK_CONTRACT_VERSION, BI_STOCK_INDICATORS, BI_STOCK_REQUIRED_GREEN,
-    BreakoutAnalysisResult, analyze_breakout_imminent,
+    BreakoutAnalysisResult, analyze_breakout_imminent, detect_liquidity_levels,
 )
 
 
@@ -491,7 +491,7 @@ _SYNTHETIC_BARS = {
 }
 
 
-@pytest.mark.parametrize("direction,expected_score,expected_green", [("long", 93, 16), ("short", 113, 17)])
+@pytest.mark.parametrize("direction,expected_score,expected_green", [("long", 84, 16), ("short", 104, 17)])
 def test_real_unmocked_analysis_counts_causal_evidence_on_fixed_synthetic_ohlcv(direction, expected_score, expected_green):
     bars = [dict(zip(("open", "high", "low", "close", "volume"), row))
             for row in _SYNTHETIC_BARS[direction]]
@@ -507,6 +507,19 @@ def test_real_unmocked_analysis_counts_causal_evidence_on_fixed_synthetic_ohlcv(
     assert result.green_count == expected_green
     assert result.available_count == 20
     assert result[1] == expected_score
+    # The real equal-high/low pool is exactly ON the 15-bar range boundary.
+    # Rounding it to four decimals used to move it outside that boundary,
+    # creating nine unearned Stop-Hunt points (14 instead of 5). The evidence
+    # stays green; neither direction's 17/20 acceptance is relaxed here.
+    liquidity = detect_liquidity_levels(bars)
+    if direction == "long":
+        assert liquidity["nearest_buyside"]["level"] == max(bar["high"] for bar in bars[-15:])
+    else:
+        assert liquidity["nearest_sellside"]["level"] == min(bar["low"] for bar in bars[-15:])
+    assert result.indicator_checks[16]["points"] == 5
+    assert result.indicator_checks[16]["passed"] is True
+    points = [item["points"] for item in result.indicator_checks]
+    assert result[1] == sum(points) - min(points[8], points[13])
     assert result.indicator_contract_ok is True
     assert not result.hard_gate_failures
     d = _diagnostics(direction=direction)

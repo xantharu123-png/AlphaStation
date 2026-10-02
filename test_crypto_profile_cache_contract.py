@@ -104,7 +104,7 @@ def test_new_listing_v2_is_incompatible_even_with_new_volume_contract(monkeypatc
     row["new_listing_short_cache_version"] = 2
     _stub_result_paths(monkeypatch, [row], api._crypto_profile_cache_metadata(new_listing=True))
     assert api.get_new_listing_results()["data"] == []
-    assert api._NEW_LISTING_SHORT_CACHE_VERSION == 3
+    assert api._NEW_LISTING_SHORT_CACHE_VERSION == 4
 
 
 def test_early_final_revalidator_rejects_legacy_before_shared_gate(monkeypatch):

@@ -8,6 +8,8 @@ API restart or overlapping scheduler tick cannot lose or double-claim work.
 from __future__ import annotations
 
 import re
+import math
+from datetime import date
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +44,19 @@ def _valid_entry(entry: Any) -> bool:
     ticker = str(entry.get("ticker") or "").strip().upper()
     row = entry.get("row")
     try:
+        from modules.stock_swing_contract import session_close
+        confirmation = entry.get("confirmation_date")
+        target = entry.get("target_session_date")
+        if (not isinstance(confirmation, str) or not isinstance(target, str)
+                or date.fromisoformat(confirmation).isoformat() != confirmation
+                or date.fromisoformat(target).isoformat() != target
+                or confirmation >= target or session_close(confirmation) is None
+                or session_close(target) is None):
+            return False
+        required = (entry.get("breakout_level"), entry.get("expires_at"))
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) or value <= 0 for value in required):
+            return False
         lease_until = entry.get("lease_until")
         generation = entry.get("generation")
         return bool(
@@ -53,11 +68,12 @@ def _valid_entry(entry: Any) -> bool:
             and float(entry.get("expires_at") or 0) > 0
             and (
                 lease_until in (None, "")
-                or float(lease_until) >= 0
+                or (not isinstance(lease_until, bool) and isinstance(lease_until, (int, float))
+                    and math.isfinite(lease_until) and lease_until >= 0)
             )
             and (
                 generation in (None, "")
-                or int(generation) >= 0
+                or (type(generation) is int and generation >= 0)
             )
         )
     except (TypeError, ValueError, OverflowError):
@@ -195,12 +211,9 @@ def finish_claim(
     lease_owner = str(owner or "")
     if not key or not lease_owner:
         return False
-    try:
-        expected_generation = (
-            None if generation is None else int(generation)
-        )
-    except (TypeError, ValueError, OverflowError):
+    if generation is not None and (type(generation) is not int or generation < 0):
         return False
+    expected_generation = generation
     changed = False
 
     def _mutate(raw: dict) -> dict:

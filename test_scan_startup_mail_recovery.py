@@ -56,10 +56,10 @@ def test_biotech_full_scan_excludes_empty_symbol_without_losing_siblings(monkeyp
         "status": "OK", "resultsCount": 0, "queryCount": 0,
     }))
     real_technical = scanners._biotech_technical_score
-    def technical(key, ticker):
+    def technical(key, ticker, *, as_of=None):
         if ticker == "OTHER":
             return {"technical_score": 20, "details": {"price": 20., "chart_health": 10}}
-        return real_technical(key, ticker)
+        return real_technical(key, ticker, as_of=as_of)
     monkeypatch.setattr(scanners, "_biotech_technical_score", technical)
     scored = []
     def risk(*a, **kw):

@@ -71,7 +71,7 @@ def test_gap_score_is_not_capped_by_unrelated_long_high_breakout_rules(
     name = _gap_fixture(monkeypatch, direction, metrics=metrics)
     rows = api._strategy_scan_wrapper(name, send_email=False)
     assert len(rows) == 1
-    assert rows[0]["Gap_Pct"] == (3.5 if direction == "Long" else -3.5)
+    assert rows[0]["Gap_Pct"] == pytest.approx(3.5 if direction == "Long" else -3.5)
     assert rows[0]["Change_Pct"] == (5.0 if direction == "Long" else -5.0)
     assert rows[0]["base_score"] == rows[0]["score"] == 90
     assert rows[0]["Momentum_Breakout_Type"] == (
@@ -105,7 +105,7 @@ def test_completed_daily_gap_ignores_unrelated_extended_trade_price(monkeypatch,
     assert len(rows) == 1
     row = rows[0]
     assert row["price"] == (105. if direction == "Long" else 95.)
-    assert row["Gap_Pct"] == (3.5 if direction == "Long" else -3.5)
+    assert row["Gap_Pct"] == pytest.approx(3.5 if direction == "Long" else -3.5)
     assert row["Change_Pct"] == (5. if direction == "Long" else -5.)
     assert row["Extended_Hours"] is False
     assert row["scan_price_source"] == swing.SOURCE

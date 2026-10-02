@@ -2794,8 +2794,9 @@ function getRelativeTime(timestamp, isFuture = false) {
 function getScanTiming(schedulerStatus, scanKey) {
     if (!schedulerStatus?.scans?.[scanKey]) return { lastScan: null, nextScan: null };
     const scan = schedulerStatus.scans[scanKey];
+    const lastStamp = scannerTimestamp(scan.last_run);
     return {
-        lastScan: scan.last_run ? getRelativeTime(scan.last_run) : null,
+        lastScan: lastStamp !== null && lastStamp <= Date.now() ? getRelativeTime(scan.last_run) : null,
         nextScan: scan.next_run ? getRelativeTime(scan.next_run, true) : null,
     };
 }
@@ -3033,7 +3034,7 @@ function SchedulerStatus({ status }) {
 }
 
 // ScanControl Component
-function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null, progressOverride = null,
+function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = null, schedulerStatus = null, scanKey = null, progressOverride = null, resultInfo = null,
     controlFeed = null, canControl = null }) {
     const inheritedAdmin = React.useContext(ScannerAdminContext);
     canControl = canControl === null ? inheritedAdmin === true : canControl === true;
@@ -3049,7 +3050,12 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
     };
     // Auto-derive lastScan/nextScan from schedulerStatus if scanKey provided
     const timing = scanKey ? getScanTiming(schedulerStatus, scanKey) : { lastScan, nextScan };
-    const displayLast = timing.lastScan || lastScan;
+    // A scheduler owner's completed round is not the timestamp of the rows
+    // currently displayed (manual and automatic stock owners can differ).
+    const resultTiming = scannerResultTiming(resultInfo);
+    const displayLast = resultTiming ? resultTiming.timestamp ? getRelativeTime(resultTiming.timestamp) : 'Zeitpunkt nicht bestätigt'
+        : timing.lastScan || lastScan;
+    const displayLastLabel = resultTiming?.label || 'Owner-Abschluss';
     const displayNext = timing.nextScan || nextScan;
 
     // Check if scheduler is currently running this scan in the background
@@ -3095,7 +3101,7 @@ function ScanControl({ onScan, isScanning = false, lastScan = null, nextScan = n
                         {controlAction.label}
                     </button>
                     <div className="flex flex-col gap-1 text-sm text-gray-500 sm:flex-row sm:items-center sm:gap-4">
-                        {displayLast && <div>Letzter: {displayLast}</div>}
+                        {displayLast && <div>{displayLastLabel}: {displayLast}</div>}
                         {displayNext && !scheduleNotice && <div className="text-sm text-gray-500">Nächster: {displayNext}</div>}
                     </div>
                 </div>
@@ -7122,6 +7128,16 @@ function scannerCacheIsStale(info) {
         || (info?.warnings || []).some(w => /^(Cache alt:|Strategie-Cache ist alt)/.test(String(w)));
 }
 
+function scannerResultTiming(info, now = Date.now()) {
+    if (!info || typeof info !== 'object' || Array.isArray(info)) return null;
+    const stamp = scannerTimestamp(info.cached_at);
+    const label = info.partial === true ? 'Zwischenstand' : info.scan_error || info.scan_running === true ? 'Gespeicherter Altstand'
+        : scannerCacheIsStale(info) ? 'Ergebnisstand (veraltet)' : 'Ergebnisstand';
+    // Do not turn a future/invalid timestamp into "gerade eben". This label
+    // describes the snapshot's age, never quote freshness or scan success.
+    return { label, timestamp: stamp !== null && Number.isFinite(now) && stamp <= now ? info.cached_at : null };
+}
+
 function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = null) {
     if (expectedRunId && data?.scan_run_id && data.scan_run_id !== expectedRunId) return 'superseded';
     const control = scannerControlSnapshot(data);
@@ -7132,6 +7148,8 @@ function scannerPollOutcome(data, previousStamp, sawRunning, expectedRunId = nul
     if (scannerLivePartialTimeout(data, expectedRunId)) return 'running';
     if (data?.scan_error) return 'error';
     if (data?.scan_running || data?.partial) return 'running';
+    if (data?.data_quality?.cache_status === 'unknown' && data?.data_quality?.cache_stale_reason === 'gap_cache_session_unverified')
+        return 'unverified_final';
     const diag = data?.diagnostics || {};
     const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
     if (coverage === 'incomplete') return 'error';
@@ -7196,6 +7214,8 @@ function scannerEvidenceState({ info, loading, running, error, hasLoaded, count,
             : 'Scan laeuft. Noch kein bestaetigter Zwischenstand oder fertiger neuer Scan.' };
     if (loading) return { tone: 'loading', text: 'Ergebnisstand wird geladen; die angezeigte Anzahl ist noch nicht bestaetigt.' };
     if (!hasLoaded || scannerTimestamp(info?.cached_at) === null) return { tone: 'missing', text: 'Noch kein abgeschlossener Ergebnisstand vorhanden. Daraus folgt nicht, dass es keine Signale gibt.' };
+    if (info?.data_quality?.cache_status === 'unknown' && info?.data_quality?.cache_stale_reason === 'gap_cache_session_unverified')
+        return { tone: 'warning', text: 'Gap-Ergebnisstand noch nicht bestätigt.' };
     const coverage = (diag.attempt_diagnostics || diag.funnel || diag).coverage;
     if (coverage === 'incomplete') return { tone: 'warning', text: 'Der letzte Scan war unvollstaendig. Angezeigte Daten sind kein vollstaendig geprueftes neues Ergebnis.' };
     if (stale) return { tone: 'stale', text: 'Ergebnisstand ist veraltet. Bitte einen neuen Scan abwarten oder starten.' };
@@ -7377,7 +7397,10 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         const controller = new AbortController();
         readAbortRef.current = controller;
         const serial = ++readSerialRef.current;
-        setLoading(true);
+        // Background reads do not invalidate a loaded snapshot. Keep its
+        // rows, count and stale/error evidence visible while confirming it.
+        const displayedStamp = scannerTimestamp(snapshot.scopeKey === scopeKey ? snapshot.info?.cached_at : null);
+        setLoading(!hasLoaded || displayedStamp === null || displayedStamp > Date.now());
         try {
             const res = await fetch(resultsUrl, { signal: controller.signal });
             let data = null;
@@ -7504,7 +7527,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
                 if (outcome === 'error') setError(scannerPublicFailure(200, { scan_error: data.scan_error || 'scan_data_incomplete' }));
                 if (outcome === 'missing_final') setError('Scan beendet, aber kein neuer finaler Ergebnisstand verfuegbar. Kein bestaetigter Nulltreffer-Scan.');
                 if (outcome === 'superseded') setError('Inzwischen wird ein anderer Scanlauf gemeldet. Der angeforderte Abschluss ist nicht bestaetigt; Status erneut laden.');
-                if (outcome === 'unverified_final') setNotice('Ein neuer leerer Ergebnisstand liegt vor, aber vollstaendige Pruefdetails fehlen. Kein belegter erfolgreicher Nulltreffer-Scan.');
+                if (outcome === 'unverified_final') setNotice('Ergebnisstand noch nicht bestätigt. Datenprüfung offen.');
                 return;
             }
             // BI regularly needs more than 30 minutes. A frontend observation
@@ -7652,7 +7675,9 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         };
     }, [scopeKey, resultsUrl]);
 
-    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null, schedulerState?.last_attempt_at || null, schedulerState?.run_id || null, schedulerState?.control?.state || null, schedulerState?.schedule || null]);
+    // A moving next-run/calendar forecast is not new result or worker evidence.
+    // In particular, an overdue next_eligible_at can move at every status GET.
+    const schedulerRevision = JSON.stringify([scopeKey, schedulerState?.last_run || null, !!schedulerState?.running, schedulerState?.scan_error || null, schedulerState?.last_attempt_at || null, schedulerState?.run_id || null, schedulerState?.control?.state || null]);
     useEffect(() => {
         const previous = schedulerSeenRef.current;
         schedulerSeenRef.current = schedulerRevision;
@@ -7860,7 +7885,7 @@ function ScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => {}
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey}
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={scannerKey} resultInfo={scanInfo}
                 controlFeed={marketType === 'stocks' && !specialKey ? feed : null} canControl={canControl} progressOverride={selectedProgress} />
 
             <LiveScanStatus
@@ -8043,7 +8068,7 @@ function BIScannerTab({ onSelectTicker, scanCache = {}, updateScanCache = () => 
                 </div>
             </div>
 
-            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'}
+            <ScanControl onScan={handleScan} isScanning={isScanning} schedulerStatus={schedulerStatus} scanKey={direction === 'long' ? 'bi_long' : 'bi_short'} resultInfo={liveInfo}
                 controlFeed={feed} canControl={canControl} progressOverride={selectedProgress} />
 
             <ScannerEvidence feed={feed} kind="bi" running={!!schedulerStatus?.scans?.[scannerKey]?.running} />

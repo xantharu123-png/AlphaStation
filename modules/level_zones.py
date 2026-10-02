@@ -21,6 +21,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 UTC = timezone.utc
+LEVEL_ZONE_MODEL_VERSION = "causal_level_zones_v2"
+DIRECTIONAL_LEVEL_MODEL_VERSION = "directional_level_zones_v2"
 _CLOSE_TIME_KEYS = ("close_time", "close_timestamp", "end_time", "end", "T")
 _OPEN_TIME_KEYS = ("open_time", "timestamp", "time", "ts", "t")
 
@@ -361,7 +363,7 @@ class StructureSnapshot:
     atr_by_timeframe: Mapping[str, float]
     completed_bar_counts: Mapping[str, int]
     quality_flags: Tuple[str, ...] = ()
-    model: str = "causal_level_zones_v1"
+    model: str = LEVEL_ZONE_MODEL_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -395,7 +397,7 @@ class DirectionalStructure:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "model": "directional_level_zones_v1",
+            "model": DIRECTIONAL_LEVEL_MODEL_VERSION,
             "entry": self.entry,
             "direction": self.direction,
             "as_of": _iso(self.snapshot.as_of),
@@ -977,9 +979,13 @@ def build_level_zones(
 
     ``spread`` is an absolute price distance.  The adaptive half-width is the
     maximum of the supplied evidence width, two ticks, 0.75 spreads and the
-    configured ATR fraction. Membership and bounds depend only on evidence and
-    those market-noise inputs, never on the current quote. The quote classifies
-    the finished zone; it cannot split, clip, or move its invalidation boundary.
+    configured ATR fraction. All expanded members must share a local price
+    intersection: pairwise adjacent overlap is not enough to join a chain of
+    distant levels. This bounds a cluster's union by twice its widest member
+    interval without imposing an outcome-dependent width or clipping evidence.
+    Membership and bounds depend only on evidence and those market-noise inputs,
+    never on the current quote. The quote classifies the finished zone; it cannot
+    split, clip, or move its invalidation boundary.
     """
     reference = _safe_float(reference_price)
     if reference is None or reference <= 0:
@@ -1019,6 +1025,7 @@ def build_level_zones(
     for group in (structural_rows, reference_rows):
         members: List[Tuple[LevelEvidence, float, float]] = []
         cluster_lower = cluster_upper = 0.0
+        common_upper = 0.0
 
         def flush() -> None:
             nonlocal members, cluster_lower, cluster_upper
@@ -1126,14 +1133,21 @@ def build_level_zones(
             if not members:
                 members = [row]
                 cluster_lower, cluster_upper = row[1], row[2]
-            elif row[1] <= cluster_upper:
+                common_upper = row[2]
+            elif row[1] <= common_upper:
+                # Rows are sorted by their lower edge. Requiring this new edge
+                # below every previous upper edge keeps one shared local price
+                # in the intersection; transitive overlap alone could swallow
+                # several ATRs of unrelated historical supports/resistances.
                 members.append(row)
                 cluster_lower = min(cluster_lower, row[1])
                 cluster_upper = max(cluster_upper, row[2])
+                common_upper = min(common_upper, row[2])
             else:
                 flush()
                 members = [row]
                 cluster_lower, cluster_upper = row[1], row[2]
+                common_upper = row[2]
         flush()
     return tuple(sorted(zones, key=lambda zone: (zone.lower, zone.upper, zone.zone_id)))
 

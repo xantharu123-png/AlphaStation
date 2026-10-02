@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
 def _finite_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if isinstance(value, bool):
+        return default
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if math.isnan(result) or math.isinf(result):
         return default
@@ -34,54 +36,104 @@ def aggregate_regular_session_4h_bars(
     timezone_et: Any,
     *,
     limit: int = 24,
+    as_of: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Aggregate Polygon 30-minute bars into regular-session execution bars.
 
-    The US cash session is 6.5 hours, so it is represented as one full 4-hour
-    bar (09:30-13:30 ET) and one 2.5-hour closing bar. The closing bar is still
-    relevant for execution because it captures late-session rejection risk.
+    Normal cash sessions have a 09:30-13:30 ET bar and a 2.5-hour closing
+    segment. Exchange holidays and early closes use the shared calendar.
+    Completion requires every distinct, valid 30-minute source slot and a
+    closed segment at ``as_of``; a duplicate cannot stand in for a missing slot.
+    A forming segment is retained only as explicitly partial timing context.
     """
-    buckets: Dict[Any, List[Dict[str, Any]]] = {}
+    from modules.stock_swing_contract import NY, session_close
+
+    cutoff = as_of if as_of is not None else datetime.now(timezone.utc)
+    if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
+        raise ValueError("stock_4h_as_of_requires_timezone")
+    cutoff = cutoff.astimezone(timezone.utc)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("stock_4h_invalid_limit")
+    if not isinstance(raw_bars, (list, tuple)):
+        raise ValueError("stock_4h_invalid_30m_response")
+    buckets: Dict[Any, Dict[datetime, Dict[str, Any]]] = {}
+    session_bounds: Dict[Any, Any] = {}
     for bar in raw_bars or []:
         if not isinstance(bar, dict):
-            continue
+            raise ValueError("stock_4h_invalid_30m_bar")
         timestamp_ms = _finite_float(bar.get("t"))
-        if timestamp_ms is None:
+        if timestamp_ms is None or timestamp_ms <= 0 or not timestamp_ms.is_integer():
+            raise ValueError("stock_4h_invalid_30m_timestamp")
+        try:
+            opened = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            raise ValueError("stock_4h_invalid_30m_timestamp") from None
+        # Irrelevant future/closed-session data cannot contaminate a causal
+        # prefix (nor does its provisional OHLC need to be interpreted).
+        if opened >= cutoff:
             continue
-        local_dt = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone_et)
-        minutes = local_dt.hour * 60 + local_dt.minute
-        if local_dt.weekday() >= 5 or minutes < 570 or minutes >= 960:
+        local_dt = opened.astimezone(NY)
+        day = local_dt.date()
+        if day not in session_bounds:
+            closed = session_close(day.isoformat())
+            opening = datetime.combine(day, datetime.min.time(), tzinfo=NY).replace(hour=9, minute=30)
+            session_bounds[day] = (opening, closed)
+        opening, closed = session_bounds[day]
+        if closed is None or opened < opening or opened >= closed:
             continue
-        bucket_index = 0 if minutes < 810 else 1
-        buckets.setdefault((local_dt.date(), bucket_index), []).append(bar)
+        offset_seconds = (opened - opening).total_seconds()
+        if offset_seconds % (30 * 60):
+            raise ValueError("stock_4h_30m_off_grid")
+        values = {key: _finite_float(bar.get(key)) for key in ("o", "h", "l", "c", "v")}
+        if (any(value is None for value in values.values())
+                or min(values[key] for key in ("o", "h", "l", "c")) <= 0
+                or values["v"] < 0
+                or values["h"] < max(values["o"], values["c"])
+                or values["l"] > min(values["o"], values["c"])):
+            raise ValueError("stock_4h_invalid_30m_ohlcv")
+        flag_keys = ("closed", "is_closed", "complete", "completed", "final", "is_final",
+                     "partial", "is_partial", "partial_source_bar")
+        if any(key in bar and not isinstance(bar[key], bool) for key in flag_keys):
+            raise ValueError("stock_4h_invalid_30m_completion")
+        source_partial = (
+            opened + timedelta(minutes=30) > cutoff
+            or any(bar.get(key) is False for key in flag_keys[:6])
+            or any(bar.get(key) is True for key in flag_keys[6:])
+        )
+        bucket_index = int(offset_seconds // (4 * 60 * 60))
+        bucket = buckets.setdefault((day, bucket_index), {})
+        candidate = dict(values, partial=source_partial)
+        if opened in bucket and bucket[opened] != candidate:
+            raise ValueError("stock_4h_conflicting_duplicate_30m")
+        bucket[opened] = candidate
 
     aggregated: List[Dict[str, Any]] = []
-    for (_session_date, bucket_index), chunk in sorted(buckets.items(), key=lambda item: item[0]):
-        chunk = sorted(chunk, key=lambda item: _finite_float(item.get("t"), 0.0) or 0.0)
-        if not chunk:
-            continue
-        open_price = _finite_float(chunk[0].get("o"))
-        close = _finite_float(chunk[-1].get("c"))
-        highs = [_finite_float(item.get("h")) for item in chunk]
-        lows = [_finite_float(item.get("l")) for item in chunk]
-        if open_price is None or close is None or any(value is None for value in highs + lows):
-            continue
-        high = max(float(value) for value in highs if value is not None)
-        low = min(float(value) for value in lows if value is not None)
-        if open_price <= 0 or close <= 0 or high < max(open_price, close) or low > min(open_price, close):
-            continue
-        expected_count = 8 if bucket_index == 0 else 5
+    for (day, bucket_index), slot_map in sorted(buckets.items()):
+        opening, closed = session_bounds[day]
+        segment_start = opening + timedelta(hours=4 * bucket_index)
+        segment_end = min(segment_start + timedelta(hours=4), closed)
+        expected_count = int((segment_end - segment_start).total_seconds() // (30 * 60))
+        expected_slots = {segment_start + timedelta(minutes=30 * index) for index in range(expected_count)}
+        ordered = [slot_map[key] for key in sorted(slot_map)]
+        missing = len(expected_slots - set(slot_map))
+        partial = missing > 0 or segment_end > cutoff or any(item["partial"] for item in ordered)
+        closed_iso = segment_end.astimezone(timezone.utc).isoformat()
         aggregated.append({
-            "timestamp": chunk[0].get("t"),
-            "open": float(open_price),
-            "high": high,
-            "low": low,
-            "close": float(close),
-            "volume": sum(_finite_float(item.get("v"), 0.0) or 0.0 for item in chunk),
-            "source_bar_count": len(chunk),
-            "partial_source_bar": len(chunk) < expected_count,
+            "timestamp": int(segment_start.timestamp() * 1000),
+            "open": ordered[0]["o"],
+            "high": max(item["h"] for item in ordered),
+            "low": min(item["l"] for item in ordered),
+            "close": ordered[-1]["c"],
+            "volume": sum(item["v"] for item in ordered),
+            "source_bar_count": len(ordered),
+            "expected_source_bar_count": expected_count,
+            "missing_source_bar_count": missing,
+            "closed_at": closed_iso,
+            "close_time": closed_iso,
+            "is_closed": not partial,
+            "partial_source_bar": partial,
         })
-    return aggregated[-max(1, int(limit or 24)):]
+    return aggregated[-limit:]
 
 
 def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -117,7 +169,14 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
             "close": float(close),
             "volume": float(volume),
             "timestamp": raw.get("timestamp", raw.get("time", raw.get("t"))),
+            "partial": bool(raw.get("partial_source_bar", raw.get("partial", False))),
         })
+
+    latest_partial = cleaned[-1] if cleaned and cleaned[-1]["partial"] else None
+    # An open or incomplete 4H segment cannot positively confirm a reclaim.
+    # Its adverse current price is considered below, but historical structure
+    # and confirmation use only genuinely completed source coverage.
+    cleaned = [item for item in cleaned if not item["partial"]]
 
     if len(cleaned) < 8:
         return {
@@ -256,12 +315,13 @@ def stock_swing_4h_execution_state(bars: List[Dict[str, Any]]) -> Dict[str, Any]
         "Swing_4H_Rejection_Close_Pos": round(float(rejection["close_position"]), 3),
         "Swing_4H_Rejection_Range_Ratio": round(float(rejection["range_ratio"]), 2),
         "Swing_4H_Rejection_Volume_Ratio": round(float(rejection["volume_ratio"]), 2),
-        "Swing_4H_Reclaim_Level": round(reclaim_level, 6),
-        "Swing_4H_Rejection_Low": round(float(rejection["rejection_low"]), 6),
+        "Swing_4H_Reclaim_Level": reclaim_level,
+        "Swing_4H_Rejection_Low": float(rejection["rejection_low"]),
         "Swing_4H_Rejection_Bars_Ago": len(cleaned) - 1 - int(rejection["index"]),
         "Swing_4H_Failed_Breakout": bool(rejection["failed_breakout"]),
     }
-    if cleaned[-1]["close"] < reclaim_level * 0.997:
+    if (cleaned[-1]["close"] < reclaim_level * 0.997
+            or latest_partial and latest_partial["close"] < reclaim_level * 0.997):
         state["Swing_4H_Execution_Status"] = "WAIT_RECLAIM"
         state["Swing_4H_Execution_Reason"] = (
             "failed_4h_breakout_not_reclaimed"
@@ -422,10 +482,12 @@ def stock_swing_4h_short_execution_state(bars: List[Dict[str, Any]]) -> Dict[str
     state: Dict[str, Any] = {
         **base_state,
         "Swing_Short_4H_Post_Parabolic": True,
-        "Swing_Short_4H_Base_High": round(float(best["base_high"]), 6),
-        "Swing_Short_4H_Base_Low": round(base_floor, 6),
-        "Swing_Short_4H_Recent_Swing_High": round(recent_high, 6),
-        "Swing_Short_4H_Stop_Floor": round(stop_floor, 6),
+        "Swing_Short_4H_Base_High": float(best["base_high"]),
+        "Swing_Short_4H_Base_Low": base_floor,
+        "Swing_Short_4H_Recent_Swing_High": recent_high,
+        # This value feeds the executable stop ceil. Display precision must
+        # not move the real invalidation just above a tick onto that tick.
+        "Swing_Short_4H_Stop_Floor": stop_floor,
         "Swing_Short_4H_Run_Pct": round(float(best["run_pct"]), 2),
         "Swing_Short_4H_Base_Width_Pct": round(float(best["base_width_pct"]), 2),
         "Swing_Short_4H_Base_Hold_Ratio": round(float(best["hold_ratio"]), 3),

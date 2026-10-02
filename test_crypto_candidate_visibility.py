@@ -16,7 +16,8 @@ def _early(**changes):
         "trade_decision": "NO_TRADE", "signal_quality": "no_trade",
         "execution_trigger_ok": False, "alertable_crypto": False,
         "live_rr_ratio": 2.2, "distance_to_entry_r": 0.1,
-        "btc_context": {"tailwind": True, "btc_24h": 0.2, "btc_7d": 1.0},
+        "btc_context": {"tailwind": True, "btc_24h": 0.2, "btc_7d": 1.0,
+                        "known": True, "data_status": "ok", "observed_at": api.time.time()},
         "native_plan_status": "unavailable", "native_plan_reason": "no_structural_invalidation",
         "risk_flags": ["trade_health_no_trade"],
     }

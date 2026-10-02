@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import api
 from modules.biotech_news_contract import BIOTECH_NEWS_CONTRACT_VERSION
@@ -15,6 +16,8 @@ def test_early_mover_signal_only_shows_scored_candidates_and_confirmed_trades():
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.1,
         "btc_context": {
+            "known": True,
+            "observed_at": time.time(),
             "tailwind": True,
             "allows_long": True,
             "btc_24h": 0.2,

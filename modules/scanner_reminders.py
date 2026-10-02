@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 
 from modules import stock_swing_contract as swing
+from modules.level_zones import LEVEL_ZONE_MODEL_VERSION
 
 MODE = "structure_1d"
 
@@ -41,7 +42,7 @@ def anchor_from_row(row, *, ticker, direction, condition, now, zone_id=None):
     """Freeze one exact zone from a trusted, latest completed scanner snapshot."""
     now = instant(now)
     snapshot = row.get("level_structure") or row.get("Level_Structure") or {}
-    if (not isinstance(snapshot, dict) or snapshot.get("model") != "causal_level_zones_v1"
+    if (not isinstance(snapshot, dict) or snapshot.get("model") != LEVEL_ZONE_MODEL_VERSION
             or str(snapshot.get("symbol") or "").upper() != ticker
             or snapshot.get("asset_class") != "stock" or snapshot.get("horizon") != "swing"
             or int((snapshot.get("completed_bar_counts") or {}).get("1D", 0)) < 1):

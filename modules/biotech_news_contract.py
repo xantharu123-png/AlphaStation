@@ -1,6 +1,8 @@
 """Version the news evidence, independently of cache write/enrichment time."""
 
-BIOTECH_NEWS_CONTRACT_VERSION = "biotech-news-v2"
+# v3 unifies negation-aware risk interpretation and drops unavailable calendar
+# scores during quick refresh. Old rows must undergo a fresh producer pass.
+BIOTECH_NEWS_CONTRACT_VERSION = "biotech-news-v3"
 
 
 def biotech_news_contract_valid(row):

@@ -49,11 +49,12 @@ def test_orb_requires_three_distinct_aligned_opening_intervals():
 
 
 def test_turtle_volume_is_completed_not_projected_and_bear_clock_is_explicit():
-    turtle = inspect.getsource(api._turtle_scan_wrapper)
+    from qa_source_helpers import function_source
+    turtle = function_source(api, "_turtle_scan_wrapper")
     assert "completed_polygon_bars" in turtle
     assert "_project_us_equity_rvol(rvol_raw)" not in turtle
     assert '"completed_signal_session"' in turtle
-    bear = inspect.getsource(api._bear_scan_wrapper)
+    bear = function_source(api, "_bear_scan_wrapper")
     assert '_is_extended_hours = _bear_session in ("Pre-Market", "After-Hours")' in bear
 
 

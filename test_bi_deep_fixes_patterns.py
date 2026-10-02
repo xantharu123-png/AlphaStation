@@ -285,17 +285,25 @@ def test_m2_ob_near_vs_far_hit():
 
 
 def test_m2_textbook_reaches_3_fires():
-    """Echte Mehrquellen-Akkumulation erreicht weiterhin >= 3 fires
-    (Volumen-Komplex=1 + ADX/Resilience/OB/Liq-mit-Naehe)."""
-    best = 0
-    for seed in range(15):
-        bars = gen_textbook_accumulation(seed=seed, base=30, range_pct=3.0, dryup=0.30,
-                                         accum_bias=2.8, hl_drift=0.5)[-30:]
-        iv, sc, mx, det, conf, gr, fires, hits = analyze_breakout_imminent(bars, direction="long")
-        best = max(best, fires)
-        if fires >= 3:
-            break
-    assert best >= 3, f"Lehrbuch-Setup erreicht keine 3 fires mehr (max {best}) — Dedupe zu hart"
+    """A fixed synthetic witness has three independently evidenced sources.
+
+    The old random-seed search assumed that at least one of seeds 0..14 had an
+    active liquidity pool after the causal sweep check. That is not a rule of
+    accumulation. Seed 22 explicitly has volume flow, a nearby unmitigated OB
+    and an unswept pool strictly beyond the range, without changing BI 17/20.
+    """
+    bars = gen_textbook_accumulation(seed=22, base=30, range_pct=3.0, dryup=0.30,
+                                     accum_bias=2.8, hl_drift=0.5)[-30:]
+    result = analyze_breakout_imminent(bars, direction="long")
+    details = result[3]
+    assert any("OBV-Divergenz" in detail for detail in details)
+    assert any("Inst.-Akkumulation" in detail for detail in details)
+    assert any("M-2 Dedup" in detail for detail in details)
+    assert any("OB nahe Breakout-Level" in detail for detail in details)
+    assert any("Stop-Hunt Potential" in detail for detail in details)
+    assert result.indicator_checks[14]["passed"] is True
+    assert result.indicator_checks[16]["passed"] is True
+    assert result[6] == 3  # flow once + OB once + active liquidity once
 
 
 # ====================================================================

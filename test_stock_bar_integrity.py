@@ -65,9 +65,13 @@ def test_biotech_live_and_offline_use_identical_distribution_scoring(monkeypatch
             return {"results": raw}
     monkeypatch.setattr(scanners, "rate_limited_get", lambda *a, **k: Response())
     canonical = [{"open": b["o"], "high": b["h"], "low": b["l"], "close": b["c"], "volume": b["v"]} for b in raw]
-    live = scanners._biotech_technical_score("offline", "TEST")
+    last_session = datetime.fromtimestamp(raw[-1]["t"] / 1000, timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    as_of = scanners.stock_swing.session_close(last_session) + timedelta(minutes=15)
+    live = scanners._biotech_technical_score("offline", "TEST", as_of=as_of)
     offline = scanners._compute_biotech_technical_from_bars(canonical)
     assert live["technical_score"] == offline["technical_score"]
     assert live["rvol"] == offline["rvol"]
     assert "Distribution" in live["details"]["vol_signal"]
-    assert live["technical_model"] == offline["technical_model"] == "biotech_completed_bar_v2"
+    assert live["technical_model"] == offline["technical_model"] == "biotech_completed_bar_v3"
+    assert live["details"]["analysis_session"] == last_session
+    assert live["details"]["analysis_as_of"] == as_of.astimezone(timezone.utc).isoformat()

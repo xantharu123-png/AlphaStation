@@ -863,7 +863,9 @@ BI_STOCK_INDICATOR_COUNT = 20
 BI_STOCK_REQUIRED_GREEN = 17
 # Recompute cached native VRVP plans after price-range input validation changed.
 # The 20 factors and strict 17-of-20 requirement remain unchanged.
-BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v6"
+# v7 preserves raw RVOL at the grade/mail boundary; v6's rounded ratio cannot
+# be reconstructed from cached rows and is not evidence for the new decision.
+BI_STOCK_CONTRACT_VERSION = "stock-bi-20-v8"
 BI_STOCK_INDICATORS = (
     (1, "atr_squeeze", "ATR-Squeeze", 6),
     (2, "volume_dry_up", "Volume Dry-Up", 5),
@@ -2664,7 +2666,7 @@ def analyze_breakout_imminent(bars, direction="long", crypto_mode=False):
 
 
 # ── find_pivots (originally line 4246) ──
-def find_pivots(prices, window=5):
+def find_pivots(prices, window=5, *, include_edge=True):
     """
     Findet Swing Highs und Swing Lows (Pivot Points) mit ZigZag-Logik.
     
@@ -2716,7 +2718,7 @@ def find_pivots(prices, window=5):
     
     # === EDGE PIVOT: Prüfe letzten Abschnitt (letzte window Bars) ===
     # Ohne das wird der D-Punkt (Pattern-Completion!) abgeschnitten
-    if len(prices) > window + 1:
+    if include_edge and len(prices) > window + 1:
         edge_start = len(prices) - window
         edge_section = prices[edge_start:]
         left_section = prices[max(0, edge_start - window):edge_start]
@@ -2984,8 +2986,9 @@ def identify_harmonic_pattern(pivots, prices, min_pivots=5):
                 else:
                     details.append(f" AD/XA: {ad_retracement:.3f}")
             
-            # Pattern gilt als erkannt wenn mindestens 3/4 Verhältnisse stimmen
-            if matches >= 3 and score >= 50:
+            # A named harmonic requires every defining ratio. Three matching
+            # legs cannot compensate for an invalid mandatory D retracement.
+            if total_checks >= 3 and matches == total_checks and score >= 50:
                 # Berechne Entry, Stop Loss, Take Profits
                 if is_bullish:
                     entry = D
@@ -3158,7 +3161,7 @@ def scan_harmonic_patterns(ticker, api_key, days=180, timeframe="day"):
             return {"error": "Not enough data", "patterns": []}
         
         # Finde Pivots
-        pivots = find_pivots(prices, window=3)
+        pivots = find_pivots(prices, window=3, include_edge=False)
         
         if len(pivots) < 5:
             return {"error": "Not enough pivots", "patterns": [], "pivot_count": len(pivots)}
@@ -3375,10 +3378,10 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             
             zones.append({
                 "direction": "bullish", "type": zone_type,
-                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "zone_high": gap_high, "zone_low": gap_low,
+                "zone_mid": gap_mid, "gap_pct": gap_pct,
                 "bar_idx": i, "time": c_curr.get("time", 0),
-                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "vol_ratio": vol_ratio, "strength": strength,
                 "filled": False, "ce_filled": False, "fill_bar": None,
             })
         
@@ -3398,10 +3401,10 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             
             zones.append({
                 "direction": "bearish", "type": zone_type,
-                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "zone_high": gap_high, "zone_low": gap_low,
+                "zone_mid": gap_mid, "gap_pct": gap_pct,
                 "bar_idx": i, "time": c_curr.get("time", 0),
-                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "vol_ratio": vol_ratio, "strength": strength,
                 "filled": False, "ce_filled": False, "fill_bar": None,
             })
     
@@ -3450,10 +3453,10 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             # older two-bar zone using a later third candle's evidence.
             zones.append({
                 "direction": "bullish", "type": "FVG",
-                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "zone_high": gap_high, "zone_low": gap_low,
+                "zone_mid": gap_mid, "gap_pct": gap_pct,
                 "bar_idx": i, "time": c3.get("time", 0),
-                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "vol_ratio": vol_ratio, "strength": strength,
                 "filled": False, "ce_filled": False, "fill_bar": None,
             })
         
@@ -3473,10 +3476,10 @@ def detect_volume_imbalances(ohlcv_data, max_zones=50):
             
             zones.append({
                 "direction": "bearish", "type": "FVG",
-                "zone_high": round(gap_high, 4), "zone_low": round(gap_low, 4),
-                "zone_mid": round(gap_mid, 4), "gap_pct": round(gap_pct, 2),
+                "zone_high": gap_high, "zone_low": gap_low,
+                "zone_mid": gap_mid, "gap_pct": gap_pct,
                 "bar_idx": i, "time": c3.get("time", 0),
-                "vol_ratio": round(vol_ratio, 1), "strength": strength,
+                "vol_ratio": vol_ratio, "strength": strength,
                 "filled": False, "ce_filled": False, "fill_bar": None,
             })
     
@@ -3633,12 +3636,14 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 if not mitigated and ob_low < current_price:
                     dist_pct = (current_price - ob_high) / current_price * 100
                     bullish_obs.append({
-                        "type": "Bullish OB", "ob_high": round(ob_high, 4),
-                        "ob_low": round(ob_low, 4), "ob_wick_low": round(ob_wick_low, 4),
-                        "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        # Analytical zone edges also feed BI confluence and
+                        # trade levels. Format only at the presentation edge.
+                        "type": "Bullish OB", "ob_high": ob_high,
+                        "ob_low": ob_low, "ob_wick_low": ob_wick_low,
+                        "ob_mid": (ob_high + ob_low) / 2,
                         "impulse_size": round(impulse_up / atr, 1),
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
-                        "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
+                        "mitigated": mitigated, "dist_pct": dist_pct,
                         "idx": i, "time": c0.get("time"),
                         "confirmed_idx": i + 2, "confirmed_at": c2.get("close_time", c2.get("time")),
                         "range_baseline": atr,
@@ -3677,12 +3682,12 @@ def detect_order_blocks(ohlcv_data, max_blocks=10):
                 if not mitigated and ob_high > current_price:
                     dist_pct = (ob_low - current_price) / current_price * 100
                     bearish_obs.append({
-                        "type": "Bearish OB", "ob_high": round(ob_high, 4),
-                        "ob_low": round(ob_low, 4), "ob_wick_high": round(ob_wick_high, 4),
-                        "ob_mid": round((ob_high + ob_low) / 2, 4),
+                        "type": "Bearish OB", "ob_high": ob_high,
+                        "ob_low": ob_low, "ob_wick_high": ob_wick_high,
+                        "ob_mid": (ob_high + ob_low) / 2,
                         "impulse_size": round(impulse_down / atr, 1),
                         "vol_ratio": round(vol_ratio, 1), "strength": strength,
-                        "mitigated": mitigated, "dist_pct": round(dist_pct, 2),
+                        "mitigated": mitigated, "dist_pct": dist_pct,
                         "idx": i, "time": c0.get("time"),
                         "confirmed_idx": i + 2, "confirmed_at": c2.get("close_time", c2.get("time")),
                         "range_baseline": atr,
@@ -3715,10 +3720,9 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
     n = len(ohlcv_data)
     current_price = ohlcv_data[-1]["close"]
     
-    # Fix 4: ATR-basierte Toleranz
-    ranges = [d["high"] - d["low"] for d in ohlcv_data if d["high"] > d["low"]]
-    atr = sum(ranges) / len(ranges) if ranges else current_price * 0.02
-    tol = atr * 0.15  # 15% der ATR
+    # A pool's tolerance is known when its first pivot is confirmed. Later
+    # volatility may not regroup already swept touches into an active pool.
+    mean_ranges = _causal_mean_ranges(ohlcv_data)
     
     highs = [d["high"] for d in ohlcv_data]
     lows = [d["low"] for d in ohlcv_data]
@@ -3731,15 +3735,18 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
         # One contiguous plateau is one test, not many independent touches.
         # The strict left comparison chooses its first qualifying pivot.
         if highs[i] > max(highs[i-sw:i]) and highs[i] >= max(highs[i+1:i+sw+1]):
-            swing_highs.append({"price": highs[i], "idx": i, "time": ohlcv_data[i].get("time")})
+            swing_highs.append({"price": highs[i], "idx": i, "time": ohlcv_data[i].get("time"),
+                               "confirmed_idx": i + sw, "tolerance": mean_ranges[i + sw] * .15})
         if lows[i] < min(lows[i-sw:i]) and lows[i] <= min(lows[i+1:i+sw+1]):
-            swing_lows.append({"price": lows[i], "idx": i, "time": ohlcv_data[i].get("time")})
+            swing_lows.append({"price": lows[i], "idx": i, "time": ohlcv_data[i].get("time"),
+                              "confirmed_idx": i + sw, "tolerance": mean_ranges[i + sw] * .15})
 
     # ── Equal Highs → Buyside Liquidity ──
     buyside = []
     used = set()
     for i, sh in enumerate(swing_highs):
         if i in used: continue
+        tol = sh["tolerance"]
         cluster = [sh]; used.add(i)
         for j, sh2 in enumerate(swing_highs):
             if j in used: continue
@@ -3748,10 +3755,12 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
         
         # Fix 5: Nur Equal Highs (2+ touches) = echte Liquidität
         if len(cluster) >= 2:
-            max_p = max(c["price"] for c in cluster)
+            # Fixed first-touch band: adding a later high inside that band
+            # must not move the historic sweep boundary further upward.
+            sweep_boundary = sh["price"] + tol
             last_sweep = max(
                 (index for index in range(min(c["idx"] for c in cluster) + 1, n)
-                 if highs[index] > max_p + tol), default=-1,
+                 if highs[index] > sweep_boundary), default=-1,
             )
             cluster = [touch for touch in cluster if touch["idx"] > last_sweep]
             if len(cluster) < 2:
@@ -3761,11 +3770,13 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
                 dist_pct = (max_p - current_price) / current_price * 100
                 if dist_pct < 10:  # Max 10% Entfernung
                     buyside.append({
-                        "type": "Equal Highs", "level": round(max_p, 4),
+                        "type": "Equal Highs", "level": max_p,
                         "touches": len(cluster), "strength": min(5, len(cluster)),
                         "dist_pct": round(dist_pct, 2),
                         "label": f"BSL ${max_p:.2f} ({len(cluster)}x)",
                         "state": "active", "last_touch_index": max(c["idx"] for c in cluster),
+                        "confirmed_index": max(c["confirmed_idx"] for c in cluster),
+                        "touch_tolerance": tol, "sweep_boundary": sweep_boundary,
                     })
 
     # ── Equal Lows → Sellside Liquidity ──
@@ -3773,6 +3784,7 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
     used = set()
     for i, sl in enumerate(swing_lows):
         if i in used: continue
+        tol = sl["tolerance"]
         cluster = [sl]; used.add(i)
         for j, sl2 in enumerate(swing_lows):
             if j in used: continue
@@ -3780,10 +3792,10 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
                 cluster.append(sl2); used.add(j)
         
         if len(cluster) >= 2:
-            min_p = min(c["price"] for c in cluster)
+            sweep_boundary = sl["price"] - tol
             last_sweep = max(
                 (index for index in range(min(c["idx"] for c in cluster) + 1, n)
-                 if lows[index] < min_p - tol), default=-1,
+                 if lows[index] < sweep_boundary), default=-1,
             )
             cluster = [touch for touch in cluster if touch["idx"] > last_sweep]
             if len(cluster) < 2:
@@ -3793,15 +3805,19 @@ def detect_liquidity_levels(ohlcv_data, max_levels=8):
                 dist_pct = (current_price - min_p) / current_price * 100
                 if dist_pct < 10:
                     sellside.append({
-                        "type": "Equal Lows", "level": round(min_p, 4),
+                        "type": "Equal Lows", "level": min_p,
                         "touches": len(cluster), "strength": min(5, len(cluster)),
                         "dist_pct": round(dist_pct, 2),
                         "label": f"SSL ${min_p:.2f} ({len(cluster)}x)",
                         "state": "active", "last_touch_index": max(c["idx"] for c in cluster),
+                        "confirmed_index": max(c["confirmed_idx"] for c in cluster),
+                        "touch_tolerance": tol, "sweep_boundary": sweep_boundary,
                     })
 
-    buyside.sort(key=lambda x: x["dist_pct"])
-    sellside.sort(key=lambda x: x["dist_pct"])
+    # A tied two-decimal label cannot select the more distant first-created
+    # pool as the nearest real barrier (or truncate the nearer one away).
+    buyside.sort(key=lambda x: x["level"] - current_price)
+    sellside.sort(key=lambda x: current_price - x["level"])
     return {
         "buyside": buyside[:max_levels], "sellside": sellside[:max_levels],
         "nearest_buyside": buyside[0] if buyside else None,
@@ -4550,7 +4566,7 @@ def find_harmonic_for_chart(ohlcv_data):
                 "open": d["open"],
                 "volume": d.get("volume", 0)
             })
-        pivots = find_pivots(prices, window=3)
+        pivots = find_pivots(prices, window=3, include_edge=False)
         if len(pivots) < 5:
             return []
         patterns = identify_harmonic_pattern(pivots, prices)

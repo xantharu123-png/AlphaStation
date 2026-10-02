@@ -27,6 +27,7 @@ from modules.data_fetchers import (
 )
 from modules.helpers import calculate_sr_levels_simple
 from modules.volume_metrics import completed_bar_rvol, historical_volume_baseline
+from modules.level_zones import LEVEL_ZONE_MODEL_VERSION
 
 
 def calculate_short_bonus_signals(ticker, bars, poly_key=None, mode="swing"):
@@ -1287,9 +1288,9 @@ def _causal_sr_unavailable(*, timeframe, reason, input_count=0, completed_count=
         "total_candles": int(completed_count),
         "completed_candles": int(completed_count),
         "input_candles": int(input_count),
-        "zone_model": "causal_level_zones_v1",
+        "zone_model": LEVEL_ZONE_MODEL_VERSION,
         "zone_provenance": {
-            "model": "causal_level_zones_v1",
+            "model": LEVEL_ZONE_MODEL_VERSION,
             "timeframe": normalized,
             "causal_completed_bars": False,
             "fixed_percent_cluster_used": False,

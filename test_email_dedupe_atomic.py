@@ -160,9 +160,11 @@ def test_orb_and_penny_mailers_claim_only_rows_they_send():
     assert "buy_candidates[:5]" in penny
     assert "claimed_buy_candidates" in penny
     assert "claimed_at=side_effect_now" in penny
-    import inspect
-    import api
-    dispatch = inspect.getsource(api._penny_dispatch_model_management)
+    # The dispatcher deliberately publishes __wrapped__ for its pure helper;
+    # extract its own definition rather than inspect.getsource's unwrapping.
+    dispatch = _source_section(
+        api_source, "def _penny_dispatch_model_management(", "def _penny_stock_scanner_wrapper("
+    )
     assert "_email_dedupe_claim(key" in dispatch
     assert "_call_penny_mail_helper(sender, [row]" in dispatch
     assert dispatch.index("_email_dedupe_claim(key") < dispatch.index("_call_penny_mail_helper(sender, [row]")

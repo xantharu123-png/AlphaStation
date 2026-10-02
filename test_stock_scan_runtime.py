@@ -255,7 +255,8 @@ def test_starter_has_no_redundant_ten_minute_opening_sweep(monkeypatch):
 
 
 def test_strategy_is_scheduled_as_heavy_and_watchdog_limits_not_raised():
-    source = inspect.getsource(api._scheduler_loop)
+    from qa_source_helpers import function_source
+    source = function_source(api, "_scheduler_loop")
     light, heavy = source.split("heavy_scans =", 1)
     assert '("strategy_scan", _stock_strategy_alert_sweep_wrapper)' not in light
     assert '("strategy_scan", _stock_strategy_alert_sweep_wrapper)' in heavy

@@ -61,10 +61,14 @@ def _fresh_5m_trigger(checked_at=None, age_seconds=60):
     }
 
 
-def _early_mover_row(**overrides):
+def _early_mover_row(*, context_at=None, **overrides):
     """Sauberes, im Versandmoment handelbares Crypto-Swing-Setup
     (Spiegel der Fixture aus test_email_alert_audit.py inkl. AUDIT-H-1
     entry_score)."""
+    context = {
+        "known": True, "data_status": "ok", "observed_at": time.time() if context_at is None else context_at,
+        "btc_24h": 1.2, "btc_7d": 2.0, "alpha_24h": 3.0, "tailwind": True,
+    }
     row = {
         "Symbol": "EMO",
         "Name": "Early Mover",
@@ -88,7 +92,7 @@ def _early_mover_row(**overrides):
         "live_rr_ratio": 2.4,
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
-        "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        "btc_context": dict(context),
         "risk_flags": [],
         "trade_setup": {
             "trade_action": "LONG_TRIGGER",
@@ -98,7 +102,7 @@ def _early_mover_row(**overrides):
             "tp2": 1.57,
             "live_rr": 2.4,
             "distance_to_entry_r": 0,
-            "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+            "btc_context": dict(context),
         },
     }
     api._stamp_fresh_crypto_profile_contract(row)

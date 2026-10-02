@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import api
 
 
@@ -24,6 +26,8 @@ def test_btc_divergence_uses_crypto_coins_not_crypto_equities(monkeypatch):
             "price_change_percentage_7d_in_currency": 26.0,
         },
     ]
+    for coin in coins:
+        coin["last_updated"] = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(api, "_fetch_coingecko_markets", lambda pages=4: coins)
     monkeypatch.setattr(api, "fetch_multi_exchange_perps", lambda: {
         "AZTEC": {
@@ -55,6 +59,7 @@ def test_btc_divergence_does_not_include_static_crypto_equity_list(monkeypatch):
             "total_volume": 40_000_000_000,
             "price_change_percentage_24h": 0,
             "price_change_percentage_7d_in_currency": 0,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
         }
     ])
     monkeypatch.setattr(api, "fetch_multi_exchange_perps", lambda: {})

@@ -109,7 +109,18 @@ def _listing_signal_pump_data(as_of, bars):
 
 def _with_causal_listing_vrvp(pump_data):
     as_of = datetime(2026, 1, 3, 12, 30, tzinfo=timezone.utc)
+    btc_completed = int(datetime.now(timezone.utc).timestamp()) // 3600 * 3600
     return {
+        # The generator receives a measured synchronous BTC context from the
+        # hourly producer, not an implicit neutral default.
+        "btc_context_known": True,
+        "btc_context_status": "ok",
+        "btc_change_pct": 0.0,
+        "coin_change_pct": 0.0,
+        "btc_divergence": 0.0,
+        "btc_context_source": "binance:BTCUSDT:1H",
+        "btc_context_opened_at": btc_completed - 24 * 3600,
+        "btc_context_completed_at": btc_completed,
         **pump_data,
         "vrvp_as_of": as_of.isoformat(),
         "vrvp_bars": _completed_listing_vrvp_bars(as_of),
@@ -700,6 +711,7 @@ def test_missing_listing_context_is_watch_only_even_if_crack_is_confirmed():
 
 
 def test_active_pump_detection_is_watch_only_even_with_crack():
+    btc_completed = int(datetime.now(timezone.utc).timestamp()) // 3600 * 3600
     signal = generate_short_signal(
         "OLDPUMPUSDT",
         {
@@ -715,6 +727,14 @@ def test_active_pump_detection_is_watch_only_even_with_crack():
             "micro_stop_loss": 101,
             "listing_source": "pump_detection",
             "listing_age_hours": None,
+            "btc_context_known": True,
+            "btc_context_status": "ok",
+            "btc_change_pct": 0.0,
+            "coin_change_pct": 0.0,
+            "btc_divergence": 0.0,
+            "btc_context_source": "binance:BTCUSDT:1H",
+            "btc_context_opened_at": btc_completed - 24 * 3600,
+            "btc_context_completed_at": btc_completed,
         },
         exh_score=85,
         exh_details=[],
@@ -731,6 +751,7 @@ def test_active_pump_detection_is_watch_only_even_with_crack():
 
 
 def test_btc_risk_on_waits_for_deeper_crack_before_short():
+    btc_completed = int(datetime.now(timezone.utc).timestamp()) // 3600 * 3600
     signal = generate_short_signal(
         "BTCRISKONUSDT",
         {
@@ -747,6 +768,11 @@ def test_btc_risk_on_waits_for_deeper_crack_before_short():
             "listing_source": "new_listing",
             "listing_age_hours": 24,
             "btc_tailwind_risk": True,
+            "btc_context_known": True,
+            "btc_context_status": "ok",
+            "btc_context_source": "binance:BTCUSDT:1H",
+            "btc_context_opened_at": btc_completed - 24 * 3600,
+            "btc_context_completed_at": btc_completed,
             "btc_change_pct": 3.2,
             "coin_change_pct": 1.0,
             "btc_divergence": -2.2,

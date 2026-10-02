@@ -106,6 +106,10 @@ def _biotech_cache(tmp_path):
 def _early_mover_row(**overrides):
     """Handelbares Crypto-Swing-Setup (Spiegel test_mail_class_api.py)."""
     checked_at = time.time()
+    context = {
+        "known": True, "data_status": "ok", "observed_at": checked_at,
+        "btc_24h": 1.2, "btc_7d": 2.0, "alpha_24h": 3.0, "tailwind": True,
+    }
     intraday_trigger = {
         "ok": True,
         "timeframe": "5m",
@@ -143,7 +147,7 @@ def _early_mover_row(**overrides):
         "live_rr_ratio": 2.4,
         "distance_to_entry_r": 0,
         "late_to_tp1": False,
-        "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+        "btc_context": dict(context),
         "risk_flags": [],
         "trade_setup": {
             "trade_action": "LONG_TRIGGER",
@@ -160,7 +164,7 @@ def _early_mover_row(**overrides):
             "intraday_trigger": dict(intraday_trigger),
             "live_rr": 2.4,
             "distance_to_entry_r": 0,
-            "btc_context": {"btc_24h": 1.2, "alpha_24h": 3.0, "tailwind": True},
+            "btc_context": dict(context),
         },
     }
     api._stamp_fresh_crypto_profile_contract(row)

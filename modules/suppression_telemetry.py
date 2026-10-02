@@ -96,8 +96,12 @@ ALLOWED_SUPPRESSION_SCANNERS = frozenset({
 })
 
 ALLOWED_SUPPRESSION_REASONS = frozenset({
+    "stock_strategy_not_implemented",
     "wyckoff_contract_invalid",
     "biotech_news_contract_invalid",
+    "bear_plan_contract_invalid",
+    "btc_context_missing",
+    "btc_context_blocks_short",
     # Stable fallback. It intentionally contains no fragment of the rejected
     # value, so an unexpected code reason cannot leak an identity.
     "unclassified_code_reason",

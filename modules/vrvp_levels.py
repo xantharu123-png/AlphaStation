@@ -1914,6 +1914,40 @@ def apply_vrvp_to_trade_setup(
                 selected_tp2 = candidate
                 break
 
+    # The Bear producer's current model already chooses the closest two
+    # observed day/20D/60D lows without optimizing R:R. Those observations are
+    # not causal pivot-zone identities; do not upgrade them to such, but also
+    # never replace the closer native prices with a distant VRVP/R projection.
+    # This is deliberately not a compatibility bypass for v1/projection claims.
+    preserve_bear_targets = bool(
+        side == "SHORT"
+        and str(setup.get("level_model") or "") == "bear_structure_first_v2"
+        and setup.get("tp1_source") in {"day_low_liquidity", "20d_low_support", "60d_low_support"}
+        and setup.get("tp2_source") in {"day_low_liquidity", "20d_low_support", "60d_low_support"}
+        and setup.get("tp1_is_projection") is not True
+        and setup.get("tp2_is_projection") is not True
+        and not unverified_structural_tp1_claim
+        and _target_on_trade_side(tp1, entry, side)
+        and _target_on_trade_side(tp2, entry, side)
+        and tp2 < tp1
+        and (selected_tp1 is None or tp1 > float(selected_tp1["price"]) + tolerance)
+    )
+    if preserve_bear_targets:
+        selected_tp1 = selected_tp2 = None
+        enriched["vrvp_native_targets_preserved"] = "closer_observed_bear_levels"
+        conservative_barrier = {
+            "side": "support", "price": tp1, "source": enriched.get("tp1_source"),
+            "source_family": "native_bear_observation", "structural": False,
+            "causal_structure_validated": False, "distance_r": (entry - tp1) / risk,
+            "distance_pct": (entry - tp1) / entry * 100,
+            "below_minimum_reward": entry - tp1 + tolerance < min_tp_reward,
+        }
+        enriched["nearest_barrier"] = conservative_barrier
+        if conservative_barrier["below_minimum_reward"]:
+            # Conservative rejection needs no invented confirmation identity;
+            # the lack of room remains real even if pivot evidence is absent.
+            _attach_barrier_gate(enriched, conservative_barrier, side)
+
     selected_tp1_family = (
         str(selected_tp1.get("source_family") or "") if selected_tp1 else None
     )
@@ -1940,7 +1974,7 @@ def apply_vrvp_to_trade_setup(
     # Preserve valid existing targets only when VRVP has no opposing structural
     # barrier.  A close real barrier must remain the honest TP1 and must never
     # be overwritten by a farther risk projection.
-    if tp1 is None or (selected_tp1 is None and not _distance_ok(tp1, entry, max(risk * 1.5, entry * 0.006), side)):
+    if tp1 is None or (selected_tp1 is None and not preserve_bear_targets and not _distance_ok(tp1, entry, max(risk * 1.5, entry * 0.006), side)):
         tp1 = entry + risk * 1.6 if side == "LONG" else max(0.00000001, entry - risk * 1.6)
         enriched["tp1_source"] = "risk fallback after VRVP validation"
         enriched["tp1_is_projection"] = True
@@ -1962,7 +1996,7 @@ def apply_vrvp_to_trade_setup(
         enriched["tp2_is_projection"] = True
         enriched["tp2_structure"] = "projection_after_first_structural_barrier"
         enriched["tp2_projection_reason"] = "no_second_independent_structural_barrier"
-    elif selected_tp2 is None and (
+    elif selected_tp2 is None and not preserve_bear_targets and (
         tp2 is None
         or not _distance_ok(
             tp2,

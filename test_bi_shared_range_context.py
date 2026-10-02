@@ -196,7 +196,7 @@ def test_new_semantics_version_preserves_twenty_ids_and_seventeen_gate(monkeypat
 
     _force_checks(monkeypatch, green)
     result = patterns.analyze_breakout_imminent([_bar() for _ in range(50)], direction=direction)
-    assert result.contract_version == patterns.BI_STOCK_CONTRACT_VERSION == "stock-bi-20-v6"
+    assert result.contract_version == patterns.BI_STOCK_CONTRACT_VERSION == "stock-bi-20-v8"
     assert [c["id"] for c in result.indicator_checks] == list(range(1, 21))
     assert len({c["key"] for c in result.indicator_checks}) == 20
     assert result.required_green == 17 and result.available_count == 20

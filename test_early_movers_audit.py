@@ -23,6 +23,7 @@ def _btc(change_24h=1.0, change_7d=2.0):
         "total_volume": 10_000_000_000,
         "price_change_percentage_24h": change_24h,
         "price_change_percentage_7d_in_currency": change_7d,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -881,6 +882,8 @@ def test_confirmed_early_mover_long_now_remains_visible():
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.05,
         "btc_context": {
+            "known": True,
+            "observed_at": api.time.time(),
             "allows_long": True,
             "tailwind": True,
             "btc_24h": 0.2,
@@ -972,7 +975,15 @@ def test_early_mover_orderbook_guard_rejects_market_impact(monkeypatch):
     for i in range(20):
         bars.append({"timestamp": start + i * 300, "open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000})
     bars.append({"timestamp": start + 20 * 300, "open": 1.0, "high": 1.04, "low": 0.99, "close": 1.035, "volume": 2200})
-    monkeypatch.setattr(api, "fetch_candles_for", lambda *args, **kwargs: bars)
+    htf_bars = [
+        {"timestamp": now - (9 - index) * 14400,
+         "open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 1000}
+        for index in range(8)
+    ]
+    monkeypatch.setattr(
+        api, "fetch_candles_for",
+        lambda *args, **kwargs: htf_bars if kwargs.get("timeframe", args[2] if len(args) > 2 else "") == "4h" else bars,
+    )
     monkeypatch.setattr(api, "fetch_orderbook_for", lambda *args, **kwargs: {
         "bids": [(1.069, 100), (1.068, 200)],
         "asks": [(1.071, 100), (1.072, 200)],
@@ -1240,7 +1251,10 @@ def _armed_row():
         "target_quality": "STRUCTURAL",
         "risk_level": "LOW",
         "risk_flags": [],
-        "btc_context": {"tailwind": True, "btc_24h": 1.0, "alpha_24h": 4.0},
+        "btc_context": {
+            "tailwind": True, "btc_24h": 1.0, "btc_7d": 2.0, "alpha_24h": 4.0,
+            "known": True, "data_status": "ok", "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
         "trade_setup": {
             "trade_action": "LONG_TRIGGER",
             "entry": 1.065,

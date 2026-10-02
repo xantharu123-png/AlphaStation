@@ -31,6 +31,8 @@ def _candidate(symbol="COIN", score=86, entry_score=76, action="LONG_TRIGGER", s
         "live_rr_ratio": 2.2,
         "distance_to_entry_r": 0.18,
         "btc_context": {
+            "known": True,
+            "observed_at": time.time(),
             "tailwind": True,
             "allows_long": True,
             "btc_24h": 0.2,
@@ -168,7 +170,8 @@ def test_early_mover_pre_breakout_coil_is_visible_as_candidate_until_trade_trigg
         "risk_level": "MEDIUM",
         "live_rr_ratio": 3.1,
         "distance_to_entry_r": 0.14,
-        "btc_context": {"tailwind": False, "btc_24h": 0.2, "btc_7d": -4.2, "alpha_24h": 3.2},
+        "btc_context": {"tailwind": False, "btc_24h": 0.2, "btc_7d": -4.2, "alpha_24h": 3.2,
+                        "known": True, "data_status": "ok", "observed_at": time.time()},
         "target_quality": "STRUCTURAL",
         "entry": 1.0,
         "stop_loss": 0.94,
@@ -254,7 +257,8 @@ def test_early_mover_confirmed_5m_trigger_needs_setup_entry_and_execution():
         "tp1": 1.13,
         "tp2": 1.22,
         "Price": 1.01,
-        "btc_context": {"tailwind": True, "btc_24h": 0.8, "btc_7d": -1.0, "alpha_24h": 3.0},
+        "btc_context": {"tailwind": True, "btc_24h": 0.8, "btc_7d": -1.0, "alpha_24h": 3.0,
+                        "known": True, "data_status": "ok", "observed_at": time.time()},
     })
 
     state = api._classify_alert_candidate("early_movers", row, 1_000_000.0)
