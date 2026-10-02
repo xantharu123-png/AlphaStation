@@ -112,7 +112,11 @@ Normalisierte SHA-256 (UTF-8, CRLF → LF), Worktree und eingefrorener Code glei
 - `frontend/index.html`: `a06c541c46f6528ec5fda3891e54d62780445607f5cd1c78e0cd188a0f603825`
 - `frontend/app.bundle.js`: `505426d6c3d7a6dea58b3e97a4aca6529687dc99582938fd39de6a085ceb4208`
 
-Die Commit-/Remote-Bestätigung wird nach erfolgreicher Veröffentlichung ergänzt.
+Korrekturcommit: `0b2ae89bd6b9308e66786ce8579d590476e273a1`.
+`git push origin main` erfolgreich; `git ls-remote origin refs/heads/main`
+bestätigte genau diesen Hash. Diese abschließende Übergabedokumentation
+wird separat committet; sie verändert den geprüften Laufzeitcode nicht.
+Keine Produktionsänderung durch den Git-Push.
 
 ## Grenzen und Betrieb
 

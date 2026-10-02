@@ -27,7 +27,10 @@ hinzu. Die unten dokumentierten Mail-/Cup-Grenzen bleiben separat bestehen.
 - [x] Eingefrorenen Index-Gesamtlauf abgeschlossen: 10.887 bestanden,
   1 POSIX-Dateirechteprüfung unter Windows übersprungen, 0 Fehler.
   `tmp/qa-b3fbe27b64fa/results.xml`; Deploy-Umstellungstests nicht im Umfang.
-- [ ] Nur das geprüfte Erstlade-Paket committen und auf `main` veröffentlichen.
+- [x] Nur das geprüfte Erstlade-Paket committet und auf `main` gepusht:
+  `0b2ae89bd6b9308e66786ce8579d590476e273a1`, durch `git ls-remote` bestätigt.
+  Statusnachweis hier und im Prüfbericht gespeichert; kein Serverupdate
+  durch den Push.
 - [ ] Nach normalem Betreiberpull echten ersten Seitenaufruf kontrollieren.
   API-Health am 02.10.2026 17:28:20 (Serverzeitstempel): healthy / `1c3fb68f51df`
   / Frontend `806260a08809`. Die Erstlade-Korrektur ist dort noch nicht
