@@ -123,8 +123,17 @@ def test_transport_failure_after_live_timeout_keeps_final_not_partial_snapshot()
       queue.push({body:live()}); render(configured()); await settle();
       queue.push({status:503,body:{detail:'PRIVATE'}}); await timer();
       assert.equal(feed.results[0].ticker,'FINAL'); assert.equal(feed.control,null);
-      assert.equal(feed.isScanning,false); assert.equal(timers.size,0);
+      assert.equal(feed.info.cached_at,t1); assert.equal(feed.info.partial,false);
+      assert.equal(feed.isScanning,true); assert.equal(timers.size,1);
       assert.ok(feed.error); assert.ok(!feed.error.includes('PRIVATE'));
+      assert.equal(writes.filter(([key])=>key==='bi:snapshot:bi:long').length,0);
+      queue.push({body:payload('2026-09-08T10:10:00','RECOVERED',{scan_run_id:'run-1',
+        scan_control:ctl({state:'finished',worker_alive:false})})}); await timer();
+      assert.equal(feed.results[0].ticker,'RECOVERED'); assert.equal(feed.info.partial,false);
+      assert.equal(feed.info.cached_at,'2026-09-08T10:10:00'); assert.equal(feed.info.scan_run_id,'run-1');
+      assert.equal(feed.isScanning,false); assert.equal(feed.error,null); assert.equal(timers.size,0);
+      assert.equal(writes.filter(([key])=>key==='bi:snapshot:bi:long').length,1);
+      assert.equal(toasts.length,0); assert.equal(requests.filter(r=>r.init.method==='POST').length,0);
     """)
 
 
@@ -165,11 +174,21 @@ def test_first_ever_partial_is_discarded_after_read_failure(failure):
       else queue.push({status:failure==='http_503'?503:401,body:{detail:'PRIVATE'}});
       await timer();
       assert.equal(feed.results.length,0); assert.equal(feed.info,null); assert.equal(feed.control,null);
-      assert.equal(feed.isScanning,false); assert.equal(timers.size,0); assert.ok(feed.error);
+      const retrying=['http_503','network'].includes(failure);
+      assert.equal(feed.isScanning,retrying); assert.equal(timers.size,retrying?1:0); assert.ok(feed.error);
       assert.ok(!feed.error.includes('PRIVATE')); assert.equal(toasts.length,0);
       assert.equal(writes.filter(([key])=>key==='bi:snapshot:bi:long').length,0);
       const evidence=scannerEvidenceState({info:feed.info,error:feed.error,hasLoaded:true,count:0});
       assert.equal(evidence.tone,'error');
+      if (retrying) {
+        queue.push({body:payload('2026-09-08T10:10:00','RECOVERED',{scan_run_id:'run-1',
+          scan_control:ctl({state:'finished',worker_alive:false})})}); await timer();
+        assert.deepEqual(feed.results,[{ticker:'RECOVERED'}]); assert.equal(feed.info.partial,false);
+        assert.equal(feed.info.cached_at,'2026-09-08T10:10:00'); assert.equal(feed.info.scan_run_id,'run-1');
+        assert.equal(feed.isScanning,false); assert.equal(feed.error,null); assert.equal(timers.size,0);
+        assert.equal(writes.filter(([key])=>key==='bi:snapshot:bi:long').length,1);
+      }
+      assert.equal(toasts.length,0); assert.equal(requests.filter(r=>r.init.method==='POST').length,0);
     """)
 
 

@@ -73,6 +73,7 @@ from fastapi import FastAPI, BackgroundTasks, Query, HTTPException, Request, Hea
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 # V3.4: Auth & Subscription System
@@ -930,6 +931,7 @@ def _stock_alert_asset_exclusion_reason(
     common_stock_universe: Optional[set[str]] = None,
     universe_source: str = "",
     require_reference: bool = False,
+    cache_only: bool = False,
 ) -> Optional[str]:
     """Return why a ticker must not be used as an actionable stock alert."""
     tk = str(ticker or "").upper().strip()
@@ -951,7 +953,18 @@ def _stock_alert_asset_exclusion_reason(
             return f"not in common-stock universe ({universe_source or 'unknown source'})"
         return None
     if require_reference or "." in tk:
-        is_stock, reason = _is_orb_common_stock_candidate(tk)
+        if cache_only:
+            evidence = _ORB_REFERENCE_CACHE.get(tk)
+            is_stock, reason = evidence if evidence is not None else (False, "reference_unavailable")
+            if not is_stock and str(reason).lower().replace("_", " ").startswith("reference unavailable"):
+                # A cold UI reference cache is not proof that the scanner
+                # found no stocks. The producer, never the GET, refreshes it.
+                raise HTTPException(status_code=503, detail={
+                    "code": "stock_reference_cache_unavailable",
+                    "message": "Gespeicherte Instrumentpruefung noch nicht verfuegbar.",
+                }, headers={"Retry-After": "5"})
+        else:
+            is_stock, reason = _is_orb_common_stock_candidate(tk)
         if not is_stock:
             return reason
     return None
@@ -1000,35 +1013,48 @@ _COMMON_STOCK_UNIVERSE_MEM: Dict[str, Any] = {
     "names": None,
     "names_refresh_attempted_at": 0,
 }
+_COMMON_STOCK_UNIVERSE_MEM_LOCK = threading.RLock()
+
+
+def _publish_common_stock_universe_memory(snapshot: Dict[str, Any], expected_memory=None) -> None:
+    """A display reader must not overwrite a newer worker reference snapshot."""
+    with _COMMON_STOCK_UNIVERSE_MEM_LOCK:
+        if expected_memory is not None and _COMMON_STOCK_UNIVERSE_MEM != expected_memory:
+            return
+        _COMMON_STOCK_UNIVERSE_MEM.update(snapshot)
 
 
 def _load_common_stock_universe(
     max_age_seconds: int = 24 * 3600,
     require_names: bool = False,
+    cache_only: bool = False,
 ) -> tuple[Optional[set[str]], str]:
     """Return active common-stock/ADR tickers for breadth filtering without per-symbol reference calls."""
     now_ts = time.time()
-    mem_tickers = _COMMON_STOCK_UNIVERSE_MEM.get("tickers")
-    mem_loaded_at = float(_COMMON_STOCK_UNIVERSE_MEM.get("loaded_at", 0) or 0)
-    mem_names = dict(_COMMON_STOCK_UNIVERSE_MEM.get("names") or {})
+    with _COMMON_STOCK_UNIVERSE_MEM_LOCK:
+        original_memory = dict(_COMMON_STOCK_UNIVERSE_MEM)
+    mem_tickers = original_memory.get("tickers")
+    mem_loaded_at = float(original_memory.get("loaded_at", 0) or 0)
+    mem_names = dict(original_memory.get("names") or {})
     names_refresh_attempted_at = float(
-        _COMMON_STOCK_UNIVERSE_MEM.get("names_refresh_attempted_at", 0) or 0
+        original_memory.get("names_refresh_attempted_at", 0) or 0
     )
     stale_mem_tickers = set(mem_tickers or []) if mem_tickers is not None else set()
-    if stale_mem_tickers and now_ts - mem_loaded_at < max_age_seconds and (mem_names or not require_names):
-        return stale_mem_tickers, str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+    if stale_mem_tickers and now_ts - mem_loaded_at < max_age_seconds and (mem_names or not require_names or cache_only):
+        return stale_mem_tickers, str(original_memory.get("source") or "memory")
     if (
         stale_mem_tickers
+        and not cache_only
         and require_names
         and not mem_names
         and now_ts - names_refresh_attempted_at < 15 * 60
     ):
-        return stale_mem_tickers, str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+        return stale_mem_tickers, str(original_memory.get("source") or "memory")
 
     stale_cached_tickers: set[str] = stale_mem_tickers
-    stale_cached_source = str(_COMMON_STOCK_UNIVERSE_MEM.get("source") or "memory")
+    stale_cached_source = str(original_memory.get("source") or "memory")
     stale_cached_at = mem_loaded_at
-    stale_cached_adr: set[str] = set(_COMMON_STOCK_UNIVERSE_MEM.get("adr_tickers") or [])
+    stale_cached_adr: set[str] = set(original_memory.get("adr_tickers") or [])
     stale_cached_names: Dict[str, str] = mem_names
     try:
         if os.path.exists(COMMON_STOCK_UNIVERSE_CACHE):
@@ -1044,14 +1070,14 @@ def _load_common_stock_universe(
                 for ticker, name in raw_cached_names.items()
                 if str(ticker).strip() and str(name).strip()
             } if isinstance(raw_cached_names, dict) else {}
-            if cached_tickers and now_ts - cached_at < max_age_seconds and (cached_names or not require_names):
-                _COMMON_STOCK_UNIVERSE_MEM.update({
-                    "loaded_at": now_ts,
+            if cached_tickers and now_ts - cached_at < max_age_seconds and (cached_names or not require_names or cache_only):
+                _publish_common_stock_universe_memory({
+                    "loaded_at": cached_at if cache_only else now_ts,
                     "tickers": sorted(cached_tickers),
                     "source": "file_cache",
                     "adr_tickers": sorted(cached_adr),
                     "names": cached_names,
-                })
+                }, expected_memory=original_memory if cache_only else None)
                 return cached_tickers, "file_cache"
             if cached_tickers:
                 stale_cached_tickers = cached_tickers
@@ -1062,9 +1088,25 @@ def _load_common_stock_universe(
     except Exception as cache_err:
         print(f"[Common Stock Universe] cache read error: {cache_err}")
 
+    if cache_only:
+        # Display-only reads must not turn missing issuer names into many
+        # provider pages. Keep saved metadata (including its real age); never
+        # refresh it or promote it to fresh mail/scanner admission evidence.
+        if stale_cached_tickers:
+            cached_source = stale_cached_source if stale_cached_source.startswith("stale") else "stale_memory_cache"
+            _publish_common_stock_universe_memory({
+                "loaded_at": stale_cached_at,
+                "tickers": sorted(stale_cached_tickers),
+                "source": cached_source,
+                "adr_tickers": sorted(stale_cached_adr),
+                "names": stale_cached_names,
+            }, expected_memory=original_memory)
+            return stale_cached_tickers, cached_source
+        return None, "cached_reference_unavailable"
+
     if not POLYGON_KEY:
         if stale_cached_tickers:
-            _COMMON_STOCK_UNIVERSE_MEM.update({
+            _publish_common_stock_universe_memory({
                 "loaded_at": stale_cached_at or now_ts,
                 "tickers": sorted(stale_cached_tickers),
                 "source": stale_cached_source,
@@ -1075,7 +1117,7 @@ def _load_common_stock_universe(
         return None, "missing_polygon_key"
 
     if require_names:
-        _COMMON_STOCK_UNIVERSE_MEM["names_refresh_attempted_at"] = now_ts
+        _publish_common_stock_universe_memory({"names_refresh_attempted_at": now_ts})
 
     tickers: set[str] = set()
     adr_tickers: set[str] = set()
@@ -1131,7 +1173,7 @@ def _load_common_stock_universe(
                     }, f)
             except Exception as write_err:
                 print(f"[Common Stock Universe] cache write error: {write_err}")
-            _COMMON_STOCK_UNIVERSE_MEM.update({
+            _publish_common_stock_universe_memory({
                 "loaded_at": now_ts,
                 "tickers": sorted(tickers),
                 "source": "polygon_reference",
@@ -1144,7 +1186,7 @@ def _load_common_stock_universe(
         print(f"[Common Stock Universe] fetch error: {redact_sensitive_query_values(e)}")
 
     if stale_cached_tickers:
-        _COMMON_STOCK_UNIVERSE_MEM.update({
+        _publish_common_stock_universe_memory({
             "loaded_at": stale_cached_at or now_ts,
             "tickers": sorted(stale_cached_tickers),
             "source": stale_cached_source,
@@ -10296,7 +10338,7 @@ def _elliott_display_row(row):
     return {key: deepcopy(value) for key, value in row.items() if key in keys}
 
 
-def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None, *, cache_only: bool = False) -> Dict[str, Any]:
+def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None, *, cache_only: bool = False, display_only: bool = False) -> Dict[str, Any]:
     if is_elliott_pattern_context(row, strategy=scanner_name):
         return _elliott_context_trade_state(row)
     now = now or time.time()
@@ -10374,14 +10416,18 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
         reasons.append("missing_ticker")
     asset_exclusion_reason = None
     if ticker and scanner_name in _STOCK_EMAIL_ASSET_GUARD_SCANNERS:
-        common_stock_universe, common_stock_source = _load_common_stock_universe_cached() if cache_only else _load_common_stock_universe()
-        if cache_only and common_stock_universe is None:
+        if display_only:
+            common_stock_universe, common_stock_source = _load_common_stock_universe(cache_only=True)
+        else:
+            common_stock_universe, common_stock_source = _load_common_stock_universe_cached() if cache_only else _load_common_stock_universe()
+        if cache_only and not display_only and common_stock_universe is None:
             raise RuntimeError("audit_common_stock_basis_unavailable")
         asset_exclusion_reason = _stock_alert_asset_exclusion_reason(
             ticker,
             common_stock_universe=common_stock_universe,
             universe_source=common_stock_source,
             require_reference=common_stock_universe is None,
+            cache_only=display_only,
         )
         if asset_exclusion_reason:
             reasons.append("non_common_stock_product")
@@ -17165,7 +17211,7 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
             else:
                 row.pop(key, None)
     assessed_at = time.time()
-    state = _classify_alert_candidate(scanner_name, row, assessed_at)
+    state = _classify_alert_candidate(scanner_name, row, assessed_at, cache_only=True, display_only=True)
     # Explain the actual mail score separately from scanner release. This is
     # a read-only preview, not a send/claim or proof of inbox delivery.
     mail_reasons = list(state.get("suppression_reasons") or [])
@@ -17422,11 +17468,13 @@ def _apply_scanner_result_trade_state(item: Dict[str, Any], scanner_name: str) -
 def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cache_age_seconds: Optional[int]) -> List[Dict[str, Any]]:
     """Add consistent signal explanations and risk warnings to scanner rows."""
     decorated = []
+    if not results:
+        return decorated
     market_context = _get_market_context_snapshot()
     stock_guard_universe = None
     stock_guard_source = ""
     if scanner_name in STOCK_SCANNER_ASSET_GUARD_NAMES:
-        stock_guard_universe, stock_guard_source = _load_common_stock_universe(require_names=True)
+        stock_guard_universe, stock_guard_source = _load_common_stock_universe(require_names=True, cache_only=True)
     for raw in results or []:
         if not isinstance(raw, dict):
             decorated.append(raw)
@@ -17448,6 +17496,7 @@ def _decorate_scan_results(results: List[Dict[str, Any]], scanner_name: str, cac
                 common_stock_universe=stock_guard_universe,
                 universe_source=stock_guard_source,
                 require_reference=stock_guard_universe is None,
+                cache_only=True,
             )
             if exclusion_reason:
                 continue
@@ -28449,7 +28498,7 @@ async def commerce_auth_gate(request: Request, call_next):
         if not HAS_AUTH:
             return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
         token = _token_from_authorization(request.headers.get("authorization"))
-        payload = _readonly_diagnostic_call(verify_token, token) if token else None
+        payload = await run_in_threadpool(_readonly_diagnostic_call, verify_token, token) if token else None
         if not payload:
             return JSONResponse(status_code=401, content={"detail": "Admin login required"})
         if str(payload.get("email", "")).strip().lower() not in ADMIN_EMAILS:
@@ -28462,7 +28511,7 @@ async def commerce_auth_gate(request: Request, call_next):
         if not HAS_AUTH:
             return JSONResponse(status_code=503, content={"detail": "Auth system not available"})
         token = _token_from_authorization(request.headers.get("authorization"))
-        payload = verify_token(token) if token else None
+        payload = await run_in_threadpool(verify_token, token) if token else None
         if not payload:
             return JSONResponse(status_code=401, content={"detail": "Admin login required"})
         if str(payload.get("email", "")).strip().lower() not in ADMIN_EMAILS:
@@ -28481,16 +28530,18 @@ async def commerce_auth_gate(request: Request, call_next):
     token = _token_from_authorization(request.headers.get("authorization"))
     if not token:
         return JSONResponse(status_code=401, content={"detail": "Login required"})
-    payload = verify_token(token)
+    # Auth/plan helpers perform synchronous store I/O. Keep authorization
+    # unchanged while allowing unrelated reads to progress during that I/O.
+    payload = await run_in_threadpool(verify_token, token)
     if not payload:
         return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
-    denial = _commerce_gate_denial(path, token, payload)
+    denial = await run_in_threadpool(_commerce_gate_denial, path, token, payload)
     if denial:
         return denial
     if request.method == "POST" and path in _MANUAL_SCAN_PATHS:
         email = str(payload.get("email") or "").strip().lower()
         if email not in ADMIN_EMAILS:
-            plan = get_user_plan(token)
+            plan = await run_in_threadpool(get_user_plan, token)
             retry_after, interval_seconds = _manual_scan_throttle_claim(email, path, plan)
             if retry_after > 0:
                 return JSONResponse(
@@ -29013,14 +29064,14 @@ async def api_get_me(authorization: str = Header(None)):
     token = _get_token_from_header(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Token required")
-    payload = verify_token(token)
+    payload = await run_in_threadpool(verify_token, token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    limits = get_user_limits(token)
+    limits = await run_in_threadpool(get_user_limits, token)
     # Load full user data from DB
     email = payload.get("email", "")
     from modules.auth import _load_users
-    db = _load_users()
+    db = await run_in_threadpool(_load_users)
     db_user = db.get("users", {}).get(email, {})
     return {
         "user": {
@@ -29044,10 +29095,10 @@ async def api_get_alert_settings(authorization: str = Header(None)):
     token = _get_token_from_header(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Token required")
-    payload = verify_token(token)
+    payload = await run_in_threadpool(verify_token, token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return get_user_alert_settings(token)
+    return await run_in_threadpool(get_user_alert_settings, token)
 
 
 @app.put("/api/auth/alert-settings")
@@ -29084,9 +29135,9 @@ async def api_get_personal_positions(authorization: str = Header(None)):
     if not HAS_AUTH:
         raise HTTPException(status_code=503, detail="Auth system not available")
     token = _get_token_from_header(authorization)
-    if not token or not verify_token(token):
+    if not token or not (await run_in_threadpool(verify_token, token)):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    result = get_user_personal_positions(token)
+    result = await run_in_threadpool(get_user_personal_positions, token)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Could not load positions"))
     return result

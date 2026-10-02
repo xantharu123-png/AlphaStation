@@ -1,5 +1,41 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 02.10.2026 – Erstaufruf ohne manuelles Neuladen
+
+Zusätzlicher aktueller Befund: Die anfänglich leere Seite war nicht bloß ein
+laufender Scan. Ergebnis-GET/Body konnten hängen; transiente Erstlesefehler
+wurden nicht automatisch wiederholt, passive Aktualisierungen brachen Reads
+ab. Zwei versteckte Referenz-Providerpfade und blockierendes Auth-I/O kamen
+hinzu. Die unten dokumentierten Mail-/Cup-Grenzen bleiben separat bestehen.
+
+- [x] Gemeinsamen Scannerfeed mit 20 s Request-/Bodydeadline, SingleFlight und
+  automatischem transienten Retry versehen; Retry-After wird nicht umgangen.
+- [x] Finale Ergebnisse bei Ladefehlern behalten; Teilstände nicht zu finalen
+  Ergebnissen/Nullscans umdeuten; Scope-/Run-/Berechtigungsgrenzen erhalten.
+- [x] Ergebnisse aus gespeicherten Instrumentdaten lesen, auch ohne Namen;
+  keine Providerseiten/-Einzelabrufe durch den Standard-Ergebnis-GET.
+  Fehlende Identitätsbeweise bleiben 503, nicht scheinbar gültige 0 Treffer.
+- [x] Cachealter/Firmennamen erhalten und überschreibenden alten Displayread
+  gegenüber neuer Worker-Publikation mit Lock/CAS abgesichert.
+- [x] Auth-/Kontodatenreads aus dem ASGI-Eventloop verlagert, bestehende
+  Auth-/Cookie-/Plan-/read_only-/Throttle-Regeln unverändert geprüft.
+- [x] Playwright-Skill: tatsächliches lokales Bundle auf Desktop/Mobil
+  geprüft. Verzögerter Erstread 503 → Retry → Treffer ohne Reload; spätere 503
+  behalten alte Treffer. 0 Schreibanfragen/Provideraufrufe; eigene Prozesse zu.
+- [x] Gezielte Offlineprüfungen bestanden: 390 bestehende Lifecycle/Authfälle
+  plus 55 abschließende Kernfälle; keine externen Provider/SMTP/Secrets.
+- [x] Eingefrorenen Index-Gesamtlauf abgeschlossen: 10.887 bestanden,
+  1 POSIX-Dateirechteprüfung unter Windows übersprungen, 0 Fehler.
+  `tmp/qa-b3fbe27b64fa/results.xml`; Deploy-Umstellungstests nicht im Umfang.
+- [ ] Nur das geprüfte Erstlade-Paket committen und auf `main` veröffentlichen.
+- [ ] Nach normalem Betreiberpull echten ersten Seitenaufruf kontrollieren.
+  API-Health am 02.10.2026 17:28:20 (Serverzeitstempel): healthy / `1c3fb68f51df`
+  / Frontend `806260a08809`. Die Erstlade-Korrektur ist dort noch nicht
+  installiert; kein Export, Scanstart oder Serverneustart durch Codex.
+
+Details/Nachweise: [Erstlade-Prüfbericht](docs/INITIAL_RESULT_LOAD_REPAIR_2026-10-02.md).
+Keine Änderung der Signalbedingungen, keine Behauptung neuer Mailzustellung.
+
 ## Neue Livekontrolle 02.10.2026 – nach dem Betreiberupdate
 
 Dieser Abschnitt hat Vorrang vor dem älteren Hinweis „auf Hetzner noch nicht

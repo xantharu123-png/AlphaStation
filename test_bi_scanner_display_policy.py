@@ -19,7 +19,9 @@ def test_bi_candidate_order_is_not_alphabet_prefix_biased():
 
 
 def test_bi_mail_gate_does_not_become_no_trade(monkeypatch):
-    def fake_classify(scanner_name, row, now=None):
+    def fake_classify(scanner_name, row, now=None, *, cache_only=False, display_only=False):
+        assert cache_only is True
+        assert display_only is True
         return {
             "score": 69,
             "suppression_reasons": [
@@ -42,7 +44,9 @@ def test_bi_mail_gate_does_not_become_no_trade(monkeypatch):
 
 
 def test_bi_trade_grade_uses_stricter_ladder(monkeypatch):
-    def fake_classify(scanner_name, row, now=None):
+    def fake_classify(scanner_name, row, now=None, *, cache_only=False, display_only=False):
+        assert cache_only is True
+        assert display_only is True
         return {
             "score": 74,
             "suppression_reasons": [
@@ -67,7 +71,9 @@ def test_bi_trade_grade_uses_stricter_ladder(monkeypatch):
 
 
 def test_bi_explains_setup_grade_and_trade_grade_separately(monkeypatch):
-    def fake_classify(scanner_name, row, now=None):
+    def fake_classify(scanner_name, row, now=None, *, cache_only=False, display_only=False):
+        assert cache_only is True
+        assert display_only is True
         return {
             "score": 91,
             "suppression_reasons": [
@@ -100,7 +106,9 @@ def test_bi_explains_setup_grade_and_trade_grade_separately(monkeypatch):
 
 
 def test_bi_hard_blocker_stays_no_trade(monkeypatch):
-    def fake_classify(scanner_name, row, now=None):
+    def fake_classify(scanner_name, row, now=None, *, cache_only=False, display_only=False):
+        assert cache_only is True
+        assert display_only is True
         return {
             "score": 88,
             "suppression_reasons": ["invalid_trade_plan"],
@@ -134,14 +142,15 @@ def test_bi_release_grade_never_overstates_a_weak_setup():
 
 
 def test_bi_release_grade_keeps_original_setup_grade_after_redecoration(monkeypatch):
-    monkeypatch.setattr(
-        api,
-        "_classify_alert_candidate",
-        lambda scanner_name, row, now=None: {
+    def fake_classify(scanner_name, row, now=None, *, cache_only=False, display_only=False):
+        assert cache_only is True
+        assert display_only is True
+        return {
             "score": 94,
             "suppression_reasons": ["grade_below_alert_threshold"],
-        },
-    )
+        }
+
+    monkeypatch.setattr(api, "_classify_alert_candidate", fake_classify)
     row = {
         "ticker": "DMLP",
         "grade": "S",

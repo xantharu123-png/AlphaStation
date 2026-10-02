@@ -25,7 +25,7 @@ def test_calendar_forecast_changes_never_abort_the_initial_result_read():
     """)
 
 
-def test_confirmed_32_rows_keep_their_summary_during_superseded_background_reads():
+def test_confirmed_32_rows_keep_their_summary_during_coalesced_background_reads():
     lifecycle("""
       const final=payload(t1,'FINAL'); final.data=Array.from({length:32},(_,i)=>({ticker:'FINAL'+i}));
       queue.push({body:final}); render(options()); await settle();
@@ -36,13 +36,24 @@ def test_confirmed_32_rows_keep_their_summary_during_superseded_background_reads
       assert.equal(feed.loading,false); assert.equal(summary().text,'32 Ergebnisse');
       const second=defer(); queue.push({promise:second.promise});
       const newest=feed.refresh(); await settle();
-      assert.equal(requests[1].init.signal.aborted,true);
-      first.resolve(response(200,payload(t2,'OBSOLETE'))); await reading; await settle();
+      assert.equal(requests.length,2); assert.equal(requests[1].init.signal.aborted,false);
+      assert.equal(feed.results.length,32); assert.equal(feed.info.cached_at,t1);
+      assert.equal(summary().text,'32 Ergebnisse');
+      first.resolve(response(200,final)); await reading; await newest; await settle();
       assert.equal(feed.results.length,32); assert.equal(summary().text,'32 Ergebnisse');
-      second.resolve(response(200,final)); await newest; await settle();
-      assert.equal(feed.results.length,32); assert.equal(feed.loading,false);
+      assert.equal(feed.info.cached_at,t1); assert.equal(timers.size,1);
+      // All passive refreshes share the first read, then reconcile once.
+      await timer();
+      assert.equal(requests.length,3); assert.equal(requests[2].init.signal.aborted,false);
+      assert.equal(feed.results.length,32); assert.equal(summary().text,'32 Ergebnisse');
+      assert.equal(feed.info.cached_at,t1); assert.equal(feed.loading,false);
+      second.resolve(response(200,{...final,cached_at:t2})); await settle();
+      assert.equal(feed.results.length,32); assert.equal(feed.info.cached_at,t2);
+      assert.equal(feed.loading,false); assert.equal(timers.size,0);
       queue.push({status:503,body:{}}); await feed.refresh(); await settle();
-      assert.equal(feed.results.length,32); assert.equal(summary().tone,'error');
+      assert.equal(feed.results.length,32); assert.equal(feed.info.cached_at,t2);
+      assert.equal(summary().tone,'error'); assert.equal(timers.size,1);
+      assert.equal(requests.filter(r=>r.init.method==='POST').length,0);
     """)
 
 

@@ -71,8 +71,10 @@ def test_momentum_breakdown_is_separate_from_mail_score_and_retest():
 
 
 def test_quality_rejection_is_visible_but_does_not_rewrite_scanner_release(monkeypatch):
-    monkeypatch.setattr(api, "_classify_alert_candidate", lambda *_a: {
-        "score": 94, "grade": "S", "suppression_reasons": [], "alertable_now": True})
+    def classify(_scanner, _row, _now, *, cache_only=False, display_only=False):
+        assert cache_only is True and display_only is True
+        return {"score": 94, "grade": "S", "suppression_reasons": [], "alertable_now": True}
+    monkeypatch.setattr(api, "_classify_alert_candidate", classify)
     monkeypatch.setattr(api, "_stock_strategy_mail_quality_state", lambda *_a, **_k:
                         (False, "momentum_mail_blocked_daily_quality_below_threshold"))
     state = api._scanner_result_trade_state("stock_strategy", {"ticker": "QA", "score": 94})
@@ -103,7 +105,8 @@ def test_old_or_running_evidence_keeps_priority_over_exclusion_success():
 
 def test_display_does_not_replace_legitimate_capped_score_with_raw_score(monkeypatch):
     observed = []
-    def classify(_scanner, row, _now):
+    def classify(_scanner, row, _now, *, cache_only=False, display_only=False):
+        assert cache_only is True and display_only is True
         observed.append(api._extract_alert_score(row))
         return {"score": 60, "suppression_reasons": ["score_below_alert_threshold"], "grade": "B"}
     monkeypatch.setattr(api, "_classify_alert_candidate", classify)
