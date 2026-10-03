@@ -44,8 +44,10 @@ Ausgangsrevision `9267b0d87e63a30a1231d8a7694efa5ba5312074`.
   `tmp/qa-2a892a8eb305/results.xml`. Alle 11 Quell-/Testdateien entsprechen
   SHA-256-genau dem geprüften Snapshot. Retirierte Deploy-Umstellungstests und
   fremde Commerce-/Kalender-/Deploy-/Handbuch-WIP nicht im Reparaturpaket.
-- [ ] Nur dieses geprüfte Paket committen/pushen; private Exporte und
-  Browserartefakte sowie vorhandene fremde Änderungen nicht übernehmen.
+- [x] Nur dieses geprüfte Paket committet und auf `main` gepusht:
+  `98da02ef104e0145e3e14c2b53d2a1f8e1440830`, durch `git ls-remote` bestätigt.
+  Private Exporte/Browserartefakte und vorhandene fremde Änderungen nicht
+  übernommen. Dieser abschließende Statusnachtrag ändert nur Dokumentation.
 - [ ] Nach normalem Betreiberpull die echte Wochenkohorte nachrechnen und
   ein neues gültiges Handelssignal vom Scanner bis zur persönlichen Mail prüfen.
   Kein automatischer Replay historischer Einstiegsmails und keine weitere Testmail.
