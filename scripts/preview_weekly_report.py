@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Preview der Wochenreport-Mail mit echten Daten (AUDIT 2026-07-24).
+"""Preview der Wochenreport-Mail mit echten Daten (AUDIT 2026-10-03).
 
 Rendert bg_service._build_weekly_report_mail mit der echten
 load_performance_summary — dieselbe Datenbasis und derselbe Code-Pfad wie
-der Freitags-Job, aber OHNE Versand. Schreibt weekly_report_preview.html
-ins Repo-Root und prueft, ob die T1/Kalibrier-Elemente (Ø R 50/50-Spalte,
-Wilson-Fusstext) im Body landen.
+der Freitags-Job, aber OHNE Versand: belegte SMTP-Annahmen fuer die
+7-Tage-Aktivitaet und eine getrennte reife 30-Tage-Kohorte. Schreibt
+weekly_report_preview.html ins Repo-Root und prueft Provenienz,
+Bestandsabgleich sowie 50/50-/BE-Semantik. Bei Lesefehlern bleibt eine
+vorhandene Vorschau unveraendert.
 
 Usage (Server, im App-Verzeichnis):
     venv/bin/python3 scripts/preview_weekly_report.py [--days 7]
     # HTML danach lokal ansehen:
     #   scp root@SERVER:/home/tradingbot/app/weekly_report_preview.html .
 
-Exit 0 = Mail rendert mit allen neuen Elementen (oder leere Woche),
-1 = Elemente fehlen trotz Signalen (Alt-Stand?) / Fehler.
+Exit 0 = qualifizierte Mail rendert mit allen Pflichtabschnitten,
+1 = fehlende Berichtsdaten, Pflichtabschnitte oder anderer Fehler.
 """
 import argparse
 import sys
@@ -90,7 +92,19 @@ def main() -> int:
               "(modules/signal_tracker.py fehlt?)")
         return 1
 
-    summary = bg_service.load_performance_summary(days=args.days)
+    summary = bg_service.load_performance_summary(
+        days=args.days, require_delivery_evidence=True,
+    )
+    performance = bg_service.load_performance_summary(
+        days=30, mature_only=True, require_delivery_evidence=True,
+    )
+    if any(
+        not item.get("source_read_complete") or not item.get("report_data_available")
+        or item.get("error")
+        for item in (summary, performance)
+    ):
+        print("FAIL: Berichtsdaten nicht verfuegbar; keine Nullbilanz erzeugt.")
+        return 1
     # Shadow-Messung (AUDIT 2026-07-31): Vorschau rendert dieselbe Sektion
     # wie der Freitags-Job — defensiv, ein Fehler hier bricht die Vorschau
     # nicht (alter Code-Stand ohne shadow_summary bleibt lauffaehig).
@@ -100,13 +114,15 @@ def main() -> int:
             shadow = bg_service.shadow_summary(days=args.days)
         except Exception:
             shadow = None
-    subject, body_html = bg_service._build_weekly_report_mail(summary, shadow=shadow)
+    subject, body_html = bg_service._build_weekly_report_mail(
+        summary, shadow=shadow, performance_summary=performance,
+    )
 
     out = REPO_ROOT / "weekly_report_preview.html"
     out.write_text(body_html, encoding="utf-8")
 
     total = summary.get("total") or {}
-    n_signals = total.get("signals", 0) or 0
+    n_signals = (performance.get("total") or {}).get("signals", 0) or 0
     print(f"Betreff: {subject}")
     print(f"Signale: {n_signals} | entschieden: "
           f"{total.get('decided_signals', '?')} | "
@@ -117,11 +133,10 @@ def main() -> int:
     if n_signals > 0:
         # Nur pruefbar, wenn die Woche Tabellen rendert (keine Leere-Woche-Mail)
         for label, needle in (
-            ("Ø R 50/50-Spalte", "Ø R 50/50"),
-            ("Ø R BE-Spalte", "Ø R BE"),
-            ("Wilson-Fusstext", "KI = Wilson-95%-Intervall"),
-            ("50/50-Semantik im Fusstext", "50/50-Managements"),
-            ("BE-Semantik im Fusstext", "Einstand-Regel"),
+            ("Bestandsabgleich", "Bestandsabgleich"),
+            ("SMTP-Provenienz", "Globaler Tracker: SMTP-Annahme"),
+            ("50/50-Semantik im Fusstext", "50/50-Gegenrechnung"),
+            ("BE-Semantik im Fusstext", "BE-Gegenrechnung"),
         ):
             ok = needle in body_html
             print(("  OK   " if ok else "  FAIL ") + label)
@@ -137,7 +152,10 @@ def main() -> int:
     if not wd_ok:
         failures.append("Waechter-Sektion")
 
-    _print_scanner_table(summary)
+    print("Reife Bilanz, getrennt von den 7-Tage-Aktivitaetszahlen:")
+    for scanner, bucket in performance.get("per_scanner", {}).items():
+        print(f"{scanner}: {bucket.get('report_counts', {})}; "
+              f"50/50+BE R={bucket.get('sum_r_managed_50_50_be')}")
 
     print(f"\nHTML geschrieben: {out}")
     print("Zum Ansehen: scp root@SERVER:"

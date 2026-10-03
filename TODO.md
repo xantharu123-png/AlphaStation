@@ -1,5 +1,64 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 03.10.2026 – Wochenreport: Versandkohorte und kausale Bewertung
+
+Aktueller Auftrag: die irreführende Wochenbilanz (86 reife Einträge,
+45 ausgewertet / 40 ungeklärt, −47,5R) und ihre Versandbehauptungen korrigieren.
+Ausgangsrevision `9267b0d87e63a30a1231d8a7694efa5ba5312074`.
+
+- [x] Wochenjob und lokale Vorschau verwenden ausschließlich aktivierte,
+  kanonisch gebundene SMTP-Annahmen mit gültigen Empfänger- und Zeitbelegen.
+  Alte direkte Tracker-Einträge bleiben erhalten, gelten aber nicht mehr als
+  nachgewiesene Signalzustellung. Aktivitäten der letzten 7 Tage und das
+  separate 30-Tage-Reifefenster werden nicht vermischt.
+- [x] Die globale SMTP-Annahme wird ausdrücklich nicht als persönlicher
+  Posteingang ausgegeben. Wochenreport/Crash-Mails bleiben eigene Info-Mails;
+  ihr Eingang beweist keinen erfolgreichen Handelssignal-Ablauf.
+- [x] Erste Einstiegs- und Stop-Berührung innerhalb derselben Tageskerze
+  ohne belegten vorherigen Einstieg erzeugt keinen erfundenen Fill/Verlust.
+  Historische mehrdeutige Fälle werden beim Lesen ausgeklammert, nicht in der
+  Produktionsdatenbank umgeschrieben. Bloße Snapshot-/Pfad-Tags reichen nicht.
+- [x] Echte bereits eingestiegene Positionen und belegte Gap-Verluste bleiben
+  erhalten. Negative R-Werte werden nicht kosmetisch entfernt; die alte
+  Gesamtsumme ist ohne qualifizierte Kohorte keine belastbare Gesamtbilanz.
+- [x] Vollständiger, disjunkter Bestandsabgleich: ausgewertet, Evidenz offen,
+  ohne Einstieg, noch offen, nicht auswertbar. Offene Kontroll-/BE-/Pfadbelege
+  verhindern eine scheinbar endgültige Schlagzeile oder Scannerfreigabe.
+  Lesefehler erzeugen keine scheinbar erfolgreiche Nullbilanz und überschreiben
+  keine vorhandene Vorschau.
+- [x] Unabhängige neue Kausalitäts-/Provenienz-Gegenfälle sowie echte
+  Prepare → Attempt → Finalize → Evaluator-Lifecycles lokal geprüft.
+  Akzeptanzbindungen überstehen gültige spätere Outcome-Änderungen;
+  Doppelversand bleibt gesperrt. Keine Schwellen, Einstellungen oder Orders geändert.
+- [x] Playwright-Skill: lokale synthetische Wochenmail auf Desktop1440 und
+  Mobil390 geprüft; kein horizontaler Überlauf, keine externen Requests.
+  Die Vorschau ist Formatnachweis, keine Rekonstruktion der echten 86 Einträge.
+  Private Screenshots liegen unter `output/playwright/weekly-repair-*.png`.
+- [x] Drei kalendarische Testfehler gegen unveränderten HEAD reproduziert.
+  Nur Test-Clocks korrigiert; Admission-/Expiry-Assertions unverändert.
+  142 gezielte Scheduler-Nachbarprüfungen bestanden; kein API-Produktionsfix
+  hierfür erforderlich. 37 abschließende Preview-/Kohortenprüfungen bestanden
+  (`tmp/qa-f44b35f2d948/results.xml`).
+- [x] Eingefrorenen Gesamtlauf abgeschlossen: 11.180 bestanden,
+  1 POSIX-Prüfung auf Windows übersprungen, 0 Fehler, 301,34 s.
+  `tmp/qa-2a892a8eb305/results.xml`. Alle 11 Quell-/Testdateien entsprechen
+  SHA-256-genau dem geprüften Snapshot. Retirierte Deploy-Umstellungstests und
+  fremde Commerce-/Kalender-/Deploy-/Handbuch-WIP nicht im Reparaturpaket.
+- [ ] Nur dieses geprüfte Paket committen/pushen; private Exporte und
+  Browserartefakte sowie vorhandene fremde Änderungen nicht übernehmen.
+- [ ] Nach normalem Betreiberpull die echte Wochenkohorte nachrechnen und
+  ein neues gültiges Handelssignal vom Scanner bis zur persönlichen Mail prüfen.
+  Kein automatischer Replay historischer Einstiegsmails und keine weitere Testmail.
+
+Letzte reine Livekontrolle dieses Auftrags: `/api/health` am03.10.2026
+06:19:21 (Serverzeitstempel) healthy / `4ef6c9b28482`, Frontend `5f2a5271c188`.
+Kein Serverupdate, Scanstart, SMTP-Versuch oder Produktionsdaten-Umschreiben
+durch diesen Auftrag. Die temporär geöffnete App zeigte die Anmeldeseite;
+SSH im Batch-Modus wies vorhandene Schlüssel ab. Beide nur lesenden Zugänge
+stehen damit ohne Betreiberanmeldung nicht zur Verfügung.
+Die technischen Fehler sind lokal prüfbar; neue echte Signalzustellung bleibt
+eine getrennte, noch offene Betriebsprüfung.
+
 ## 02.10.2026 – Backtest zuerst tief auditiert, dann repariert
 
 Aktueller Auftrag: Backtest Center vor dem Reload-Fix tief prüfen.

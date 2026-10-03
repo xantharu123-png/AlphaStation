@@ -17,6 +17,7 @@ Session-Status wird IMMER gemockt (tageszeit-/kalenderunabhaengig).
 import os
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -1006,7 +1007,10 @@ def test_k2d_hourly_discovery_owner_queues_only_immediate_prior_close(monkeypatc
 def test_k2d_closed_session_prunes_without_provider_or_wire(monkeypatch, tmp_path):
     queue_path = tmp_path / "cup-watch.json"
     monkeypatch.setattr(api, "_CUP_HANDLE_WATCH_QUEUE_PATH", queue_path)
-    target_date = _today_et_str()
+    # A weekday after its regular close, not the operator's current day: a
+    # Saturday has no exchange close and therefore cannot produce this expiry.
+    closed_at = datetime(2026, 8, 31, 20, 30, tzinfo=timezone.utc)
+    target_date = closed_at.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     expiry = api._cup_handle_watch_expiry_ts(target_date)
     assert expiry is not None
     assert cup_watch_queue.upsert_watch(
@@ -1038,7 +1042,7 @@ def test_k2d_closed_session_prunes_without_provider_or_wire(monkeypatch, tmp_pat
     monkeypatch.setattr(
         api, "_send_email_alert", lambda *a, **k: wires.append(True) or True
     )
-    result = api._cup_handle_watch_monitor_wrapper(now_ts=api.time.time())
+    result = api._cup_handle_watch_monitor_wrapper(now_ts=closed_at.timestamp())
     assert result == {"claimed": 0, "triggered": 0, "completed": 0}
     assert provider_calls == []
     assert wires == []

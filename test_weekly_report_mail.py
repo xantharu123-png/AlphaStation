@@ -55,6 +55,8 @@ def _summary(**total_overrides):
     total.setdefault("win_rate_wilson_95", {"lower_pct": 36.0, "upper_pct": 80.0})
     return {
         "generated_at": "2026-06-12T20:20:00+00:00",
+        "source_read_complete": True, "report_data_available": True,
+        "delivery_evidence": {"required": True, "excluded_signals": 0},
         "window_days": 7,
         "total": total,
         "per_scanner": {
@@ -112,8 +114,18 @@ def _mature_summary(**total_overrides):
         "breakeven_win_rate_managed_be_pct": 43.0,
     }
     total.update(total_overrides)
+    total["report_counts"] = {
+        "resolved": total.get("managed_be_decided_signals", 0),
+        "evidence_unresolved": total.get("managed_be_unresolved", 0),
+        "no_fill": max(0, total["signals"] - total.get("managed_be_decided_signals", 0)
+                       - total.get("managed_be_unresolved", 0)),
+        "still_open": 0, "untracked": 0,
+        "report_total": total["signals"], "reconciled": True,
+    }
     return {
         "generated_at": "2026-06-12T20:20:00+00:00",
+        "source_read_complete": True, "report_data_available": True,
+        "delivery_evidence": {"required": True, "excluded_signals": 0},
         "window_days": 30,
         "cohort_mode": "fully_observed",
         "excluded_not_mature": 8,
@@ -182,7 +194,10 @@ def _setup(monkeypatch, tmp_path, summary=None, now=FRIDAY_1620):
     monkeypatch.setattr(bg_service, "datetime", _FakeDatetime)
     monkeypatch.setattr(
         bg_service, "load_performance_summary",
-        lambda days=7: summary if summary is not None else _summary(),
+        lambda days=7, mature_only=False, **kwargs: (
+            ({**_mature_summary(), "calibration_cells": (summary or {}).get("calibration_cells", [])}
+             if mature_only else (summary if summary is not None else _summary()))
+        ),
         raising=False,
     )
     sent_mails = []
@@ -298,24 +313,23 @@ def test_subject_format_and_seven_day_window(monkeypatch, tmp_path):
     (ℹ️-Praefix setzt _apply_mail_class_prefix erst im echten Versand.)"""
     sent = _setup(monkeypatch, tmp_path)
     seen_days = []
+    def _loader(days, mature_only=False, require_delivery_evidence=False):
+        seen_days.append((days, mature_only, require_delivery_evidence))
+        return _mature_summary() if mature_only else _summary()
     monkeypatch.setattr(
         bg_service, "load_performance_summary",
-        lambda days: (seen_days.append(days), _summary())[1],
+        _loader,
         raising=False,
     )
     bg_service._run_weekly_report({})
-    assert seen_days == [7]
-    assert sent[0]["subject"] == (
-        "Wochenreport Signal-Tracker: +3.5R | 12 Signale | Hit-Rate 60%"
-    )
+    assert seen_days == [(7, False, True), (30, True, True)]
+    assert "-1.5R | 18 reife Signale (10 resolved / 0 unresolved)" in sent[0]["subject"]
 
 
 def test_scanner_table_rows_and_pnl_tinting(monkeypatch, tmp_path):
     """Je-Scanner-Tabelle enthaelt beide Zeilen; Σ R >= 0 gruen (#e9f7ef),
     < 0 rot (#fdecea) — Toenung steht im <tr> VOR dem Scanner-Namen."""
-    sent = _setup(monkeypatch, tmp_path)
-    bg_service._run_weekly_report({})
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary(), now_et=FRIDAY_1620, watchdog_events=[])
     assert "bi_long" in body and "bear_scan" in body
     assert "+4.6R" in body and "-1.1R" in body
     green_pos, red_pos = body.index("#e9f7ef"), body.index("#fdecea")
@@ -329,8 +343,7 @@ def test_small_sample_hint_below_30_decided(monkeypatch, tmp_path):
     """9 entschiedene Signale (<30) => Stichproben-Hinweis im Body."""
     sent = _setup(monkeypatch, tmp_path)  # decided = 3+2+4 = 9
     bg_service._run_weekly_report({})
-    assert ("Stichprobe noch klein — keine Schwellen-Entscheidungen "
-            "daraus ableiten.") in sent[0]["body"]
+    assert "Stichprobe unter 30 entschiedenen Signalen" in sent[0]["body"]
 
 
 def test_no_small_sample_hint_at_30_decided(monkeypatch, tmp_path):
@@ -346,6 +359,8 @@ def test_empty_week_sends_lifesign_mail(monkeypatch, tmp_path):
     """0 Signale => Mail geht TROTZDEM raus (Lebenszeichen), gleiche Dedupe."""
     empty = {
         "generated_at": "2026-06-12T20:20:00+00:00", "window_days": 7,
+        "source_read_complete": True, "report_data_available": True,
+        "delivery_evidence": {"required": True, "excluded_signals": 0},
         "total": {"signals": 0, "open": 0, "tp1_hit": 0, "tp2_hit": 0,
                   "stop_hit": 0, "expired": 0, "untracked": 0,
                   "win_rate_pct": None, "avg_r": None, "sum_r": 0.0,
@@ -353,11 +368,14 @@ def test_empty_week_sends_lifesign_mail(monkeypatch, tmp_path):
         "per_scanner": {}, "recent": [],
     }
     sent = _setup(monkeypatch, tmp_path, summary=empty)
+    monkeypatch.setattr(bg_service, "load_performance_summary", lambda **kwargs: {
+        **empty, "total": {**empty["total"], "managed_be_decided_signals": 0},
+    })
     assert bg_service._run_weekly_report({}) is True
     assert len(sent) == 1
-    assert "Keine Signale diese Woche" in sent[0]["body"]
-    assert sent[0]["subject"].startswith(
-        "Wochenreport Signal-Tracker: +0.0R | 0 Signale")
+    assert "Noch keine auswertbaren Signale" in sent[0]["body"]
+    assert "Noch keine ausgewertete Bilanz | 0 reife Signale" in sent[0]["subject"]
+    assert "+0.0R" not in sent[0]["subject"]
     # Gleiches Dedupe wie volle Woche: zweiter Lauf bleibt still
     assert bg_service._run_weekly_report({}) is False
     assert len(sent) == 1
@@ -385,9 +403,7 @@ def test_raising_summary_loader_no_crash_no_mail(monkeypatch, tmp_path):
 
 def test_managed_r_column_in_head_and_scanner_table(monkeypatch, tmp_path):
     """T1: Ø R 50/50 in Kopf- UND Scanner-Tabelle (total +0.55R, bi_long +1.20R)."""
-    sent = _setup(monkeypatch, tmp_path)
-    bg_service._run_weekly_report({})
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary(), now_et=FRIDAY_1620, watchdog_events=[])
     assert "Ø R 50/50" in body
     assert "+0.55R" in body  # total.avg_r_managed_50_50
     assert "+1.20R" in body  # bi_long.avg_r_managed_50_50
@@ -395,16 +411,14 @@ def test_managed_r_column_in_head_and_scanner_table(monkeypatch, tmp_path):
 
 def test_wilson_ci_next_to_head_hit_rate(monkeypatch, tmp_path):
     """Kalibrier-Loop: Wilson-KI steht an der Hit-Rate der Kopftabelle."""
-    sent = _setup(monkeypatch, tmp_path)
-    bg_service._run_weekly_report({})
-    assert "KI 36–80%" in sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary(), now_et=FRIDAY_1620, watchdog_events=[])
+    assert "KI 36–80%" in body
 
 
 def test_managed_r_in_recent_rows(monkeypatch, tmp_path):
     """Letzte Signale zeigen das 50/50-Management-R hinter r_realized."""
-    sent = _setup(monkeypatch, tmp_path)
-    bg_service._run_weekly_report({})
-    assert "(50/50: +1.50R)" in sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary(), now_et=FRIDAY_1620, watchdog_events=[])
+    assert "(50/50: +1.50R)" in body
 
 
 def test_summary_without_new_fields_still_renders(monkeypatch, tmp_path):
@@ -417,9 +431,7 @@ def test_summary_without_new_fields_still_renders(monkeypatch, tmp_path):
             bucket.pop(key, None)
     for row in legacy["recent"]:
         row.pop("r_managed_50_50", None)
-    sent = _setup(monkeypatch, tmp_path, summary=legacy)
-    assert bg_service._run_weekly_report({}) is True
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(legacy, now_et=FRIDAY_1620, watchdog_events=[])
     assert "Ø R 50/50" in body        # Spaltenkoepfe bleiben
     assert "(KI " not in body         # kein Wilson-Span ohne Feld
     # decided-Fallback: 3+2+4 = 9 < 30 => Stichproben-Hinweis weiterhin da
@@ -488,7 +500,7 @@ def test_verdict_alert_on_30_crossing(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path, summary=_summary_with_crash(31))
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
-    assert "Verdikt-Alarm" in body
+    assert "Kalibrierungs-Alarm" in body
     assert "überschreitet 30er-Marke" in body
     assert "13 → 31 entschieden" in body
     assert "<b>behalten</b>" in body
@@ -524,7 +536,7 @@ def test_verdict_alert_on_verdict_change(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path, summary=s)
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
-    assert "Verdikt-Alarm" in body
+    assert "Kalibrierungs-Alarm" in body
     assert "Verdikt-Wechsel" in body
     assert "behalten → <b>abschalten</b>" in body
 
@@ -620,9 +632,7 @@ def _summary_with_be():
 
 def test_be_column_in_head_and_scanner_table(monkeypatch, tmp_path):
     """Ø R BE in Kopf- UND Scanner-Tabelle (total +0.61R, bi_long +1.40R)."""
-    sent = _setup(monkeypatch, tmp_path, summary=_summary_with_be())
-    bg_service._run_weekly_report({})
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary_with_be(), now_et=FRIDAY_1620, watchdog_events=[])
     assert body.count("Ø R BE") >= 2   # Spaltenkopf in beiden Tabellen
     assert "+0.61R" in body            # total.avg_r_be
     assert "+1.40R" in body            # bi_long.avg_r_be
@@ -630,9 +640,7 @@ def test_be_column_in_head_and_scanner_table(monkeypatch, tmp_path):
 
 def test_be_box_with_activations_and_saved(monkeypatch, tmp_path):
     """BE-Box trennt MFE-Beobachtung und Gegenrechnung von echter Ausfuehrung."""
-    sent = _setup(monkeypatch, tmp_path, summary=_summary_with_be())
-    bg_service._run_weekly_report({})
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary_with_be(), now_et=FRIDAY_1620, watchdog_events=[])
     assert "Einstand-Regel (seit 30.07. im Tracker)" in body
     assert "5 Signale" in body
     assert "MFE >= +1R beobachtet" in body
@@ -648,9 +656,7 @@ def test_be_box_with_activations_and_saved(monkeypatch, tmp_path):
 
 def test_no_be_box_without_activations(monkeypatch, tmp_path):
     """Alt-Summary OHNE BE-Felder: keine Box, Spaltenkoepfe bleiben, Werte '–'."""
-    sent = _setup(monkeypatch, tmp_path)  # _summary() ohne BE-Felder
-    assert bg_service._run_weekly_report({}) is True
-    body = sent[0]["body"]
+    _subject, body = bg_service._build_weekly_report_mail(_summary(), now_et=FRIDAY_1620, watchdog_events=[])
     assert "Ø R BE" in body                            # Spaltenkopf bleibt
     assert "Einstand-Regel (seit 30.07. im Tracker)" not in body  # keine Box
     assert "Einstand-Regel (Stop auf Einstand ab +1R" in body  # Footer-Semantik
@@ -690,7 +696,8 @@ def test_watchdog_all_clear_without_events(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path)  # _setup patcht Loader auf []
     assert bg_service._run_weekly_report({}) is True
     body = sent[0]["body"]
-    assert "Keine Hänge-Episoden diese Woche" in body
+    assert "Keine Hänge-Episoden im Wochenprotokoll" in body
+    assert "alle Scanner liefen im Zeitbudget" not in body
     assert "Hänge-Episode(n)" not in body
 
 
@@ -741,14 +748,14 @@ def test_mature_report_separates_activity_from_performance():
     assert "18 reife Signale (10 resolved / 0 unresolved)" in subject
     assert "Aktivitaet der letzten 7 Tage" in body
     assert "Ausgereifte Signale im 30-Tage-Berichtsfenster" in body
-    assert "Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote" in body
+    assert "Globale Signalaktivitaet, keine persoenliche Zustell- oder Trefferquote" in body
     assert "56" in body
     assert "35" in body
     assert "W / L / 0R" in body
     assert "4 / 5 / 1" in body
     assert "8 noch unreife Signale wurden ausgeschlossen" in body
     assert "Brokergebuehren" in body
-    assert "keine Netto-Kontoperformance" in body
+    assert "Keine Netto-Kontoperformance" in body
     assert "vollstaendigen chronologischen 5-Minuten-OHLC-Intervallen" in body
 
 
@@ -919,14 +926,14 @@ def test_weekly_job_loads_activity_and_mature_cohorts(monkeypatch, tmp_path):
     sent = _setup(monkeypatch, tmp_path)
     calls = []
 
-    def _loader(days=90, mature_only=False, as_of=None):
-        calls.append((days, mature_only))
+    def _loader(days=90, mature_only=False, as_of=None, require_delivery_evidence=False):
+        calls.append((days, mature_only, require_delivery_evidence))
         return _mature_summary() if mature_only else _summary()
 
     monkeypatch.setattr(bg_service, "load_performance_summary", _loader)
 
     assert bg_service._run_weekly_report({}) is True
-    assert calls == [(7, False), (30, True)]
+    assert calls == [(7, False, True), (30, True, True)]
     assert len(sent) == 1
     assert "50/50+BE" in sent[0]["subject"]
     assert "Ausgereifte Signale im 30-Tage-Berichtsfenster" in sent[0]["body"]

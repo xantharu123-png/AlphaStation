@@ -3533,8 +3533,7 @@ def _watchdog_report_section(events=None):
     if episodes == 0:
         return """
     <div style="background:#e9f7ef;border:1px solid #10b981;padding:12px;border-radius:4px;margin-bottom:16px;font-size:13px;color:#0f172a">
-        <b>🐕 Scan-Waechter:</b> Keine Hänge-Episoden diese Woche — alle
-        Scanner liefen im Zeitbudget. ✓
+        <b>🐕 Scan-Waechter:</b> Keine Hänge-Episoden im Wochenprotokoll.
     </div>"""
     rows = ""
     for name, b in (agg.get("per_scanner") or {}).items():
@@ -3627,28 +3626,32 @@ def _grade_calibration_report_section(summary):
         pf_text = f"{profit_factor:.2f}" if profit_factor is not None else "-"
         rows.append(
             f"""<tr>
-            <td style="padding:7px;border-bottom:1px solid #eee"><b>{escaped[0]}</b></td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[1]}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[2]}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[3]}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{escaped[4]}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{n}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{hit:.1f}%<br><span style="color:#64748b;font-size:10px">KI {float(lower):.1f}–{float(upper):.1f}%</span></td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{avg_r:+.2f}R</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{sum_r:+.2f}R</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{pf_text}</td>
+            <td data-label="Scanner" style="padding:7px;border-bottom:1px solid #eee"><b>{escaped[0]}</b></td>
+            <td data-label="Grade" style="padding:7px;border-bottom:1px solid #eee">{escaped[1]}</td>
+            <td data-label="Richtung" style="padding:7px;border-bottom:1px solid #eee">{escaped[2]}</td>
+            <td data-label="Horizont" style="padding:7px;border-bottom:1px solid #eee">{escaped[3]}</td>
+            <td data-label="Regime" style="padding:7px;border-bottom:1px solid #eee">{escaped[4]}</td>
+            <td data-label="n" style="padding:7px;border-bottom:1px solid #eee">{n}</td>
+            <td data-label="Trefferquote" style="padding:7px;border-bottom:1px solid #eee">{hit:.1f}%<br><span style="color:#64748b;font-size:10px">KI {float(lower):.1f}–{float(upper):.1f}%</span></td>
+            <td data-label="Durchschnitt R" style="padding:7px;border-bottom:1px solid #eee">{avg_r:+.2f}R</td>
+            <td data-label="Summe R" style="padding:7px;border-bottom:1px solid #eee">{sum_r:+.2f}R</td>
+            <td data-label="Profit Factor" style="padding:7px;border-bottom:1px solid #eee">{pf_text}</td>
         </tr>"""
         )
     if not rows:
         return ""
+    origins = (
+        "belegter SMTP-Annahme" if (summary or {}).get("delivery_evidence", {}).get("required") is True
+        else "SMTP-Akzeptanz oder direkter Post-Send-Erfassung"
+    )
     return f"""
     <h3 style="color:#0f172a;font-size:15px">Grade-Kalibrierung (nur Information)</h3>
     <p style="font-size:12px;color:#64748b;margin-top:0">
         Nur vollständig beobachtete, Fill-belegte 50/50+BE-Ergebnisse aus
-        SMTP-Akzeptanz oder direkter Post-Send-Erfassung; keine Freigabe- oder
+        {origins}; keine Freigabe- oder
         Breaker-Entscheidung.
     </p>
-    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px">
+    <table class="report-grid" style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px">
         <tr style="background:#f5f5f5">
             <th style="padding:7px;text-align:left">Scanner</th>
             <th style="padding:7px;text-align:left">Grade</th>
@@ -3676,8 +3679,9 @@ def _build_mature_weekly_report_mail(
     """Wochenmail mit getrennter Aktivitaets- und Performance-Kohorte.
 
     Die Aktivitaet umfasst die letzten sieben Tage. Die Performance verwendet
-    nur Signale aus den letzten 30 Tagen, deren komplettes Beobachtungsfenster
-    bereits abgelaufen ist. Hauptkennzahl ist das tatsaechlich empfohlene
+    Signale, deren Beobachtungsfenster in den letzten 30 Tagen abgelaufen ist.
+    Der Versandjob verlangt eine belegte SMTP-Annahme, keine Inbox-Bestaetigung.
+    Hauptkennzahl ist das tatsaechlich empfohlene
     Management: 50 Prozent am TP1, Rest bis TP2/Stop/Expiry und Einstand ab +1R.
     """
     stamp = now_et if now_et is not None else datetime.now()
@@ -3686,19 +3690,61 @@ def _build_mature_weekly_report_mail(
 
     def _int(bucket, key):
         try:
-            return int(bucket.get(key) or 0)
-        except (TypeError, ValueError):
+            value = bucket.get(key)
+            if isinstance(value, bool):
+                return 0
+            parsed = int(value or 0)
+            return parsed if parsed >= 0 and float(value or 0) == parsed else 0
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     def _number(bucket, key):
         value = bucket.get(key)
-        return float(value) if isinstance(value, (int, float)) else None
+        return (
+            float(value) if isinstance(value, (int, float))
+            and not isinstance(value, bool) and math.isfinite(float(value)) else None
+        )
+
+    def _report_counts(bucket):
+        counts = bucket.get("report_counts")
+        if isinstance(counts, dict):
+            keys = ("resolved", "evidence_unresolved", "no_fill", "still_open", "untracked")
+            parsed = {key: _int(counts, key) for key in keys}
+            computed_total = sum(parsed.values())
+            parsed["reconciled"] = bool(
+                counts.get("reconciled") is True
+                and computed_total == _int(bucket, "signals")
+                and computed_total == _int(counts, "report_total")
+                and all(counts.get(key) == parsed[key] and not isinstance(counts.get(key), bool)
+                        for key in keys)
+            )
+            return parsed
+        # Older externally supplied summaries are descriptive, not proof that
+        # every terminal result or mail has a qualified evidence chain.
+        resolved = _int(bucket, "managed_be_decided_signals")
+        known = {
+            "resolved": resolved,
+            "evidence_unresolved": max(
+                _int(bucket, "managed_be_unresolved"),
+                _int(bucket, "be_unresolved"),
+                _int(bucket, "control_unresolved"),
+                _int(bucket, "upper_unresolved"),
+            ),
+            "no_fill": _int(bucket, "control_no_fill") or _int(bucket, "no_fill"),
+            "still_open": _int(bucket, "open") + _int(bucket, "tp1_hit"),
+            "untracked": _int(bucket, "untracked"),
+        }
+        residual = max(0, _int(bucket, "signals") - sum(known.values()))
+        known["unclassified"] = residual
+        return known
 
     def _r_text(value, decimals=2):
-        return f"{float(value):+.{decimals}f}R" if isinstance(value, (int, float)) else "-"
+        number = _number({"value": value}, "value")
+        return f"{number:+.{decimals}f}R" if number is not None else "-"
 
     def _pct_text(value, decimals=1):
-        return f"{float(value):.{decimals}f}%" if isinstance(value, (int, float)) else "-"
+        number = _number({"value": value}, "value")
+        return f"{number:.{decimals}f}%" if number is not None else "-"
 
     def _metric_band(lower, upper, formatter):
         lower_text = formatter(lower)
@@ -3741,14 +3787,53 @@ def _build_mature_weekly_report_mail(
     mature_ambiguous = _int(perf_total, "ambiguous_outcomes")
     mature_pf = _number(perf_total, "profit_factor_managed_be")
     mature_be = _number(perf_total, "breakeven_win_rate_managed_be_pct")
-    excluded = int((performance_summary or {}).get("excluded_not_mature") or 0)
+    excluded = _int(performance_summary or {}, "excluded_not_mature")
+    report_counts = _report_counts(perf_total)
+    accounting_unresolved = _int(report_counts, "evidence_unresolved")
+    upper_unresolved = _int(perf_total, "upper_unresolved")
+    control_unresolved = _int(perf_total, "control_unresolved")
+    unclassified = _int(report_counts, "unclassified")
+    cohort_inconsistent = report_counts.get("reconciled") is False
+    reliability_blocked = bool(
+        max(mature_unresolved, be_unresolved, accounting_unresolved, upper_unresolved, control_unresolved)
+        or unclassified or cohort_inconsistent
+    )
+
+    delivery = (performance_summary or {}).get("delivery_evidence") or {}
+    activity_delivery = (activity_summary or {}).get("delivery_evidence") or {}
+    strict_delivery = delivery.get("required") is True and activity_delivery.get("required") is True
+    unavailable = bool(
+        (activity_summary or {}).get("report_data_unavailable")
+        or (performance_summary or {}).get("report_data_unavailable")
+    )
+    excluded_delivery = _int(delivery, "excluded_signals")
+    excluded_activity_delivery = _int(activity_delivery, "excluded_signals")
+    provenance_html = (
+        '<p style="font-size:12px;color:#64748b">Globaler Tracker: SMTP-Annahme '
+        'an mindestens einen Empfaenger; keine persoenliche Posteingangsbilanz.</p>'
+        if strict_delivery else
+        '<p style="font-size:12px;color:#92400e"><b>Versandnachweise nicht '
+        'geprueft:</b> beschreibender Trackerbestand, keine Zustellbilanz.</p>'
+    )
+    if excluded_delivery or excluded_activity_delivery:
+        provenance_html += (
+            '<p style="font-size:12px;color:#64748b">Ohne belastbaren '
+            f'Versandnachweis ausgeschlossen: {excluded_activity_delivery} im '
+            f'7-Tage-Aktivitaetsfenster, {excluded_delivery} im '
+            '30-Tage-Reifefenster. Altbestand bleibt erhalten.</p>'
+        )
+    if unavailable:
+        provenance_html += (
+            '<p style="font-size:12px;color:#92400e"><b>Berichtsdaten nicht '
+            'verfuegbar.</b> Kein bestaetigter Nullbestand und keine Bilanz.</p>'
+        )
 
     ci = perf_total.get("managed_be_win_rate_wilson_95") or {}
     ci_low = ci.get("lower_pct")
     ci_high = ci.get("upper_pct")
     ci_text = ""
     if (
-        mature_unresolved == 0
+        not reliability_blocked
         and isinstance(ci_low, (int, float))
         and isinstance(ci_high, (int, float))
     ):
@@ -3776,14 +3861,28 @@ def _build_mature_weekly_report_mail(
             'Erwartungswert und keine behauptete Performance. Das 95%-KI oben bezieht '
             'sich bewusst auf den konservativen Pfad.</div>'
         )
+    if upper_unresolved:
+        uncertainty_note += (
+            '<p style="font-size:12px;color:#92400e"><b>Kursreihenfolge '
+            f'ungeklaert:</b> {upper_unresolved} Ergebnis(se) haben keine '
+            'belegbare Obergrenze. Keine vollstaendig geklaerte Bilanz.</p>'
+        )
 
     subject_r = _metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))
-    subject_unresolved = max(mature_unresolved, be_unresolved)
+    subject_unresolved = max(mature_unresolved, be_unresolved, accounting_unresolved, upper_unresolved, control_unresolved) + unclassified
+    if reliability_blocked:
+        subject_r = "Teilbilanz — Evidenz offen"
+    elif mature_decided == 0:
+        subject_r = "Noch keine ausgewertete Bilanz"
+    if unavailable:
+        subject_r = "Berichtsdaten nicht verfuegbar"
     subject = (
         f"Wochenreport Signal-Tracker: {subject_r} | "
         f"{mature_signals} reife Signale "
         f"({mature_decided} resolved / {subject_unresolved} unresolved) | 50/50+BE"
     )
+    if unavailable:
+        subject = "Wochenreport Signal-Tracker: Berichtsdaten nicht verfuegbar"
 
     alarm_html = ""
     if verdict_alerts:
@@ -3798,7 +3897,7 @@ def _build_mature_weekly_report_mail(
 
     activity_html = f"""
     <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Aktivitaet der letzten 7 Tage</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px">
+    <table class="report-grid" style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px">
         <tr style="background:#f5f5f5">
             <th style="padding:8px;text-align:left">Neue Signale</th>
             <th style="padding:8px;text-align:left">Bereits entschieden</th>
@@ -3806,30 +3905,34 @@ def _build_mature_weekly_report_mail(
             <th style="padding:8px;text-align:left">Alerts/Tag</th>
         </tr>
         <tr>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{activity_signals}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{activity_decided}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{activity_open}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{float(activity_total.get('alerts_per_day') or 0.0):.1f}</td>
+            <td data-label="Neue Signale" style="padding:8px;border-bottom:1px solid #eee"><b>{activity_signals}</b></td>
+            <td data-label="Entschieden" style="padding:8px;border-bottom:1px solid #eee">{activity_decided}</td>
+            <td data-label="Noch offen" style="padding:8px;border-bottom:1px solid #eee">{activity_open}</td>
+            <td data-label="Alerts/Tag" style="padding:8px;border-bottom:1px solid #eee">{f"{_number(activity_total, 'alerts_per_day'):.1f}" if _number(activity_total, 'alerts_per_day') is not None else '-'}</td>
         </tr>
     </table>
     <p style="color:#64748b;font-size:12px;margin-top:4px;margin-bottom:18px">
-        Diese Zahlen zeigen Versandaktivitaet, nicht die Trefferquote. Frische
-        Gewinner koennen noch offen sein, waehrend schnelle Stops bereits
-        entschieden sind.
+        Globale Signalaktivitaet, keine persoenliche Zustell- oder Trefferquote.
     </p>"""
 
-    unresolved_total = max(mature_unresolved, be_unresolved)
+    unresolved_total = max(mature_unresolved, be_unresolved, accounting_unresolved, upper_unresolved, control_unresolved) + unclassified
     denominator_html = f"""
     <p style="font-size:12px;color:#334155;margin:0 0 12px">
         <b>50/50+BE: {mature_decided} resolved / {mature_unresolved} unresolved</b><br>
         <b>BE-Gegenrechnung: {be_decided} resolved / {be_unresolved} unresolved</b>
+        <br>Bestandsabgleich: {_int(report_counts, 'resolved')} ausgewertet ·
+        {_int(report_counts, 'evidence_unresolved')} Evidenz offen ·
+        {_int(report_counts, 'no_fill')} ohne Einstieg ·
+        {_int(report_counts, 'still_open')} noch offen ·
+        {_int(report_counts, 'untracked')} nicht auswertbar
+        {f" · {unclassified} nicht zugeordnet" if unclassified else ""}
     </p>"""
     reliability_html = ""
-    if unresolved_total > 0:
+    if reliability_blocked:
         reliability_html = f"""
     <div style="background:#fffbeb;border:1px solid #f59e0b;padding:10px;border-radius:6px;margin:0 0 14px;font-size:12px;color:#78350f">
-        <b>Reliability gesperrt:</b> {unresolved_total} Ergebnis(se) haben keine
-        vollstaendige BE-Evidenz. Quoten und R-Werte beziehen sich nur auf die
+        <b>Reliability gesperrt:</b> {unresolved_total} Ergebnis(se) mit offener
+        Fill-, Kursfolge- oder BE-Evidenz. Quoten und R-Werte beziehen sich nur auf die
         resolved Teilmenge und duerfen keine Freigabeentscheidung ausloesen.
     </div>"""
 
@@ -3842,17 +3945,17 @@ def _build_mature_weekly_report_mail(
             be_unresolved,
         )
     )
-    if has_performance_evidence:
+    if has_performance_evidence and not unavailable:
         performance_html = f"""
     <h3 style="color:#0f172a;font-size:15px;margin-bottom:8px">Ausgereifte Signale im 30-Tage-Berichtsfenster</h3>
     <p style="font-size:12px;color:#64748b;margin-top:0">
-        Nur Versandkohorten nach Ablauf des vorgesehenen Beobachtungsfensters;
+        Kohorten nach Reifedatum, nicht nach Datum des Signalstarts;
         {excluded} noch unreife Signale wurden ausgeschlossen.
     </p>
     {denominator_html}
     {reliability_html}
     {uncertainty_note}
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+    <table class="report-grid" style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
         <tr style="background:#eef2ff">
             <th style="padding:8px;text-align:left">Reife Signale</th>
             <th style="padding:8px;text-align:left">50/50+BE resolved</th>
@@ -3865,35 +3968,35 @@ def _build_mature_weekly_report_mail(
             <th style="padding:8px;text-align:left">Break-even</th>
         </tr>
         <tr>
-            <td style="padding:8px;border-bottom:1px solid #eee">{mature_signals}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_decided}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{mature_unresolved}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{mature_wins} / {mature_losses} / {mature_flat}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">
+            <td data-label="Reife Signale" style="padding:8px;border-bottom:1px solid #eee">{mature_signals}</td>
+            <td data-label="50/50+BE resolved" style="padding:8px;border-bottom:1px solid #eee"><b>{mature_decided}</b></td>
+            <td data-label="50/50+BE unresolved" style="padding:8px;border-bottom:1px solid #eee"><b>{mature_unresolved}</b></td>
+            <td data-label="W / L / 0R" style="padding:8px;border-bottom:1px solid #eee">{mature_wins} / {mature_losses} / {mature_flat}</td>
+            <td data-label="Trefferquote" style="padding:8px;border-bottom:1px solid #eee">
                 {_metric_band(mature_hit, mature_hit_upper, _pct_text)}{ci_text}
                 <br><span style="color:#64748b;font-size:10px">ohne 0R: {_pct_text(mature_hit_ex_be)}</span>
             </td>
-            <td style="padding:8px;border-bottom:1px solid #eee"><b>{_metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))}</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{_metric_band(mature_avg, mature_avg_upper, _r_text)}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{f'{mature_pf:.2f}' if mature_pf is not None else '-'}</td>
-            <td style="padding:8px;border-bottom:1px solid #eee">{_pct_text(mature_be)}</td>
+            <td data-label="Summe R" style="padding:8px;border-bottom:1px solid #eee"><b>{_metric_band(mature_sum, mature_sum_upper, lambda value: _r_text(value, 1))}</b></td>
+            <td data-label="Durchschnitt R" style="padding:8px;border-bottom:1px solid #eee">{_metric_band(mature_avg, mature_avg_upper, _r_text)}</td>
+            <td data-label="Profit Factor" style="padding:8px;border-bottom:1px solid #eee">{f'{mature_pf:.2f}' if mature_pf is not None else '-'}</td>
+            <td data-label="Break-even" style="padding:8px;border-bottom:1px solid #eee">{_pct_text(mature_be)}</td>
         </tr>
     </table>"""
     else:
         performance_html = f"""
     <div style="background:#f8fafc;border:1px solid #cbd5e1;padding:12px;border-radius:6px;margin-bottom:18px;font-size:13px;color:#0f172a">
-        <b>Noch keine vollstaendig beobachteten Signale im 30-Tage-Berichtsfenster.</b><br>
+        <b>{'Keine belastbare Bilanz verfuegbar.' if unavailable else 'Noch keine auswertbaren Signale im 30-Tage-Berichtsfenster.'}</b><br>
         {excluded} Signal(e) haben ihr Beobachtungsfenster noch nicht beendet. Sie werden erst
         nach Ablauf ihres kompletten Stock- bzw. Krypto-Zeitfensters gewertet.
+        {denominator_html if mature_signals else ''}
+        {reliability_html}{uncertainty_note}
     </div>"""
 
     scanner_rows = ""
     per_scanner = (performance_summary or {}).get("per_scanner") or {}
     for scanner, bucket in sorted(
         per_scanner.items(),
-        key=lambda item: float(
-            ((item[1] or {}).get("sum_r_managed_50_50_be") or 0.0)
-        ),
+        key=lambda item: _number(item[1] or {}, "sum_r_managed_50_50_be") or 0.0,
         reverse=True,
     ):
         bucket = bucket or {}
@@ -3913,7 +4016,8 @@ def _build_mature_weekly_report_mail(
             if "be_unresolved" in bucket
             else row_unresolved
         )
-        if max(row_decided, row_unresolved, row_be_decided, row_be_unresolved) <= 0:
+        row_counts = _report_counts(bucket)
+        if max(row_decided, row_unresolved, row_be_decided, row_be_unresolved, _int(bucket, 'signals')) <= 0:
             continue
         row_sum = _number(bucket, "sum_r_managed_50_50_be")
         row_avg = _number(bucket, "avg_r_managed_50_50_be")
@@ -3923,7 +4027,7 @@ def _build_mature_weekly_report_mail(
         row_hit_upper = _number(bucket, "managed_be_win_rate_pct_upper")
         row_avg_upper = _number(bucket, "avg_r_managed_50_50_be_upper")
         row_pf = _number(bucket, "profit_factor_managed_be")
-        if max(row_unresolved, row_be_unresolved) > 0:
+        if max(row_unresolved, row_be_unresolved, _int(row_counts, 'evidence_unresolved'), _int(bucket, 'upper_unresolved'), _int(bucket, 'control_unresolved')) > 0:
             tint = "#fffbeb"
         elif row_sum is None:
             tint = "#f8fafc"
@@ -3932,26 +4036,27 @@ def _build_mature_weekly_report_mail(
         row_range = _r_text(row_sum, 1)
         if (
             row_ambiguous > 0
+            and row_sum is not None
             and row_sum_upper is not None
             and row_sum_upper > row_sum + 1e-9
         ):
             row_range = f"{_r_text(row_sum, 1)} bis {_r_text(row_sum_upper, 1)}*"
         scanner_rows += f"""<tr style="background:{tint}">
-            <td style="padding:7px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{row_decided}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{row_unresolved}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{row_be_decided}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{row_be_unresolved}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_hit, row_hit_upper, _pct_text)}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_avg, row_avg_upper, _r_text)}</td>
-            <td style="padding:7px;border-bottom:1px solid #eee"><b>{row_range}</b></td>
-            <td style="padding:7px;border-bottom:1px solid #eee">{f'{row_pf:.2f}' if row_pf is not None else '-'}</td>
+            <td data-label="Scanner" style="padding:7px;border-bottom:1px solid #eee"><b>{html.escape(str(scanner))}</b></td>
+            <td data-label="50/50+BE resolved" style="padding:7px;border-bottom:1px solid #eee">{row_decided}</td>
+            <td data-label="50/50+BE unresolved" style="padding:7px;border-bottom:1px solid #eee">{row_unresolved}</td>
+            <td data-label="BE resolved" style="padding:7px;border-bottom:1px solid #eee">{row_be_decided}</td>
+            <td data-label="BE unresolved" style="padding:7px;border-bottom:1px solid #eee">{row_be_unresolved}</td>
+            <td data-label="Trefferquote" style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_hit, row_hit_upper, _pct_text)}</td>
+            <td data-label="Durchschnitt R" style="padding:7px;border-bottom:1px solid #eee">{_metric_band(row_avg, row_avg_upper, _r_text)}</td>
+            <td data-label="Summe R" style="padding:7px;border-bottom:1px solid #eee"><b>{row_range}</b></td>
+            <td data-label="Profit Factor" style="padding:7px;border-bottom:1px solid #eee">{f'{row_pf:.2f}' if row_pf is not None else '-'}</td>
         </tr>"""
     scanner_html = ""
     if scanner_rows:
         scanner_html = f"""
     <h3 style="color:#0f172a;font-size:15px">Reife Bilanz je Scanner</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
+    <table class="report-grid" style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px">
         <tr style="background:#f5f5f5">
             <th style="padding:7px;text-align:left">Scanner</th>
             <th style="padding:7px;text-align:left">50/50+BE resolved</th>
@@ -3979,16 +4084,16 @@ def _build_mature_weekly_report_mail(
         status = html.escape(str(sig.get("status") or "?"))
         managed = sig.get("r_managed_50_50_be")
         recent_rows += f"""<tr>
-            <td style="padding:6px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#64748b;font-size:11px">{direction}</span></td>
-            <td style="padding:6px;border-bottom:1px solid #eee">{scanner}</td>
-            <td style="padding:6px;border-bottom:1px solid #eee">{status}</td>
-            <td style="padding:6px;border-bottom:1px solid #eee">{_r_text(managed)}</td>
+            <td data-label="Ticker" style="padding:6px;border-bottom:1px solid #eee"><b>{ticker}</b> <span style="color:#64748b;font-size:11px">{direction}</span></td>
+            <td data-label="Scanner" style="padding:6px;border-bottom:1px solid #eee">{scanner}</td>
+            <td data-label="Status" style="padding:6px;border-bottom:1px solid #eee">{status}</td>
+            <td data-label="50/50+BE R" style="padding:6px;border-bottom:1px solid #eee">{_r_text(managed)}</td>
         </tr>"""
     recent_html = ""
     if recent_rows:
         recent_html = f"""
     <h3 style="color:#0f172a;font-size:15px">Letzte Signale</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <table class="report-grid" style="width:100%;border-collapse:collapse;font-size:12px">
         <tr style="background:#f5f5f5">
             <th style="padding:6px;text-align:left">Ticker</th>
             <th style="padding:6px;text-align:left">Scanner</th>
@@ -4006,10 +4111,25 @@ def _build_mature_weekly_report_mail(
             "noch keine harte Strategieentscheidung allein daraus ableiten."
         )
 
+    if unavailable:
+        activity_html = '<p style="color:#92400e">Aktivitaetsdaten nicht verfuegbar.</p>'
+        scanner_html = grade_calibration_html = recent_html = ""
+        small_sample = ""
+
     body_html = f"""
-    <html><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto">
+    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+    @media (max-width:600px) {{
+      .report-grid,.report-grid tbody,.report-grid tr,.report-grid td {{display:block!important;width:auto!important;}}
+      .report-grid tr:first-child {{display:none!important;}}
+      .report-grid tr {{border:1px solid #e2e8f0;margin-bottom:10px;border-radius:6px;}}
+      .report-grid td {{border:0!important;padding:5px 8px!important;overflow-wrap:anywhere;}}
+      .report-grid td:before {{content:attr(data-label) ": ";font-weight:bold;color:#64748b;}}
+    }}
+    </style></head><body style="font-family:Arial,sans-serif;max-width:760px;margin:0 auto;padding:12px;box-sizing:border-box">
     <h2 style="color:#0f172a">Wochenreport Signal-Tracker</h2>
     <p style="color:#64748b">{stamp.strftime('%d.%m.%Y %H:%M')} ET | KW {stamp.isocalendar()[1]}</p>
+    {provenance_html}
     {alarm_html}
     {watchdog_html}
     {activity_html}
@@ -4018,13 +4138,15 @@ def _build_mature_weekly_report_mail(
     {grade_calibration_html}
     {recent_html}
     <p style="color:#64748b;font-size:12px;margin-top:20px;line-height:1.5">
-        Hauptmodell: 1R Anfangsrisiko, 50/50-Plan-Gegenrechnung an TP1, Rest bis
+        Modell, keine Broker-Ausfuehrung: 1R Anfangsrisiko, 50/50-Gegenrechnung an TP1, Rest bis
         TP2/Stop/Expiry und bedingter Stop auf Einstand nach beobachteter MFE
         &gt;= +1R; dies behauptet weder Teilverkauf noch Broker-Ausfuehrung. Aktien werden mit
         nachfolgenden Tages-OHLC bis zum strategieabhaengigen, beim Versand
         gespeicherten Bar-Horizont ausgewertet; wenn Stop und Ziel am selben Tag
-        beruehrt werden, gilt konservativ Stop zuerst und eine separat markierte
-        Obergrenze zeigt nur den anderen noch moeglichen Pfad. Krypto- und Intraday-Pfade
+        beruehrt werden, gilt bei bereits belegtem Einstieg konservativ Stop zuerst und eine separat markierte
+        Obergrenze zeigt nur den anderen noch moeglichen Pfad. Ist bereits die Reihenfolge
+        von erstem Einstieg und Stop unbekannt, bleibt der Fall ohne erfundenen Verlust
+        nicht auswertbar. Krypto- und Intraday-Pfade
         werden aus vollstaendigen chronologischen 5-Minuten-OHLC-Intervallen im
         gespeicherten Horizont bewertet. Beruehren Stop und Ziel dieselbe 5-Minuten-
         Kerze, bleibt nur deren Reihenfolge ohne Tickdaten unbekannt und wird
@@ -4035,7 +4157,7 @@ def _build_mature_weekly_report_mail(
         Forward-Track-Record, kein Backtest. Die R-Werte beschreiben den
         Kursverlauf vor allgemeinen Brokergebuehren, Kommissionen, Borrow,
         Funding und ueber erkannte Gap-Fills hinausgehender individueller
-        Slippage; sie sind keine Netto-Kontoperformance. * Obergrenzen sind
+        Slippage; Stop-Gaps koennen Verluste unter -1R verursachen. Keine Netto-Kontoperformance. * Obergrenzen sind
         keine Erwartungswerte. Grade ist Rangklasse, keine Wahrscheinlichkeit.
         {small_sample}
     </p>
@@ -4382,17 +4504,21 @@ def _run_weekly_report(secrets=None, now_et=None):
             log.info("[Wochenreport] Dedupe aktiv (%s) — kein erneuter Versand", dedupe_key)
             return False
         try:
-            summary = load_performance_summary(days=7) or {}
-            performance_summary = None
-            try:
-                performance_summary = (
-                    load_performance_summary(days=30, mature_only=True) or {}
-                )
-            except TypeError:
-                # Rueckwaertskompatibel zu externen/alten Loadern. Der echte
-                # Tracker unterstuetzt mature_only; Tests/Plugins koennen noch
-                # die fruehere Ein-Parameter-Signatur bereitstellen.
-                performance_summary = None
+            # Never silently downgrade to historical/unverified rows when a
+            # plugin/older loader lacks the qualified cohort contract.
+            summary = load_performance_summary(days=7, require_delivery_evidence=True) or {}
+            performance_summary = load_performance_summary(
+                days=30, mature_only=True, require_delivery_evidence=True,
+            ) or {}
+            if not all(
+                isinstance(item, dict)
+                and (item.get("delivery_evidence") or {}).get("required") is True
+                and item.get("source_read_complete") is True
+                and item.get("report_data_available") is True
+                and not item.get("error")
+                for item in (summary, performance_summary)
+            ):
+                raise ValueError("weekly_delivery_evidence_contract_unavailable")
             verdict_alerts, new_verdict_state = [], {}
             if scanner_verdict is not None:
                 verdict_alerts, new_verdict_state = _verdict_alerts(

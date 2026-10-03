@@ -614,9 +614,12 @@ def test_stock_entry_and_stop_in_same_bar_is_marked_ambiguous(tracker, row, bar)
         stock_daily_fetcher=_stock_fetcher({ticker: bars})
     )
     sig = _signal(ticker)
-    assert sig["status"] == "STOP_HIT"
-    assert sig["outcome_detail"] == "ambiguous_same_day_entry_and_stop_unresolved_upper"
-    assert sig["r_realized"] == pytest.approx(-1.0)
+    assert sig["status"] == "UNTRACKED"
+    assert sig["outcome_detail"] == "ambiguous_entry_and_stop_same_interval"
+    assert sig["entry_filled_at"] is None
+    assert sig["entry_fill_price"] is None
+    assert sig["stop_hit_at"] is None
+    assert sig["r_realized"] is None
     assert sig["r_realized_upper"] is None
     assert tracker._realized_upper(sig) is None
     assert tracker._managed_upper_r(sig) is None

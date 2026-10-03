@@ -3485,7 +3485,77 @@ def _stop_exit_metrics(
 def _is_ambiguous_outcome(value: Any) -> bool:
     """Return whether one OHLC interval permits mutually exclusive paths."""
     detail = value.get("outcome_detail") if isinstance(value, dict) else value
-    return str(detail or "").startswith("ambiguous_same_")
+    return str(detail or "").startswith((
+        "ambiguous_same_", "ambiguous_entry_and_stop_same_interval",
+    ))
+
+
+def _entry_stop_path_is_unresolved(row: Mapping[str, Any]) -> bool:
+    """Quarantine first-entry/stop OHLC claims without rewriting history.
+
+    Older Daily evaluations stamped a fill and -1R even though invalidation
+    before entry was an equally possible path.  The detail identifies that
+    ambiguity, but an independently proven prior/at-open fill must remain a
+    trade; it is not the same as an unordered first entry.
+    """
+    detail = str(row.get("outcome_detail") or "").strip()
+    if not detail.startswith((
+        "ambiguous_same_day_entry_stop",
+        "ambiguous_same_day_entry_and_stop",
+        "ambiguous_entry_and_stop_same_interval",
+    )):
+        return False
+    fill = _to_float(row.get("entry_fill_price"))
+    filled_at = row.get("entry_filled_at")
+    fill_start, fill_end = _event_time_bounds(filled_at)
+    causal_value = (
+        row.get("delivery_accepted_at")
+        if _parse_utc_datetime(row.get("delivery_accepted_at")) is not None
+        else row.get("created_at")
+    )
+    _causal_start, causal_end = _event_time_bounds(causal_value)
+    if (
+        fill is None or fill <= 0.0 or fill_start is None or fill_end is None
+        or causal_end is None or fill_start < causal_end
+    ):
+        return True
+    closed_at = _parse_utc_datetime(row.get("closed_at"))
+    if closed_at is not None and fill_start > closed_at:
+        return True
+    stop_start, stop_end = _event_time_bounds(row.get("stop_hit_at"))
+    if stop_end is not None and fill_start > stop_end:
+        return True
+    if stop_start is not None and fill_end < stop_start:
+        return False
+    # A path/snapshot label is not independent evidence. For an exact quote,
+    # revalidate the persisted original quote at its original recording clock,
+    # then require it to be the same executable price/instant as the fill.
+    # A date-only fill or quote never becomes a fabricated midnight instant.
+    if str(row.get("fill_evidence_mode") or "").strip() != "verified_snapshot":
+        return True
+    recorded_start, recorded_end = _event_time_bounds(row.get("created_at"))
+    quote_start, quote_end = _event_time_bounds(row.get("price_observed_at"))
+    direction = str(row.get("direction") or "").strip().upper()
+    if (
+        recorded_start is None or recorded_start != recorded_end
+        or fill_start != fill_end or quote_start != quote_end
+        or quote_start != fill_start or direction not in {"LONG", "SHORT"}
+    ):
+        return True
+    fields = dict(row)
+    flag = row.get("fill_evidence_verified")
+    fields["fill_evidence_verified"] = (
+        flag is True or (type(flag) is int and flag == 1)
+    )
+    fields["direction"] = direction
+    evidence = _verified_immediate_fill_evidence(fields, recorded_start)
+    entry = _to_float(row.get("entry"))
+    if (
+        evidence is None or entry is None or evidence["price"] != fill
+        or (fill < entry if direction == "LONG" else fill > entry)
+    ):
+        return True
+    return False
 
 
 _CURRENT_AMBIGUOUS_DETAILS = frozenset({
@@ -3524,6 +3594,8 @@ def _realized_upper_resolution(
     carry no raw OHLC provenance that could distinguish TP1 from TP2, so their
     optimistic stored upper is quarantined instead of reconstructed.
     """
+    if _entry_stop_path_is_unresolved(row):
+        return None, True
     lower = _to_float(row.get("r_realized"))
     if lower is None:
         return None, False
@@ -3596,8 +3668,11 @@ def _managed_r_50_50(row: Dict[str, Any]) -> Optional[float]:
       - STOP_HIT nach TP1:  managed = 0.5*r_tp1 + 0.5*r_stop_exit
       - EXPIRED nach TP1:   managed = 0.5*r_tp1 + 0.5*r_close
     Bei unvollstaendigen Levels faellt die Funktion auf r_realized zurueck
-    (besser ein Level-R als gar kein Wert); None nur bei fehlendem r_realized.
+    (besser ein Level-R als gar kein Wert); None bei fehlendem r_realized oder
+    unbewiesener erster Entry/Stop-Reihenfolge.
     """
+    if _entry_stop_path_is_unresolved(row):
+        return None
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None
@@ -3893,6 +3968,8 @@ def _breakeven_after_mfe_resolution(
     stop-update was delivered. This prevents an optimistic subset in which
     undelivered winners remain while comparable undelivered losses disappear.
     """
+    if _entry_stop_path_is_unresolved(row):
+        return None, True
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None, False
@@ -3949,6 +4026,8 @@ def _managed_tp1_order_at_be_exit(row: Mapping[str, Any]) -> str:
 
 
 def _managed_be_exit_resolution(row: Mapping[str, Any], be_exit_r: float) -> Tuple[Optional[float], bool]:
+    if _entry_stop_path_is_unresolved(row):
+        return None, True
     order = _managed_tp1_order_at_be_exit(row)
     if order == "not_reached":
         return round(be_exit_r, 4), False
@@ -3992,6 +4071,8 @@ def _terminal_extrema_bounds(*, previous_favorable: float, previous_adverse: flo
 
 def _managed_5050_be_resolution(row: Dict[str, Any]) -> Tuple[Optional[float], bool]:
     """Resolve recommended 50/50+BE R and flag incomplete delivery evidence."""
+    if _entry_stop_path_is_unresolved(row):
+        return None, True
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None, False
@@ -4049,6 +4130,8 @@ def _shadow_counterfactual_5050_be_resolution(
     Every other triggered shadow stays unresolved, keeping release fail-closed.
     This function never writes or infers a real delivery acknowledgement.
     """
+    if _entry_stop_path_is_unresolved(row):
+        return None, True
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None, False
@@ -4381,6 +4464,8 @@ def _control_population_resolution(
         return None
 
     status = str(materialized.get("status") or "").strip()
+    if _entry_stop_path_is_unresolved(materialized):
+        return "unresolved"
     fill_at_raw = materialized.get("entry_filled_at")
     fill_price_raw = materialized.get("entry_fill_price")
     realized_raw = materialized.get("r_realized")
@@ -4459,7 +4544,10 @@ def _control_population_counts(
             continue
         counts["eligible"] += 1
         counts[resolution] += 1
-        if resolution == "unresolved" and _legacy_ambiguous_upper_is_unresolved(row):
+        if resolution == "unresolved" and (
+            _legacy_ambiguous_upper_is_unresolved(row)
+            or _entry_stop_path_is_unresolved(row)
+        ):
             counts["ambiguity_unresolved"] += 1
     return counts
 
@@ -4615,7 +4703,9 @@ def _evaluate_stock_signal(
     """Aktien-Signal praezise ueber Daily-OHLC bewerten.
 
     Liefert (updates, fetch_failed). Chronologisch pro Folgetag-Bar:
-      LONG:  low<=stop UND (neuer) TP am selben Tag -> AMBIGUOUS, konservativ
+      Erster Entry UND Stop bei Open zwischen beiden -> UNTRACKED: weder
+      ein Fill noch eine vorherige Invalidation ist kausal bewiesen.
+      LONG nach bewiesenem Fill: low<=stop UND (neuer) TP -> AMBIGUOUS, konservativ
              Stop zuerst (STOP_HIT, outcome_detail 'ambiguous_same_day');
              sonst low<=stop -> STOP_HIT; high>=tp2 -> TP2_HIT (impliziert
              TP1); high>=tp1 -> tp1_hit_at setzen und OPEN weiterlaufen.
@@ -4725,6 +4815,13 @@ def _evaluate_stock_signal(
                         "outcome_detail": "entry_gapped_beyond_tp1",
                     })
                     break
+                if open_price < entry and high >= entry and low <= stop:
+                    updates.update(_no_fill_cleanup_updates())
+                    updates.update(_untracked_state_updates(
+                        sig, now_dt,
+                        unfilled_detail="ambiguous_entry_and_stop_same_interval",
+                    ))
+                    return updates, False
                 if open_price >= entry:
                     fill_price = open_price
                 elif low <= entry <= high:
@@ -4738,6 +4835,13 @@ def _evaluate_stock_signal(
                         "outcome_detail": "entry_gapped_beyond_tp1",
                     })
                     break
+                if open_price > entry and low <= entry and high >= stop:
+                    updates.update(_no_fill_cleanup_updates())
+                    updates.update(_untracked_state_updates(
+                        sig, now_dt,
+                        unfilled_detail="ambiguous_entry_and_stop_same_interval",
+                    ))
+                    return updates, False
                 if open_price <= entry:
                     fill_price = open_price
                 elif low <= entry <= high:
@@ -6025,6 +6129,8 @@ def breakeven_adjusted_r(row: Dict[str, Any]) -> Optional[float]:
         Reihenfolge MFE/Stop unbewiesen — kein BE-Kredit)
       - BE aktiviert, Verlust, aber Exit unbewiesen -> None (kein 0R erfinden)
     """
+    if _entry_stop_path_is_unresolved(row):
+        return None
     realized = _to_float(row.get("r_realized"))
     if realized is None:
         return None
@@ -6843,6 +6949,16 @@ def _empty_bucket() -> Dict[str, Any]:
             "stop_gap_exits": 0,
             "sum_stop_gap_slippage_r": 0.0,
             "avg_stop_gap_slippage_r": None,
+            "report_untracked_fill_claims": 0,
+            "report_counts": {
+                "resolved": 0,
+                "evidence_unresolved": 0,
+                "no_fill": 0,
+                "still_open": 0,
+                "untracked": 0,
+                "report_total": 0,
+                "reconciled": True,
+            },
         }
     )
     return bucket
@@ -7028,7 +7144,7 @@ def _add_stop_gap_metrics(bucket: Dict[str, Any], rows: Iterable[Dict[str, Any]]
     """Add measured adverse stop-gap execution costs to a metric bucket."""
     values: List[float] = []
     for row in rows:
-        if row.get("status") != STATUS_STOP:
+        if row.get("status") != STATUS_STOP or _entry_stop_path_is_unresolved(row):
             continue
         value = _to_float(row.get("stop_gap_slippage_r"))
         if value is not None and value > 0.0:
@@ -7040,10 +7156,71 @@ def _add_stop_gap_metrics(bucket: Dict[str, Any], rows: Iterable[Dict[str, Any]]
     )
 
 
+def _add_report_counts(
+    bucket: Dict[str, Any], rows: Iterable[Mapping[str, Any]], as_of: datetime
+) -> None:
+    """Partition report rows without confusing unresolved evidence with losses.
+
+    Control counts intentionally overlap status counts (for example an
+    UNTRACKED filled position also blocks calibration). This separate partition
+    is additive and reconciles the actual report population exactly once.
+    """
+    counts = {
+        "resolved": 0, "evidence_unresolved": 0, "no_fill": 0,
+        "still_open": 0, "untracked": 0,
+    }
+    untracked_fill_claims = 0
+    for raw_row in rows:
+        row = dict(raw_row)
+        status = str(row.get("status") or "").strip()
+        if status == STATUS_UNTRACKED:
+            category = "untracked"
+            if any(
+                value is not None and str(value).strip() != ""
+                for value in (row.get("entry_filled_at"), row.get("entry_fill_price"))
+            ):
+                untracked_fill_claims += 1
+        elif _entry_stop_path_is_unresolved(row):
+            category = "evidence_unresolved"
+        elif status in {STATUS_NO_FILL, STATUS_STOP, STATUS_TP2, STATUS_EXPIRED}:
+            resolution = _control_population_resolution(
+                row, as_of, require_mature=False
+            )
+            if resolution == "no_fill":
+                category = "no_fill"
+            elif resolution == "resolved":
+                payoff, unresolved = _managed_5050_be_resolution(row)
+                _upper, upper_unresolved = _realized_upper_resolution(row)
+                category = (
+                    "resolved"
+                    if (
+                        payoff is not None and math.isfinite(payoff)
+                        and not unresolved and not upper_unresolved
+                    )
+                    else "evidence_unresolved"
+                )
+            else:
+                category = "evidence_unresolved"
+        elif status == STATUS_OPEN:
+            category = "still_open"
+        else:
+            category = "evidence_unresolved"
+        counts[category] += 1
+    report_total = sum(counts.values())
+    bucket["report_counts"] = {
+        **counts,
+        "report_total": report_total,
+        "reconciled": report_total == int(bucket.get("signals") or 0),
+    }
+    # Diagnostic subset only; deliberately outside the disjoint partition.
+    bucket["report_untracked_fill_claims"] = untracked_fill_claims
+
+
 def _performance_bucket_for_rows(
     rows: Iterable[Dict[str, Any]],
     window_days: int,
     as_of: Optional[datetime] = None,
+    require_delivery_evidence: bool = False,
 ) -> Dict[str, Any]:
     """Build one complete performance bucket for an additive dimension."""
     materialized = list(rows)
@@ -7068,7 +7245,14 @@ def _performance_bucket_for_rows(
             row.get("status") in {STATUS_STOP, STATUS_TP2, STATUS_EXPIRED}
             and bool(row.get("entry_filled_at"))
             and _to_float(row.get("entry_fill_price")) is not None
+            and not _entry_stop_path_is_unresolved(row)
         )
+        if require_delivery_evidence:
+            is_decided_fill = is_decided_fill and (
+                _control_population_resolution(
+                    row, as_of or _utc_now(), require_mature=False
+                ) == "resolved"
+            )
         if r_value is None or not is_decided_fill:
             continue
         r_values.append(r_value)
@@ -7117,6 +7301,7 @@ def _performance_bucket_for_rows(
         _control_population_counts(materialized, as_of or _utc_now()),
     )
     _add_stop_gap_metrics(bucket, materialized)
+    _add_report_counts(bucket, materialized, as_of or _utc_now())
     return bucket
 
 
@@ -7125,13 +7310,16 @@ def _grouped_performance(
     window_days: int,
     key_fn: Callable[[Dict[str, Any]], str],
     as_of: Optional[datetime] = None,
+    require_delivery_evidence: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         key = str(key_fn(row) or "unknown")
         grouped.setdefault(key, []).append(row)
     return {
-        key: _performance_bucket_for_rows(group_rows, window_days, as_of)
+        key: _performance_bucket_for_rows(
+            group_rows, window_days, as_of, require_delivery_evidence
+        )
         for key, group_rows in sorted(grouped.items())
     }
 
@@ -7388,18 +7576,73 @@ def build_calibration_cell_identity(
         return None
 
 
-def select_performance_cohort(candidate_rows: Iterable[Mapping[str, Any]], *, days: int,
-                              as_of: datetime, mature_only: bool = True) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Pure cohort selection shared by API reporting and read-only export tools."""
+def _report_delivery_exclusion(row: Mapping[str, Any]) -> Optional[str]:
+    """Validate SMTP-origin evidence, never a legacy/direct recorder assertion.
+
+    Recipient keys and the canonical intent/ref binding are validated, not
+    returned in public summaries. Acceptance must follow creation/preparation
+    and any recorded attempt, so future or malformed chronology is no proof.
+    ACTIVE is the durable activation state and remains unchanged at trade exit.
+    SMTP acceptance is not proof of personal inbox delivery or a broker fill.
+    """
+    if str(row.get("origin_evidence") or "").strip() != "smtp_acceptance":
+        return "unknown_origin"
+    accepted_at = _parse_utc_datetime(row.get("delivery_accepted_at"))
+    created_at = _parse_utc_datetime(row.get("created_at"))
+    prepared_at = _parse_utc_datetime(row.get("delivery_prepared_at"))
+    attempted_raw = row.get("delivery_attempted_at")
+    attempted_at = _parse_utc_datetime(attempted_raw)
+    if (
+        not _has_trade_qualified_origin(row)
+        or _canonical_delivery_binding(row) is None
+        or str(row.get("delivery_state") or "").strip() != "ACTIVE"
+        or not _normalized_delivery_recipient_keys(
+            row.get("delivery_recipient_keys_json")
+        )
+        or accepted_at is None or created_at is None or prepared_at is None
+        or accepted_at < max(created_at, prepared_at)
+        or (
+            attempted_raw not in (None, "")
+            and (attempted_at is None or attempted_at > accepted_at)
+        )
+    ):
+        return "invalid_acceptance"
+    return None
+
+
+def select_performance_cohort(
+    candidate_rows: Iterable[Mapping[str, Any]], *, days: int,
+    as_of: datetime, mature_only: bool = True,
+    require_delivery_evidence: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Pure cohort selection shared by API reporting and read-only exports.
+
+    The opt-in SMTP report population requires a valid acceptance instant,
+    public origin reference and nonempty validated recipient cohort. Legacy
+    created_at is used only to scope aggregate exclusion diagnostics, never to
+    qualify report rows. General descriptive summaries retain their old mode.
+    """
     as_of = _coerce_now(as_of)
     cutoff = as_of - timedelta(days=max(1, int(days)))
     earliest = cutoff - timedelta(days=_MAX_PERFORMANCE_MATURITY_LOOKBACK_DAYS) if mature_only else cutoff
     candidates = []
+    excluded_delivery = {"unknown_origin": 0, "invalid_acceptance": 0}
     for candidate in candidate_rows:
         row = dict(candidate)
         started = _signal_causal_start(row)
         if (row.get("mail_class") == "trade" and row.get("status") != STATUS_PENDING_DELIVERY
                 and started is not None and earliest <= started <= as_of):
+            if require_delivery_evidence:
+                exclusion = _report_delivery_exclusion(row)
+                if exclusion is not None:
+                    maturity = _signal_maturity_at(row)
+                    in_report_window = (
+                        maturity is not None and cutoff <= maturity <= as_of
+                        if mature_only else started >= cutoff
+                    )
+                    if in_report_window:
+                        excluded_delivery[exclusion] += 1
+                    continue
             candidates.append(row)
     created = [row for row in candidates if _signal_causal_start(row) >= cutoff]
     rows = []
@@ -7410,17 +7653,25 @@ def select_performance_cohort(candidate_rows: Iterable[Mapping[str, Any]], *, da
                 row = dict(row, maturity_at=maturity.isoformat())
             rows.append(row)
     excluded = sum(not _signal_has_full_observation_window(row, as_of) for row in created) if mature_only else 0
-    return rows, {
+    counts = {
         "created_in_window": len(created),
         "matured_in_window": len(rows) if mature_only else sum(_signal_has_full_observation_window(row, as_of) for row in created),
         "included_signals": len(rows), "excluded_not_mature": excluded,
     }
+    if require_delivery_evidence:
+        counts.update({
+            "excluded_delivery_evidence": sum(excluded_delivery.values()),
+            "excluded_delivery_unknown_origin": excluded_delivery["unknown_origin"],
+            "excluded_delivery_invalid_acceptance": excluded_delivery["invalid_acceptance"],
+        })
+    return rows, counts
 
 
 def load_performance_summary(
     days: int = 90,
     mature_only: bool = False,
     as_of: Any = None,
+    require_delivery_evidence: bool = False,
 ) -> dict:
     """Track-Record-Zusammenfassung ueber die letzten `days` Tage. Wirft nie.
 
@@ -7428,6 +7679,11 @@ def load_performance_summary(
     Beobachtungsfenster am `as_of`-Zeitpunkt abgelaufen ist. Das verhindert,
     dass schnelle Stops gegen noch offene potenzielle Gewinner als fertige
     Trefferquote erscheinen.
+
+    ``require_delivery_evidence=True`` ist der explizite Wochenreport-Modus:
+    ausschliesslich SMTP-akzeptierte, aktivierte Urspruenge mit validierter
+    Empfaengerkohorte und Versandzeit. Ohne diesen Opt-in bleibt die globale
+    deskriptive Historie kompatibel. SMTP-Akzeptanz belegt keinen Inbox-Eingang.
 
     Die `managed_be_*`-Felder bilden das empfohlene Modell ab: 50 Prozent am
     TP1, Rest bis TP2/Stop/Expiry und Stop auf Einstand ab +1R. Die gemeldete
@@ -7472,15 +7728,40 @@ def load_performance_summary(
         as_of_dt = _parse_utc_datetime(as_of) or _utc_now()
     else:
         as_of_dt = _utc_now()
+    selection_basis = (
+        "matured_in_window" if mature_only else (
+            "accepted_in_window" if require_delivery_evidence else "created_in_window"
+        )
+    )
     summary: Dict[str, Any] = {
         "generated_at": as_of_dt.isoformat(),
         "window_days": window,
         "cohort_mode": "fully_observed" if mature_only else "created_in_window",
-        "cohort_selection_basis": "matured_in_window" if mature_only else "created_in_window",
+        "cohort_selection_basis": selection_basis,
         "as_of": as_of_dt.isoformat(),
         "evaluation_model_version": EVALUATION_MODEL_VERSION,
         "cost_basis": "gross_price_path_no_general_roundtrip_costs",
         "excluded_not_mature": 0,
+        "source_read_complete": False,
+        "report_data_available": False,
+        "error": None,
+        "delivery_evidence": {
+            "required": bool(require_delivery_evidence),
+            "scope": selection_basis,
+            "candidate_signals": 0,
+            "included_signals": 0,
+            "excluded_signals": 0,
+            "excluded_unknown_origin": 0,
+            "excluded_invalid_acceptance": 0,
+            "semantics": (
+                "Globale SMTP-akzeptierte Ursprungskohorte; keine persoenliche "
+                "Inbox- oder Broker-Ausfuehrungsbestaetigung. Historische/unklare "
+                "Urspruenge bleiben gespeichert und werden nur aggregiert ausgeschlossen."
+                if require_delivery_evidence else
+                "Globale deskriptive Historie einschliesslich historischer/unklarer "
+                "Urspruenge; keine Behauptung belegter SMTP- oder Inbox-Zustellung."
+            ),
+        },
         "total": _empty_bucket(),
         "per_scanner": {},
         "per_strategy": {},
@@ -7504,15 +7785,25 @@ def load_performance_summary(
         ],
         "cohort": {
             "mode": "fully_observed" if mature_only else "created_in_window",
-            "selection_basis": "matured_in_window" if mature_only else "created_in_window",
+            "selection_basis": selection_basis,
             "mature_only": bool(mature_only),
             "created_in_window": 0,
             "matured_in_window": 0,
             "included_signals": 0,
             "excluded_not_mature": 0,
+            **({
+                "require_delivery_evidence": True,
+                "excluded_delivery_evidence": 0,
+                "excluded_delivery_unknown_origin": 0,
+                "excluded_delivery_invalid_acceptance": 0,
+            } if require_delivery_evidence else {}),
         },
         "recent": [],
     }
+    # Snapshot only the small empty public envelope. A strict report must never
+    # turn a failed read/aggregation into a success-shaped zero or partial mail.
+    empty_report = json.loads(json.dumps(summary)) if require_delivery_evidence else None
+    source_read_complete = False
     try:
         cutoff_dt = as_of_dt - timedelta(days=window)
         cutoff_iso = cutoff_dt.isoformat()
@@ -7523,30 +7814,39 @@ def load_performance_summary(
         )
         with _DB_LOCK:
             with _db_connection() as conn:
+                time_filter = (
+                    "((delivery_accepted_at >= ? AND delivery_accepted_at <= ?) "
+                    "OR (created_at >= ? AND created_at <= ?)) "
+                    if require_delivery_evidence else
+                    "COALESCE(delivery_accepted_at, created_at) >= ? "
+                    "AND COALESCE(delivery_accepted_at, created_at) <= ? "
+                )
+                time_params = [query_cutoff.isoformat(), as_of_dt.isoformat()]
+                if require_delivery_evidence:
+                    time_params *= 2
                 candidate_rows = [
                     dict(row)
                     for row in conn.execute(
                         "SELECT * FROM signals "
-                        "WHERE COALESCE(delivery_accepted_at, created_at) >= ? "
-                        "AND COALESCE(delivery_accepted_at, created_at) <= ? "
+                        "WHERE " + time_filter +
                         "AND mail_class = 'trade' AND status != ? "
                         "ORDER BY COALESCE(delivery_accepted_at, created_at) DESC, id DESC",
-                        (
-                            query_cutoff.isoformat(), as_of_dt.isoformat(),
-                            STATUS_PENDING_DELIVERY,
-                        ),
+                        (*time_params, STATUS_PENDING_DELIVERY),
                     ).fetchall()
                 ]
-        created_rows = [
-            row for row in candidate_rows
-            if (_signal_causal_start(row) or datetime.min.replace(tzinfo=timezone.utc))
-            >= cutoff_dt
-        ]
+        source_read_complete = True
+        summary["source_read_complete"] = True
+        created_rows, _activity_counts = select_performance_cohort(
+            candidate_rows, days=window, as_of=as_of_dt, mature_only=False,
+            require_delivery_evidence=require_delivery_evidence,
+        )
         created_in_window = len(created_rows)
         rows, cohort_counts = select_performance_cohort(
             candidate_rows, days=window, as_of=as_of_dt, mature_only=mature_only,
+            require_delivery_evidence=require_delivery_evidence,
         )
         summary["excluded_not_mature"] = cohort_counts["excluded_not_mature"]
+        summary["cohort"].update(cohort_counts)
         summary["cohort"].update({
             "created_in_window": created_in_window,
             "matured_in_window": len(rows) if mature_only else sum(
@@ -7555,6 +7855,15 @@ def load_performance_summary(
             "included_signals": len(rows),
             "excluded_not_mature": summary["excluded_not_mature"],
         })
+        summary["delivery_evidence"].update({
+            "candidate_signals": len(rows) + cohort_counts.get("excluded_delivery_evidence", 0),
+            "included_signals": len(rows),
+            "excluded_signals": cohort_counts.get("excluded_delivery_evidence", 0),
+            "excluded_unknown_origin": cohort_counts.get("excluded_delivery_unknown_origin", 0),
+            "excluded_invalid_acceptance": cohort_counts.get("excluded_delivery_invalid_acceptance", 0),
+        })
+        if require_delivery_evidence:
+            summary["cohort"]["accepted_in_window"] = created_in_window
         total_r: List[float] = []
         total_r_upper: List[float] = []
         total_managed: List[float] = []
@@ -7592,7 +7901,14 @@ def load_performance_summary(
                 row.get("status") in {STATUS_STOP, STATUS_TP2, STATUS_EXPIRED}
                 and bool(row.get("entry_filled_at"))
                 and _to_float(row.get("entry_fill_price")) is not None
+                and not _entry_stop_path_is_unresolved(row)
             )
+            if require_delivery_evidence:
+                is_decided_fill = is_decided_fill and (
+                    _control_population_resolution(
+                        row, as_of_dt, require_mature=False
+                    ) == "resolved"
+                )
             if r_value is not None and is_decided_fill:
                 total_r.append(r_value)
                 scanner_r.setdefault(scanner, []).append(r_value)
@@ -7694,10 +8010,16 @@ def load_performance_summary(
                 created_scanner_counts.get(scanner, 0) / float(window), 3
             )
         _add_stop_gap_metrics(summary["total"], rows)
+        _add_report_counts(summary["total"], rows, as_of_dt)
         for scanner, bucket in summary["per_scanner"].items():
             _add_stop_gap_metrics(
                 bucket,
                 (row for row in rows if str(row.get("scanner") or "unknown") == scanner),
+            )
+            _add_report_counts(
+                bucket,
+                (row for row in rows if str(row.get("scanner") or "unknown") == scanner),
+                as_of_dt,
             )
 
         strategy_key = lambda row: str(
@@ -7712,22 +8034,22 @@ def load_performance_summary(
             row.get("fill_evidence_mode") or "legacy_unclassified"
         )
         summary["per_strategy"] = _grouped_performance(
-            rows, window, strategy_key, as_of_dt
+            rows, window, strategy_key, as_of_dt, require_delivery_evidence
         )
         summary["per_direction"] = _grouped_performance(
-            rows, window, direction_key, as_of_dt
+            rows, window, direction_key, as_of_dt, require_delivery_evidence
         )
         summary["per_horizon"] = _grouped_performance(
-            rows, window, horizon_key, as_of_dt
+            rows, window, horizon_key, as_of_dt, require_delivery_evidence
         )
         summary["per_market_regime"] = _grouped_performance(
-            rows, window, regime_key, as_of_dt
+            rows, window, regime_key, as_of_dt, require_delivery_evidence
         )
         summary["per_code_revision"] = _grouped_performance(
-            rows, window, revision_key, as_of_dt
+            rows, window, revision_key, as_of_dt, require_delivery_evidence
         )
         summary["per_fill_evidence_mode"] = _grouped_performance(
-            rows, window, evidence_key, as_of_dt
+            rows, window, evidence_key, as_of_dt, require_delivery_evidence
         )
         for grouped, key_fn in (
             (summary["per_strategy"], strategy_key),
@@ -7767,7 +8089,9 @@ def load_performance_summary(
                 "market_regime": key[4],
                 "code_revision": key[5],
                 "fill_evidence_mode": key[6],
-                **_performance_bucket_for_rows(group_rows, window, as_of_dt),
+                **_performance_bucket_for_rows(
+                    group_rows, window, as_of_dt, require_delivery_evidence
+                ),
             }
             segment["alerts_per_day"] = round(
                 created_segment_counts.get(key, 0) / float(window), 3
@@ -7794,7 +8118,9 @@ def load_performance_summary(
             )
         summary["calibration_cells"] = []
         for key, group_rows in sorted(calibration_rows.items()):
-            bucket = _performance_bucket_for_rows(group_rows, window, as_of_dt)
+            bucket = _performance_bucket_for_rows(
+                group_rows, window, as_of_dt, require_delivery_evidence
+            )
             verdict, verdict_reason = scanner_verdict(bucket)
             cell = {
                 "cell_id": "|".join(key),
@@ -7862,6 +8188,18 @@ def load_performance_summary(
             "reihenfolge-unklaren Bars. Upper ist kein Erwartungswert und keine "
             "behauptete Performance, sondern die Obergrenze des Datenbands."
         )
+        summary["report_count_semantics"] = (
+            "report_counts ist eine disjunkte Zerlegung von signals: resolved "
+            "= terminales, empfohlenes R mit validierter Evidenz; "
+            "evidence_unresolved = fehlende/unklare terminale, BE- oder "
+            "Upper-Evidenz; no_fill = explizit und kausal ohne Entry beendet; "
+            "still_open = OPEN; untracked = UNTRACKED. "
+            "report_total ist exakt die Summe dieser fuenf Kategorien. "
+            "report_untracked_fill_claims ist nur eine Teilmenge von untracked "
+            "und wird niemals nochmals zum Nenner addiert. Konservative "
+            "belegte Level-R-Verluste bleiben bei fehlender Upper-Evidenz "
+            "numerisch sichtbar, aber die Reportkategorie bleibt unresolved."
+        )
         summary["recent"] = [
             {
                 "id": row.get("id"),
@@ -7909,8 +8247,16 @@ def load_performance_summary(
             }
             for row in rows[:20]
         ]
+        summary["report_data_available"] = True
     except Exception as exc:
         logger.warning("load_performance_summary fehlgeschlagen: %s", exc)
+        if require_delivery_evidence:
+            summary = empty_report
+        summary["source_read_complete"] = source_read_complete
+        summary["report_data_available"] = False
+        # Error class is enough for a scheduler guard; exception text could
+        # contain filesystem, recipient, credentials or provider material.
+        summary["error"] = "report_data_unavailable:" + type(exc).__name__
     return summary
 
 

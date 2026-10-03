@@ -5,7 +5,7 @@ The real scheduler and durable reservation functions remain under test.
 """
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -27,6 +27,18 @@ def swiss(text):
 @pytest.fixture
 def admission(monkeypatch, tmp_path):
     clock = {"now": swiss("2026-09-30T01:59:00").timestamp(), "calls": []}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = datetime.fromtimestamp(clock["now"], timezone.utc)
+            return current.astimezone(tz) if tz else current.replace(tzinfo=None)
+
+    # The scheduler uses both epoch time (Gap reservations) and datetime.now
+    # (ordinary US-stock admission). Both must follow this scenario's clock;
+    # otherwise a real Saturday silently disables the intended weekday jobs.
+    monkeypatch.setattr(api, "datetime", Clock)
+    monkeypatch.setattr(api.scan_schedule, "datetime", Clock)
     store = gap.GapScheduleStore(tmp_path / "gap.json")
     store.next_due(LONG, clock["now"])
     monkeypatch.setattr(api, "_GAP_SCAN_SCHEDULE_STORE", store)
