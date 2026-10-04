@@ -1,5 +1,59 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 04.10.2026 – Aktueller Abschluss: BI-Backtester und Mail-Reservierungen
+
+Dieser Abschnitt ersetzt die älteren offenen Implementierungsstände unten.
+Basis: `cabb5b17ee41dc93f40c0a43270ffe71e803b820`. Kein Serverupdate durch Codex.
+
+- [x] BI-Auswahl auf die jüngsten 50 Sitzungen vor dem Testzeitraum korrigiert;
+  gewähltes Mindestvolumen 200.000 wird nicht heimlich auf 500.000 angehoben.
+  Signalgrenze, letzte abgeschlossene Signalkerze und belegte Handelsfenster korrigiert.
+- [x] Abdeckung und vollständiger Trichter implementiert: ausgewählte Aktien,
+  auswertbare Historien, 17/20-Kandidaten, Planablehnungen, Pläne, Fills und offene Fälle.
+  Fehlende/ungültige Kurse bleiben Datenlücken; kein künstlicher Ersatz.
+- [x] API und gespeicherte Berichte prüfen Rohzeilen, Zählerpartitionen und Provenienz.
+  Der 150-Zeilen-Anzeigecap verfälscht nicht die vollständigen Zähler.
+  Nur BI erhält eine neue Modell-/Cachekennung; ältere Dateien werden nicht gelöscht.
+- [x] Kurze BI-Hauptanzeige; Diagnose und Methodik geschlossen. Offene Folgekerzen,
+  fehlende Indikatoren, keine Setups und abgelehnte Pläne sind getrennt.
+  Gefüllte, noch offene Einstiege sind von „Ausgewertete Trades“ getrennt.
+  BI bleibt bei 17/20; Score-, Risiko- und Mailfreigaben werden nicht gelockert.
+- [x] Sichere Abbrüche vor SMTP geben unversuchte Reservierungen frei.
+  BG bereinigt nach 30 Minuten ausschließlich unberührte, nicht angenommene Reservierungen.
+  Alter Sender kann keinen Ersatzowner löschen. ATTEMPTED, unklare DATA-Annahme und
+  separat journalisierte SMTP-Annahme bleiben geschützt; Journalfehler stoppen Wiederholung.
+  Ungültige Prepared-Zeitstempel werden nicht durch SQLite-Normalisierung gelöscht.
+- [x] Unabhängige Cache-/Mail-Nachprüfung; 445 gezielte Mailtests, 151 Producer-Tests,
+  89 Frontend-/API-Proben und 45 abschließende Cache-/API-Proben bestanden.
+  Diese überlappenden Läufe werden nicht zu einer Gesamtzahl addiert.
+- [x] Playwright: 18 Desktop-/Mobilfälle grün, kein externer Request, kein Schreibaufruf,
+  keine Laufzeitfehler, kein horizontaler Überlauf. Bundle `67924e9f894a` verifiziert.
+- [x] Angemeldete App rein lesend geprüft: gespeicherter BI-Lauf vom 03.10., 21:47:24,
+  3 Monate / 200 Aktien / Preis 5 / Volumen 200.000 enthält 0 Pläne/Trades,
+  aber keine gespeicherten Ablehnungsdiagnosen. Seine exakte Ursache bleibt unbekannt.
+- [x] Live-Mailansicht: zuletzt 50 Entscheidungen vor SMTP ausgelassen, keine
+  SMTP-Annahme und kein Versandfehler in diesem sichtbaren Fenster. Kein Nachweis eines
+  allgemeinen Transportausfalls. Technische Testmail laut Nutzer angekommen.
+  Sonntag: Aktien-Autoläufe pausieren; nächste erlaubte Öffnung 05.10., 04:00 UTC.
+- [x] Abschließender eingefrorener Gesamtlauf: 11.274 bestanden, 0 Fehler,
+  1 POSIX-Rechtetest unter Windows übersprungen; `tmp/qa-1b8536a9bad0/results.xml`.
+  Erster Lauf: 11.264 bestanden, 1 alte Quelltextprüfung rot, 1 POSIX-Rechtetest unter Windows
+  übersprungen. Quelltextprüfung korrigiert; danach 67 gezielte Tests grün.
+  Ein Windows-Queue-Timeout im Mail-Nachlauf ist dokumentiert; ohne Änderungen
+  bestanden anschließend der Atomic-Test (10/10) und der vollständige 445er-Lauf.
+- [x] Reparaturpaket committet und gepusht: `f46413c2d357475968109aa79269a9c07e21ddd7`.
+  Remotehash kontrolliert. Fremdes WIP und private Exporte nicht aufgenommen.
+  Dieser Abschlussabschnitt wird separat als Dokumentationscommit veröffentlicht.
+- [ ] Nach Betreiberpull BI-Dreimonatslauf neu berechnen und echte Diagnose auswerten.
+- [ ] Neue echte Handelssignalannahme, persönlicher Empfang und Wochenkohorte nachweisen.
+  Kein weiterer Export, Scanstart oder Testmail durch diese Bearbeitung.
+
+Live-Health vom 04.10.2026, Serverzeit 20:58:06: healthy,
+Revision `cabb5b17ee41`, Bundle `17410b75a42c`.
+Server unverändert; keine Einstellungen, Zugangsdaten oder Produktionsdaten geändert.
+Bestehendes Dokumentations-/Deploy-/Test-WIP bleibt erhalten.
+Prüfbericht: [BI-Backtester und Mail-Recovery](docs/BI_BACKTEST_MAIL_RECOVERY_2026-10-04.md).
+
 ## 03.10.2026 – Wochenreport: Versandkohorte und kausale Bewertung
 
 Aktueller Auftrag: die irreführende Wochenbilanz (86 reife Einträge,
