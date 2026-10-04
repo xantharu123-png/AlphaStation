@@ -11568,6 +11568,23 @@ def _send_email_alert(
         _mail_suppressed("bi_indicator_contract_not_met")
         return False
     intent_key = ""
+    prepared_reservation_rows = []
+
+    def _cancel_unsent_prepared_intent() -> None:
+        # No SMTP ownership or DATA attestation is assumed here. The tracker
+        # atomically cancels only untouched PREPARED rows; an ATTEMPTED,
+        # accepted or concurrently owned intent remains non-replayable.
+        if intent_key and cancel_alert_delivery_intent is not None:
+            try:
+                cancel_alert_delivery_intent(
+                    intent_key, expected_prepared_rows=prepared_reservation_rows,
+                )
+            except Exception as cancel_exc:
+                _record_email_event(
+                    subject, "tracker_pending",
+                    f"pre_smtp_intent_cancel_failed:{type(cancel_exc).__name__}",
+                )
+
     if tracking_scanner or tracking_rows_list:
         if (
             not tracking_scanner
@@ -11609,6 +11626,9 @@ def _send_email_alert(
             _mail_suppressed("tracker_delivery_intent_not_sendable")
             return False
         persisted_signals = list(prepared.get("signals") or [])
+        # Copy the actual reservation identity before validation/rendering.
+        # An expired old renderer may not cancel a fresh same-key owner.
+        prepared_reservation_rows = [dict(row) for row in persisted_signals]
         public_refs = [row.get("public_signal_ref") for row in persisted_signals]
         if (
             len(persisted_signals) != len(tracking_rows_list)
@@ -11617,6 +11637,7 @@ def _send_email_alert(
         ):
             _record_email_event(subject, "skipped", "tracker_public_signal_ref_invalid")
             _mail_suppressed("tracker_public_signal_ref_invalid")
+            _cancel_unsent_prepared_intent()
             return False
         plan_lines = []
         for signal, public_ref in zip(persisted_signals, public_refs):
@@ -11633,6 +11654,7 @@ def _send_email_alert(
             ):
                 _record_email_event(subject, "skipped", "tracker_public_signal_plan_invalid")
                 _mail_suppressed("tracker_public_signal_plan_invalid")
+                _cancel_unsent_prepared_intent()
                 return False
             entry, stop, tp1, tp2 = (float(value) for value in plan_values)
             plan_lines.append(
@@ -11641,61 +11663,74 @@ def _send_email_alert(
                 f"{html.escape(direction)} | E={entry:g} | SL={stop:g} | "
                 f"TP1={tp1:g} | TP2={tp2:g}"
             )
-        body_html = (
-            f"{_extract_email_body_inner(body_html)}"
-            "<p style='font-size:11px;color:#64748b'>"
-            + "<br>".join(plan_lines)
-            + "</p>"
-        )
-    branded_body_html = _brand_email_html(
-        subject,
-        body_html,
-        rendered_at=rendered_at,
-    )
-    msg = MIMEMultipart("alternative")
-    msg["From"] = f"Alpha Station Alert <{gmail_user}>"
-    # Never disclose subscriber addresses to other recipients.
-    msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
-    msg["Subject"] = subject
-    # The same wire message (and Message-ID) is reused when only definitively
-    # refused recipients are retried. Confirmed recipients are never retried.
-    msg["Message-ID"] = make_msgid()
-    plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
-    msg.attach(MIMEText(plain, "plain", "utf-8"))
-    msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
-    wire_message = msg.as_string()
-
-    if intent_key:
-        # Consent is mutable. Bind the prepared pseudonymous cohort above, then
-        # immediately before the SMTP ownership claim retain only recipients
-        # who are still globally/channel/horizon authorized. A recipient added
-        # after preparation is deliberately excluded from this intent. Explicit
-        # recipient overrides do not bypass this final authorization boundary.
-        currently_authorized = set(_resolve_email_alert_recipients(
-            recipient_emails=None,
-            trade_horizon=trade_horizon,
-            mail_class=mail_class,
-            mail_channel=mail_channel,
-        ))
-        recipients = sorted(set(recipients).intersection(currently_authorized))
-        if not recipients:
-            _record_email_event(
-                subject,
-                "skipped",
-                "tracker_recipient_authorization_changed",
+        try:
+            body_html = (
+                f"{_extract_email_body_inner(body_html)}"
+                "<p style='font-size:11px;color:#64748b'>"
+                + "<br>".join(plan_lines)
+                + "</p>"
             )
-            _mail_suppressed("tracker_recipient_authorization_changed")
-            return False
+        except Exception:
+            _cancel_unsent_prepared_intent()
+            raise
+    try:
+        branded_body_html = _brand_email_html(
+            subject,
+            body_html,
+            rendered_at=rendered_at,
+        )
+        msg = MIMEMultipart("alternative")
+        msg["From"] = f"Alpha Station Alert <{gmail_user}>"
+        # Never disclose subscriber addresses to other recipients.
+        msg["To"] = recipients[0] if len(recipients) == 1 else "undisclosed-recipients:;"
+        msg["Subject"] = subject
+        # The same wire message (and Message-ID) is reused when only definitively
+        # refused recipients are retried. Confirmed recipients are never retried.
+        msg["Message-ID"] = make_msgid()
+        plain = re.sub(r"<[^>]+>", "", branded_body_html.replace("<br>", "\n").replace("</tr>", "\n"))
+        msg.attach(MIMEText(plain, "plain", "utf-8"))
+        msg.attach(MIMEText(branded_body_html, "html", "utf-8"))
+        wire_message = msg.as_string()
+
+        if intent_key:
+            # Consent is mutable. Bind the prepared pseudonymous cohort above,
+            # then retain only still-authorized members before SMTP ownership.
+            # New recipients require a separately prepared intent.
+            currently_authorized = set(_resolve_email_alert_recipients(
+                recipient_emails=None,
+                trade_horizon=trade_horizon,
+                mail_class=mail_class,
+                mail_channel=mail_channel,
+            ))
+            recipients = sorted(set(recipients).intersection(currently_authorized))
+            if not recipients:
+                _record_email_event(
+                    subject,
+                    "skipped",
+                    "tracker_recipient_authorization_changed",
+                )
+                _mail_suppressed("tracker_recipient_authorization_changed")
+                _cancel_unsent_prepared_intent()
+                return False
+    except Exception:
+        # Rendering/authorization errors happened before SMTP. They must not
+        # leave an unsent reservation that blocks future freshly checked rows.
+        _cancel_unsent_prepared_intent()
+        raise
 
     # Cross-process compare-and-set immediately before the external side
     # effect. Only the worker that changed every PREPARED row to ATTEMPTED may
     # issue SMTP DATA; replays and concurrent schedulers fail closed.
     if intent_key:
-        attempt_claim = mark_alert_delivery_attempted(
-            intent_key,
-            attempted_at=time.time(),
-            expected_prepared_rows=persisted_signals,
-        )
+        try:
+            attempt_claim = mark_alert_delivery_attempted(
+                intent_key,
+                attempted_at=time.time(),
+                expected_prepared_rows=persisted_signals,
+            )
+        except Exception:
+            _cancel_unsent_prepared_intent()
+            raise
         if not (
             attempt_claim.get("claimed_this_call") is True
             and attempt_claim.get("send_allowed") is True
@@ -11706,6 +11741,7 @@ def _send_email_alert(
                 "tracker_delivery_attempt_not_owned",
             )
             _mail_suppressed("tracker_delivery_attempt_not_owned")
+            _cancel_unsent_prepared_intent()
             return False
 
     accepted_recipients: List[str] = []
@@ -12037,6 +12073,7 @@ def _send_email_alert(
             cancel_alert_delivery_intent(
                 intent_key,
                 delivery_definitively_not_accepted=True,
+                expected_prepared_rows=prepared_reservation_rows,
             )
         except Exception as cancel_exc:
             _record_email_event(
@@ -45119,7 +45156,7 @@ ADVANCED_SCANNER_BACKTESTS = {
         "default_max_tickers": 200,
         "default_min_price": 5.0,
         "default_min_volume": 200000,
-        "note": "Backtest nutzt die BI-Retest-Engine mit 50/50 TP1/TP2-Logik.",
+        "note": "BI-Long-Plan: Ausbruchseinstieg, Tagesmodell mit 50/50 TP1/TP2-Logik.",
     },
     "scanner_bi_short": {
         "name": "BI Scanner Short",
@@ -45207,18 +45244,26 @@ def _backtest_v2_cache_path(identity: Dict[str, Any], *, latest: bool = False) -
     # Only a digest is used in the path. No ticker, strategy or caller path is
     # interpolated into filenames, and v1 files remain completely untouched.
     basis = ({key: identity[key] for key in ("ticker", "strategy")} if latest else identity)
-    encoded = json.dumps({"model": _BACKTEST_MODEL_VERSION, "request": basis},
+    encoded = json.dumps({"model": _backtest_model_version(identity.get("strategy")), "request": basis},
                          sort_keys=True, separators=(",", ":"), allow_nan=False)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     prefix = "backtest_v2_latest_" if latest else "backtest_v2_"
     return Path(BACKTEST_CACHE).parent / f"{prefix}{digest}.json"
 
 
+def _backtest_model_version(strategy: str) -> str:
+    # Only BI histories changed. Other exact studies remain readable; the old
+    # BI files are preserved but never presented as recalculated diagnostics.
+    if strategy in {"scanner_bi_long", "scanner_bi_short"}:
+        return "bi_coverage_20261004_v1"
+    return _BACKTEST_MODEL_VERSION
+
+
 def _store_backtest_result(identity: Dict[str, Any], result: Dict[str, Any]) -> None:
     # Failed studies never replace the last successful report. Validate the
     # entire payload before either atomic write, including non-finite numbers.
     json.dumps(result, allow_nan=False, default=_serialize_json)
-    metadata = {"cache_version": _BACKTEST_CACHE_VERSION, "model_version": _BACKTEST_MODEL_VERSION,
+    metadata = {"cache_version": _BACKTEST_CACHE_VERSION, "model_version": _backtest_model_version(identity.get("strategy")),
                 "request": identity, "cached_at": result["cached_at"]}
     save_cache_file(str(_backtest_v2_cache_path(identity)), result, metadata)
     save_cache_file(str(_backtest_v2_cache_path(identity, latest=True)), result, metadata)
@@ -45939,7 +45984,7 @@ def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[s
         1 for trade in all_trades
         if str(trade.get("outcome") or "").upper() == "UNRESOLVED"
     )
-    return _build_backtest_result(
+    result = _build_backtest_result(
         strategy=strategy,
         label=meta.get("name", strategy),
         direction=meta.get("direction", "long"),
@@ -45956,6 +46001,17 @@ def _normalize_scanner_backtest(raw: Dict[str, Any], strategy: str, meta: Dict[s
         methodology_warnings=summary.get("methodology_warnings") or [],
         data_quality=summary.get("data_quality"),
     )
+    for key in ("diagnostics", "plan_version", "parity_scope", "execution_model", "live_delivery_equivalent", "selection_model", "input_timeframe"):
+        if key in summary:
+            result[key] = deepcopy(summary[key])
+    result["model_provenance"] = {
+        key: deepcopy(summary[key])
+        for key in ("plan_version", "parity_scope", "execution_model", "live_delivery_equivalent", "selection_model", "input_timeframe")
+        if key in summary
+    }
+    from modules.backtest_diagnostics import apply_bi_backtest_diagnosis
+    return apply_bi_backtest_diagnosis(result, strategy, trade_rows=raw.get("trades"),
+                                       source_quality=summary.get("data_quality"), source_summary=summary)
 
 
 def _run_advanced_scanner_backtest(request: BacktestRequest) -> Dict[str, Any]:
@@ -47401,7 +47457,7 @@ def get_backtest_results(ticker: str = Query("AAPL"), strategy: str = Query("sma
             saved_request = payload.get("request") if isinstance(payload, dict) else None
             saved_result = payload.get("results") if isinstance(payload, dict) else None
             if (payload.get("cache_version") != _BACKTEST_CACHE_VERSION
-                    or payload.get("model_version") != _BACKTEST_MODEL_VERSION
+                    or payload.get("model_version") != _backtest_model_version(request.strategy)
                     or not isinstance(saved_request, dict) or not isinstance(saved_result, dict)
                     or saved_result.get("error") or not payload.get("cached_at")
                     or (exact and saved_request != identity)

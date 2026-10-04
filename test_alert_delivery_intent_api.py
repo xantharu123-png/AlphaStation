@@ -203,7 +203,7 @@ def test_corrupt_prepared_tuple_between_render_and_claim_never_enters_smtp(
         state = conn.execute(
             "SELECT status, delivery_state, delivery_attempted_at, delivery_accepted_at FROM signals"
         ).fetchone()
-    assert state == (tracker.STATUS_PENDING_DELIVERY, "PREPARED", None, None)
+    assert state is None  # Definite pre-SMTP rejection must not reserve a trade.
 
 
 @pytest.mark.parametrize(
@@ -264,7 +264,7 @@ def test_every_canonical_identity_field_is_revalidated_before_smtp(
             "SELECT status, delivery_state, delivery_attempted_at, "
             "delivery_accepted_at FROM signals"
         ).fetchone()
-    assert state == (tracker.STATUS_PENDING_DELIVERY, "PREPARED", None, None)
+    assert state is None  # Definite pre-SMTP rejection must not reserve a trade.
 
 
 @pytest.mark.parametrize("optout_layer", ["global", "channel", "horizon"])
@@ -312,7 +312,7 @@ def test_tracking_recipient_optout_after_render_never_reaches_smtp(
             "SELECT status, delivery_state, delivery_attempted_at, "
             "delivery_accepted_at FROM signals"
         ).fetchone()
-    assert state == (tracker.STATUS_PENDING_DELIVERY, "PREPARED", None, None)
+    assert state is None  # Definite pre-SMTP rejection must not reserve a trade.
 
 
 def test_explicit_tracking_recipient_is_still_reauthorized_before_smtp(
@@ -360,7 +360,7 @@ def test_explicit_tracking_recipient_is_still_reauthorized_before_smtp(
             "SELECT status, delivery_state, delivery_attempted_at, "
             "delivery_accepted_at FROM signals"
         ).fetchone()
-    assert state == (tracker.STATUS_PENDING_DELIVERY, "PREPARED", None, None)
+    assert state is None  # Definite pre-SMTP rejection must not reserve a trade.
 
 
 def test_tracking_intent_never_adds_recipient_authorized_after_prepare(

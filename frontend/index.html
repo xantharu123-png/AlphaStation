@@ -11482,6 +11482,101 @@ function backtestEvidencePresentation(result) {
     };
 }
 
+function backtestBIDiagnosticsPresentation(result) {
+    const data = result || {};
+    const strategy = data.request?.strategy || data.strategy;
+    if (!['scanner_bi_long', 'scanner_bi_short', 'bi_long', 'bi_short'].includes(strategy)) return null;
+    const count = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const raw = data.diagnostics;
+    const known = raw?.schema_version === 1 && raw.coverage && typeof raw.coverage === 'object'
+        && !Array.isArray(raw.coverage) && raw.funnel && typeof raw.funnel === 'object' && !Array.isArray(raw.funnel);
+    const coverage = known ? raw.coverage : {};
+    const funnel = known ? raw.funnel : {};
+    const selected = count(coverage.selected_tickers) ?? count(data.n_tickers);
+    const usable = count(coverage.tickers_with_usable_windows);
+    const qualified = count(funnel.indicator_qualified_candidates);
+    const accepted = count(funnel.accepted_plans);
+    const rejected = count(funnel.plan_rejected_candidates);
+    const evaluated = count(funnel.indicator_evaluated_windows);
+    const unavailable = count(funnel.indicator_contract_unavailable_windows);
+    const unresolved = count(funnel.unresolved);
+    const filled = count(funnel.filled_trades);
+    const zeroResult = count(data.total_trades) === 0 || data.verdict?.status === 'no_trades';
+    const declaredStage = known ? raw.zero_result_stage : null;
+    // API reports a null zero-result stage after a filled entry; only its
+    // explicit future-tail flag permits a pending-result presentation.
+    const stage = known && declaredStage === null && data.data_quality?.followup_pending_only === true
+        && accepted > 0 && filled > 0 && unresolved > 0 ? 'outcomes_pending' : declaredStage;
+    const hasCoverageGaps = known && (
+        (Array.isArray(coverage.failed_fetch_dates) && coverage.failed_fetch_dates.length > 0)
+        || (Array.isArray(coverage.empty_fetch_dates) && coverage.empty_fetch_dates.length > 0)
+        || Object.values(coverage.missing_sessions_by_ticker || {}).some(days => Array.isArray(days) && days.length > 0)
+        || Object.values(coverage.invalid_bars_by_ticker || {}).some(value => count(value) > 0)
+        || (count(coverage.expected_fetch_sessions) !== null && count(coverage.loaded_fetch_sessions) !== null
+            && coverage.loaded_fetch_sessions < coverage.expected_fetch_sessions)
+        || (count(coverage.selected_expected_sessions) !== null && count(coverage.selected_observed_sessions) !== null
+            && coverage.selected_observed_sessions < coverage.selected_expected_sessions)
+    );
+    const followupPendingOnly = !!known && !hasCoverageGaps && data.data_quality?.followup_pending_only === true
+        && ['entry_pending', 'outcomes_pending'].includes(stage);
+    let title = zeroResult ? 'Ursache der Nullanzeige nicht gespeichert' : 'Prüfdiagnose nicht gespeichert';
+    let detail = 'Für diese gespeicherte Auswertung fehlen vollständige Prüfzähler. Ein neuer Lauf mit Diagnose ist erforderlich.';
+    let tone = 'unknown';
+    if ((known && stage === 'data_incomplete') || hasCoverageGaps
+            || (!followupPendingOnly && (data.data_quality?.status === 'PARTIAL' || data.verdict?.status === 'data_incomplete'))) {
+        title = 'Datenabdeckung unvollständig';
+        detail = zeroResult ? 'Die Nullanzeige ist kein vollständiges Marktergebnis.' : 'Die Auswertung enthält Datenlücken.';
+        if (!known) detail += ' Prüfzähler fehlen; ein neuer Lauf mit Diagnose ist erforderlich.';
+        tone = 'warning';
+    } else if (known && stage === 'no_selected_tickers' && selected === 0) {
+        title = 'Keine Aktien für die Stichprobe ausgewählt'; detail = 'Die Universumauswahl hat keine auswertbare Stichprobe geliefert.'; tone = 'warning';
+    } else if (known && stage === 'no_usable_windows' && usable === 0) {
+        title = 'Keine auswertbaren BI-Zeitfenster'; detail = 'Es wurden keine vollständigen Zeitfenster für die BI-Prüfung gefunden.'; tone = 'warning';
+    } else if (known && stage === 'prefilter_rejected' && usable > 0 && evaluated === 0 && qualified === 0 && accepted === 0) {
+        title = 'Keine BI-Prüfung nach Preis-/Volumenfilter'; detail = 'Auswertbare Historien waren vorhanden; die Zeitfenster scheiterten bereits an den gewählten Filtern.'; tone = 'neutral';
+    } else if (known && ['indicator_unavailable', 'indicator_rejected'].includes(stage) && evaluated > 0 && qualified === 0 && accepted === 0 && unavailable > 0) {
+        title = 'BI-Prüfung unvollständig'; detail = 'Nicht alle Indikatoren waren berechenbar; kein vollständiges 17/20-Ergebnis.'; tone = 'warning';
+    } else if (known && stage === 'indicator_rejected' && evaluated > 0 && qualified === 0 && accepted === 0 && unavailable === 0) {
+        title = 'Keine BI-Setups nach 17/20-Prüfung'; detail = 'Die geprüften Zeitfenster erfüllten den BI-Vertrag nicht.'; tone = 'neutral';
+    } else if (known && stage === 'plan_rejected' && qualified > 0 && accepted === 0 && rejected === qualified) {
+        title = `${qualified} BI-Setups · kein Handelsplan freigegeben`; detail = 'Die BI-Prüfung war erfüllt; die Handelsplanprüfung lehnte diese Kandidaten ab.'; tone = 'warning';
+    } else if (known && ['entry_pending', 'no_fills'].includes(stage) && accepted > 0 && filled === 0 && unresolved > 0) {
+        title = 'Einstiegsprüfung noch offen'; detail = 'Die Einstiegsprüfung ist im betrachteten Zeitraum noch nicht abgeschlossen.'; tone = 'warning';
+    } else if (known && stage === 'outcomes_pending' && filled > 0 && unresolved > 0) {
+        title = zeroResult ? 'Trade-Ergebnis noch offen' : 'BI-Backtest ausgewertet · Ergebnisse noch offen';
+        detail = 'Einstiege sind belegt; für offene Trades ist der Folgezeitraum noch nicht abgeschlossen.'; tone = 'warning';
+    } else if (known && stage === 'no_fills' && accepted > 0 && filled === 0 && unresolved === 0) {
+        title = 'Handelspläne gefunden · kein Einstieg ausgeführt'; detail = 'Die Pläne führten im vollständig beobachteten Folgezeitraum zu keinem Einstieg.'; tone = 'neutral';
+    } else if (known && stage == null && !zeroResult && filled > 0) {
+        title = 'BI-Backtest ausgewertet'; detail = ''; tone = 'neutral';
+    }
+    const counters = [
+        ['Aktien ausgewählt', selected], ['Aktien mit auswertbaren Fenstern', usable],
+        ['BI-Setups', qualified], ['Handelspläne', accepted], ['Einstiege', filled],
+    ].filter(([, value]) => value !== null);
+    const rows = [
+        ['Aktien mit Daten im Testzeitraum', coverage.tickers_with_test_period_data],
+        ['Zeitfenster betrachtet', funnel.windows_considered], ['Durch laufenden Trade belegt', funnel.occupied_windows],
+        ['Unvollständige oder ungültige Fenster', funnel.invalid_or_incomplete_windows],
+        ['Preisfilter', funnel.price_filtered_windows], ['Volumenfilter', funnel.volume_filtered_windows],
+        ['BI-Zeitfenster geprüft', funnel.indicator_evaluated_windows], ['BI-Prüfung abgelehnt', funnel.indicator_rejected_windows],
+        ['BI-Vertrag nicht berechenbar', funnel.indicator_contract_unavailable_windows],
+        ['Handelsplan abgelehnt', funnel.plan_rejected_candidates], ['Ohne Einstieg', funnel.no_fill], ['Ungeklärte Verläufe', funnel.unresolved],
+        ['Sitzungen erwartet', coverage.selected_expected_sessions], ['Sitzungen vorhanden', coverage.selected_observed_sessions],
+        ['Abrufsitzungen erwartet', coverage.expected_fetch_sessions], ['Abrufsitzungen geladen', coverage.loaded_fetch_sessions],
+        ['Leere Abrufantworten', Array.isArray(coverage.empty_fetch_dates) ? coverage.empty_fetch_dates.length : null],
+        ['Fehlgeschlagene Abrufe', Array.isArray(coverage.failed_fetch_dates) ? coverage.failed_fetch_dates.length : null],
+    ].filter(([, value]) => count(value) !== null);
+    const reasonCounts = known && funnel.plan_rejection_counts && typeof funnel.plan_rejection_counts === 'object'
+        && !Array.isArray(funnel.plan_rejection_counts)
+        ? Object.entries(funnel.plan_rejection_counts).filter(([, value]) => count(value) !== null) : [];
+    const provenance = [
+        ['Planversion', data.plan_version], ['Ausführungsmodell', data.execution_model],
+        ['Vergleichsumfang', data.parity_scope], ['Methode', data.methodology],
+    ].filter(([, value]) => typeof value === 'string' && value.length > 0);
+    return { available: !!known, zeroResult, followupPendingOnly, title, detail, tone, counters, rows, reasonCounts, provenance };
+}
+
 function loadBacktestPreferences() {
     const defaults = { ticker: '', strategy: 'sma_crossover', months: '6', maxTickers: '50', minPrice: '', minVolume: '' };
     try {
@@ -11735,6 +11830,7 @@ function BacktestTab() {
     const tradeCounts = backtestTradeCounts(results);
     const hiddenTradeCount = tradeCounts.hidden;
     const evidence = backtestEvidencePresentation(results);
+    const biDiagnosis = backtestBIDiagnosticsPresentation(results);
     const verdict = evidence.verdict;
     const outOfSample = results?.out_of_sample || null;
     const progressPercent = Number.isFinite(Number(progress?.percent)) ? Math.max(0, Math.min(100, Number(progress.percent))) : 0;
@@ -11885,8 +11981,33 @@ function BacktestTab() {
 
             {results && (
                 <>
+                    {biDiagnosis && (
+                        <div role="status" data-testid="backtest-bi-diagnosis" className={`card border p-4 rounded-lg text-sm ${biDiagnosis.tone === 'warning' ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+                            <div className="font-semibold" data-testid="backtest-bi-zero-reason">{biDiagnosis.title}</div>
+                            {biDiagnosis.detail && <p className="mt-1 text-xs">{biDiagnosis.detail}</p>}
+                            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs" data-testid="backtest-bi-funnel">
+                                {biDiagnosis.counters.map(([label, value]) => <span key={label}>{label}: <strong>{value}</strong></span>)}
+                            </div>
+                            {(biDiagnosis.rows.length > 0 || biDiagnosis.reasonCounts.length > 0 || biDiagnosis.provenance.length > 0) && (
+                                <details className="mt-2 text-xs" data-testid="backtest-bi-diagnostic-details">
+                                    <summary className="cursor-pointer">Prüfdetails</summary>
+                                    <dl className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1">
+                                        {biDiagnosis.rows.map(([label, value]) => <div key={label} className="flex justify-between gap-3"><dt>{label}</dt><dd>{value}</dd></div>)}
+                                    </dl>
+                                    {biDiagnosis.reasonCounts.length > 0 && <div className="mt-3">
+                                        <div className="font-semibold">Gründe der Handelsplanablehnung</div>
+                                        {biDiagnosis.reasonCounts.map(([reason, value]) => <div key={reason} className="mt-1 break-words">{reason}: {value}</div>)}
+                                    </div>}
+                                    {biDiagnosis.provenance.length > 0 && <dl className="mt-3 space-y-1">
+                                        {biDiagnosis.provenance.map(([label, value]) => <div key={label} className="break-words"><dt className="inline font-semibold">{label}: </dt><dd className="inline">{value}</dd></div>)}
+                                    </dl>}
+                                </details>
+                            )}
+                        </div>
+                    )}
                     <details data-testid="backtest-methodology" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
-                        <summary className="font-bold cursor-pointer">{evidence.label} · Modell &amp; Kosten</summary>
+                        <summary className="font-semibold cursor-pointer">Modell, Kosten &amp; Datenbasis</summary>
+                        <div className="mt-2 font-semibold">{evidence.label}</div>
                         <p className="mt-2">{evidence.modelLimited
                             ? 'Näherungsmodell, kein identischer Live-Scanner. Fehlende Intraday-Daten, historische Quotes und tatsächliche Ausführungen werden nicht als bestätigt gewertet.'
                             : 'Modell und Datenbasis sind ausgewiesen. Historische Ergebnisse bleiben eine Simulation, kein Gewinnversprechen.'}</p>
@@ -11895,14 +12016,14 @@ function BacktestTab() {
                         </ul>}
                         <p className="mt-2 font-semibold">Trefferquote und R gelten nur für dieses Modell und diese Stichprobe – nicht automatisch für App-Signale oder Mails.</p>
                     </details>
-                    {(results.data_quality?.status === 'PARTIAL' || Number(results.unresolved) > 0) && (
+                    {!biDiagnosis && (results.data_quality?.status === 'PARTIAL' || Number(results.unresolved) > 0) && (
                         <div role="status" data-testid="backtest-data-coverage" className="card border border-amber-300 bg-amber-50 p-4 rounded-lg text-sm text-amber-900">
                             <div className="font-bold">Datenabdeckung unvollständig</div>
                             <div className="mt-1">Ungeklärte Signale: {formatBacktestMetric(results.unresolved, 0)} · Fetch-Ausfalltage: {formatBacktestMetric(results.data_quality?.failed_fetch_days, 0)} · Fehlende Sitzungen: {results.data_quality?.missing_expected_sessions?.length ?? '—'}</div>
                             <p className="mt-2">Kennzahlen berücksichtigen nur beobachtete, entschiedene Verläufe. Ungeklärte Fälle sind weder 0R noch abgeschlossene Trades. Diese Teilstichprobe bestätigt keinen vollständigen Handelsvorteil.</p>
                         </div>
                     )}
-                    {verdict && (
+                    {verdict && !biDiagnosis?.zeroResult && !biDiagnosis?.followupPendingOnly && (
                         <div
                             className="rounded-lg p-4"
                             style={{ border: `1px solid ${verdictTheme.border}`, background: verdictTheme.bg, color: verdictTheme.text }}
@@ -11958,7 +12079,7 @@ function BacktestTab() {
 
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                         <div className="metric-card green">
-                            <div className="text-xs font-semibold text-gray-500">Trades</div>
+                            <div className="text-xs font-semibold text-gray-500">{biDiagnosis ? 'Ausgewertete Trades' : 'Trades'}</div>
                             <div className="text-2xl font-bold mt-1">{formatBacktestMetric(results.total_trades, 0)}</div>
                         </div>
                         <div className="metric-card blue">
@@ -12005,15 +12126,18 @@ function BacktestTab() {
                     {(results.total_signals !== undefined || results.n_tickers || results.note) && (
                         <div className="card border border-blue-100 bg-blue-50 p-4 rounded-lg text-sm text-blue-900">
                             <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-                                <div><span className="font-semibold">Signale:</span> {results.total_signals ?? results.total_trades}</div>
+                                <div><span className="font-semibold">{biDiagnosis ? 'Handelspläne:' : 'Signale:'}</span> {formatBacktestMetric(results.total_signals ?? results.total_trades, 0)}</div>
                                 <div><span className="font-semibold">No Fill:</span> {formatBacktestMetric(results.no_fill, 0)}</div>
-                                <div><span className="font-semibold">Ticker:</span> {results.n_tickers ?? '-'}</div>
+                                <div><span className="font-semibold">Ticker ausgewählt:</span> {formatBacktestMetric(results.n_tickers, 0)}</div>
                                 <div><span className="font-semibold">Sum PnL:</span> {formatBtPct(results.sum_pnl ?? results.total_return)}</div>
                                 <div><span className="font-semibold">Profit Factor:</span> {results.profit_factor_display || formatBacktestMetric(results.profit_factor)}</div>
                                 <div><span className="font-semibold">Avg R:</span> {formatBacktestMetric(results.avg_r)}</div>
                             </div>
-                            {results.note && <div className="mt-2 text-xs text-blue-700">{results.note}</div>}
-                            {results.methodology && <div className="mt-1 text-xs text-blue-700">{results.methodology}</div>}
+                            {!biDiagnosis && (results.note || results.methodology) && <details className="mt-2 text-xs text-blue-700">
+                                <summary className="cursor-pointer">Modelldetails</summary>
+                                {results.note && <div className="mt-2">{results.note}</div>}
+                                {results.methodology && <div className="mt-1 break-words">{results.methodology}</div>}
+                            </details>}
                         </div>
                     )}
 

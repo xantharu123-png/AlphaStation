@@ -1953,6 +1953,7 @@ def _prepared_delivery_snapshot(row: Mapping[str, Any]) -> Optional[tuple[Any, .
         not _delivery_evidence_matches_state(row)
         or str(row.get("status") or "") != STATUS_PENDING_DELIVERY
         or str(row.get("delivery_state") or "") != "PREPARED"
+        or row.get("delivery_attempted_at") is not None
         or row.get("delivery_accepted_at") is not None
     ):
         return None
@@ -2744,7 +2745,19 @@ def mark_alert_delivery_attempted(
     attempted_dt = _parse_utc_datetime(attempted_at) or _coerce_now(_utc_now())
     prefix = f"{base}:"
     try:
-        with _DB_LOCK:
+        # Lock the independent acceptance journal before the tracker. A
+        # durable legacy acceptance can precede its tracker-state upgrade;
+        # neither that intent nor an unavailable journal authorizes replay.
+        with _DELIVERY_JOURNAL_LOCK, _delivery_journal_connection() as journal, _DB_LOCK:
+            if journal.execute(
+                "SELECT 1 FROM delivery_acceptance_journal WHERE intent_key=?",
+                (base,),
+            ).fetchone() is not None:
+                result.update({
+                    "intent_state": "ACCEPTED_PENDING",
+                    "manual_reconciliation_required": True,
+                })
+                return result
             with _db_connection() as conn:
                 rows = [
                     dict(row)
@@ -2753,7 +2766,8 @@ def mark_alert_delivery_attempted(
                         "contract_symbol, direction, strategy, trade_horizon, setup_key, "
                         "entry, stop, tp1, tp2, "
                         "status, delivery_state, delivery_intent_key, delivery_prepared_at, "
-                        "delivery_accepted_at, delivery_recipient_keys_json, mail_channel, "
+                        "delivery_attempted_at, delivery_accepted_at, "
+                        "delivery_recipient_keys_json, mail_channel, "
                         "public_signal_ref, origin_evidence "
                         "FROM signals WHERE delivery_intent_key IS NOT NULL ORDER BY id"
                     ).fetchall()
@@ -2781,9 +2795,10 @@ def mark_alert_delivery_attempted(
                     placeholders = ",".join("?" for _ in ids)
                     cursor = conn.execute(
                         "UPDATE signals SET delivery_state='ATTEMPTED', "
-                        "delivery_attempted_at=COALESCE(delivery_attempted_at, ?) "
+                        "delivery_attempted_at=? "
                         f"WHERE id IN ({placeholders}) AND status=? "
-                        "AND delivery_state='PREPARED' AND delivery_accepted_at IS NULL",
+                        "AND delivery_state='PREPARED' "
+                        "AND delivery_attempted_at IS NULL AND delivery_accepted_at IS NULL",
                         [attempted_dt.isoformat(), *ids, STATUS_PENDING_DELIVERY],
                     )
                     claimed = int(cursor.rowcount or 0) == len(ids)
@@ -3369,44 +3384,74 @@ def cancel_alert_delivery_intent(
     intent_key: str,
     *,
     delivery_definitively_not_accepted: bool = False,
+    expected_prepared_rows: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> int:
     """Delete only rows known not to have been accepted by SMTP.
 
     Untouched PREPARED rows are safe to cancel. ATTEMPTED rows require the
     caller's explicit attestation that DATA was definitively not accepted;
     unknown delivery outcomes remain durable and are never auto-deleted.
+    When supplied, the immutable original reservation identity protects a
+    replacement owner after expiry/repreparation of the same economic key.
     """
     base = str(intent_key or "").strip()[:180]
     if not base:
         return 0
     prefix = f"{base}:"
-    try:
-        with _DB_LOCK:
-            with _db_connection() as conn:
-                ids = [
-                    int(row["id"])
-                    for row in conn.execute(
-                        "SELECT id, delivery_intent_key, delivery_state FROM signals "
-                        "WHERE status = ? "
-                        "AND delivery_state IN ('PREPARED', 'ATTEMPTED') "
-                        "AND delivery_accepted_at IS NULL",
-                        (STATUS_PENDING_DELIVERY,),
-                    ).fetchall()
-                    if str(row["delivery_intent_key"] or "").startswith(prefix)
-                    and (
-                        str(row["delivery_state"] or "") == "PREPARED"
-                        or bool(delivery_definitively_not_accepted)
-                    )
-                ]
-                if not ids:
+    expected_owners = []
+    if expected_prepared_rows is not None:
+        try:
+            seen_ids = set()
+            for row in expected_prepared_rows:
+                if not isinstance(row, Mapping) or isinstance(row.get("id"), bool):
                     return 0
-                placeholders = ",".join("?" for _ in ids)
+                signal_id = int(row.get("id"))
+                prepared_at = row.get("delivery_prepared_at")
+                row_key = str(row.get("delivery_intent_key") or "")
+                if (
+                    signal_id <= 0 or signal_id in seen_ids
+                    or not isinstance(prepared_at, str)
+                    or _parse_utc_datetime(prepared_at) is None
+                    or not row_key.startswith(prefix)
+                ):
+                    return 0
+                seen_ids.add(signal_id)
+                expected_owners.append((signal_id, prepared_at, row_key))
+        except (TypeError, ValueError):
+            return 0
+        if not expected_owners:
+            return 0
+    try:
+        with _DELIVERY_JOURNAL_LOCK, _delivery_journal_connection() as journal, _DB_LOCK:
+            if journal.execute(
+                "SELECT 1 FROM delivery_acceptance_journal WHERE intent_key=?",
+                (base,),
+            ).fetchone() is not None:
+                return 0
+            with _db_connection() as conn:
+                # Recheck the allowed state in the DELETE itself: another
+                # process may have won SMTP ownership since preparation.
+                # A default cancellation never deletes an attempted owner,
+                # including a malformed PREPARED row carrying an attempt.
+                allowed_state = (
+                    "delivery_state IN ('PREPARED', 'ATTEMPTED')"
+                    if delivery_definitively_not_accepted
+                    else "delivery_state = 'PREPARED' AND delivery_attempted_at IS NULL"
+                )
+                ownership_sql = ""
+                ownership_values = []
+                if expected_owners:
+                    ownership_sql = " AND (" + " OR ".join(
+                        "(id=? AND delivery_prepared_at=? AND delivery_intent_key=?)"
+                        for _ in expected_owners
+                    ) + ")"
+                    ownership_values = [value for owner in expected_owners for value in owner]
                 cursor = conn.execute(
-                    f"DELETE FROM signals WHERE id IN ({placeholders}) "
-                    "AND status = ? "
-                    "AND delivery_state IN ('PREPARED', 'ATTEMPTED') "
-                    "AND delivery_accepted_at IS NULL",
-                    [*ids, STATUS_PENDING_DELIVERY],
+                    "DELETE FROM signals WHERE status = ? "
+                    f"AND {allowed_state} "
+                    "AND delivery_accepted_at IS NULL "
+                    "AND substr(delivery_intent_key, 1, ?) = ?" + ownership_sql,
+                    [STATUS_PENDING_DELIVERY, len(prefix), prefix, *ownership_values],
                 )
                 return int(cursor.rowcount or 0)
     except Exception as exc:
@@ -3428,14 +3473,39 @@ def cleanup_stale_prepared_delivery_intents(
     now_dt = now_dt or _utc_now()
     cutoff = (now_dt - timedelta(minutes=age_minutes)).isoformat()
     try:
-        with _DB_LOCK:
+        # The journal's BEGIN IMMEDIATE stays held through deletion. This
+        # protects legacy PREPARED rows with separately durable acceptance,
+        # and a journal read/lock failure conservatively preserves all rows.
+        with _DELIVERY_JOURNAL_LOCK, _delivery_journal_connection() as journal, _DB_LOCK:
+            accepted_intents = {
+                str(row["intent_key"])
+                for row in journal.execute(
+                    "SELECT intent_key FROM delivery_acceptance_journal"
+                ).fetchall()
+            }
             with _db_connection() as conn:
+                # SQLite normalizes impossible dates/hour 24. Such a value
+                # is not a proven preparation instant and must stay held.
+                conn.create_function(
+                    "delivery_prepared_time_valid", 1,
+                    lambda value: int(_parse_utc_datetime(value) is not None),
+                )
+                conn.create_function(
+                    "delivery_intent_has_acceptance", 1,
+                    lambda row_key: int(
+                        str(row_key or "").rpartition(":")[0] in accepted_intents
+                    ),
+                )
                 cursor = conn.execute(
                     "DELETE FROM signals WHERE status = ? "
                     "AND delivery_state = 'PREPARED' "
+                    "AND delivery_attempted_at IS NULL "
                     "AND delivery_accepted_at IS NULL "
                     "AND delivery_prepared_at IS NOT NULL "
-                    "AND delivery_prepared_at < ?",
+                    "AND delivery_prepared_at GLOB '????-??-??[T ]??:??:??*' "
+                    "AND delivery_prepared_time_valid(delivery_prepared_at) = 1 "
+                    "AND julianday(delivery_prepared_at) < julianday(?) "
+                    "AND delivery_intent_has_acceptance(delivery_intent_key) = 0",
                     (STATUS_PENDING_DELIVERY, cutoff),
                 )
                 return int(cursor.rowcount or 0)

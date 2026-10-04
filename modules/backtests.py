@@ -9,6 +9,7 @@ Backtesting-Engine für verschiedene Strategien:
 import time
 import math
 import datetime as dt
+from collections import Counter
 from datetime import datetime, timedelta
 from functools import lru_cache
 from modules.data_fetchers import rate_limited_get, fetch_grouped_daily
@@ -16,7 +17,7 @@ from modules.scorers import calculate_setup_score
 from modules.strategies import BACKTEST_STRATEGY_RULES
 from modules.analysis import compute_daily_metrics
 from modules.helpers import check_signal
-from modules.patterns import analyze_breakout_imminent
+from modules.patterns import analyze_breakout_imminent, BI_STOCK_CONTRACT_VERSION
 from modules.scanners import _compute_biotech_technical_from_bars
 from modules.data_fetchers import fetch_backtest_daily_data
 from modules.trade_levels import trade_geometry
@@ -161,6 +162,111 @@ def _finite_backtest_number(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _bi_backtest_raw_bar_issue(row):
+    """Validate provider inputs before an indicator can turn bad bars into scores."""
+    if not isinstance(row, dict):
+        return "INVALID_OHLCV"
+    if daily_bar_is_explicitly_incomplete(row):
+        return "INCOMPLETE_DAILY_BAR"
+    prices = [row.get(key) for key in ("o", "h", "l", "c")]
+    # JSON provider values are numbers. Strings and booleans must not silently
+    # become valid market evidence through float()/truthiness conversions.
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+           for value in prices):
+        return "INVALID_OHLC"
+    open_, high, low, close = prices
+    if high < max(open_, low, close) or low > min(open_, high, close):
+        return "INVALID_OHLC"
+    volume = row.get("v")
+    if type(volume) not in (int, float) or not math.isfinite(volume) or volume <= 0:
+        return "INVALID_VOLUME"
+    return None
+
+
+def _new_bi_backtest_diagnostics(trading_days, test_start):
+    """Serializable counts, including empty cohorts; no inferred factor results."""
+    return {
+        "schema_version": 1,
+        "coverage": {
+            "selected_tickers": 0, "tickers_with_test_period_data": 0,
+            "tickers_with_usable_windows": 0,
+            "expected_fetch_sessions": len(trading_days), "loaded_fetch_sessions": 0,
+            "expected_test_sessions": sum(day >= test_start for day in trading_days),
+            "empty_fetch_dates": [], "failed_fetch_dates": [],
+            "selected_expected_sessions": 0, "selected_observed_sessions": 0,
+            "missing_sessions_by_ticker": {}, "invalid_bars_by_ticker": {},
+            "invalid_bar_reason_counts": {}, "excluded_invalid_bars": 0,
+            "source_excluded_invalid_bars": 0, "source_invalid_bar_reason_counts": {},
+            "boundary_coverage": "expected_sessions_for_pre_start_selected_assets_not_listing_verification",
+        },
+        "funnel": {
+            **{key: 0 for key in (
+                "windows_considered", "occupied_windows", "invalid_or_incomplete_windows",
+                "price_filtered_windows", "volume_filtered_windows", "indicator_evaluated_windows",
+                "indicator_qualified_candidates", "indicator_contract_unavailable_windows",
+                "indicator_rejected_windows", "indicator_metadata_unknown_windows",
+                "plan_rejected_candidates", "accepted_plans", "filled_trades", "no_fill", "unresolved",
+            )},
+            "confluence_histogram": {}, "hard_gate_counts": {},
+            "unavailable_factor_counts": {}, "plan_rejection_counts": {},
+        },
+        "zero_result_stage": None,
+    }
+
+
+def _record_bi_indicator_diagnostics(result, funnel):
+    """Named contract evidence, never a confluence guess from weighted score."""
+    green = getattr(result, "green_count", None)
+    available = getattr(result, "available_count", None)
+    checks = getattr(result, "indicator_checks", None)
+    contract = getattr(result, "indicator_contract_ok", None)
+    metadata_known = (
+        type(green) is int and 0 <= green <= 20
+        and type(available) is int and 0 <= green <= available <= 20
+        and type(contract) is bool and isinstance(checks, (tuple, list))
+        and len(checks) == 20 and all(isinstance(check, dict) for check in checks)
+    )
+    histogram = funnel["confluence_histogram"]
+    bucket = str(green) if metadata_known else "unknown"
+    histogram[bucket] = histogram.get(bucket, 0) + 1
+    if not metadata_known:
+        funnel["indicator_metadata_unknown_windows"] += 1
+    else:
+        for check in checks:
+            if check.get("available") is not True:
+                key = str(check.get("key") or check.get("id") or "unknown")
+                counts = funnel["unavailable_factor_counts"]
+                counts[key] = counts.get(key, 0) + 1
+    for reason in getattr(result, "hard_gate_failures", ()) or ():
+        key = str(reason)
+        counts = funnel["hard_gate_counts"]
+        counts[key] = counts.get(key, 0) + 1
+    return metadata_known and contract is False
+
+
+def _bi_backtest_zero_stage(diagnostics, quality):
+    coverage, funnel = diagnostics["coverage"], diagnostics["funnel"]
+    if funnel["filled_trades"]:
+        return None
+    if quality.get("status") in {"PARTIAL", "UNAVAILABLE"}:
+        return "data_incomplete"
+    if not coverage["selected_tickers"]:
+        return "no_selected_tickers"
+    if not coverage["tickers_with_usable_windows"]:
+        return "no_usable_windows"
+    if not funnel["indicator_evaluated_windows"]:
+        return "prefilter_rejected"
+    if not funnel["indicator_qualified_candidates"]:
+        if funnel["indicator_contract_unavailable_windows"]:
+            return "indicator_unavailable"
+        return "indicator_rejected"
+    if not funnel["accepted_plans"]:
+        return "plan_rejected"
+    if funnel["unresolved"]:
+        return "entry_pending"
+    return "no_fills"
 
 
 def _backtest_data_quality(trades, *, failed_fetch_dates=(), unavailable_tickers=(), source_quality=()):
@@ -1126,8 +1232,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             trading_days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
 
-    if not trading_days:
-        return {"trades": [], "stats_by_grade": {}, "summary": {}, "n_tickers": 0}
+    diagnostics = _new_bi_backtest_diagnostics(trading_days, test_start)
+    coverage, funnel = diagnostics["coverage"], diagnostics["funnel"]
+    session_index = {day: index for index, day in enumerate(trading_days)}
+    expected_test_days = {day for day in trading_days if day >= test_start}
 
     # ============================================================
     # PASS 1: Lade alle Tage und baue per-Ticker History auf
@@ -1136,6 +1244,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     total_tickers_seen = set()
     failed_fetch_days = 0  # NACHAUDIT H3-Rest: hart gescheiterte Fetch-Tage sichtbar machen
     failed_fetch_dates = []
+    empty_fetch_dates = []
+    invalid_dates_by_ticker = {}
+    invalid_bar_reasons = Counter()
+    invalid_reasons_by_ticker = {}
 
     for day_idx, date_str in enumerate(trading_days):
         if progress_callback:
@@ -1145,7 +1257,7 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             )
 
         day_data = fetch_grouped_daily(poly_key, date_str)
-        if day_data is None:
+        if day_data is None or not isinstance(day_data, dict):
             # NACHAUDIT H3-Rest: None = Fetch nach Retries hart gescheitert
             # (kein valider Leertag). Nicht still verschlucken, sondern zaehlen —
             # an diesem Tag sind Stop-/TP-Treffer fuer ALLE Ticker unsichtbar.
@@ -1153,10 +1265,15 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             failed_fetch_dates.append(date_str)
             continue
         if not day_data:
+            # This loop fetches exchange-calendar sessions only. A successful
+            # but empty response is not proof that the expected session had no
+            # market data. Distinguish it from a failed request, keep it visible.
+            empty_fetch_dates.append(date_str)
             continue
+        coverage["loaded_fetch_sessions"] += 1
 
         for ticker, r in day_data.items():
-            if len(ticker) > 5 or "." in ticker:
+            if not isinstance(ticker, str) or len(ticker) > 5 or "." in ticker:
                 continue
 
             _t = ticker.upper()
@@ -1171,17 +1288,20 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             if any(_t.startswith(p) for p in _skip_prefixes):
                 continue
 
-            price = r.get("c", 0)
-            volume = r.get("v", 0)
-            if price <= 0:
+            invalid_reason = _bi_backtest_raw_bar_issue(r)
+            if invalid_reason:
+                invalid_dates_by_ticker.setdefault(ticker, []).append(date_str)
+                invalid_bar_reasons[invalid_reason] += 1
+                invalid_reasons_by_ticker.setdefault(ticker, Counter())[invalid_reason] += 1
                 continue
+            price, volume = r["c"], r["v"]
             if price >= min_price and volume >= min_volume:
                 total_tickers_seen.add(ticker)
             bar = {
                 "date": date_str,
-                "open": r.get("o", 0),
-                "high": r.get("h", 0),
-                "low": r.get("l", 0),
+                "open": r["o"],
+                "high": r["h"],
+                "low": r["l"],
                 "close": price,
                 "volume": volume,
                 "time": date_str,
@@ -1195,7 +1315,10 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     for t, bars_list in ticker_history.items():
         # Future survival/exit coverage cannot determine the starting universe.
         # The later rolling analysis still requires its full indicator window.
-        avg_vol = _initial_universe_average_volume(bars_list, window_size, as_of=test_start)
+        # Rank from the latest available pre-start indicator window, not the
+        # oldest warmup month and never future study volume or survival.
+        prior_bars = [bar for bar in bars_list if bar["date"] < test_start]
+        avg_vol = _initial_universe_average_volume(prior_bars[-window_size:], window_size)
         if avg_vol is not None:
             ticker_avg_vol[t] = avg_vol
 
@@ -1203,11 +1326,31 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
     # Aber schliesse High-Volume nicht komplett aus (niedrigere Prio)
     midcap_tickers = {t: v for t, v in ticker_avg_vol.items() if 500_000 <= v <= 10_000_000}
     largecap_tickers = {t: v for t, v in ticker_avg_vol.items() if v > 10_000_000}
+    # Respect the requested minimum; the old implicit 500K threshold silently
+    # removed e.g. a valid 300K-volume asset from a 200K-volume study. These are
+    # liquidity buckets, not market-cap classifications. Keep existing priority.
+    lower_volume_tickers = {t: v for t, v in ticker_avg_vol.items()
+                            if min_volume <= v < 500_000}
 
     # Mid-Caps zuerst (sortiert nach Vol), dann Large-Caps auffüllen
     sorted_midcap = sorted(midcap_tickers.keys(), key=lambda t: midcap_tickers[t], reverse=True)
     sorted_largecap = sorted(largecap_tickers.keys(), key=lambda t: largecap_tickers[t], reverse=True)
-    tickers_to_test = (sorted_midcap + sorted_largecap)[:max_tickers]
+    sorted_lower_volume = sorted(lower_volume_tickers, key=lambda t: lower_volume_tickers[t], reverse=True)
+    tickers_to_test = (sorted_midcap + sorted_largecap + sorted_lower_volume)[:max_tickers]
+    selected_invalid_reasons = Counter()
+    for ticker in tickers_to_test:
+        selected_invalid_reasons.update(invalid_reasons_by_ticker.get(ticker, {}))
+    coverage.update(
+        selected_tickers=len(tickers_to_test),
+        selected_expected_sessions=len(tickers_to_test) * len(expected_test_days),
+        empty_fetch_dates=empty_fetch_dates, failed_fetch_dates=failed_fetch_dates,
+        invalid_bars_by_ticker={ticker: len(invalid_dates_by_ticker[ticker]) for ticker in tickers_to_test
+                               if ticker in invalid_dates_by_ticker},
+        invalid_bar_reason_counts=dict(selected_invalid_reasons),
+        excluded_invalid_bars=sum(selected_invalid_reasons.values()),
+        source_excluded_invalid_bars=sum(invalid_bar_reasons.values()),
+        source_invalid_bar_reason_counts=dict(invalid_bar_reasons),
+    )
 
     # ============================================================
     # PASS 2: Rolling-Window Breakout Imminent Analyse + Trade Sim
@@ -1225,26 +1368,53 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
 
         bars = ticker_history[ticker]
         date_to_index = {bar.get("date"): index for index, bar in enumerate(bars)}
+        observed_days = {bar["date"] for bar in bars if bar["date"] in expected_test_days}
+        coverage["selected_observed_sessions"] += len(observed_days)
+        if observed_days:
+            coverage["tickers_with_test_period_data"] += 1
+        missing_days = sorted(expected_test_days - observed_days)
+        if missing_days:
+            # Missing means unobserved for this selected pre-start asset, not
+            # evidence whether a provider omitted it, trading halted or listing
+            # ended. It must not become an apparently complete zero cohort.
+            coverage["missing_sessions_by_ticker"][ticker] = missing_days
+        ticker_has_usable_window = False
 
         # Für jeden Tag ab test_start: 50-Bar Fenster → BI V2 Analyse
-        for idx in range(window_size, len(bars)):
-            if bars[idx]["date"] < test_start:
+        for idx in range(window_size, len(bars) + 1):
+            # Date the signal from its last known completed bar, not the first
+            # future execution bar. Include the final observed signal even if
+            # its future fill is unresolved; exclude the pre-study signal.
+            if bars[idx-1]["date"] < test_start:
                 continue
+            funnel["windows_considered"] += 1
 
             # Do not open a second simulated setup while the first is pending
             # or active. A fixed cooldown can still create overlapping trades.
             if idx <= blocked_until.get(ticker, -1):
+                funnel["occupied_windows"] += 1
                 continue
 
             # 50-Bar Rolling Window (genug für MACD 26+9=35)
             window = bars[idx-window_size:idx]
-            if (
-                float(window[-1].get("close") or 0) < min_price
-                or float(window[-1].get("volume") or 0) < min_volume
-            ):
+            structural_bars = bars[max(0, idx-structure_window):idx]
+            # Dropping an invalid/missing session must not join separate price
+            # segments into an invented contiguous 50/90-session structure.
+            if (session_index[structural_bars[-1]["date"]]
+                    - session_index[structural_bars[0]["date"]] != len(structural_bars) - 1):
+                funnel["invalid_or_incomplete_windows"] += 1
+                continue
+            ticker_has_usable_window = True
+            if window[-1]["close"] < min_price:
+                funnel["price_filtered_windows"] += 1
+                continue
+            if window[-1]["volume"] < min_volume:
+                funnel["volume_filtered_windows"] += 1
                 continue
 
             result = analyze_breakout_imminent(window, direction=direction)
+            funnel["indicator_evaluated_windows"] += 1
+            contract_unavailable = _record_bi_indicator_diagnostics(result, funnel)
             # V2.1+: Returns 8 values (mit smart_money_fires, smart_money_hits)
             if len(result) == 8:
                 is_valid, bi_score, bi_max, details, confidence, grade, sm_fires, sm_hits = result
@@ -1253,7 +1423,11 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 sm_fires, sm_hits = 0, 0
 
             if not is_valid:
+                rejected_key = ("indicator_contract_unavailable_windows" if contract_unavailable
+                                else "indicator_rejected_windows")
+                funnel[rejected_key] += 1
                 continue
+            funnel["indicator_qualified_candidates"] += 1
 
             # Scanner and historical study consume the same plan builder.
             # Execution remains explicitly a daily approximation, not SMTP replay.
@@ -1262,13 +1436,18 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 hour=23, minute=59, second=59, tzinfo=dt.timezone.utc,
             )
             plan = build_bi_trade_plan(
-                bars[max(0, idx-structure_window):idx], direction=direction,
+                structural_bars, direction=direction,
                 range_days=getattr(result, "consolidation_days", None),
                 live_price=float(window[-1]["close"]), as_of=as_of,
             )
             if not plan.get("accepted"):
+                funnel["plan_rejected_candidates"] += 1
+                reason = str(plan.get("reason") or "unspecified_plan_rejection")
+                reasons = funnel["plan_rejection_counts"]
+                reasons[reason] = reasons.get(reason, 0) + 1
                 continue
             signals_found += 1
+            funnel["accepted_plans"] += 1
             trade_result = _simulate_bi_plan_daily(
                 bars, idx, plan, direction, horizon_bars=trade_hold_bars,
             )
@@ -1280,12 +1459,15 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
                 "trade_hold_bars": trade_hold_bars, "entry_wait_bars": trade_hold_bars,
             })
             if trade_result["outcome"] == "UNRESOLVED":
-                blocked_until[ticker] = len(bars) - 1
+                # The final completed bar also owns a signal window now. An
+                # unresolved active/pending plan must cover that last window.
+                blocked_until[ticker] = len(bars)
             else:
                 blocked_until[ticker] = conservative_trade_exit_index(
                     trade_result, date_to_index, idx,
                 )
             all_trades.append(trade_result)
+        coverage["tickers_with_usable_windows"] += int(ticker_has_usable_window)
 
     # ============================================================
     # STATISTIKEN nach Grade
@@ -1354,6 +1536,23 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         1 for t in all_trades
         if str(t.get("outcome") or "").upper() == "UNRESOLVED"
     )
+    funnel.update(filled_trades=len(filled_trades), no_fill=no_fill_count, unresolved=unresolved_count)
+    source_quality = {
+        "status": "PARTIAL" if (
+            failed_fetch_dates or empty_fetch_dates or selected_invalid_reasons
+            or coverage["missing_sessions_by_ticker"]
+            or (not tickers_to_test and invalid_bar_reasons)
+        ) else "NO_KNOWN_FETCH_OR_SESSION_GAP",
+        "missing_expected_sessions": sorted(
+            set(empty_fetch_dates).union(*(set(days) for days in coverage["missing_sessions_by_ticker"].values()))
+        ),
+        "excluded_invalid_bars": sum(selected_invalid_reasons.values()),
+        "invalid_dates": sorted({day for ticker in tickers_to_test
+                                 for day in invalid_dates_by_ticker.get(ticker, ())}),
+    }
+    data_quality = _backtest_data_quality(all_trades, failed_fetch_dates=failed_fetch_dates,
+                                         source_quality=(source_quality,))
+    diagnostics["zero_result_stage"] = _bi_backtest_zero_stage(diagnostics, data_quality)
 
     # Hypothetical full-notional trade sequence, not account/portfolio equity.
     equity = 10000
@@ -1382,9 +1581,12 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
         "n_tickers": len(tickers_to_test),
         "n_tickers_total": len(total_tickers_seen),
         "failed_fetch_days": failed_fetch_days,
-        "data_quality": _backtest_data_quality(all_trades, failed_fetch_dates=failed_fetch_dates),
+        "data_quality": data_quality,
+        "diagnostics": diagnostics,
         "n_midcap": len(sorted_midcap),
         "n_largecap": len(sorted_largecap),
+        "n_lower_volume": len(sorted_lower_volume),
+        "universe_ranking": "latest_pre_start_volume_buckets_not_market_cap",
         "direction": direction,
         "months": months,
         "setup_horizons": {
@@ -1392,6 +1594,8 @@ def run_bi_v2_backtest(poly_key, direction="long", months=6, max_tickers=200,
             "trade_hold_bars": trade_hold_bars,
         },
         "methodology": "shared_production_bi_plan_daily_execution_variant",
+        "selection_model": BI_STOCK_CONTRACT_VERSION,
+        "input_timeframe": "1D",
         "plan_version": BI_PLAN_VERSION,
         "parity_scope": "scanner_contract_and_plan_not_entire_universe_gate_parity",
         "execution_model": "daily_next_session_50_50_be_after_tp1_v2",

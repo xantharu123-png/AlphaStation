@@ -317,8 +317,15 @@ def test_micro_preis_levels_ueberleben_dedupe():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_backtests_zaehlen_failed_fetch_days_source():
+    import ast
+
     src = (REPO / "modules" / "backtests.py").read_text(encoding="utf-8", errors="replace")
-    assert src.count("if day_data is None:") >= 3, "Alle 3 Grouped-Konsumenten muessen None erkennen (H3)"
+    # A None check remains required when the consumer also rejects malformed
+    # payloads in the same condition; do not depend on the trailing colon.
+    none_check = ast.dump(ast.parse("day_data is None", mode="eval").body)
+    none_checks = [node for node in ast.walk(ast.parse(src))
+                   if isinstance(node, ast.Compare) and ast.dump(node) == none_check]
+    assert len(none_checks) >= 3, "Alle 3 Grouped-Konsumenten muessen None erkennen (H3)"
     assert src.count("failed_fetch_days += 1") >= 3
     assert '"failed_fetch_days": failed_fetch_days,' in src, "failed_fetch_days muss im Summary stehen"
 

@@ -150,9 +150,10 @@ def limit_backtest_report(result):
 
 def describe_cached_backtest(result, strategy=None):
     """Never relabel an old cached cohort as if today's contract generated it."""
+    from modules.backtest_diagnostics import apply_bi_backtest_diagnosis
     if not isinstance(result, dict) or not result.get("model_provenance"):
-        return attach_backtest_methodology(result if isinstance(result, dict) else {}, strategy, legacy=True)
+        return apply_bi_backtest_diagnosis(attach_backtest_methodology(result if isinstance(result, dict) else {}, strategy, legacy=True), strategy)
     enriched = deepcopy(result)
     enriched.update({"live_equivalent": False, "live_validation_eligible": False,
                      "paper_autotrade_release_eligible": False})
-    return limit_backtest_report(enriched)
+    return apply_bi_backtest_diagnosis(limit_backtest_report(enriched), strategy)

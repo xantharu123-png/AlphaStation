@@ -182,6 +182,12 @@ except Exception as _tracker_import_err:  # ImportError + Folgefehler beim Paral
     normalize_origin_evidence = None
     scanner_verdict = None
     shadow_summary = None
+# This optional maintenance hook must not disable the existing tracker import
+# contract on an older/mixed-version process. It never sends or replays mail.
+try:
+    from modules.signal_tracker import cleanup_stale_prepared_delivery_intents
+except Exception:
+    cleanup_stale_prepared_delivery_intents = None
 # Telegram-Benachrichtigung (Team-A-Kontrakt) — optional, gleiche Defensive.
 try:
     from modules.notify_telegram import (
@@ -3330,6 +3336,20 @@ def _run_signal_eval_job(secrets=None):
         # Ein vorheriger SMTP-Erfolg darf nach einem Tracker-Aktivierungscrash
         # niemals eine zweite Entry-Mail erzeugen. Reconcile ist rein lokal.
         _reconcile_pending_accepted_deliveries()
+        if cleanup_stale_prepared_delivery_intents is not None:
+            try:
+                released = cleanup_stale_prepared_delivery_intents(30)
+                if released:
+                    log.info(
+                        "[SignalTracker] %s alte, unversuchte Mail-Reservierungen freigegeben; kein Versand",
+                        released,
+                    )
+            except Exception as cleanup_exc:
+                # Maintenance must not hide valid tracker/exit evaluation.
+                log.warning(
+                    "[SignalTracker] Unversuchte Reservierungen konnten nicht bereinigt werden: %s",
+                    type(cleanup_exc).__name__,
+                )
         stats = evaluate_open_signals(
             stock_daily_fetcher=_tracker_stock_fetcher,
             stock_intraday_fetcher=_tracker_stock_intraday_fetcher,
