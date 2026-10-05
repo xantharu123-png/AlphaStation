@@ -2567,6 +2567,15 @@ def _stable_suppression_reason(raw_reason: Any) -> str:
     token = str(raw_reason or "").strip()
     if token in ALLOWED_SUPPRESSION_REASONS:
         return token
+    # Session guards append code-owned clock detail. Preserve the fixed branch,
+    # never the suffix (which may contain mixed-case human text).
+    for family in (
+        "us_market_closed", "stock_market_closed_before_strategy_mail",
+        "stock_market_closed_before_crash_mail", "stock_market_closed_before_bear_mail",
+    ):
+        if token.startswith(f"{family}:"):
+            return family
+
     if token != token.lower():
         return "unclassified_code_reason"
 
@@ -3009,6 +3018,19 @@ _ALERT_SUPPRESSION_LABELS = {
     "intraday_unconfirmed_pattern": "Pattern intraday unbestaetigt (Tageskerze laeuft) — keine Trade-Mail",
     "invalid_trade_plan": "Entry/Stop/TP ungueltig",
     "bi_plan_not_released": "Handelsplan noch nicht freigegeben",
+    "swing_mode_not_allowed_for_scanner": "Scanner nicht fuer Tages-Swing-Mails freigegeben",
+    "swing_daily_reference_invalid_or_stale": "Abgeschlossener Tagesstand fehlt, ist ungueltig oder veraltet",
+    "swing_trade_plan_invalid": "Tages-Swing-Handelsplan nicht freigegeben",
+    "swing_reference_price_mismatch": "Scannerkurs und gespeicherter Tagesschluss stimmen nicht ueberein",
+    "swing_reference_outside_plan": "Tagesschluss liegt ausserhalb von Stop und erstem Ziel",
+    "swing_delayed_price_or_path_unconfirmed": "Aktualisierte Kursdaten oder Kursweg seit dem Tagesschluss nicht bestaetigt",
+    "swing_delayed_rr_insufficient": "R:R nach der aktualisierten Kurspruefung zu niedrig",
+    "swing_delayed_entry_too_extended": "Kurs nach der aktualisierten Pruefung zu weit vom Einstieg entfernt",
+    "no_mail_adjacent_revalidated_rows": "Kein Kandidat besteht die letzte Kurs- und Handelsplanpruefung",
+    "us_market_closed": "Handelssitzung fuer diesen Mailkanal nicht freigegeben",
+    "stock_market_closed_before_strategy_mail": "Handelssitzung fuer Aktien-Signal-Mails nicht freigegeben",
+    "stock_market_closed_before_crash_mail": "Handelssitzung fuer Crash-Hinweise nicht freigegeben",
+    "stock_market_closed_before_bear_mail": "Handelssitzung fuer Short-Signal-Mails nicht freigegeben",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
     "trade_rr_below_threshold": "R:R unter Mindestwert",
     "trade_target_not_structural": "Kursziel nicht durch Struktur bestaetigt",
@@ -30429,7 +30451,7 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
         "no_active_short_signals": "Keine bestaetigten Krypto-Short-Signale",
         "daily_dump_watch_dedupe_active": "Krypto-Watch-Hinweis heute bereits verarbeitet",
         "time_sensitive_entry_mail": "Einstiegssignal wird nicht zeitversetzt nachgesendet",
-        "unclassified_code_reason": "Weiterer Versandgrund; im Betreiberprotokoll pruefen",
+        "unclassified_code_reason": "Versandgrund noch nicht zugeordnet",
     }
     decisions = []
     now = datetime.now(timezone.utc)

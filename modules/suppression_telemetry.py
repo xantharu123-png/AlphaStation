@@ -235,6 +235,21 @@ ALLOWED_SUPPRESSION_REASONS = frozenset({
     "final_advance_failed",
     "mail_adjacent_stock_revalidation_exception",
     "mail_adjacent_stock_revalidation_failed",
+    "no_mail_adjacent_revalidated_rows",
+    # Final daily Swing checks. Keep the concrete cause, not a generic failure.
+    "swing_mode_not_allowed_for_scanner",
+    "swing_daily_reference_invalid_or_stale",
+    "swing_trade_plan_invalid",
+    "swing_reference_price_mismatch",
+    "swing_reference_outside_plan",
+    "swing_delayed_price_or_path_unconfirmed",
+    "swing_delayed_rr_insufficient",
+    "swing_delayed_entry_too_extended",
+    # Fixed mail-session branches; private suffixes are never stored.
+    "us_market_closed",
+    "stock_market_closed_before_strategy_mail",
+    "stock_market_closed_before_crash_mail",
+    "stock_market_closed_before_bear_mail",
     # Common model gates.
     "estimated_trade_plan",
     "entry_quality_watch_only",

@@ -1,5 +1,74 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 05.10.2026 – Aktuelle Signal-Mailkontrolle nach Betreiberpull
+
+Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparaturpaket.
+
+- [x] Live-Health 13:37 UTC: `healthy`, Revision `43180ffea286`,
+  Frontend-Bundle `67924e9f894a`. Das Paket mit `f46413c` läuft jetzt auf Hetzner.
+  Kein weiterer Pull allein wegen des bisherigen Pakets erforderlich.
+- [x] Angemeldete App/Admin-Mailversand direkt geprüft: 1 Swing-/1 Kryptoempfänger,
+  0 SMTP-Annahmen, 50 ausgelassen, 0 Versandfehler, 0 wartend im sichtbaren Fenster.
+  Maximal 50 RAM-Events seit API-Start, höchstens 24h – kein vollständiger Tagesnachweis.
+  Aktuelle Vorprüfung: 37 Aktienstrategie-, 13 Gap-Long-, 3 Gap-Short-Kandidaten,
+  jeweils 0 mailfähig. Die Vorprüfung ersetzt keinen Abschluss/Versandnachweis.
+- [x] DAC konkret nachgerechnet: Score 88/S und Tagesqualität 87/96 reichen aus,
+  aber TP1 170,10 und TP2 174,23 sind Projektionen ab Entry 165,15
+  (3 % / 5,5 %), keine bestätigten Strukturziele. `trade_target_not_structural`
+  blockiert vor SMTP; der offene Rücktest ist hier nicht die Blockade.
+- [x] Neuen automatischen BI-Long-Lauf bis Abschluss beobachtet, ohne Scanstart
+  oder Neuladen: 05.10., 14:01:29 Serverzeit, 5.319/5.319 geprüft,
+  4.186 analysiert, 120 Kursdatenfehler einzeln ausgeschlossen, 0 gültige Signale.
+  Kein globaler Abbruch; fehlerhafte Aktien werden im nächsten Lauf erneut geprüft.
+  Ergebnis/Fortschritt haben sich in der App automatisch aktualisiert.
+- [x] Diagnosefehler lokal repariert: acht finale Swing-Ablehnungen bleiben mit
+  konkretem anonymem Code in Admin/Telemetrie erhalten; leere Endauswahl und
+  Mail-Sitzungswächter sind erklärbar. Unbekannte Gründe bleiben unbekannt;
+  keine unbestätigte Aussage „Börse geschlossen“ oder garantiertes Serverprotokoll.
+  Keine Änderung von Freigaberegeln, Sendern, Dedupe oder Daten-/Preisprüfungen.
+- [x] TDD und unabhängige Nachprüfung: 184 gezielte Tests bestanden;
+  ein bekannter anyio-Importhinweis. Neue Randfälle zunächst rot nachgewiesen.
+  [Prüfbericht](docs/MAIL_LIVE_GATE_AUDIT_2026-10-05.md).
+- [x] Eigenständiges anonymes Exportregister mit dem korrigierten App-Register
+  synchronisiert. Danach 407 gezielte Mail-/Collector-/Historytests bestanden.
+  Vorläufige Gesamtlauffehler samt Ursachen sind im Prüfbericht dokumentiert;
+  Ergebnis der finalen Wiederholung mit unveränderten Quellen siehe unten.
+- [x] Admin um 16:07 Zürich nachgeprüft: weiterhin keine SMTP-Annahme im
+  begrenzten RAM-Fenster; neue generische Events um 16:06 nicht nachträglich
+  zuordenbar. System Logs liefert 0 Zeilen und ersetzt kein systemd-Journal.
+- [x] Finaler isolierter Gesamtlauf: 11.575 bestanden, 0 Fehler, 5 Windows/Linux-
+  Ausnahmen, ein bekannter anyio-Importhinweis. XML und SHA256 vor/nach dem Lauf
+  geprüft; Produkt-/Testquellen unverändert. Ausnahmen im Prüfbericht dokumentiert.
+- [x] Zusätzlich den abgegrenzten Veröffentlichungsbaum geprüft:
+  11.573 bestanden, 0 Fehler, 5 Plattformausnahmen. Kein fremdes Deploy-/Test-WIP
+  in dieser Releasekopie. Git-Metadatenproblem der ersten ZIP-Prüfung im
+  unveränderten Test reproduziert und durch korrekte Testumgebung behoben;
+  kein Produkt-/Testfix oder verdeckter Skip. Nachweise im Prüfbericht.
+- [ ] Lokal geprüften Diagnosepatch bei der nächsten Veröffentlichung gezielt
+  übernehmen: `api.py`, `modules/suppression_telemetry.py`,
+  `scripts/collect_server_evidence.py`, `test_swing_mail_rejection_diagnostics.py`,
+  neuer Prüfbericht und aktueller TODO-Abschnitt. Noch nicht committet/gepusht
+  oder auf Hetzner installiert; fremdes Deploy-/Dokumentations-WIP nicht mitnehmen,
+  private `output/`-Nachweise nicht veröffentlichen.
+- [ ] DAC-Originalzonen, `level_structure.as_of`, `completed_bar_counts` und
+  Bestätigungszeiten prüfen: fehlt eine echte Gegenbarriere oder wurde sie übersehen?
+  Aus dem angezeigten Projektionsziel allein ist das nicht entscheidbar.
+  Zusätzliche unabhängige Quellprüfung ohne nachgewiesenen Richtungs-/Zeitfehler;
+  Original-`zones/evidence`, Qualitätsflags und Vor-/Nach-VRVP-Zielentscheidung
+  bleiben zur fachlichen Nachrechnung erforderlich. Nicht pauschal als erledigt markieren.
+- [ ] Generische heutige Events nicht als Score-/Providerfehler ausgeben;
+  Originalursache noch offen. SSH-Keyzugriff wird abgewiesen, geschützte
+  Detail-API ohne Anmeldung liefert 401; keine Zugangsdaten aus dem Browser übernommen.
+  Die vorhandene Browseranmeldung bleibt für sichere UI-Leseprüfungen nutzbar.
+- [ ] Tatsächlich zulässige Signal-Mail → SMTP-Annahme → Postfach nachweisen.
+  Technische Testmail kam früher an. Kein neuer Export oder Testmail verlangt/gesendet.
+- [ ] Neuer historischer BI-Dreimonatslauf, Wochenkohorte und DAC/VIAV/AST-
+  Originaldaten bleiben offen; durch die heutige Live-Diagnose nicht erledigt.
+
+Heute kein Serverupdate, Neustart, manueller Scan, Settings-/Produktions-DB-Schreibzugriff oder
+Mailversand. Bestehendes fremdes WIP bleibt erhalten. Nur der Diagnosepatch,
+zugehörige Tests und diese Dokumentation wurden lokal bearbeitet.
+
 ## 04.10.2026 – Aktueller Abschluss: BI-Backtester und Mail-Reservierungen
 
 Dieser Abschnitt ersetzt die älteren offenen Implementierungsstände unten.
