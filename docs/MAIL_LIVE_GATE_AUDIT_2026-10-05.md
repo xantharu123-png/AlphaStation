@@ -139,8 +139,10 @@ Swing-Mailgate; Kandidaten werden separat geprüft.
   Die fünf Fingerprintfehler des vorläufigen Laufs treten im eingefrorenen
   Wiederholungslauf nicht mehr auf. `git diff --check` ohne Formatfehler;
   vorhandene LF/CRLF-Hinweise sind keine Testfehler.
-- Diagnosekorrektur noch lokal, nicht auf Hetzner. Die ursprüngliche Reparatur ist
-  dagegen live bestätigt. Keine neue Mailfreigabe durch diesen Bericht.
+- Diagnosekorrektur nach ausdrücklicher Freigabe veröffentlicht:
+  Codecommit `d566c5d973bd645270ae306cdbf7f6f77f0bba9b`, `origin/main` bestätigt.
+  Nicht als auf Hetzner installiert bestätigt. Die ursprüngliche Reparatur
+  ist dagegen live bestätigt. Keine neue Mailfreigabe durch diesen Bericht.
 - Offen: konkrete Originalzonen für DAC nachprüfen, neuen historischen BI-Lauf
   auswerten und eine tatsächlich zulässige Signal-Mail bis zum Postfach nachweisen.
   Keine künstlichen Zielwerte freigeben und keine Kriterien pauschal lockern.
@@ -173,3 +175,7 @@ Private Exporte und QA-Artefakte nicht auf GitHub veröffentlichen.
   Die vier Produkt-/Testquellen blieben vor/nach diesem Lauf unverändert.
   Staginginhalt entspricht der Testkopie; beim Collector nur normale
   Git-Zeilenendennormalisierung. Keine Serveränderung.
+- Codecommit `d566c5d973bd645270ae306cdbf7f6f77f0bba9b` gepusht und direkt
+  durch `git ls-remote origin refs/heads/main` bestätigt. Nur sechs geprüfte
+  Dateien veröffentlicht; kein privater Export und kein fremdes WIP übernommen.
+  Die anschließende Statusdokumentation ändert keinen Produktcode.

@@ -44,12 +44,16 @@ Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparatu
   in dieser Releasekopie. Git-Metadatenproblem der ersten ZIP-Prüfung im
   unveränderten Test reproduziert und durch korrekte Testumgebung behoben;
   kein Produkt-/Testfix oder verdeckter Skip. Nachweise im Prüfbericht.
-- [ ] Lokal geprüften Diagnosepatch bei der nächsten Veröffentlichung gezielt
-  übernehmen: `api.py`, `modules/suppression_telemetry.py`,
-  `scripts/collect_server_evidence.py`, `test_swing_mail_rejection_diagnostics.py`,
-  neuer Prüfbericht und aktueller TODO-Abschnitt. Noch nicht committet/gepusht
-  oder auf Hetzner installiert; fremdes Deploy-/Dokumentations-WIP nicht mitnehmen,
-  private `output/`-Nachweise nicht veröffentlichen.
+- [x] Diagnosepatch auf ausdrückliches „go“ gezielt committet/gepusht:
+  Codecommit `d566c5d973bd645270ae306cdbf7f6f77f0bba9b`, `origin/main` bestätigt.
+  Genau sechs Dateien: API, Telemetrieregister, eigenständiger Collector,
+  Regressionstest, Prüfbericht und nur dieser aktuelle TODO-Abschnitt.
+  Fremdes Deploy-/Dokumentations-/Test-WIP und private `output/`-Nachweise
+  bleiben unveröffentlicht. Abschlussdokumentation enthält keinen weiteren Produktcode.
+- [ ] Betreiberpull nach Abschluss laufender Scans; normaler `git pull --ff-only`
+  und API-/BG-Neustart, kein Deploy-Skript oder Installationsumbau.
+  Danach Health/Revision und neue konkrete Ablehnungsgründe live prüfen.
+  Codefix ist noch nicht als auf Hetzner installiert oder im Postfach angekommen bestätigt.
 - [ ] DAC-Originalzonen, `level_structure.as_of`, `completed_bar_counts` und
   Bestätigungszeiten prüfen: fehlt eine echte Gegenbarriere oder wurde sie übersehen?
   Aus dem angezeigten Projektionsziel allein ist das nicht entscheidbar.
