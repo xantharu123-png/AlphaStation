@@ -1,5 +1,10 @@
 # BI-Startfeedback und anschließende Signal-Mailprüfung – 05.10.2026
 
+Veröffentlichungsnachtrag 07.10.2026: die beschriebenen Reparaturen sind in
+`8d119ad4b8e39bf7c38ecaf956a7555e82f1798f` auf `origin/main` veröffentlicht.
+Die folgenden Abschnitte dokumentieren den ursprünglichen Prüfzeitpunkt;
+Serverupdate, neuer BI-Lauf und echte Signalzustellung sind weiterhin separat.
+
 ## Reparatur
 
 Der Nutzer hat korrekt auf den Startknopf geklickt. Das zufällig offene Menü im

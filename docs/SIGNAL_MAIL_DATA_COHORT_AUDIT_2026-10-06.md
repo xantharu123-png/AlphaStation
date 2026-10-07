@@ -1,5 +1,10 @@
 # Signal-Mail- und Datenfehlerprüfung – 06.10.2026
 
+Veröffentlichungsnachtrag 07.10.2026: gemeinsame Ausschlussgrenze und zugehörige
+Regressionen sind in `8d119ad4b8e39bf7c38ecaf956a7555e82f1798f` gepusht.
+Die folgenden zeitlich markierten Betriebsbeobachtungen bleiben historisch;
+kein neuer Produktionsscan oder Postfacheingang wird dadurch nachgewiesen.
+
 ## Nachkontrolle 18:27 Zürich – neue erfolgreiche Momentum-Ergebnisse
 
 Die neu gelesene Admin-Maildiagnose trägt 06.10.2026, 18:27:40 Zürich: ein Swing-

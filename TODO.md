@@ -1,6 +1,6 @@
 # Aktuelle Aufgaben / Übergabe
 
-## 07.10.2026, 07:54 Zürich – Veröffentlichung der geprüften Reparaturen
+## 07.10.2026, 07:56 Zürich – Geprüfte Reparaturen veröffentlicht
 
 - [x] Nutzer hat Commit und Push ausdrücklich freigegeben („machen“).
 - [x] API, Frontendquelle und Bundle unverändert gegenüber dem zuletzt
@@ -18,11 +18,15 @@
   von ausgeschlossenem WIP; Bundle in-memory bytegenau reproduziert, Fingerprint
   `ba7e64a7b792`. Persönliche Kontokonfiguration aus Bericht/TODO neutralisiert;
   keine Zugangsdaten, Empfängeradressen oder private Originalexporte im Stage.
-- [ ] Begrenztes Releasepaket aus gemeinsamer App-/Mailvorprüfung, BI-
+- [x] Begrenztes Releasepaket aus gemeinsamer App-/Mailvorprüfung, BI-
   Startfeedback, gemeinsamem Datenfehlerbudget, Regressionstests und
-  zugehöriger Dokumentation committen und pushen.
+  zugehöriger Dokumentation committet und auf `origin/main` gepusht:
+  **`8d119ad4b8e39bf7c38ecaf956a7555e82f1798f`**. Push bestätigt.
   Vorhandenes separates Deploy-/Installations-/Commercial-WIP bleibt lokal;
   kein Safe-Deploy-Aufruf, kein Serverumbau, keine Produktionsmutation.
+- [x] Nach Veröffentlichung TODO und Berichte auf den tatsächlichen Stand
+  fortgeschrieben; abschließender Dokumentationscommit enthält keine Runtime-
+  oder Teständerung. Private Exporte und separates WIP weiter unversioniert/lokal.
 - [ ] Anschließend Betreiber-Pull und Serverrevision bestätigen; tatsächliche
   reguläre Signalzustellung bleibt gesonderte Liveprüfung. Frühere technische
   Testmail nicht erneut verwenden oder als Signalzustellung ausgeben.

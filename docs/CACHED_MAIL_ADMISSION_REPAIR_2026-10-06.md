@@ -235,3 +235,11 @@ Stage enthält genau 16 freigegebene Pfade, keine privaten `output/`-Originale,
 Zugangsdaten oder echten Empfängeradressen. `git diff --cached --check` sauber.
 API-Gitblob `8c5bbf19d930f3b11771e2858712c6a67094f300` ist bytegleich zwischen
 Index, Produktarbeitsstand und QA-Snapshot. Kein Serverupdate/Testversand.
+
+07.10., 07:56 Zürich: Paket committet und Push auf `origin/main` erfolgreich:
+`8d119ad4b8e39bf7c38ecaf956a7555e82f1798f`. Nachfolgender Dokumentationsabschluss
+ändert ausschließlich TODO/Berichtsstatus, nicht das getestete Produkt oder Tests.
+Hetzner wurde hier nicht aktualisiert. Nächster Schritt ist Betreiber-Pull mit
+normalem Git/Service-Neustart, dann neue Serverrevision und reguläre
+Signalentscheidung → finale Revalidierung → SMTP → Postfach belegen.
+Eine angekommene technische Testmail bleibt kein regulärer Signalnachweis.
