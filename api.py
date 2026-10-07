@@ -10135,6 +10135,9 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "orb_tp1_already_reached",
         "orb_invalid_target_geometry",
         "invalid_momentum_inputs",
+        "display_metadata_invalid",
+        "swing_daily_reference_invalid_or_stale",
+        "swing_reference_price_mismatch",
     }
     no_trade_prefixes = (
         "grade_below",
@@ -10628,6 +10631,66 @@ def _classify_alert_candidate(scanner_name: str, row: Dict[str, Any], now: Optio
     }
 
 
+def _scanner_admission_source_row(scanner_name: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Restore the producer fields before reassessing a decorated cache row."""
+    basis = row.get("_scanner_display_basis")
+    if (isinstance(basis, dict) and basis.get("version") == 1
+            and basis.get("scanner") == scanner_name and isinstance(basis.get("fields"), dict)):
+        row = dict(row)
+        for key in _SCANNER_DISPLAY_SOURCE_FIELDS:
+            if key in basis["fields"]:
+                row[key] = basis["fields"][key]
+            else:
+                row.pop(key, None)
+    return row
+
+
+def _cached_alert_admission_state(
+    scanner_name: str, row: Dict[str, Any], now: float, *, display_only: bool = False,
+) -> Dict[str, Any]:
+    """Read-only cached selection shared by App release and Admin precheck.
+
+    Reuse the sender's stock-specific gates without refreshing evidence or
+    claiming delivery. Session/recipient/claim/final-price checks stay in the
+    sender; display callers separately exclude transport-only suppressions.
+    """
+    row = _scanner_admission_source_row(scanner_name, row)
+    state = _classify_alert_candidate(scanner_name, row, now, cache_only=True, display_only=display_only)
+    if scanner_name not in _SWING_STOCK_STRATEGY_ALERT_SCANNERS or is_elliott_pattern_context(row, strategy=scanner_name):
+        return {**state, "cached_admission_complete": True}
+    reasons = list(state.get("suppression_reasons") or [])
+    complete = True
+    try:
+        clock = datetime.fromtimestamp(now, timezone.utc)
+        daily_close_mode = stock_swing.validate(row, clock)
+        if stock_swing.is_swing(row) and not daily_close_mode:
+            # Same sender rule: invalid daily evidence cannot become live/PM.
+            reasons.append("swing_daily_reference_invalid_or_stale")
+        else:
+            if daily_close_mode:
+                # Cheap source coherence from the final daily-plan guard,
+                # without its provider-backed delayed-price/path validation.
+                price = _alert_float(_extract_alert_price(row))
+                reference = stock_swing.number(row.get("swing_reference_close"))
+                if price is None or reference is None or not math.isfinite(price) or not math.isclose(price, reference, abs_tol=0.0051):
+                    reasons.append("swing_reference_price_mismatch")
+            quality_ok, quality_reason = _stock_strategy_mail_quality_state(
+                row, daily_close_confirmed_mode=daily_close_mode, now_utc=clock,
+                market_status=None if daily_close_mode else _stock_trade_email_status(clock),
+            )
+            if not quality_ok:
+                reasons.append(quality_reason or "stock_strategy_mail_quality_gate")
+    except (TypeError, ValueError, AttributeError, KeyError, OverflowError):
+        complete = False
+        reasons.append("display_metadata_invalid")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        **state, "alertable_now": not reasons and complete,
+        "suppression_reasons": reasons, "cached_admission_complete": complete,
+        **_alert_decision_from_reasons(scanner_name, reasons),
+    }
+
+
 def _classify_premarket_candidate(scanner_name: str, row: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
     """Dedizierter Alert-Check fuer Pre-Market-Radar-Rows (AUDIT 2026-07-29).
 
@@ -10768,7 +10831,7 @@ def _build_alert_audit_for_cache(scanner_name: str, cache_file: str, *, read_onl
     for row in rows:
         if scanner_name in _STOCK_ALERT_SCANNERS and not read_only:
             row = _enrich_stock_alert_5m_state(scanner_name, row)
-        state = _classify_alert_candidate(scanner_name, row, now, cache_only=True) if read_only else _classify_alert_candidate(scanner_name, row, now)
+        state = _cached_alert_admission_state(scanner_name, row, now) if read_only else _classify_alert_candidate(scanner_name, row, now)
         if scanner_name == "crypto_explosion":
             # Same native source proof as the sender, but no executable quote
             # or transport during diagnostics. A passed cache is no receipt.
@@ -17260,36 +17323,16 @@ def _scanner_result_trade_state(scanner_name: str, row: Dict[str, Any]) -> Dict[
     # Re-decoration must not feed the previous derived score/action back into
     # its own calculation. Preserve the producer's exact fields, not arbitrary
     # raw_score values (those may predate legitimate scanner score caps).
-    basis = row.get("_scanner_display_basis")
-    if (isinstance(basis, dict) and basis.get("version") == 1
-            and basis.get("scanner") == scanner_name and isinstance(basis.get("fields"), dict)):
-        row = dict(row)
-        for key in _SCANNER_DISPLAY_SOURCE_FIELDS:
-            if key in basis["fields"]:
-                row[key] = basis["fields"][key]
-            else:
-                row.pop(key, None)
+    row = _scanner_admission_source_row(scanner_name, row)
     assessed_at = time.time()
-    state = _classify_alert_candidate(scanner_name, row, assessed_at, cache_only=True, display_only=True)
-    # Explain the actual mail score separately from scanner release. This is
-    # a read-only preview, not a send/claim or proof of inbox delivery.
+    state = _cached_alert_admission_state(scanner_name, row, assessed_at, display_only=True)
+    # Cached selection gates also control scanner release. This remains a
+    # read-only preview, not a send/claim or proof of inbox delivery.
     mail_reasons = list(state.get("suppression_reasons") or [])
-    mail_preview_complete = True
-    if scanner_name in _SWING_STOCK_STRATEGY_ALERT_SCANNERS:
-        try:
-            clock = datetime.fromtimestamp(assessed_at, timezone.utc)
-            quality_ok, quality_reason = _stock_strategy_mail_quality_state(
-                row, daily_close_confirmed_mode=stock_swing.validate(row, clock),
-                now_utc=clock,
-            )
-            if not quality_ok:
-                mail_reasons.append(quality_reason or "stock_strategy_mail_quality_gate")
-        except (TypeError, ValueError, AttributeError, KeyError, OverflowError):
-            mail_preview_complete = False
     mail_preview = scanner_visibility.mail_check_summary(
         row, state, reasons=mail_reasons, labels=_ALERT_SUPPRESSION_LABELS,
         minimum_score=_ALERT_MIN_SCORE, assessed_at=assessed_at,
-        complete=mail_preview_complete,
+        complete=state.get("cached_admission_complete", False),
     )
     display_reasons = [
         reason for reason in (state.get("suppression_reasons") or [])
@@ -20187,8 +20230,9 @@ def _exclude_stock_history_symbol(error, diagnostics):
         raise ScannerDataError(error.code, diagnostics) from None
     excluded = int(diagnostics.get("invalid_history_symbols", 0)) + 1
     diagnostics["invalid_history_symbols"] = excluded
-    # A large malformed cohort may be a provider/schema incident.
-    if excluded > 20:
+    # Both malformed histories and daily-reference disagreements consume the
+    # same leaf budget, including histories fetched by the special filter.
+    if excluded > 20 or int(diagnostics.get("excluded_data_symbols", 0)) >= 20:
         _record_stock_history_error(
             StockHistoryDataError("scan_data_invalid", "symbol_exclusion_limit"), diagnostics)
         raise ScannerDataError("scan_data_invalid", diagnostics) from None
@@ -23225,6 +23269,7 @@ _STOCK_ATTEMPT_COUNTS = frozenset({
     "special_filter_input_count", "special_filter_checked_count",
     "special_filter_unexamined_count", "special_filter_limit",
     "excluded_data_symbols", "empty_history_symbols", "invalid_history_symbols",
+    "daily_reference_exclusions",
     "data_retry_attempts", "data_retry_recovered", "data_retry_failed",
     "data_retry_budget_exhausted", "data_retry_observation_mismatches",
 })
@@ -24135,9 +24180,13 @@ def _strategy_scan_wrapper(
                         if reference_error:
                             _reject("daily_reference:" + reference_error)
                             scan_diag["excluded_data_symbols"] = int(scan_diag.get("excluded_data_symbols", 0)) + 1
+                            reference_exclusions = int(scan_diag.get("daily_reference_exclusions", 0)) + 1
+                            scan_diag["daily_reference_exclusions"] = reference_exclusions
                             if scan_diag["excluded_data_symbols"] > 20:
                                 # Widespread disagreement may be a provider
                                 # incident: preserve the last good final cache.
+                                # History exclusions share this same budget;
+                                # the separate reference count is diagnostic only.
                                 raise ScannerDataError("scan_data_invalid", scan_diag)
                             continue
                     _wyckoff_evidence = None

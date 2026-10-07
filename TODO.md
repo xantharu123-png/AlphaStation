@@ -1,5 +1,399 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 07.10.2026, 07:54 Zürich – Veröffentlichung der geprüften Reparaturen
+
+- [x] Nutzer hat Commit und Push ausdrücklich freigegeben („machen“).
+- [x] API, Frontendquelle und Bundle unverändert gegenüber dem zuletzt
+  geprüften Stand; finale Hashes im Abschlussbericht bestätigt. Private
+  Exporte und sonstige `output/`-Artefakte werden nicht veröffentlicht.
+- [x] Genau ausgewählte Produkt-/Testdateien aus dem Git-Index in einen
+  separaten Release-Snapshot exportiert. Breiter isolierter Produktlauf dort:
+  **11.569 bestanden, 2 Windows-Skips, 0 Fehler/Errors**, 452,5s laut XML.
+  `output/release-verification-20261007/qa-8b465e7207f5/results.xml`.
+  Vier unveränderte test_deploy*.py-Dateien wie zuvor explizit ausgenommen;
+  Commerce-/Kalendertests diesmal in ihren unveränderten HEAD-Versionen.
+  Runtime-/Test-Snapshot unverändert; nachträgliche Änderungen nur anonymisierte
+  Dokumentation und QA-Ergebnis. Keine volle Repo-/Linux-/SMTP-Prüfung behaupten.
+- [x] Veröffentlichungsumfang unabhängig geprüft: keine Runtime-Abhängigkeit
+  von ausgeschlossenem WIP; Bundle in-memory bytegenau reproduziert, Fingerprint
+  `ba7e64a7b792`. Persönliche Kontokonfiguration aus Bericht/TODO neutralisiert;
+  keine Zugangsdaten, Empfängeradressen oder private Originalexporte im Stage.
+- [ ] Begrenztes Releasepaket aus gemeinsamer App-/Mailvorprüfung, BI-
+  Startfeedback, gemeinsamem Datenfehlerbudget, Regressionstests und
+  zugehöriger Dokumentation committen und pushen.
+  Vorhandenes separates Deploy-/Installations-/Commercial-WIP bleibt lokal;
+  kein Safe-Deploy-Aufruf, kein Serverumbau, keine Produktionsmutation.
+- [ ] Anschließend Betreiber-Pull und Serverrevision bestätigen; tatsächliche
+  reguläre Signalzustellung bleibt gesonderte Liveprüfung. Frühere technische
+  Testmail nicht erneut verwenden oder als Signalzustellung ausgeben.
+
+## 06.10.2026, 21:30 Zürich – Gemeinsame App-/Mailvorprüfung geprüft (lokal)
+
+- [x] Nutzerauftrag „alles machen“ für die vier gezielten nächsten Schritte
+  aufgenommen. Vorhandenes WIP erhalten; kein Reset, Commit, Push oder
+  Serverupdate und keine weitere technische Testmail.
+- [x] Nachgewiesene falsche grüne Freigabe korrigiert: App und lesende Admin-
+  Vorprüfung verwenden die bestehende spezifische Aktien-Qualitätsprüfung
+  zusammen mit den allgemeinen Gates. Tagesreferenz und Scannerkurs werden
+  anhand der bereits bestehenden Senderregel verglichen; keine neue Toleranz.
+  Empfänger, Doppelschutz, Markt-/Versandzeit und finale aktuelle Kursprüfung
+  bleiben separate Sendeschritte. Schwellen/Strukturpläne nicht gelockert.
+- [x] Wiederholte Dekoration verwendet die ursprünglichen Producer-Felder;
+  abgeleitete Scores/BEOBACHTEN dürfen nicht in die nächste Bewertung
+  zurückfließen. 57 neue Backend-Fälle, gezielt 424 bestanden (inklusive
+  vorhandener Tests): `output/mail-fix-qa-c7f9900dc28343f5869a9686bce5f077/results.xml`.
+- [x] Vollständiger Nachlauf fand drei unregistrierte Datenfehler im Decision-
+  Mapping. Sechs zusätzliche echte App-/Admin-Consumer-Regressionsfälle RED;
+  jetzt exakt diese drei Gründe NO_TRADE statt WATCH, keine Whitelist und
+  keine Senderänderung. Neue Backenddatei 63 Fälle. Zusammen mit Registry und
+  auf den gemeinsamen Vertrag aktualisiertem Sichtbarkeitstest 242 bestanden:
+  `output/mail-fix-qa-51c2e5805e47446582cef24542d4b125/results.xml`.
+- [x] Kurze Kandidatenanzeige nennt die tatsächliche Qualitäts-/Datenblockade;
+  Rücktest bleibt sekundäre Warnung. Sperrgrund nach Warnung 12 verschwindet
+  nicht mehr aus der Kurzfassung, Details bleiben begrenzt. Finale gezielte
+  Oberfläche: 131 bestanden, kein Fehler/Skip; vorhandener anyio-Hinweis:
+  `output/mail-fix-qa-b1179452807a44f88c1f5642306375cd/results.xml`.
+- [x] Bundle frisch gebaut: `ba7e64a7b792`. Desktop und 390×844 im internen
+  Browser mit ausdrücklich synthetischem, nur lokalem GET-Stub geprüft:
+  Qualitätsblockade/Detailgrund stimmen überein, gültige Freigabe trotz
+  offenem Rücktest bleibt grün; keine zusätzlichen Textblöcke. Keine echten
+  Scans, Kontoeinstellungen oder SMTP-Aufrufe. Viewport zurückgesetzt.
+- [x] Gezielten LSPD-Reader abschließend geprüft. Root-Vollprüfung fand nach
+  ersten grünen Fixtures einen abweichenden JSON-Key zwischen Python und
+  PowerShell; echte Reader-Antwort statt unabhängig handgeschriebener Wrapper-
+  Fixture reproduzierte den Fehler. Korrigiert: 33 bestanden, ein Windows-
+  Symlink-Test übersprungen. `output/mail-fix-qa-bdb9cfa7aedd4e22b4cd6b8c6cf45c61/results.xml`.
+  Einmalige gezielte LSPD-Abfrage erfolgreich eingegangen; nicht erneut anfordern.
+- [x] Ursprünglichen LSPD-Plan-/Zonenbeleg Root/unabhängig gelesen:
+  `output/profitability/lspd-plan-evidence-20261006T191129Z.json` (privat,
+  nicht veröffentlichen), SHA256 `DD7C42DC8BEA23FFA666D3D96B4EAB81D7329A8C87EDF85900C5C698584AEF96`.
+  106 eindeutige Zonen/269 Evidenzen; IDs, Bounds, Cutoffs, Bestätigungen intern
+  konsistent. Entry 10,21 innerhalb erster Zone 10,13109–10,22891. Native
+  Auswahl reproduziert WAIT_BREAK_RECLAIM/0R Barrierenraum; fehlender Rücktest
+  ist nicht alleinige Ursache. Gespeichertes 50/50-R:R 0,21 arithmetisch korrekt.
+  Kein belegter falscher LSPD-Ausschluss, keine Regeln gelockert.
+- [x] Begrenzte Rundungsprüfung: außerhalb liegende LONG/SHORT-ACCEPT-Pläne
+  behalten konservative Targets/R:R; zwei Overlap-Proben runden anders, bleiben
+  WAIT und nicht freigegeben. Vier reine Offline-Komponentenproben bestanden,
+  kein vollständiger Scanner-/Mail-Replay und keine Quelländerung daraus.
+- [ ] Vollständiger ursprünglicher LSPD-OHLCV-/VRVP-Replay: Originalkerzen
+  fehlen im Ergebniscache; begrenzte bestehende Evidenzsuche fand sie nicht.
+  Späteren Chart nicht rückwirkend als Beweis benutzen, keine vollständige
+  fachliche Levelrichtigkeit aus bloßer Zonen-Konsistenz behaupten.
+- [x] Vollständiger isolierter Lauf abgeschlossen: 11.722 bestanden, 4 Fehler,
+  6 Skips, keine Errors. Zwei fachliche Testabweichungen danach oben korrigiert.
+  Zwei unveränderte 30-Sekunden-Windows-Bash-Timeouts separat ohne höhere
+  Timeouts wiederholt: 2 bestanden. Ergebnisse nicht zu einem vollständig
+  grünen Gesamtpass umdeuten. `output/mail-fix-qa-7cb256a31e574332a523c1b3a0964a96/results.xml`
+  und `output/mail-fix-qa-acf662242675495bbf9f21bee29d86dc/results.xml`.
+- [x] Abschließender breiter Produktlauf auf API-Hash `F198AC728D405CF8C59E24051AC010A0C6BCAD12C7B370B7551733BB269A7530`
+  abgeschlossen: 11.565 bestanden/2 Windows-Skips/0 Fehler oder Errors,
+  472,5s; Root las XML und bestätigte API-/HTML-/Bundlehash danach:
+  `output/mail-fix-qa-4ee1ba82632248c6bb17f82cb0591cff/results.xml`.
+  Nur vier unveränderte test_deploy*.py-Dateien ausgenommen, deren erste
+  Gesamtlauf-/Wiederholungsevidenz bleibt separat. Keine neuen externen Aufrufe.
+- [x] Aktuelle lesende Livekontrolle 21:17–21:26: SMTP 0/Auslassungen 50/
+  Fehler 0/wartend 0 im begrenzten Fenster; kein Wochen- oder Postfachnachweis.
+  ECHO aktuell weiterhin grün trotz Tagesqualität 70/96; Details sperren die
+  Mail ausdrücklich `<78`, nicht wegen Rücktest. Genau diese Abweichung lokal
+  korrigiert; alte generische Admin-Vorprüfung 46/1 ist kein Versandnachweis.
+  Kein Scan/Testmail/Einstellungswechsel. Temporärer Agent-Tab geschlossen.
+- [ ] Veröffentlichung/Deployment separat erledigen, anschließend echte
+  Signalentscheidung → finale Revalidierung → SMTP → Postfach prüfen. Bis dahin
+  keine komplette Ursachenbehebung oder tatsächliche Signalzustellung behaupten.
+
+[Abschlussbericht](docs/CACHED_MAIL_ADMISSION_REPAIR_2026-10-06.md).
+
+## 06.10.2026, 19:51 Zürich – Nächster gezielter Reparaturschritt
+
+- [x] App weiterhin angemeldet lesend geprüft; kein Scan oder Mailversand
+  gestartet. LSPD-Details bestätigen weiterhin Qualität 96/96, Entry 10,21,
+  Gegenbarriere 10,23, Plan-R:R 0,21 und Trade-Score 45. Die UI zeigt nicht
+  den vollständigen ursprünglichen Zonen-/Kerzenbeleg.
+- [x] Evidenzlücke eingegrenzt: native Cachezeilen speichern `Level_Structure`
+  mit Zonenbounds, `confirmed_at`, Rollen, Break-/Reclaim-Evidenz und
+  Quellbelegen. Die allgemeine private Exportprojektion entfernt bewusst
+  Ticker, IDs und Herkunftsblöcke; nicht ungeprüft erweitern.
+- [ ] Zuerst eine aktuelle native LSPD-Cachezeile und die dazugehörigen
+  abgeschlossenen Kerzen bis zum selben `as_of` als begrenzten Beleg lesen;
+  gespeicherten Scanplan nicht mit einer später neu berechneten Chartstruktur
+  gleichsetzen. Dann reproduzierbare Fehlablehnung als RED-Test absichern.
+- [ ] App und spezifische Mailvorprüfung auf denselben vollständigen
+  Freigabevertrag beziehen; Empfänger-/Doppelschutz und zeitpunktabhängige
+  finale Revalidierung separat belassen. Nicht alle Warnkandidaten mailen und
+  keine Qualitätsschwellen ohne explizite Regelentscheidung senken.
+- [x] In dieser Nachfrage keine Programmcode-/Serveränderung. Nur lesende
+  Nachprüfung und TODO-Fortschreibung; keine Reparatur als erledigt behaupten.
+
+## 06.10.2026 – Systemische Nachfrage: Wochen ohne Signal-Mails
+
+- [x] Einzelne ECHO-Sperre nicht als Erklärung für mehrere Wochen verwendet.
+  Vier unabhängige Teilprüfungen: historische Periodenbelege, native Level-/
+  Plangates, zusätzliche Mailgates und Dispatch/Doppelschutz.
+- [x] 22 vorhandene Export-Momentaufnahmen getrennt nach Revision gelesen:
+  frühe Daten-/Scanabbrüche; später abgeschlossene Runden mit 48 beziehungsweise
+  30 Kandidaten und keinen Transportereignissen. Native Strukturpläne nur
+  2/48 beziehungsweise 0/30; dominante Gründe erste Gegenbarriere/R:R und
+  unbestätigte überschrittene Zonen. Keine lückenlose Wochenstatistik behaupten.
+- [x] Neuere angemeldete Livekontrolle: Momentum 12.607/12.607, 46 Ergebnisse,
+  Referenz 05.10., Ergebniszeit 06.10. 16:46:17.170500 Serverzeit. Scores
+  2×83, 4×69, 40×45. Früheren Nachtabbruch ausdrücklich nicht fortschreiben.
+- [x] LSPD als konkreten gemeinsamen Engpass gelesen: Setup 94, Qualität 96,
+  Trade 45; Entry 10,21/Stop 10,04/TP1 10,23/TP2 10,26, Plan-R:R 0,21.
+  Gemischte bestätigte Swing-High-/Low-Quelle 1D/1W. Original-Zonenbounds und
+  Bestätigungszeiten fehlen; kein belegter falscher Widerstand daraus ableiten.
+- [x] Mixed-role-Zonenmechanismus LONG/SHORT nativ reproduziert. Erweiterter
+  Zonenrand setzt Bestätigungsanker zurück und kann kompletten Plan blockieren.
+  Nachprüfung: bestehender ausdrücklich getesteter konservativer Vertrag,
+  kein neu bewiesener Implementierungsfehler. Nicht mit LSPD gleichsetzen.
+- [x] Zusätzliche Tageshoch-/TP1-Nähe-Regel mit realer ATR/Scoring/Qualität/
+  Health/1D-Struktur isoliert nachgestellt: gültiger Plan bei Score 92,
+  Qualität 83, TP1 1,82R trotzdem gesperrt; positive Kontrolle besteht.
+  Vier Probe-Assertions unabhängig wiederholt. Regel ausdrücklich geschützt;
+  keine Lockerung oder vollständige Senderprüfung behaupten.
+- [x] Dispatch/Doppelschutz ohne globalen Blockierungsnachweis geprüft:
+  tickerbezogene Gleichwertigkeit, Marker erst nach erfolgreichem Versand,
+  erfolgreiche Teilrunden bleiben versandfähig. 162 + 8 Tests bestanden;
+  Levelnachprüfung 136 bestanden. XML-Zähler bestätigt, Mengen überlappen.
+- [x] Drei vorläufige Trackerzeilen im 30-Tage-UI-Fenster gelesen; ältere
+  reife Statistik nicht mit neuem Versand verwechselt. Technische Testmail
+  bereits vom Nutzer als angekommen bestätigt; keine weitere versendet.
+- [ ] Gemeinsamen Struktur-/Freigabevertrag an aktuellen Originalkerzen mit
+  Zonenherkunft, Bounds, Bestätigungszeit, Rolle und Ausbruch kritisch prüfen.
+  Bewiesene Rechenfehler korrigieren; bestehende konservative Vertragsregeln
+  nicht ohne explizite Änderung als Bug lockern. Kein allgemeiner SMTP- oder
+  mathematischer Defekt in dieser begrenzten Nachprüfung neu nachgewiesen.
+- [ ] App-/Mailfreigabe eindeutig angleichen: generische Cachevorprüfung ist
+  keine vollständige spezifische Momentum-Mailfreigabe. Bereits bestehende
+  offene Vertragsfrage bleibt; ein einzelnes ECHO erklärt nicht die Periode.
+- [ ] Vererbte lokale BI-Start-/Datenkohortenreparaturen separat veröffentlichen,
+  Serverrevision und neuen vollständigen Lauf bestätigen; finale tatsächliche
+  Signalzustellung bleibt offen.
+- [x] In dieser Nachfrage ausschließlich neue lokale Diagnoseartefakte und
+  Dokumentation, keine Programmcodeänderung/Commit/Push/Servermutation.
+  API-/HTML-/Bundle-Rohhashes unverändert; bestehendes WIP erhalten.
+
+[Systemischer Prüfbericht](docs/SIGNAL_MAIL_SYSTEMIC_AUDIT_2026-10-06.md).
+
+## 06.10.2026, 18:27 Zürich – Konkrete ECHO-Mailblockade nach erfolgreichem Lauf
+
+- [x] Neue angemeldete Livekontrolle durchgeführt, keine Testmail/Scansteuerung/
+  Einstellungen verändert. Browser hatte zunächst keinen Tab; normales Öffnen
+  der bekannten App-Adresse stellte die bestehende Anmeldung bereit.
+- [x] Maildiagnose 18:27:40: 1 Swing-/1 Kryptoempfänger, 0 SMTP-Annahmen,
+  50 Auslassungen, 0 Fehler/0 wartend im begrenzten Fenster. Kein vollständiger
+  Tages- oder Postfachnachweis. Aktuelle Momentum-Skips 16:50/17:50 nennen
+  unter anderem Tagesqualität unter 78/96; Einzelereignisse sind nicht tickerbezogen.
+- [x] Früheren Nachtstand nicht als heutigen aktuellen Scanstatus fortgeschrieben:
+  Momentum jetzt 12.607/12.607 geprüft, 46/46 Ergebnisse, Referenzschluss
+  05.10.2026, Ergebniszeit 06.10.2026 15:28:14.312302 Serverzeit. Erfolgreichen
+  aktuellen Ergebnisstand gelesen, nicht durch manuellen Start erzeugt.
+- [x] Konkreter Unterschied am ECHO-Kandidaten: Trade-Score 83/Grade A,
+  App „Im Scan freigegeben“, Tagesqualität 70/96. Detailansicht sperrt Signal-Mail
+  ausdrücklich wegen Momentum-Mailminimum 78/96, nicht wegen fehlendem Rücktest.
+  Angezeigte Teilpunkte 17,929709 + 7,95314 + 14,487289 + 20 + 10 = 70,370138,
+  gerundet 70. Dies prüft die angezeigte Summe, nicht erneut die Original-OHLC.
+- [x] Quellpfad unabhängig gelesen: Admin-Sammelvorprüfung nur allgemeiner
+  Cachecheck (`api.py:10771`); spezifischer Momentum-Mailcheck dagegen vor
+  Versand (`14419`) und in Kandidatendetails (`17273`). `<78` erzeugt
+  `momentum_mail_blocked_daily_quality_below_threshold` (`9564`).
+  Admin „Aktienstrategien 46/1“ ist daher kein vollständiger Mailfreigabenachweis.
+  Erstbezeichnung „mailfähig“ im Zwischenbericht ausdrücklich korrigiert.
+- [ ] Nutzervorgabe für App-/Mailvertrag klären: zusätzliche Momentum-Mail-
+  Qualitätsfilter beibehalten und Freigabeanzeigen eindeutig angleichen, oder
+  Mailauswahl auf gültige App-Freigaben umstellen. Keine Filter eigenmächtig
+  senken, keine Levels erfinden; Daten-/Plan-/Empfänger-/Doppelschutz bleiben.
+- [x] Lokale Veröffentlichung separat geprüft: HEAD bleibt `e83bb1d6abdd`,
+  BI-Startfeedback und Datenkohortenpaket uncommittet. Keine neueren Serverexporte
+  als 26.09. vorhanden, keine heutige Serverrevision daraus behauptet.
+  Nur Diagnose/Dokumentation in dieser Nachfrage; kein neuer Codefix oder Testlauf.
+
+[Nachkontrolle im Bericht](docs/SIGNAL_MAIL_DATA_COHORT_AUDIT_2026-10-06.md).
+
+## 06.10.2026 – Angemeldete Mailprüfung und Datenkohorten-Korrektur
+
+- [x] Aktuelle Admin-Mailansicht nach Nutzeranmeldung gelesen (00:28:33 Zürich):
+  1 Swing-/1 Kryptoempfänger, 0 SMTP-Annahmen, 50 Auslassungen, 0 Versandfehler,
+  0 wartend im begrenzten RAM-Fenster. Keine Tages-/Postfachquote daraus ableiten.
+- [x] Neue Vorprüfung gelesen: BI Long/Short 0 Kandidaten; Aktienstrategien
+  37/0 freigegeben, Gap Long/Short 13/3 mit veralteter Sitzung und 0 freigegeben.
+  Bear 1/0 Watch-only, Crypto Long 80/0; keine Senderfreigabe aus Cachezahlen.
+- [x] Aktueller Momentum-Versuch fehlgeschlagen: `scan_data_invalid`,
+  Aktienanalyse, 2.735/12.607 geprüft, 86 s. Turtle `scan_data_incomplete`;
+  dessen nächsten automatischen Lauf ohne Start/Pause bis erneutem Fehler
+  beobachtet. Altstände bleiben; kein Null-Signal-Abschluss.
+- [x] Reihenfolgeabhängige Vermischung der Historien-/Referenz-Fehlerkohorten
+  tatsächlich reproduziert: gleiche 20 Historienfehler + 1 Referenzabweichung
+  + gültige Aktie → je nach Reihenfolge Abbruch oder unzulässiger Abschluss
+  mit 21 Datenausschlüssen.
+  Vertiefte Nachprüfung korrigiert die erste Interpretation: maximal 20
+  ungültige Aktien insgesamt ist der dokumentierte Vertrag. Der erfolgreiche
+  21er-Pfad war die Lücke. Beide Pfade und Cup-Spezialfilter nutzen jetzt den
+  gemeinsamen Guard; `daily_reference_exclusions` ist rein diagnostisch.
+  Keine pauschale Datenlockerung; heutige Liveursache weiter nicht zugeordnet.
+- [x] Erstinterpretation verworfen, nicht ungeprüft veröffentlicht: 176/92
+  erste Tests gelten nur historisch. Erster Gesamtlauf bewusst unterbrochen,
+  keine vollständige grüne XML-Auswertung daraus.
+- [x] 17 finale Grenzregressionen: RED 7 Fehler/10 bestanden mit echten
+  isolierten Cachebytes. Zulässige 19+1/1+19, unzulässige 20+1/1+20/20+20 in
+  beiden Reihenfolgen sowie homogene21, Cup-Spezialfilter und Diagnoseprojektion.
+  `output/mail-fix-qa-d564a7ee9b544bcd84cf8fb9ece912ec/results.xml`.
+- [x] Finales GREEN: 443 gezielte Tests bestanden; finale unabhängige
+  Nachprüfung 208 bestanden, keine blockierenden Befunde. Beide XML-Zähler
+  bestätigt, keine Fehler/Skips; vorhandener anyio-Hinweis. Zahlen überlappen.
+  `output/mail-fix-qa-6a87127d801e40da9cabd17f14e3a142/results.xml` und
+  `output/mail-fix-qa-70d90d7feb744b0cb888e8f5f6c4d59d/results.xml`.
+- [x] Vollständigen isolierten Gesamtlauf und XML geprüft: 11.620 bestanden,
+  1 Updater-Subprozess-Timeout nach 30 s, 5 Windows/Linux-Skips, 0 Sammelfehler.
+  11.626 Fälle; kein vollständig grüner Gesamtpass behaupten. API-/HTML-/Bundle-/
+  Regressionsquellhashes vor/nach identisch:
+  `output/mail-fix-qa-d60de01b4e5b41b6a2d65db2fe4e92f7/results.xml`.
+- [x] Einzigen fehlgeschlagenen Test unverändert isoliert wiederholt:
+  `test_auto_update_passes_safe_directory_to_target_deploy` besteht in 18,32 s,
+  XML 1/0/0/0. Timeout nicht reproduziert, konkrete Laufzeitursache unbewiesen;
+  keine Zeitgrenze erhöht, kein Test deaktiviert, kein echter Deploy.
+  `output/mail-fix-qa-e3d276d90be7409baaa5245f5e97d611/results.xml`.
+- [x] Kontoeinstellungen ausschließlich lesend geprüft, nicht geändert;
+  persönliche Kanal-/Modus-/Watchlist-Werte nicht veröffentlicht.
+  Produktseitig schließt Swing normale Aktienstrategie-/Gap-Mails nicht aus. Persönliche
+  Filter und Operator-Fallback unterscheiden sich; keine Empfängerursache aus
+  der Moduswahl behaupten. System Health Cooldown 0 s, Scheduler aktiv.
+- [x] Turtle-Regeln gegen 14 bestehende Fail-Closed-Verträge geprüft. Ein
+  bloßer Sammelcode identifiziert den heutigen konkreten Grund nicht.
+  BI-Ausschlusspolitik nicht ungeprüft auf Turtle übertragen.
+- [ ] Aktuelle anonyme Momentum-Attempt-Zähler / Turtle-Kohärenzgrund lesen;
+  angemeldete UI zeigt nur Sammelcode. System-Logs-UI 0 Zeilen, normaler
+  Health-Tab Port 8000 clientseitig gesperrt; keine Sperre umgangen. Einmaliger
+  direkter SSH-Leseversuch BatchMode abgewiesen; anonyme Attempt-Abfrage bereits
+  angefordert, noch unbeantwortet. Erneute UI-Kontrolle 01:15:24 unveränderte
+  SMTP-/Vorprüfzahlen, neuere Auslassungen; keine Postfach-/Tagesquote behaupten.
+- [ ] Lokale Reparaturen veröffentlichen/Serverinstallation separat bestätigen;
+  anschließend erfolgreicher neuer Scan, finale Freigabe, SMTP und Postfach.
+  Noch kein Commit/Push/Serverupdate, keine weitere Testmail oder Scansteuerung.
+- [ ] Separater Offlinebefund am Sitzungsschwellenwechsel absichern und beheben:
+  nach Bulkabruf veränderter Wrapperzeitpunkt kann Daily-Modus über `all(...)`
+  zu `live_snapshot` herabstufen; synthetische AST-Gegenprobe 20:14:59/20:15:00
+  UTC ergibt `scan_data_unavailable` wegen fehlendem Livepreis. Kein aktueller
+  `scan_data_invalid`-Nachweis; Zeit/Code passen nicht zum heutigen Versuch.
+  Kein stale Datenstand für Mails zurückdatieren. Nichtatomare Bulk-/Einzel-
+  Providerrevision ist eine zusätzliche offene Annahme, kein belegter Livefehler.
+
+[Prüfbericht](docs/SIGNAL_MAIL_DATA_COHORT_AUDIT_2026-10-06.md).
+Bestehendes fremdes WIP erhalten; normale Scan-/Mailberechnung nicht durch
+erfundene Levels oder gelockerte Score-/Grade-/Rücktestregeln ersetzt.
+
+## 06.10.2026 – Nachfrage zum Signal-Mailstatus
+
+- [x] Aktuellen lokalen Übergabestand gelesen: BI-Startfeedback ist lokal
+  repariert und geprüft, aber weiterhin uncommittet/ungepusht. Dieser
+  Frontendfix ist kein Signal-Mailfix. Bestehendes fremdes WIP unverändert.
+- [x] Nach neueren lokalen Serverexporten gesucht: jüngster vorhandener
+  `hetzner-evidence-*.json` unter `output/profitability` bleibt vom 26.09.
+  Kein aktueller Export und keine Antwort auf die bereits angeforderte
+  anonyme `suppression_buckets`-Abfrage vorliegend.
+- [x] Aktuellen internen Browser geprüft: kein bestehender App-Tab;
+  einmaliges normales Öffnen von Alpha Station zeigt die öffentliche
+  Landingpage ohne Anmeldung. Temporären Prüftab danach geschlossen.
+  Keine Sicherheits-/Anmeldesperre umgangen, keine Zugangsdaten gelesen.
+- [ ] Aktuelle Signalentscheidung und Transportereignisse nach einem neuen
+  Lauf direkt prüfen. Letzte bestätigte angemeldete Versandkontrolle vom
+  05.10. (0 SMTP-Annahmen im begrenzten sichtbaren Fenster, Ablehnungen vor
+  SMTP) bleibt historisch; nicht als vollständigen heutigen Tagesstand
+  oder Beweis eines defekten SMTP-Dienstes ausgeben. Angekommene technische
+  Testmail belegt nur diesen einzelnen Versand, nicht die Signalpipeline.
+- [ ] Bereits angeforderte anonyme Serverausgabe auswerten oder nach normaler
+  Anmeldung die aktuelle Admin-Versandansicht lesen; keine weitere Testmail
+  und kein weiterer Export notwendig. Echte Signalzustellung weiterhin offen.
+
+Nur Statusprüfung und TODO-Dokumentation; kein Codefix, Push, Pull, Scanstart,
+Neustart, Einstellungs-/DB-Schreibzugriff oder Mailversand in dieser Nachfrage.
+
+## 05.10.2026 – BI-Startmeldung: laufender Short und Browserzugriff getrennt
+
+- [x] Nutzerklärung: korrekt auf blauen Startknopf geklickt; das offene Aktien-
+  Menü war nur zufällig im Screenshot. Menüüberdeckung ist keine bestätigte
+  Ursache. Früherer BI-Short-Lauf erklärt nicht den aktuellen stillen Klick.
+- [x] Tatsächlichen Frontendfehler offline unabhängig reproduziert:
+  `ScanControl.startScan` lädt im `finally` nach jedem Versuch erneut die
+  Ergebnisse. Ein erfolgreicher GET des unveränderten Altstands löscht den
+  zuvor gesetzten Startfehler in `useScannerFeed.readResults`.
+  POST 429/401/500/Transportfehler und Baseline-GET 503 verlieren so ihre
+  Rückmeldung; Button wieder blau, kein bestätigter neuer Lauf. Bei Baseline-
+  Fehler kein POST. Nachweise mit bestehendem Hook-Harness und dem tatsächlichen
+  extrahierten Wrapper, ohne Produktionsanfrage. Kein Menü-/Bedienfehler.
+- [x] Startversuchsfehler separat vom Ergebnis-Lesefehler erhalten (wie
+  `blockedStartRef`), bis neuer bewusster Start oder eindeutig neuer Laufstand
+  beobachtet wird. Auch passive GETs dürfen den unveränderten fehlgeschlagenen
+  Versuch nicht still löschen; allein Entfernen des `finally` reicht nicht.
+  Lokal implementiert, neu kompiliert und unabhängig geprüft. Konkrete
+  HTTP-/Transportantwort beim Nutzer bleibt
+  unbekannt; die reproduzierten Fälle nicht als dessen gemessene Antwort ausgeben.
+- [x] TDD: 29 neue Regressionen mit tatsächlichem Hook und extrahiertem
+  Buttonwrapper. Abschließend 191 gezielte und 112 unabhängige Tests bestanden;
+  keine verbleibenden Reviewbefunde. Erststart ohne bekannte Baseline, ungültige
+  alte Cachezeit, zukünftige Zeitstempel und verspätete Antworten abgesichert.
+- [x] Gerenderte Vorher-/Nachherprüfung im internen Browser: Desktop und
+  390 x 844. Startablehnung bleibt bei Button-/manuellem/passivem Altcache-GET;
+  späterer angenommener Versuch und Long/Short-Wechsel korrekt. Nur synthetische
+  localhost-POSTs, kein echter Scan/Versand. Screenshots und Ablauf unter
+  `output/playwright/bi-start-feedback-browser-proof.md`; temporäre Server/Tabs
+  geschlossen, Browsergröße zurückgesetzt.
+- [x] Vollständiger isolierter Gesamtlauf: 11.604 bestanden, 0 Fehler,
+  5 Windows/Linux-Ausnahmen, ein vorhandener anyio-Importhinweis.
+  XML `output/mail-fix-qa-b0e0e47f1900438291ab7622a18126a6/results.xml`
+  gelesen (11.609 Fälle); HTML/Bundle/Test sowie unveränderte API/Telemetrie
+  vor/nach dem Lauf mit identischen SHA256. Neuer Bundlequellhash
+  `18bd91c87dcc`; [Prüfbericht](docs/BI_START_FEEDBACK_REPAIR_2026-10-05.md).
+- [ ] Dieses abgegrenzte Frontendpaket nach Freigabe committet/gepusht und auf
+  Hetzner installiert bestätigen. Der Startfix ist derzeit nur lokal; kein
+  Pullbefehl als vermeintliche Installation eines unveröffentlichten Fixes geben.
+- [x] Live-UI gegen 18:38 UTC ohne manuellen Scanstart geprüft: BI Long mit
+  aktivem Startknopf, letzter Abschluss 18:21:20 Serverzeit, 5.319/5.319 geprüft,
+  0 gültige 17/20-Signale. Gleichzeitig BI Short aktiv, 1.810/5.319 geprüft,
+  letzter Fortschritt 1 Sekunde alt. Long/Short teilen sich die Aktien-Engine.
+- [x] Backend-Startsperre und ACK nachgerechnet: kein paralleler Long-Start
+  während Short; `busy/other_scanner_running`, `blocking_scan_key=bi_short`.
+  Kein neuer Lauf wird eingereiht. 171 isolierte Offline-Tests bestanden,
+  0 Fehler/Skips; XML `output/mail-fix-qa-c49a1a1d20c84dad9ce6f3af35e2054a/results.xml`
+  gelesen und Zähler geprüft. Keine Freigaberegeln oder Scannerquellen geändert.
+- [x] Reiner öffentlicher Health-GET gegen 18:41 UTC bestätigt Betreiberupdate:
+  `healthy`, Revision `e83bb1d6abdd`, Bundle `67924e9f894a`. Kein weiterer Pull
+  allein wegen des Diagnosepatches erforderlich. CORS für Port-3000-Origin
+  am Health-Endpunkt HTTP 200 mit passendem Allow-Origin/Allow-Credentials.
+- [ ] Separater lokaler Browserblocker: ab 18:39:48 UTC scheitern BI-, Scheduler-
+  und Systemstatusabfragen mit `Failed to fetch`; beim direkten Öffnen des
+  öffentlichen Port-8000-Health-Endpunkts meldet der interne Browser
+  `net::ERR_BLOCKED_BY_CLIENT`. Nach einmaligem Neuladen Landingpage statt
+  angemeldeter App; das beweist keinen Passwort-/Serverdefekt. API-Zugriff
+  im internen Browser wiederherstellen/mit normalem Browser vergleichen;
+  keine Sicherheitssperre umgehen und keine Zugangsdaten übernehmen.
+- [ ] Optionaler UX-Punkt: Long-Startknopf war trotz belegter gemeinsamer Engine
+  aktiv. Tatsächliche Ablehnung wird nach POST erklärt; kein echter Startversuch
+  in dieser Prüfung. Vorab klaren Besitzerhinweis statt irreführendem aktiven
+  Knopf erst als separate Umsetzung bearbeiten. Die beim Nutzer sichtbare
+  genaue Startmeldung ist bislang nicht übermittelt.
+- [ ] Nach wiederhergestelltem Zugriff neuen Laufabschluss und konkrete
+  Mailfreigabe/SMTP/Postfach prüfen. Startsperre und Browserfehler erklären
+  nicht pauschal die bisher fehlenden Signal-Mails.
+- [x] Anschließende unabhängige Quellprüfung des finalen Swing-Mailpfads:
+  keine neue belegte mechanische Fehlablehnung/verlorener Senderaufruf gefunden.
+  Daily-Pläne erhalten keine 5m/4H-Neuabhängigkeit; fehlender Rücktest allein
+  sperrt keinen bestätigten Break. Positive simulierte Versandtests im
+  Gesamtlauf erneut bestanden. Kein Beweis eines aktuellen echten Versands.
+- [ ] Einmalig angeforderte anonyme Read-only-Serverausgabe
+  `suppression_buckets` abwarten und nach Revision/Zeit/Grund auswerten.
+  Kein weiterer Export oder Testmail nötig/angefordert. Die stündlichen,
+  überlappenden Grundzähler sind weder eindeutige Kandidatenzahlen noch
+  Sender-/SMTP-Annahmen. Danach nötigenfalls die vorhandenen anonymen
+  `diagnostics.mail_audit.transport_events` mit `trade_sender_called`,
+  `trade_accepted/partial/unknown/failed` zum aktuellen Lauf prüfen.
+
+In dieser Arbeit kein Produktionsscanstart, keine Pause/Fortsetzung, kein
+Serverupdate, Neustart, Einstellungs-/DB-Schreibzugriff oder Mailversand.
+Lokales Frontendpaket, neue Regressionen und Prüf-/TODO-Dokumentation geändert,
+noch uncommittet; bestehendes fremdes WIP bleibt erhalten. Neuer historischer
+BI-Lauf, Wochenkohorte und Original-Chartdaten werden dadurch nicht erledigt.
+
 ## 05.10.2026 – Aktuelle Signal-Mailkontrolle nach Betreiberpull
 
 Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparaturpaket.
@@ -50,10 +444,18 @@ Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparatu
   Regressionstest, Prüfbericht und nur dieser aktuelle TODO-Abschnitt.
   Fremdes Deploy-/Dokumentations-/Test-WIP und private `output/`-Nachweise
   bleiben unveröffentlicht. Abschlussdokumentation enthält keinen weiteren Produktcode.
-- [ ] Betreiberpull nach Abschluss laufender Scans; normaler `git pull --ff-only`
-  und API-/BG-Neustart, kein Deploy-Skript oder Installationsumbau.
-  Danach Health/Revision und neue konkrete Ablehnungsgründe live prüfen.
-  Codefix ist noch nicht als auf Hetzner installiert oder im Postfach angekommen bestätigt.
+- [x] Abschlussveröffentlichung `e83bb1d6abdd34a2bd08f2395170fd444f015790`
+  auf `origin/main` bestätigt. Letzte reine Health-Lesung 05.10., 17:09:59 UTC:
+  Server weiterhin `healthy`, `43180ffea286`, Bundle `67924e9f894a`.
+  Erwartete Revision nach Betreiberpull: `e83bb1d6abdd`.
+  Diese abschließende lokale Statusnotiz bleibt zusammen mit dem fremden TODO-WIP
+  uncommittet; die veröffentlichte Abschlussdokumentation ist bereits auf GitHub.
+- [x] Betreiberpull des älteren Diagnosepakets später öffentlich bestätigt:
+  05.10., gegen 18:41 UTC, `healthy`, Revision `e83bb1d6abdd`, Bundle
+  `67924e9f894a`. Kein Deploy-Skript oder Installationsumbau durch diese Arbeit.
+- [ ] Neue konkrete Ablehnungsgründe und echte Signalzustellung prüfen.
+  Serverrevision bestätigt die Installation, nicht eine Postfachzustellung.
+  Der oben beschriebene spätere Frontend-Startfix ist noch unveröffentlicht.
 - [ ] DAC-Originalzonen, `level_structure.as_of`, `completed_bar_counts` und
   Bestätigungszeiten prüfen: fehlt eine echte Gegenbarriere oder wurde sie übersehen?
   Aus dem angezeigten Projektionsziel allein ist das nicht entscheidbar.
@@ -63,7 +465,8 @@ Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparatu
 - [ ] Generische heutige Events nicht als Score-/Providerfehler ausgeben;
   Originalursache noch offen. SSH-Keyzugriff wird abgewiesen, geschützte
   Detail-API ohne Anmeldung liefert 401; keine Zugangsdaten aus dem Browser übernommen.
-  Die vorhandene Browseranmeldung bleibt für sichere UI-Leseprüfungen nutzbar.
+  Die Browseranmeldung war für diese UI-Leseprüfungen nutzbar; späterer
+  Port-8000-Clientblock und aktuelle Landingpage stehen im neueren Abschnitt oben.
 - [ ] Tatsächlich zulässige Signal-Mail → SMTP-Annahme → Postfach nachweisen.
   Technische Testmail kam früher an. Kein neuer Export oder Testmail verlangt/gesendet.
 - [ ] Neuer historischer BI-Dreimonatslauf, Wochenkohorte und DAC/VIAV/AST-
@@ -72,6 +475,90 @@ Dieser Abschnitt aktualisiert die Betriebskontrolle nach dem bisherigen Reparatu
 Heute kein Serverupdate, Neustart, manueller Scan, Settings-/Produktions-DB-Schreibzugriff oder
 Mailversand. Bestehendes fremdes WIP bleibt erhalten. Nur der Diagnosepatch,
 zugehörige Tests und diese Dokumentation wurden lokal bearbeitet.
+
+## 05.10.2026 – Accountwechsel: verifizierte Übergabe und nächster Schritt
+
+Arbeitsverzeichnis: `C:\Projekt\TradingBot`. Dies ist der aktuelle Einstieg für
+den nächsten Account. Der technische Abschluss vom 04.10. bleibt darunter erhalten;
+andere ältere Aufgaben werden durch diese Übergabe nicht pauschal als erledigt erklärt.
+
+### Veröffentlicht und technisch geprüft
+
+- [x] Lokales `main` am 05.10. geprüft: HEAD
+  `43180ffea286efcd408e7805a8880d67fb67652a` (Dokumentationsabschluss).
+  Zugehöriger Codecommit: `f46413c2d357475968109aa79269a9c07e21ddd7`.
+  Beide wurden am 04.10. gepusht; Remotehash damals bestätigt.
+  Am 05.10. keine neue Remoteabfrage, Veröffentlichung oder Serveränderung.
+- [x] BI-Auswahl, Zeitgrenzen, Datenabdeckung, Kandidaten-/Plan-/Fill-Diagnose,
+  Cachevalidierung und kompakte Anzeige repariert. Mail-Recovery schützt
+  Reservierungsowner, bereits versuchte/angenommene Zustellungen und ungültige Zeiten.
+  BI bleibt bei 17/20; Score-, Risiko- und Mailregeln wurden nicht gelockert.
+- [x] Nachweise vom 04.10.: 11.274 Offline-Tests bestanden, 0 Fehler,
+  1 Windows/POSIX-Skip; `tmp/qa-1b8536a9bad0/results.xml`.
+  Zusätzlich 18 Desktop-/Mobilfälle mit Playwright grün; geprüfter Bundlehash
+  `67924e9f894a`. Gezielte 445 Mail-, 151 Producer-, 89 Frontend/API- und
+  45 Cache/API-Tests überlappen und werden nicht addiert. Heute keine neuen Tests.
+  Ausnahmen des Gesamtlaufs und der frühere Windows-Queue-Timeout stehen im Bericht.
+- [x] Ältere historische Stichproben als bereits dokumentiert übernommen:
+  02.07.–01.10.2026, je 3 fixierte Assets, 18 Quelldateien und 88 Fingerprints.
+  Damals 0 freigegebene Modellpläne; ohne gefüllte Trades ist die Trefferquote
+  nicht berechenbar, nicht 0 %. BI damals 384 Prüfungen, maximal 13/20.
+  Diese Ergebnisse gehören zum alten Modellstand, nicht zur Neubewertung vom 04.10.
+  [Historischer Prüfbericht](docs/SCANNER_DEEP_AUDIT_2026-10-02.md),
+  [private Stichproben](output/scanner-deep-audit-20261002/HISTORICAL_SAMPLE_REPORT.md),
+  [private Abdeckungsmatrix](output/scanner-deep-audit-20261002/SCANNER_COVERAGE_MATRIX.md).
+  Am 05.10. nur Dokumentationsstatus übernommen, keine Studien neu nachgerechnet.
+- [x] Produktdateien im geprüften Paket haben aktuell kein neues uncommittiertes WIP.
+  Git-Index leer. Bestehendes Dokumentations-/Deploy-/Test-WIP bleibt erhalten,
+  insbesondere die lokale Löschung von `deploy/safe_deploy.sh` sowie das
+  nicht getrackte Verzeichnis `output/` mit privaten Nachweisen.
+  Nicht mit `git add -A`, Restore/Reset oder Aufräumen überschreiben/veröffentlichen.
+
+### Offen – in dieser Reihenfolge fortsetzen
+
+- [x] Aktuelle API-Revision und Frontend-Bundlehash nach dieser Übergabe geprüft:
+  05.10., 13:37 UTC, `healthy`, `43180ffea286`, Bundle `67924e9f894a`.
+  Der Betreiberpull ist damit live bestätigt; Details im aktuellen Abschnitt oben.
+  API: `http://178.104.69.209:8000/api/health`; Port 3000 liefert das Frontend.
+  `f46413c` enthält bereits die Code-Reparatur; `43180ff` ergänzt nur die TODO.
+  Nicht allein wegen dieses Dokumentationscommits erneut Dienste neu starten.
+  Kein automatischer Pull, Scanstart, Testmail oder Installationsumbau.
+- [ ] Nach bestätigtem Codeupdate einen neuen BI-Backtest mit echten Daten prüfen:
+  3 Monate, 200 Aktien, Mindestpreis 5, Mindestvolumen 200.000.
+  Abdeckung, 17/20-Kandidaten, Ablehnungsgründe, Pläne, Einstiege und offene
+  Folgefenster getrennt auswerten. Alte Ergebnisse werden nicht neu umetikettiert.
+  Der gespeicherte Null-Lauf vom 03.10., 21:47:24 enthielt keine Diagnosen;
+  seine konkrete Ursache lässt sich nachträglich daraus nicht ableiten.
+- [ ] Mailkette live bis zur echten zulässigen Signal-Mail und zum persönlichen
+  Empfang nachweisen: Scannerabschluss → Freigabe → Versandversuch → SMTP-Annahme
+  → Postfach. Technische Testmail kam laut Nutzer an; neue Signalzustellung offen.
+  Die 50 ausgelassenen Krypto-Entscheidungen ohne SMTP-Annahme/Versandfehler am
+  04.10. sind nur ein begrenztes, zeitgebundenes Diagnosefenster. Sonntagsstatus,
+  Montag-Zeitplan und damalige Anmeldung nicht ungeprüft als aktuell übernehmen.
+  Fehlende Freigaben nicht durch pauschales Lockern der Kriterien umgehen.
+- [ ] Wochenkohorte/Tracker-Ergebnisse anhand belegter Zustellungen und Kurswege
+  erneut prüfen. Vorhandene historische Stichproben nicht als ungemacht behandeln,
+  aber auch nicht als Quote des neuen Pakets ausgeben. Der alte Trackerexport
+  endet am 26.09.; Herkunfts-/Tickerlücken und alter Algorithmus begrenzen ihn.
+  Vollständige historische Scannerinputs und Netto-Ergebnisse bleiben offen;
+  Richtung nach 5 Sitzungen/24 Stunden ist keine Netto-PnL. Offline-/UI-Tests
+  schließen diese Lücken nicht. Ältere offene Grenzen unten beachten.
+- [ ] Originalkerzen für die exakte VIAV-/AST-Chart- und Levelprüfung beschaffen
+  beziehungsweise auswerten; die älteren Screenshots ersetzen diese Daten nicht.
+
+### Sichere Weiterarbeit und Grenzen dieser Übergabe
+
+- Primärer Reparaturbericht:
+  [BI-Backtester und Mail-Recovery](docs/BI_BACKTEST_MAIL_RECOVERY_2026-10-04.md).
+  Bei weiteren Tests `scripts/run_offline_tests.py` mit isoliertem Zustand nutzen;
+  API/BG nicht direkt mit produktiver `.env` oder echtem SMTP importieren.
+- BPIQ/Catalyst: das vom Nutzer gemeldete Aboende bei der Diagnose berücksichtigen;
+  einen Provider-401 nicht mit einem App-Login- oder SMTP-Fehler gleichsetzen.
+- Private Exporte unter `output/profitability/hetzner-evidence-*.json` sowie
+  private QA-Artefakte nicht auf GitHub hochladen. Keine Passwörter übernehmen.
+- Diese Bearbeitung vom 05.10. ändert nur `TODO.md`. Neue Übergabe noch nicht
+  committet/gepusht; kein Server-, Scan-, Mail-, Datenbank- oder Einstellungszugriff.
+  Die oben genannten Commits und Tests gehören zum abgeschlossenen Reparaturpaket.
 
 ## 04.10.2026 – Aktueller Abschluss: BI-Backtester und Mail-Reservierungen
 
@@ -126,6 +613,57 @@ Revision `cabb5b17ee41`, Bundle `17410b75a42c`.
 Server unverändert; keine Einstellungen, Zugangsdaten oder Produktionsdaten geändert.
 Bestehendes Dokumentations-/Deploy-/Test-WIP bleibt erhalten.
 Prüfbericht: [BI-Backtester und Mail-Recovery](docs/BI_BACKTEST_MAIL_RECOVERY_2026-10-04.md).
+
+## Arbeitsregel – TODO nach jedem Arbeitsabschluss aktualisieren
+
+Auf ausdrücklichen Nutzerwunsch vom 04.10.2026 diese Aufgabenliste am Ende
+jeder Bearbeitung aktualisieren, auch bei Unterbrechung oder offenem Zugang.
+Erledigt, nur geprüft, noch offen, committet/gepusht und auf dem Server
+bestätigt getrennt festhalten; Tests, Nachweise und nächsten Schritt nennen.
+Offene Aufgaben nicht allein aufgrund grüner Tests als erledigt markieren.
+
+## 04.10.2026 – Historische Ausgangsprüfung der BI-Nullanzeige (oben ersetzt)
+
+Prüfung vom 03.10.2026 zum Screenshot: BI Long, 3 Monate, 200 ausgewählte
+Aktien, Mindestpreis 5 und Mindestvolumen 200.000; Anzeige 0 Signale/0 Trades.
+Aktueller lokaler HEAD: `cabb5b17ee41dc93f40c0a43270ffe71e803b820`.
+
+- [x] Zählerpfad nachgerechnet: `n_tickers` zählt ausgewählte Aktien, nicht
+  erfolgreich ausgewertete Historien. `signals_found` steigt erst nach
+  akzeptiertem Handelsplan; vorherige BI-Kandidaten/Planablehnungen fehlen.
+- [x] Drei isolierte Gegenproben bestanden. 64 kontrolliert als qualifiziert
+  eingespeiste Analysefenster wurden von der echten Planprüfung abgelehnt;
+  Bericht trotzdem 0 Signale/0 No-Fill ohne Ablehnungsgründe. Dies beweist
+  die fehlende Diagnose, nicht 64 echte BI-Signale im Markt oder die Ursache
+  des konkreten gespeicherten Laufs.
+  Private Belege: `output/test_bi_zero_readonly_probe_20261003_e76f.py` und
+  `output/mail-fix-qa-cbd99b6b55c745d7aaa7761a675e2218/results.xml`.
+- [x] Kein pauschaler Rücktest-/4H-Zwang im BI-Long-Modell: echter Plan aus
+  abgeschlossenen Tageskerzen vor Ausbruch akzeptiert, Methode `stop_breakout`.
+  Die Bezeichnung „BI-Retest-Engine“ erklärt diesen Long-Pfad nicht korrekt.
+- [ ] Auswahl-/Datenabdeckung und Ablehnungstrichter implementieren:
+  ausgewählte und tatsächlich auswertbare Aktien, gültige Analysefenster,
+  erkannte 17/20-Setups, Planablehnungen mit Gründen, akzeptierte Pläne und Fills.
+  Fehlende Daten vor Entstehung eines Trades ebenfalls erfassen; 0 Trades
+  ist kein Nachweis vollständiger Daten. 17/20 und Risikoregeln nicht lockern.
+- [ ] Ergebnistext zwischen keinen Setups, Datenlücke und Planablehnungen
+  unterscheiden; kurze Hauptanzeige, Methoden-/Diagnosedetails aufklappbar.
+  BI-Long-Methodenbezeichnung korrigieren und Plan-/Ausführungsherkunft erhalten.
+- [ ] Tatsächlichen gespeicherten Dreimonatslauf anhand seiner Daten und
+  neuen Diagnosen nachvollziehen. Aktuelle Ursachenbehauptung „Markt hatte
+  nichts“ nicht belegt. Letzter direkter Ergebnis-GET lieferte 401; keine
+  angemeldete interne Browsersitzung vorhanden. Kein weiterer Export oder
+  neuer Provider-Backtest wurde gestartet.
+- [ ] Echte neue Signal-Mail und Wochenkohorte bleiben separate offene
+  Betriebsprüfungen; technische Testmail ist angekommen, kein neuer
+  Handelssignal-Posteingang durch diese BI-Prüfung bestätigt.
+
+Letzte historische Live-Health-Prüfung vom 03.10.2026 (Serverzeitstempel
+19:36:34): healthy, Revision `cabb5b17ee41`, Bundle `17410b75a42c`.
+Dieser Stand ersetzt ältere Serverstände unten, ist keine neue Liveprüfung
+vom 04.10. Die letzte BI-Prüfung änderte keinen Produktcode; dieser Anschluss
+ändert ausschließlich TODO-Dokumentation. Keine neue Reparatur, kein Commit,
+Push, Serverupdate, Scanstart oder Mailversand. Bestehendes fremdes WIP erhalten.
 
 ## 03.10.2026 – Wochenreport: Versandkohorte und kausale Bewertung
 
@@ -590,9 +1128,8 @@ maßgeblich für den jetzigen Serverstand ist die neue Health-Prüfung oben.
   0 SMTP-Annahmen, 0 Versandfehler, 0 Warteschlange. Das ist das begrenzte
   Fenster der letzten maximal 50 Ereignisse seit API-Start, höchstens 24 Stunden,
   keine vollständige Versandhistorie.
-- [x] Eigene Einstellungen rein lesend bestätigt: Signal-Mails aktiv,
-  Aktien Swing und Biotech eingeschaltet, Mailmodus **Swing**. Auch die anderen
-  angezeigten Kanäle sind eingeschaltet; Watchlist-Mails bleiben wie bisher aus.
+- [x] Kontokonfiguration rein lesend geprüft; persönliche Kanal-, Mailmodus-
+  und Watchlist-Einstellungen werden in dieser Dokumentation nicht veröffentlicht.
   Keine Kanal-/Modusänderung und kein Eingriff in das abgelaufene BPIQ-Abo.
 - [x] Crash-Mails sind `info`/`bear`, Aktienstrategie-Mails
   `swing_trade`/`stocks_swing`; Crash-Zustellung beweist daher keinen
@@ -747,8 +1284,8 @@ maßgeblich für den jetzigen Serverstand ist die neue Health-Prüfung oben.
   Anbieter abgelaufen. Kein globaler Mail-Schalter; andere Scanner und
   Alpha-Station-Empfängerberechtigungen bleiben davon unabhängig. Keine
   Zugangsdaten, Abos oder Mailpräferenzen geändert.
-- [x] Reale Mail-/Kanalprüfung 30.09.: Signal-Mails AKTIV, alle sieben Kanäle
-  AN, Watchlist-Mails AUS. Schlusskontrolle 18:46 UTC: 16 ausgelassen,
+- [x] Reale Mail-/Kanalprüfung 30.09. ausschließlich lesend; persönliche
+  Präferenzen nicht veröffentlicht. Schlusskontrolle 18:46 UTC: 16 ausgelassen,
   0 SMTP-Annahmen, 0 Versandfehler, leere Warteschlange; begrenztes Fenster
   seit API-Start, kein historischer Gesamt- oder Postfachnachweis.
   Konkrete Momentum-Beispiele: ABCL Score 87, Tagesqualität 73/96 statt 78
@@ -985,8 +1522,8 @@ Scans oder Mailzustellung.
 1. [ ] **Alle Dienste einzeln prüfen.** Revision,
    Bundle und ausgelieferte Frontend-Dateien sind bereits nachgewiesen.
    SSH ohne Passworteingabe wurde abgewiesen. Die angemeldete Browseransicht
-   ist am 30.09. geprüft: Scheduler aktiv, Mailkonfiguration vorhanden,
-   Signal-Mails aktiv, Aktien Swing AN, Mailmodus Swing. Keine Zugangsdaten
+   ist am 30.09. geprüft: Scheduler aktiv, Mailkonfiguration vorhanden.
+   Persönliche Kanal-/Modus-Einstellungen nicht veröffentlicht. Keine Zugangsdaten
    gespeichert und keine Konto-Einstellungen geändert.
 2. [ ] Einen neuen vollständigen Strategie-/Wyckoff-Lauf prüfen; alte
    Cacheversionen dürfen nicht als neu berechnete Ergebnisse gelten.

@@ -3207,13 +3207,13 @@ function SwingPlanNotice({ row = {} }) {
     </div>;
 }
 
-function scannerCandidatePresentation(row = {}) {
+function scannerCandidatePresentation(row = {}, warningLimit = 12) {
     if (!row || typeof row !== 'object' || !['released', 'candidate_warning', 'context'].includes(row.visibility_status)) return null;
     const released = row.visibility_status === 'released' && row.visibility_is_trade_signal === true;
     const context = row.visibility_status === 'context';
     const warnings = (Array.isArray(row.visibility_warnings) ? row.visibility_warnings : []).filter(w => (
         w && typeof w === 'object' && typeof w.code === 'string' && typeof w.label === 'string' && w.label.trim()
-    )).slice(0, 12).map(w => {
+    )).slice(0, warningLimit).map(w => {
         const numeric = key => typeof w[key] === 'number' && Number.isFinite(w[key]) ? w[key] : null;
         const detail = [];
         if (numeric('price') !== null && w.price > 0) detail.push(`Level ${w.price.toLocaleString('de-CH', { maximumFractionDigits: 6 })}`);
@@ -3477,7 +3477,9 @@ function scannerVisibleRowsSummary(rows) {
 
 function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePresentation(row), retest = null) {
     if (!view) return null;
-    const warnings = view.warnings;
+    // Details stay compact, but their display limit must not hide the actual
+    // blocker from the summary. Use the same validated warning projection.
+    const warnings = scannerCandidatePresentation(row, Infinity)?.warnings || view.warnings;
     const codes = new Set(warnings.map(warning => warning.code.toLowerCase()));
     const has = (...values) => values.some(value => codes.has(value));
     const direction = String(row.direction || row.BI_Direction || row.Direction || row.trade_setup?.direction || '').toUpperCase();
@@ -3491,7 +3493,8 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
             ? 'Widerstand' : 'Preiszone';
     const price = barrier ? ` bei ${barrier.price.toLocaleString('de-CH', {maximumFractionDigits: 6})}` : '';
     let message = '';
-    if (has('market_data_invalid', 'display_metadata_invalid', 'scan_data_invalid')) message = 'Kursdaten prüfen';
+    if (has('market_data_invalid', 'display_metadata_invalid', 'scan_data_invalid', 'swing_reference_price_mismatch')) message = 'Kursdaten prüfen';
+    else if (has('swing_daily_reference_invalid_or_stale')) message = 'Scannerstand nicht mehr aktuell';
     else if (has('trigger_not_current', 'stale_5m_candle', 'closed_5m_data_stale')) message = 'Einstiegssignal nicht mehr aktuell';
     else if (has('crossed_resistance_unconfirmed', 'crossed_support_unconfirmed')) message = 'Schlusskursbestätigung fehlt';
     else if (has('breakout_evidence_conflict', 'breakout_failed', 'failed_breakout', 'breakout_invalidated',
@@ -3507,6 +3510,13 @@ function scannerCandidateCompactPresentation(row = {}, view = scannerCandidatePr
     else if (has('trade_rr_below_threshold')) message = 'Zu wenig Platz bis zum Kursziel';
     else if (has('wait_for_trigger')) message = 'Einstiegsbestätigung fehlt';
     else if (has('wait_for_continuation')) message = 'Fortsetzung noch offen';
+    else if (has('momentum_mail_blocked_daily_quality_below_threshold', 'momentum_mail_blocked_breakout_quality_low')) message = 'Tagesqualität reicht nicht aus';
+    else if (has('momentum_mail_blocked_daily_quality_unavailable')) message = 'Tagesqualität nicht verfügbar';
+    else if (has('momentum_mail_blocked_daily_quality_unconfirmed')) message = 'Tagesqualität noch nicht bestätigt';
+    else if (has('momentum_mail_blocked_daily_target_previously_touched')) message = 'Tageshoch bereits nahe am Kursziel';
+    else if (has('momentum_mail_blocked_thin_baseline_liquidity')) message = 'Grundliquidität zu niedrig';
+    else if (has('stock_swing_mail_blocked_low_volatility_budget')) message = 'Schwankungsbreite zu gering';
+    else if (warnings.some(warning => /^(momentum_mail_|stock_swing_(?:short_)?mail_)/.test(warning.code))) message = 'Qualitätsprüfung nicht erfüllt';
     const retestPending = Boolean(retest) || has('breakout_confirmed_retest_pending', 'breakout_confirmed_without_retest', 'wait_for_retest');
     // A pending retest does not prove a breakout by itself. Avoid a second,
     // contradictory "confirmed" headline beside a blocked structural plan.
@@ -7350,6 +7360,8 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
     const [hasLoaded, setHasLoaded] = useState(!!cached);
     const [isScanning, setIsScanning] = useState(false);
     const [error, setError] = useState(null);
+    const [startError, setStartError] = useState(null);
+    const startFailureRef = useRef(null);
     const [notice, setNotice] = useState(null);
     const [blockedStart, setBlockedStart] = useState(null);
     const blockedStartRef = useRef(null);
@@ -7408,6 +7420,14 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         if (!current()) return;
         setIsScanning(value);
         updateScanCache(`${cachePrefix}_scanning`, value);
+    };
+    const failStart = (message, before, intentAt) => {
+        const evidence = before || displayedSnapshotRef.current?.info;
+        startFailureRef.current = {
+            runId: evidence?.scan_run_id || null, cachedAt: evidence?.cached_at || null,
+            lastAttemptAt: evidence?.scan_last_attempt_at || null, intentAt,
+        };
+        setStartError(message);
     };
     const readResults = async (expectedRunId = null, pollContext = null) => {
         if (!current() || !resultsUrl) return null;
@@ -7472,6 +7492,24 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
                 retryable = false;
                 publicReadError = 'Ungueltige Scanner-Antwort. Kein bestaetigter Ergebnisstand.';
                 throw new Error(publicReadError);
+            }
+            const failedStart = startFailureRef.current;
+            if (failedStart && typeof data.scan_run_id === 'string'
+                && /^[a-zA-Z0-9_-]{1,96}$/.test(data.scan_run_id) && data.scan_run_id !== failedStart.runId) {
+                const previousCache = scannerTimestamp(failedStart.cachedAt);
+                const previousEvidence = Math.max(previousCache ?? 0,
+                    scannerTimestamp(failedStart.lastAttemptAt) ?? 0) || failedStart.intentAt;
+                const attempt = scannerTimestamp(data.scan_last_attempt_at);
+                const finalStamp = scannerPollOutcome(data, previousCache === null ? null : failedStart.cachedAt, false) === 'complete'
+                    ? scannerTimestamp(data.cached_at) : null;
+                const now = Date.now();
+                // An unchanged cache, or the already observed run finishing,
+                // cannot confirm a rejected/unacknowledged new start. Only a
+                // different, provably later run supersedes its failure notice.
+                if ((attempt !== null && attempt > previousEvidence && attempt <= now)
+                    || (finalStamp !== null && finalStamp > previousEvidence && finalStamp <= now)) {
+                    startFailureRef.current = null; setStartError(null);
+                }
             }
             readFailureCountRef.current = 0;
             if (expectedRunId && data.scan_run_id && data.scan_run_id !== expectedRunId) {
@@ -7549,7 +7587,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             return data;
         } catch (err) {
             if (!current() || (controller.signal.aborted && !timedOut) || serial !== readSerialRef.current) return null;
-            readFailureRef.current = { retryable, retryAfterMs };
+            readFailureRef.current = { retryable, retryAfterMs, message: publicReadError || scannerPublicFailure() };
             if (retryable) readFailureCountRef.current += 1;
             controlVerifiedRef.current = false;
             activeControlRef.current = null;
@@ -7673,14 +7711,19 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         if (!resultsUrl || !current() || startingRef.current || pollingRef.current) return;
         startingRef.current = true;
         const operation = ++operationRef.current;
+        const intentAt = Date.now();
         clearRecovery(); refreshQueuedRef.current = false;
         blockedStartRef.current = null; setBlockedStart(null);
+        startFailureRef.current = null; setStartError(null);
         setError(null); setNotice(null); scanning(true);
         // Without a successful baseline read, an old cache could look like the
         // result of the new request. Do not launch an untrackable scan.
         const before = await readResults();
         if (!current() || operation !== operationRef.current) return;
-        if (!before) { startingRef.current = false; scanning(false); return; }
+        if (!before) {
+            failStart(readFailureRef.current?.message || scannerPublicFailure(), null, intentAt);
+            startingRef.current = false; scanning(false); return;
+        }
         const controller = new AbortController();
         postAbortRef.current = controller;
         try {
@@ -7691,12 +7734,12 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             startingRef.current = false;
             if (!res.ok) {
                 restoreFinalSnapshot();
-                setError(scannerPublicFailure(res.status, ack, res.headers?.get('Retry-After')));
+                failStart(scannerPublicFailure(res.status, ack, res.headers?.get('Retry-After')), before, intentAt);
                 scanning(false); return;
             }
             if (!ack || !['started', 'already_running', 'busy'].includes(ack.status)) {
                 restoreFinalSnapshot();
-                setError('Scanstart wurde nicht bestaetigt. Kein neues Ergebnis.'); scanning(false); return;
+                failStart('Scanstart wurde nicht bestaetigt. Kein neues Ergebnis.', before, intentAt); scanning(false); return;
             }
             if (ack.status === 'busy') {
                 // No requested worker exists to follow. In particular, never
@@ -7714,7 +7757,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
             if (!current() || controller.signal.aborted || operation !== operationRef.current) return;
             startingRef.current = false;
             restoreFinalSnapshot();
-            setError('Scanstart nicht bestaetigt. Verbindung unterbrochen; der Server kann den Auftrag dennoch erhalten haben. Status erneut laden.');
+            failStart('Scanstart nicht bestaetigt. Verbindung unterbrochen; der Server kann den Auftrag dennoch erhalten haben. Status erneut laden.', before, intentAt);
             scanning(false);
         }
     };
@@ -7773,6 +7816,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
         operationRef.current += 1;
         startingRef.current = false;
         blockedStartRef.current = null; setBlockedStart(null);
+        startFailureRef.current = null; setStartError(null);
         controlVerifiedRef.current = false;
         controlRequestRef.current = null;
         setControlPending(null); setControlNotice(null); setControlError(null);
@@ -7816,7 +7860,7 @@ function useScannerFeed({ scopeKey, resultsUrl, startUrl, startBody, cachePrefix
     return { results: sameScope ? snapshot.items : [], info: sameScope ? snapshot.info : null,
         diagnostics: sameScope ? snapshot.info?.diagnostics || null : null,
         loading: !sameScope || loading, hasLoaded: sameScope && hasLoaded,
-        isScanning: sameScope && isScanning, error: sameScope ? error : null,
+        isScanning: sameScope && isScanning, error: sameScope ? startError || error : null,
         notice: sameScope ? notice : null, blockedStart: sameScope ? blockedStart : null, start, refresh, setControl,
         control: sameScope ? activeControlRef.current : null,
         schedule: sameScope && controlEnabled ? snapshot.info?.scan_schedule || schedulerState?.schedule || null : null,

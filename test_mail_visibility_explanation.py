@@ -70,17 +70,24 @@ def test_momentum_breakdown_is_separate_from_mail_score_and_retest():
     assert run(f"scannerMomentumQualityPresentation({json.dumps({'momentum_quality': quality})})") is None
 
 
-def test_quality_rejection_is_visible_but_does_not_rewrite_scanner_release(monkeypatch):
+def test_existing_stock_quality_rejection_blocks_app_release_without_mutating_producer(monkeypatch):
     def classify(_scanner, _row, _now, *, cache_only=False, display_only=False):
         assert cache_only is True and display_only is True
         return {"score": 94, "grade": "S", "suppression_reasons": [], "alertable_now": True}
     monkeypatch.setattr(api, "_classify_alert_candidate", classify)
     monkeypatch.setattr(api, "_stock_strategy_mail_quality_state", lambda *_a, **_k:
                         (False, "momentum_mail_blocked_daily_quality_below_threshold"))
-    state = api._scanner_result_trade_state("stock_strategy", {"ticker": "QA", "score": 94})
-    assert state["alertable_now"] is True
+    row = {"ticker": "QA", "score": 94}
+    before = deepcopy(row)
+    state = api._scanner_result_trade_state("stock_strategy", row)
+    # The former assertion preserved a green App release while the same
+    # cached stock-quality rule rejected its mail precheck. Both selection
+    # views now share the rule; no sender/delivery permission is invented.
+    assert state["alertable_now"] is False
+    assert "momentum_mail_blocked_daily_quality_below_threshold" in state["display_reasons"]
     assert state["mail_check"]["status"] == "blocked"
     assert state["mail_check"]["reasons"][0]["code"] == "momentum_mail_blocked_daily_quality_below_threshold"
+    assert row == before
 
 
 @pytest.mark.parametrize("count", [0, 2])
