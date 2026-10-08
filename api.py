@@ -867,7 +867,9 @@ STRATEGY_SCAN_CACHE = "/tmp/strategy_scan_cache.json"  # Fallback / generisch
 # Wyckoff recovery and confirmation causality changed; old rows must be rescanned.
 # Native profiles now require genuine contributing bars for their price range.
 # Prior profiles may have been distorted by invalid or zero-volume records.
-STOCK_STRATEGY_CACHE_VERSION = 20
+# Directional reclaim verification now retains opposing-role barriers; older
+# cached plans may have skipped them and must be rebuilt, not reauthorised.
+STOCK_STRATEGY_CACHE_VERSION = 21
 
 def _strategy_cache_path(strategy_name: str, market_type: str = "stocks") -> str:
     """Separate Cache-Datei pro Strategie — verhindert gegenseitiges Überschreiben."""
@@ -19385,7 +19387,7 @@ def _build_structured_trade_setup(
         for zone in structure_snapshot.zones:
             crossed = ((side == "LONG" and "resistance" in zone.origin_roles and entry > zone.upper)
                        or (side == "SHORT" and "support" in zone.origin_roles and entry < zone.lower))
-            if not crossed or zone.break_state == "reclaimed":
+            if not crossed:
                 continue
             raw_proof = zone.break_reclaim_evidence.to_dict() if zone.break_reclaim_evidence is not None else None
             barrier = {"zone_id": zone.zone_id, "zone_low": zone.lower, "zone_high": zone.upper,
@@ -19396,14 +19398,17 @@ def _build_structured_trade_setup(
                 barrier["reclaim_history"] = zone.reclaim_history.to_dict()
             proof = _confirmed_trade_break_evidence(
                 {"price": entry, "scan_price_observed_at": structure_snapshot.as_of.isoformat()}, barrier)
-            if zone.break_state != "break_confirmed" or not proof or proof.get("state") != "BREAK_CONFIRMED":
+            expected_state = {"reclaimed": "RECLAIMED", "break_confirmed": "BREAK_CONFIRMED"}.get(zone.break_state)
+            if (not expected_state or not proof or proof.get("state") != expected_state
+                    or _crypto_market_timestamp_seconds(proof.get("as_of")) != structure_snapshot.as_of.timestamp()):
                 if isinstance(diagnostics, dict):
                     diagnostics["barrier"] = {
                         **barrier, "price": zone.upper if side == "LONG" else zone.lower,
                         "timeframe": "/".join(sorted({e.timeframe for e in zone.evidence})),
                     }
                 return _unavailable("crossed_resistance_unconfirmed" if side == "LONG" else "crossed_support_unconfirmed")
-            breakout_warnings.append(proof)
+            if expected_state == "BREAK_CONFIRMED":
+                breakout_warnings.append(proof)
         try:
             directional_structure = classify_for_trade(
                 structure_snapshot,

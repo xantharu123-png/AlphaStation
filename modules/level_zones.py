@@ -1471,10 +1471,51 @@ def classify_for_trade(
         opposing_pool = overlapping + supports
         invalidation = resistances
         distance = lambda zone: max(0.0, price - zone.upper)
+
+    def reclaimed_in_trade_direction(zone: LevelZone) -> bool:
+        # A SHORT support break makes the zone overhead resistance for LONG,
+        # not a cleared LONG obstacle (and symmetrically for a LONG break).
+        # A legacy state label without its bound directional certificate must
+        # also retain the barrier rather than silently authorise its removal.
+        proof = zone.break_reclaim_evidence
+        bound = bool(
+            zone.break_state == "reclaimed"
+            and isinstance(proof, BreakReclaimEvidence)
+            and proof.state == "RECLAIMED"
+            and proof.direction == side
+            and proof.zone_id == zone.zone_id
+            and proof.boundary == (zone.upper if side == "LONG" else zone.lower)
+            and proof.as_of == snapshot.as_of
+            and type(proof.retest_required) is bool
+            and type(proof.retest_observed) is bool
+        )
+        if not bound:
+            return False
+        seconds = _timeframe_seconds(proof.timeframe)
+        expected_history = zone.reclaim_history if proof.zone_confirmed_at < zone.confirmed_at else None
+        return bool(
+            proof.zone_confirmed_at == _reclaim_confirmation_at(zone, side)
+            and proof.reclaim_history == expected_history
+            and proof.break_closed_at is not None
+            and proof.last_completed_at is not None
+            and proof.last_completed_close is not None
+            and proof.zone_confirmed_at < proof.break_closed_at <= proof.last_completed_at <= proof.as_of
+            and zone.confirmed_at <= proof.last_completed_at
+            and seconds is not None
+            and (proof.as_of - proof.last_completed_at).total_seconds() <= seconds * 2 + 2
+            and proof.completed_bars_used >= proof.hold_bars_observed + 1
+            and proof.hold_bars_observed >= proof.hold_bars_required >= 0
+            and (not proof.retest_required or proof.retest_observed)
+            and (proof.last_completed_close > proof.boundary if side == "LONG"
+                 else proof.last_completed_close < proof.boundary)
+            and (snapshot.current_price > proof.boundary if side == "LONG"
+                 else snapshot.current_price < proof.boundary)
+        )
+
     opposing = tuple(sorted(
         (
             zone for zone in opposing_pool
-            if not zone.projection_only and zone.break_state != "reclaimed"
+            if not zone.projection_only and not reclaimed_in_trade_direction(zone)
             and not _is_session_reference_only_zone(zone)
         ),
         key=lambda zone: (distance(zone), -zone.strength, zone.zone_id),
