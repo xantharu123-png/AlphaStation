@@ -23476,14 +23476,16 @@ def _stock_attempt_datetime(value: Any, *, server_time: bool = False) -> Optiona
         return None
 
 
-def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
+def _read_stock_strategy_attempt(strategy_name: str, *, sweep: bool = False) -> Dict[str, Any]:
     """Bounded read-only diagnostic projection, never a live-worker assertion."""
-    if strategy_name not in _STOCK_ATTEMPT_READ_STRATEGIES:
+    if not sweep and strategy_name not in _STOCK_ATTEMPT_READ_STRATEGIES:
         return {"available": False, "reason": "not_supported"}
     import stat
-    slug = _STOCK_ATTEMPT_STRATEGIES[strategy_name]
+    slug = "stock_strategy_sweep" if sweep else _STOCK_ATTEMPT_STRATEGIES[strategy_name]
+    kind = "stock_strategy_sweep" if sweep else "stock_strategy"
     root = os.environ.get("ALPHA_RUNTIME_TMP_DIR") or ("/tmp" if os.name == "posix" else tempfile.gettempdir())
-    path = Path(root) / f"stock_strategy_{slug}_attempt.json"
+    filename = "stock_strategy_sweep_attempt.json" if sweep else f"stock_strategy_{slug}_attempt.json"
+    path = Path(root) / filename
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_size > _STOCK_ATTEMPT_READ_MAX_BYTES:
@@ -23514,7 +23516,7 @@ def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
             raise ValueError("invalid_constant")
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
         if (not isinstance(payload, dict) or type(payload.get("schema_version")) is not int
-                or payload["schema_version"] != 1 or payload.get("attempt_kind") != "stock_strategy"
+                or payload["schema_version"] != 1 or payload.get("attempt_kind") != kind
                 or payload.get("strategy_slug") != slug or payload.get("results") != []
                 or not isinstance(payload.get("run_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", payload["run_id"])
                 or not isinstance(payload.get("code_revision"), str)
@@ -23537,7 +23539,7 @@ def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
             raise ValueError("invalid_attempt_error")
         elif status == "running" and error not in (None, ""):
             raise ValueError("invalid_attempt_running")
-        projected = _stock_strategy_attempt_diagnostics(diagnostics, sweep=False)
+        projected = _stock_strategy_attempt_diagnostics(diagnostics, sweep=sweep)
         if status != "complete":
             projected.update(coverage="incomplete", final_results=None)
         return {"available": True, "status": status, "strategy_slug": slug,
@@ -23551,12 +23553,21 @@ def _read_stock_strategy_attempt(strategy_name: str) -> Dict[str, Any]:
         return {"available": False, "reason": "invalid"}
 
 
+def _stock_strategy_public_attempt(attempt: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only validated reader metadata and its reviewed mail counters."""
+    public = {key: value for key, value in attempt.items() if key != "diagnostics"}
+    audit = attempt.get("diagnostics", {}).get("mail_audit")
+    if isinstance(audit, dict):
+        public["mail_audit"] = audit
+    return public
+
+
 def _stock_strategy_result_attempt(strategy_name: str, scan_state: Dict[str, Any], cached_at: Any,
                                    *, cache_complete: bool) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Overlay newer diagnostic evidence without changing scheduler ownership."""
     state = dict(scan_state)
     attempt = _read_stock_strategy_attempt(strategy_name)
-    public = {key: value for key, value in attempt.items() if key != "diagnostics"}
+    public = _stock_strategy_public_attempt(attempt)
     cache_time = _stock_attempt_datetime(cached_at, server_time=True)
     cache_complete = bool(cache_complete and cache_time is not None and cache_time <= datetime.now(timezone.utc))
     manual_time = _stock_attempt_datetime(state.get("last_attempt_at"), server_time=True)
@@ -30500,8 +30511,32 @@ def _admin_mail_delivery_status() -> Dict[str, Any]:
         "no_active_short_signals": "Keine bestaetigten Krypto-Short-Signale",
         "daily_dump_watch_dedupe_active": "Krypto-Watch-Hinweis heute bereits verarbeitet",
         "time_sensitive_entry_mail": "Einstiegssignal wird nicht zeitversetzt nachgesendet",
+        "no_candidates": "Keine Kandidaten fuer diesen Mail-Lauf",
+        "final_snapshot_unavailable": "Abschliessender Kursdatenstand fehlt",
+        "final_snapshot_access_denied": "Kursdatenanbieter verweigert den abschliessenden Zugriff",
+        "final_snapshot_fetch_failed": "Abschliessender Kursdatenabruf fehlgeschlagen",
+        "final_snapshot_rate_limited": "Abruflimit beim abschliessenden Kursdatenabruf erreicht",
+        "final_snapshot_http_error": "Kursdatenanbieter meldet Fehler beim abschliessenden Abruf",
+        "final_snapshot_payload_invalid": "Abschliessende Kursdatenantwort ungueltig",
+        "final_snapshot_other": "Abschliessender Kursdatenabruf nicht verfuegbar; technische Ursache offen",
+        "final_quote_stale": "Abschliessender Kurs ist nicht mehr frisch",
+        "final_quote_stale_after_path": "Abschliessender Kurs nach Kurswegpruefung nicht mehr frisch",
+        "final_quote_stale_at_return": "Abschliessender Kurs beim Abschluss nicht mehr frisch",
+        "dedupe_claim_not_owned": "Versandreservierung nicht verfuegbar; Doppelschutz blockiert",
+        "tracker_delivery_intent_not_sendable": "Tracking-Versandauftrag nicht zum Versand freigegeben",
+        "tracker_delivery_intent_missing": "Tracking-Versandauftrag fehlt oder konnte nicht vorbereitet werden",
+        "tracker_delivery_intent_attempted_unknown": "Versandversuch zuvor begonnen; Ausgang nicht bestaetigt",
+        "tracker_delivery_intent_accepted_pending": "Mailserver-Annahme bereits gespeichert; Tracking-Aktivierung noch offen",
+        "tracker_delivery_intent_active": "Tracking-Versandauftrag bereits aktiv; kein erneuter Versand",
+        "tracker_delivery_intent_incomplete_or_inconsistent": "Tracking-Versandauftrag unvollstaendig oder widerspruechlich",
+        "tracker_delivery_intent_not_prepared": "Tracking-Versandauftrag nicht vorbereitet",
+        "all_strategy_rows_claimed_by_parallel_sender": "Keine Strategie-Kandidaten fuer diesen Versand reserviert",
         "unclassified_code_reason": "Versandgrund noch nicht zugeordnet",
     }
+    # Preserve every known safe identifier, even where no custom prose exists.
+    # Labels contain only trusted registry values, never raw journal text.
+    for code in sorted(ALLOWED_SUPPRESSION_REASONS):
+        reviewed.setdefault(code, f"Technischer Pruefgrund: {code}")
     decisions = []
     now = datetime.now(timezone.utc)
     window_seconds = 24 * 3600
@@ -30580,6 +30615,16 @@ def get_email_alert_audit(authorization: Optional[str] = Header(None)):
             scanners[name] = {"scanner": name, "error": "audit_unavailable", "cache_file": os.path.basename(path)}
 
     delivery = _admin_mail_delivery_status()
+    delivery["stock_sweep"] = _stock_strategy_public_attempt(_read_stock_strategy_attempt("", sweep=True))
+    # These are individual persisted attempts, not a summed history or proof
+    # of worker liveness. The existing bounded reader strips private fields.
+    delivery["stock_attempts"] = []
+    for strategy_name in sorted(_STOCK_ATTEMPT_READ_STRATEGIES):
+        attempt = _read_stock_strategy_attempt(strategy_name)
+        if attempt.get("available"):
+            delivery["stock_attempts"].append({
+                "strategy": strategy_name, **_stock_strategy_public_attempt(attempt),
+            })
     return {
         "status": "ok",
         "summary": _summarize_email_alert_audit(scanners),

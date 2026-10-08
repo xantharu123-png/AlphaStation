@@ -14501,6 +14501,40 @@ function ChartAnalyseTab({ onSelectTicker, scanCache = {}, updateScanCache = () 
 }
 
 // ── Admin Tab ──
+function stockMailAuditCounts(attempt) {
+    const keys = ['candidates','sender','accepted','partial','partialUnknown','failed','unknown','queued'];
+    const empty = Object.fromEntries(keys.map(key => [key,null]));
+    const audit = attempt?.mail_audit;
+    if (audit?.schema_version !== 1) return empty;
+    const count = value => Number.isSafeInteger(value) && value >= 0 && value <= 1e9 ? value : null;
+    const events = audit.transport_events || {};
+    return {candidates:count(audit.candidate_rows), sender:count(events.trade_sender_called),
+        accepted:count(events.trade_accepted), partial:count(events.trade_partial),
+        partialUnknown:count(events.trade_partial_unknown), failed:count(events.trade_failed),
+        unknown:count(events.trade_unknown), queued:count(events.trade_queued)};
+}
+
+function CompletedStockMailAudit({attempts,sweep}) {
+    const rows = [...(sweep?.available === true ? [{...sweep,strategy:'Aktien Auto-Sweep'}] : []),
+        ...(Array.isArray(attempts) ? attempts : [])];
+    const statuses = {complete:'Abgeschlossen',error:'Fehler',running:'Unabgeschlossen'};
+    return <details style={{background:'var(--card-bg)',border:'1px solid var(--border-color)',borderRadius:12,padding:20,marginBottom:16}}>
+        <summary style={{cursor:'pointer',fontWeight:600}}>Letzte Aktien-Mailprüfung</summary>
+        <p style={{fontSize:12,color:'var(--text-muted)'}}>Automatischer Sammellauf und fünf Einzelstrategien; andere Scanner nicht erfasst. Je letzter gespeicherter Versuch, keine Historie. Werte nicht addieren. SMTP-Annahme ist kein Postfacheingang.</p>
+        {rows.length === 0 ? <span style={{fontSize:12,color:'var(--text-muted)'}}>Keine gespeicherte Mailprüfung verfügbar.</span> :
+            <div style={{overflowX:'auto'}}><table style={{width:'100%',minWidth:920,fontSize:12}}><thead><tr>
+                <th>Scanner</th><th>Stand</th><th>Versuch</th><th>Kandidaten</th><th>Senderaufrufe</th><th>SMTP-Annahme</th><th>Teilannahme</th><th>Teilannahme unklar</th><th>Versandfehler</th><th>Annahme unklar</th><th>Warteschlange</th>
+            </tr></thead><tbody>{rows.map(attempt => {
+                const counts = stockMailAuditCounts(attempt);
+                return <tr key={attempt.attempt_run_id + attempt.strategy} data-run-id={attempt.attempt_run_id}>
+                    <td>{attempt.strategy}</td><td style={{whiteSpace:'nowrap'}}><time dateTime={attempt.updated_at}>{attempt.updated_at ? new Date(attempt.updated_at).toLocaleString('de-CH') : '—'}</time></td>
+                    <td>{statuses[attempt.status] || 'Unbekannt'}</td>
+                    {Object.values(counts).map((value,i) => <td key={i}>{value ?? '—'}</td>)}
+                </tr>;
+            })}</tbody></table></div>}
+    </details>;
+}
+
 function AdminTab() {
     const [activePanel, setActivePanel] = useState('users');
     const [users, setUsers] = useState([]);
@@ -14906,6 +14940,7 @@ function AdminTab() {
                                     {mailAudit.delivery.recent_decisions.map((event,i) => <tr key={i}><td style={{whiteSpace:'nowrap'}}>{event.timestamp ? new Date(event.timestamp).toLocaleString('de-CH') : '—'}</td><td>{mailEventNames[event.status] || 'Weitere Entscheidung'}</td><td>{(event.reasons || []).map(reason => reason.label).join(' · ') || '—'}</td></tr>)}
                                 </tbody></table></div>}
                         </div>
+                        <CompletedStockMailAudit attempts={mailAudit.delivery.stock_attempts} sweep={mailAudit.delivery.stock_sweep} />
                         <details style={cardStyle}>
                             <summary style={{cursor:'pointer',fontWeight:600}}>Scanner-Vorprüfung</summary>
                             <div style={{fontSize:12,color:'var(--text-muted)',margin:'12px 0'}}>Gespeicherte Setups, keine Versand- oder Zustellfreigabe.</div>
