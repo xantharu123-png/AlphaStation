@@ -1,5 +1,171 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 08.10.2026 – Diagnose-Reparatur gepusht; Installation/Signalnachweis offen
+
+**Aktuelle Übergabe:** [Signal-Mails / Accountwechsel](docs/HANDOFF_SIGNAL_MAIL_2026-10-08.md).
+Dieser Abschnitt ersetzt den früheren Einstieg unten. Produktcommit
+**`43ea4aa80a9a5ac34d066787f5ee3f7ddba90d86`** wurde nach ausdrücklicher
+Freigabe committet und auf `origin/main` gepusht; Remote-SHA abgeglichen.
+**Hetzner wurde hier nicht aktualisiert.** Die frühere Liveprüfung bestätigte
+`b7415f1cd71f` / `ba7e64a7b792`, nicht das neue Diagnosepaket.
+
+- [x] Bekannte sichere Versandgründe in der Adminansicht erhalten: zusätzliche
+  geprüfte Texte für Kursabruf-/Tracker-/Reservierungsgründe; übrige bekannte
+  IDs erhalten einen festen technischen Text mit ihrer sicheren ID. Nicht alle
+  bekannten IDs sind individuell ins Deutsche übersetzt. Unbekannte Rohtexte,
+  Adressen, Subjects, Authentifizierungsdetails und Provider-URLs bleiben verborgen.
+  Keine globalen Freigabe-, Sender-, SMTP- oder Schwellenregeln geändert.
+- [x] Validierte persistierte `mail_audit`-Zähler der fünf unterstützten
+  Einzelstrategien unter `diagnostics.latest_attempt` erhalten. Admin liest
+  zusätzlich den **automatischen Aktien-Sammellauf**, dessen Blattläufe bewusst
+  `send_email=False` verwenden. Blatt- und Sammellauf bleiben getrennt, mit
+  eigenem Zeitpunkt/Run-ID; keine Summierung oder erfundene Workeraktivität.
+- [x] Admin → Mailversand → **Letzte Aktien-Mailprüfung** ist standardmäßig
+  eingeklappt; keine neuen Diagnoseblöcke in der normalen Aktienliste.
+  Kandidaten, Senderaufrufe, SMTP-Annahme, Teilannahme/unklare Teilannahme,
+  Fehler, unklare Annahme und Warteschlange getrennt. Fehlende Evidenz = `—`,
+  nicht 0; SMTP-Annahme ist kein Postfacheingang. BI/Bear/ORB/Crypto sind von
+  dieser zusätzlichen persistierten Aktien-Versuchsansicht nicht abgedeckt.
+- [x] RED/GREEN und **724 gezielte Offline-Tests bestanden**. Einschließlich
+  aller erlaubten Grund-IDs, Privatsphärengrenzen, strikter Dateiprojektion,
+  realem Sammellauf-/Senderguard-/Publikations-/Leser-Roundtrip ohne SMTP und
+  kompiliertem JSX. XML:
+  `output/mail-fix-qa-6c2fa8c3054342a3a3626549624c07ed/results.xml`.
+- [x] Lokale vollständige App mit kontrollierten GET-Fixtures im internen
+  Browser geprüft: Adminnavigation, eingeklappte Ansicht, Sammellauf und
+  Einzelversuche, Desktop sowie 390×844 mobil; kein horizontaler Seitenüberlauf,
+  Tabelle separat scrollbar. Keine Konsolenfehler; bestehende Tailwind-Runtime-
+  Warnung weiterhin vorhanden. Kein Produktionsscan, Mailversand oder Login-
+  /Kontoeingriff. Viewport zurückgesetzt. Bundleprüfung: `8f8a6c0c5bae`.
+- [x] Unabhängige lesende Diffprüfung: keine belegte Privacy-/GET-Schreib- oder
+  Versandvertragsregression. Ungefilterter Gesamtlauf dieses Checkouts:
+  **11.699 bestanden, 97 fehlgeschlagen, 6 übersprungen**; Fehler ausschließlich
+  in den vier vorhandenen Deploy-Testdateien (Windows-/Retirement-Verträge),
+  kein vollständig grüner Repositorylauf. XML:
+  `output/mail-fix-qa-cdcaba96bf8d4fa79dbc5316412cf8ce/results.xml`.
+- [x] Frischer breiter Produkt-Nachlauf der finalen Diagnose:
+  **12.070 bestanden, 2 übersprungen, 0 Fehler/Errors**; nur
+  `test_deploy_auto_update.py`, `test_deploy_migration.py`,
+  `test_deploy_retirement.py`, `test_deploy_security_reaudit.py` ausdrücklich
+  ausgenommen. XML:
+  `output/mail-fix-qa-59f86c89f6dc4b2c851e43bb7f074673/results.xml`.
+  Die 97 Fehler des ungefilterten früheren Gesamtlaufs werden dadurch nicht
+  als repariert behauptet. Eigener QA-Server/-Tab geschlossen; Nutzer-Tab erhalten.
+- [x] Veröffentlichung ausdrücklich freigegeben und produktseitig abgeschlossen:
+  genau sechs Produkt-/Testdateien, keine privaten Exporte oder fremden Änderungen.
+  Frischer Testlauf aus dem tatsächlichen Git-Index-Snapshot:
+  **12.074 bestanden, 2 übersprungen, 0 Fehler/Errors**, dieselben vier Deploy-
+  Testdateien ausdrücklich ausgenommen; Kalender-/Commerce-/Deploy-Dateien in
+  unveränderter HEAD-Version. Getesteter und committeter Tree:
+  `9cbd25710cb2b38c61ae58db306171dece6a14eb`.
+  XML: `output/release-verification-20261008-mail-diagnostics-ffc5c6f0aab2/qa-5f49ff7ebbc0/results.xml`.
+  Unabhängige Veröffentlichungsprüfung: keine belegten Code-/Datenschutzblocker
+  und keine Abhängigkeit vom ausgeschlossenen WIP. Bundle `8f8a6c0c5bae` bestätigt.
+  TODO und Übergabe begleiten den Produktcommit als separater Dokumentationsstand.
+- [ ] Operatorinstallation nach Ende laufender Scans mit normalem `git pull
+  --ff-only origin main`, anschließend API/BG-Neustart und `/api/health` prüfen.
+  Kein Deployskript, Installationswechsel, automatischer Scan oder Testmail.
+  Vererbtes Deploy-/Installations-WIP unverändert erhalten; kein `git add -A`,
+  Restore des gelöschten Deployskripts oder Server-Eigentumsumbau.
+- [ ] Danach passenden aktuellen Lauf bis Freigabe → finale Prüfung → Sender
+  → SMTP → **echte Signal-Mail im Postfach** nachweisen. Diese Reparatur erklärt
+  bisher fehlende Diagnosen, repariert/beweist nicht selbst die wochenlange
+  fehlende Signalzustellung. Keine neue Testmail oder Regelaufweichung auf Verdacht.
+- [ ] Reale BI-Dreimonats-/Wochenreport-Kohorten und Originalkerzen-Levelchecks
+  bleiben eigene offene Nachweise; nicht aufgrund dieser Diagnose als erledigt markieren.
+
+## 08.10.2026 – Früherer Einstieg für den nächsten Account (historisch)
+
+**Zuerst lesen:** [Aktuelle Account-Übergabe](docs/HANDOFF_SIGNAL_MAIL_2026-10-08.md).
+Dieser Einstieg und der folgende Livebefund ersetzen ältere Pull-/Restart-
+Aufträge und Aussagen „noch nicht auf Hetzner“ für das veröffentlichte Paket.
+Ältere Abschnitte bleiben als historische Prüfprotokolle erhalten; ihre offenen
+Checkboxen nicht ohne zeitlich passende Evidenz als heutige Fehler übernehmen.
+
+- [x] Übergabe vorbereitet: bestätigter Serverstand, genaue Diagnose-Lücken,
+  Quell-/Test-Einstiege, offene Backtest-/Tracker-/Levelnachweise und geschütztes
+  vererbtes WIP dokumentiert. Kein neuer Chat/Account-/Serverzugriff veranlasst.
+- [x] **Priorität 1, in der späteren Reparaturrunde lokal abgeschlossen:** bekannte sichere Ablehnungsgründe erhalten
+  und die bereits gespeicherte abgeschlossene Mailprüfung sicher sichtbar machen.
+  Stand und Grenzen oben; nicht alle technischen IDs individuell übersetzt.
+  Mit Fehlerreproduktionen abgesichert; Sender-/SMTP-Regeln unverändert.
+- [ ] **Priorität 2:** danach aktuellen passenden Lauf bis Sender, SMTP-Annahme
+  und tatsächlichem Postfacheingang nachweisen. Technische Testmail ist kein
+  Signalnachweis; neue Testmail, Mailpräferenzen oder Versandplan nicht automatisch ändern.
+- [ ] **Priorität 3:** realen BI-Dreimonatslauf, belegte Wochenkohorte sowie
+  fehlende Originalkerzen für VIAV/AST/LSPD getrennt abschließen. Vorhandene
+  historische Studien berücksichtigen; keine unbelegte Trefferquote berechnen.
+- [x] Diese Übergaberunde ändert nur `TODO.md` und die neue Übergabedatei;
+  **lokal, nicht committet/gepusht**. Keine neue Programmcode-, Scan-, Mail-,
+  Datenbank-, Konfigurations- oder Serveränderung. Kein neuer Testlauf gestartet.
+
+## 08.10.2026 – Erneut keine Signal-Mails: aktuelle Liveprüfung offen
+
+- [x] Nach Nutzeranmeldung direkt in der App und über den öffentlichen
+  `/api/health` geprüft: Hetzner tatsächlich `healthy`, Revision
+  **`b7415f1cd71f`**, Bundle **`ba7e64a7b792`**. Fehlendes Deployment ist für
+  diesen Befund ausgeschlossen; kein weiterer Pull oder Neustart erforderlich.
+- [x] Admin-Mailversand, Stand **08.10. 07:35:11** (Browseranzeige): 1 Swing-
+  und 1 Crypto-Empfänger; SMTP-Annahmen 0, ausgelassen 5, Versandfehler 0,
+  Warteschlange 0. Beschränktes Prozess-/24h-Fenster, keine Tages-/Wochenbilanz.
+  Sichtbare Aktienentscheidung 07:30:06 nennt Tagesqualität unter 78,
+  Referenz-Tageshoch an/nahe TP1 und dünne 20T-Grundliquidität. Gründe können
+  verschiedene Kandidaten betreffen. Crypto meldet fehlende Freigabe/BTC-Kontext.
+- [x] Momentaner Momentum-Cache: 13 Kandidaten, 0 vorgeprüfte Signal-Mails.
+  RELL live einzeln gelesen: Trade-Score 95, Setup-Score 92, Tagesqualität 86/96
+  bei Minimum 78; Mailgrund `momentum_mail_blocked_thin_baseline_liquidity`.
+  Offener Rücktest ist eine separate Warnung, nicht dieser Sperrgrund. Codefloor
+  2 Mio. USD Median-Dollarvolumen20; konkrete Live-Medianzahl/Originalhistorie
+  nicht in der UI vorhanden, deshalb keine fachliche Einzelvalidierung behaupten.
+- [x] Zwei unabhängige Quellprüfungen: keine neue SMTP-/Senderregression belegt;
+  0,5%-Tageshoch-/TP1-Regel und native Gegenbarriere sind bestehende Verträge,
+  nicht derselbe Fehler wie frühere Eigenkerzen-Barrieren. Kein neuer Rechen-
+  reproduzierer. Ein eigener enger Offline-Test hing vor pytest-Ausgabe und
+  wurde beendet; keine Testbestätigung daraus und keine Produktänderung.
+- [x] Belegte Diagnose-Lücke später lokal repariert; damaliger Admin zeigt 07:32:12
+  `Versandgrund noch nicht zugeordnet`. Bekannte `no_candidates`, einige
+  `final_*`-/Tracker-/Doppelschutzgründe fehlen in der sicheren Übersetzung;
+  aus dem UI-Eintrag lässt sich sein konkreter Rohgrund nicht rekonstruieren.
+  Vorhandene Admin-Systemlogs sind leer und lesen eine Datei, während die
+  ausgelieferten Dienste ins Journal schreiben. Das beweist keinen Versandfehler.
+- [x] Abgeschlossene Mailprüfung später lokal sicher sichtbar gemacht: persistierte Blatt-
+  und Sweep-Versuche enthalten `mail_audit`, aber die normale Ergebnis-API
+  entfernt `latest_attempt.diagnostics`; Scheduler-RAM liefert vollständige
+  abgeschlossene Mailprüfungen nicht zuverlässig. Frühere Annahme eines
+  vollständigen langlebigen API-Zugangs war falsch und ist hier korrigiert.
+  Nur überprüfte Codes/Zähler ausgeben, keine Rohtexte, Adressen oder Geheimnisse.
+  Reparatur-/Teststand oben; ursprünglicher Liveeintrag nicht rückwirkend rekonstruiert.
+- [ ] Nach dieser Diagnosereparatur echte Freigabe → letzte Prüfung → Sender
+  → SMTP → Postfach belegen. Aktueller begrenzter Befund erklärt Vorab-
+  Ablehnungen, nicht abschließend die gesamte wochenlange Versandgeschichte.
+
+- [x] Aktuellen Checkout und Veröffentlichung abgeglichen: `b7415f1` enthält
+  die Dokumentation zu `8d119ad`; das separate Deploy-/Installations-WIP bleibt
+  unverändert. Die veröffentlichte Reparatur vereinheitlicht die App-/Mail-
+  Vorprüfung, ist aber kein Nachweis tatsächlicher Signalzustellung.
+- [x] Interner Browser aktuell abgemeldet vorgefunden. Alpha-Station-Login
+  geöffnet und Nutzer um Anmeldung gebeten; kein erneuter Export oder Testmail.
+  Bestehender SSH-Zugang mit BatchMode/StrictHostKeyChecking rein lesend geprüft:
+  Server lehnt ihn mit `Permission denied (publickey,password)` ab. Keine
+  Zugangsdaten gelesen, keine Server-/Kontoeinstellung geändert.
+- [x] Unabhängige lesende Quellprüfung grenzt die benötigten Livebelege ein:
+  Admin `/api/email-alert-audit` für Empfänger und Versandentscheidungen;
+  `/api/scan-results` für den gespeicherten letzten Versuch
+  (`diagnostics.latest_attempt`: `attempt_run_id`, `code_revision`, Status,
+  jedoch ohne dessen vollständige Diagnose; siehe Korrektur oben). Ein sicher
+  verfügbarer `mail_audit` unterscheidet Ablehnung vor dem Sender von
+  `trade_sender_called` und tatsächlichem Transportausgang. Admin-Maximum
+  50/24h seit Prozessstart nicht als Wochenstatistik ausgeben; Warteschlange 0
+  schließt einen fehlgeschlagenen direkten Signalversand nicht aus.
+- [x] Nach Anmeldung aktuelle Serverrevision und sichtbaren Aktien-/Versandstand
+  geprüft; fehlende vollständige finale Diagnosen bleiben oben offen. Alten
+  Livebefund vom 06.10. nicht als heutige Ursache dargestellt.
+- [ ] Konkreten neu belegten Fehler gegebenenfalls reproduzieren und beheben;
+  keine weiteren spekulativen Filter-/SMTP-Änderungen. Echter regulärer
+  Signalversand und Postfacheingang bleiben offen.
+- [x] In dieser Nachfrage nur Diagnose und lokale TODO-Fortschreibung; kein
+  Programmcode geändert, kein Commit/Push, kein Pull/Neustart/Scan/Mailversand.
+
 ## 07.10.2026, 07:56 Zürich – Geprüfte Reparaturen veröffentlicht
 
 - [x] Nutzer hat Commit und Push ausdrücklich freigegeben („machen“).
@@ -27,9 +193,12 @@
 - [x] Nach Veröffentlichung TODO und Berichte auf den tatsächlichen Stand
   fortgeschrieben; abschließender Dokumentationscommit enthält keine Runtime-
   oder Teständerung. Private Exporte und separates WIP weiter unversioniert/lokal.
-- [ ] Anschließend Betreiber-Pull und Serverrevision bestätigen; tatsächliche
-  reguläre Signalzustellung bleibt gesonderte Liveprüfung. Frühere technische
-  Testmail nicht erneut verwenden oder als Signalzustellung ausgeben.
+- [x] Serverrevision und Bundle am 08.10. live bestätigt: `healthy`,
+  `b7415f1cd71f` / `ba7e64a7b792`. Damit ist das veröffentlichte API-Paket
+  aktiv; konkreter Betreiber-Pull/-Restart und beide Dienste wurden nicht einzeln
+  beobachtet. Kein erneuter Pull/Restart wegen dieser Dokumentationsübergabe.
+- [ ] Tatsächliche reguläre Signalzustellung bleibt gesonderte Liveprüfung.
+  Frühere technische Testmail nicht erneut verwenden oder als Signalzustellung ausgeben.
 
 ## 06.10.2026, 21:30 Zürich – Gemeinsame App-/Mailvorprüfung geprüft (lokal)
 
