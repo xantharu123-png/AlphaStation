@@ -1,5 +1,192 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 08.10.2026, 14:59 Zürich – Momentum-Belege ausgewertet, Richtungsfix gepusht
+
+Dieser Abschnitt ist der neue Arbeitsstand; der 13:49-Stand darunter ist historisch.
+
+- [x] Eng begrenzter Operatorcheck abgeschlossen; **keinen weiteren Export anfordern**.
+  Private Datei `output/profitability/momentum-candidate-evidence-20261008T123541Z.json`
+  lokal gelesen: alle vier Kandidaten vorhanden, Finalcache Version 20 / 13 Zeilen.
+  Cache-SHA256 `d89c928118181c208a8f51c6b61898e9d745f083d12395eee5b9686d3de0365d`.
+  Referenzschluss **07.10.2026, 20:00 UTC**. Naive Cachezeit nicht als UTC oder
+  als Identitätsnachweis des früheren 13:02-Laufs interpretieren.
+- [x] RELL: beide gespeicherten 20T-Median-Dollarvolumen-Aliase stimmen überein:
+  **1.771.748,0399167603 USD**, also **228.251,96 USD / 11,41 % unter 2 Mio.**.
+  `History_OK=true`; Hoch 20,30 liegt unter TP1-Toleranz 20,6164; Tagesqualität
+  86/96 besteht. Rücktest blockiert nicht. Scannergrenze 750.000 prüft dagegen
+  aktuellen/projizierten Sitzungsumsatz, **nicht** historischen Median.
+  Mailregel seit `99c644ce` (22.07.), Zweck: ein einzelner hoher RVOL-Tag ersetzt
+  keine normale Liquidität. Gerade 2 Mio. ist nicht empirisch kalibriert belegt.
+- [x] UVE: Entry 45,25 liegt in historischer Resistance-Zone
+  **44,96803437823321–45,265858067507324**, sechs ältere Swings 1D/1W/4H,
+  letzte Bestätigung 18.09.; TP1 45,27 = **0,03R**. TP2 ausdrücklich Projektion.
+- [x] NECB: Entry 27,33 liegt in Resistance-Zone
+  **27,28886463346936–27,501135366530644**, vier ältere Swings 1D/4H,
+  letzte Bestätigung 24.09.; TP1 27,50 = **0,41R**. Median 948.137,095038355 USD
+  zusätzlich unter Mailgrenze. Kein eigener Signaltageshoch-Beleg als Blocker.
+- [x] GKOS: finale VRVP-HVN-Zone **168,585–172,42416666666668**, Entry 172,18
+  innerhalb; TP1 172,42 = **0,05R**. Profilzeit ist letzte abgeschlossene Profilkerze,
+  nicht erstmalige Entstehung des Knotens. Alle **767 nativen Belege** von
+  UVE/NECB/GKOS liegen vor Signal-Close; keine zukünftige Pivotbestätigung gefunden.
+- [ ] Originale OHLCV/Profile-Beiträge fehlen in diesem Export: gespeicherten Median
+  und Pivot-/VRVP-Entstehung nicht als vollständig unabhängig neu berechnet ausgeben.
+- [x] **Konkreter zusätzlicher Richtungsfehler reproduziert:** GKOS-Zone
+  `lz_5161012c0e0e8531` (172,55401398522704–174,22851097901938) trägt einen
+  bestätigten SHORT-Bruch, wurde aber pauschal auch aus LONG-Gegenbarrieren entfernt.
+  Synthetische Long/Short-Gegenprüfungen vor Fix: **12 Fehler / 4 bestanden**,
+  XML `output/directional-reclaim-red-20261008.xml`.
+- [x] Richtungsfix in `modules/level_zones.py` und `api.py` abgeschlossen:
+  aktive, geometrisch/zeitlich gebundene Bestätigung statt globalem `reclaimed`-Skip;
+  Handelsplan prüft auch RECLAIMED-Zertifikate. Cacheversion **20 → 21**, damit
+  alte Pläne nicht ungeprüft weiter freigegeben werden. Unabhängige Schlussprüfung
+  ohne verbliebenen konkreten Blocker; gemischte frühere Richtungsanker, strikte
+  Retest-Booleanflags und exakt gleicher Snapshot-Cutoff zusätzlich abgesichert.
+  Dieser Fehler begünstigte übersehene
+  Hindernisse, er repariert **nicht** die konkret belegten Ablehnungen oben.
+- [x] Exaktes Sechs-Dateien-Paket aus dem Git-Index separat geprüft:
+  **598 bestanden / 1 Windows-Symlink-Skip / 0 Fehler**, eine bekannte AnyIO-Warnung.
+  XML `output/release-verification-20261008-directional-10a9cf971199/qa-4eb5a9bf98bc/results.xml`.
+  Produkttree **`c2a3a86feb84b25ec92c47b7cbcd6afd55f81aea`** ist unverändert identisch
+  mit dem Commit; Frontend-Bundle unverändert korrekt **`8f8a6c0c5bae`**.
+  Kein neuer Gesamttest aller Scanner, kein neuer Provider- oder SMTP-Nachweis.
+  Frühere Anschluss-QA 268 bestanden/2 neue Test-Assertionfehler (optionales
+  `warning_codes`-Feld nicht vorhanden), XML
+  `output/mail-fix-qa-65e4a69b609242d28ca29f55c4e40c9c/results.xml` erhalten.
+  Assertion korrigiert, weitere echte Binding-Randfälle mit Regressionen ergänzt.
+- [x] Produktcommit **`c26aa4898f44e0af0891532f1d5ac1b1c279e2c0`** erstellt/gepusht;
+  `origin/main` anschließend exakt per `git ls-remote` bestätigt. Nur zwei
+  Produktdateien, vier Diagnosereader-/Testdateien im Paket. Private Exporte,
+  vererbtes Deploy-/Calendar-/Commerce-/Handbuch-WIP nicht veröffentlicht.
+- [ ] **Server noch nicht aktualisiert.** Nach Abschluss laufender Scans normal
+  `pull --ff-only` und API/BG-Neustart durch Operator; kein Deploy-Skript und
+  keine Installation ändern. Cache 20 wird nach Update nicht weiter freigegeben;
+  neue vollständige Strategiepläne müssen mit Version 21 berechnet werden.
+- [ ] **Reguläre Signalzustellung bleibt offen.** Keinen weiteren technischen
+  Testversand und keine stillen Schwellen-/Abo-/Kontoeingriffe vornehmen.
+  Neue echte SMTP-/Postfach-Freigabe nur anhand eines tatsächlich geeigneten
+  vollständigen aktuellen Laufs nachweisen. Biotech-Zugang bleibt separat abgelaufen.
+
+## Historisch: 08.10.2026, 13:49 Zürich – echte Versand- und BI-Prüfung
+
+Dieser Abschnitt ersetzt den 12:45-Einstieg als Arbeitsstand. Keine neue
+Regelaufweichung, Testmail, Installation oder Wiederholung eines Live-Aktienscans.
+
+- [x] Live-Health **13:18:43 Zürich**: healthy, **`8c682f4102b3`**,
+  Frontend **`8f8a6c0c5bae`**. Die vorige Produktreparatur ist installiert.
+- [x] Angemeldeten Nutzer-Tab verwendet. Admin → Mailversand **13:18:31**:
+  **SMTP 0 / ausgelassen 5 / Versandfehler 0 / Queue 0**, je ein Swing- und
+  Krypto-Empfänger. Aktien-Sammellauf **13:02:26 abgeschlossen, 13 Kandidaten**;
+  Cup-Blattlauf 13:02:24 abgeschlossen. Das ist ein neuer vollständiger Lauf
+  nach dem Update, aber weiterhin kein belegter regulärer Mailversuch.
+- [x] RELL einzeln geprüft: Referenzschluss 07.10., Preis 20, Tagesqualität
+  **86/96**, Trade-Score **91**, Setup-Score 92. Konkrete Mailablehnung:
+  **`momentum_mail_blocked_thin_baseline_liquidity`**. Der fehlende Rücktest
+  ist hier keine harte Sperre. Rohwert des historischen 20T-Median-Dollarvolumens
+  fehlt in der App; weder aktuelle RVOL noch AvgVol ersetzen ihn.
+- [x] UVE einzeln geprüft: Preis 45,25; native Gegenbarriere **45,27** aus
+  bestätigten Swings 1D/1W/4H, Zone überlappt Entry, WAIT_BREAK_RECLAIM.
+  TP1 45,27 = 0,03R, TP2 46,92 = 2,46R-Projektion. Diese Herkunft ist nicht
+  automatisch das eigene Tageshoch. Original-Zonengeometrie/-Belege fehlen im UI.
+  Gleichzeitige Zusammenfassungsgründe können verschiedene Kandidaten betreffen.
+- [ ] **Reguläre Signal-Mail weiterhin offen.** Originale eingefrorene RELL-
+  Liquiditäts- und UVE/NECB/GKOS-Zonenbelege lesen, dann Ablehnung mit demselben
+  Zeitstand gegenrechnen. Bei nachgewiesenem Fehler gezielt reparieren; nicht
+  auf Basis eines später geladenen Charts die Freigabe erzwingen.
+- [x] **Realer BI-Long-Backtest gestartet und abgeschlossen, 13:29:58:**
+  3 Monate / 200 / Mindestpreis 5 / Mindestvolumen 200.000. Ergebnis gespeichert
+  und über „Gespeicherte Auswertung laden“ erneut identisch angezeigt. Danach
+  Aktien-Ansicht geöffnet und Tools → Backtest erneut geöffnet: Ergebnis
+  **automatisch** mit Datum 13:29:58 und identischem NWSA-Trade geladen.
+  190 Aktien mit auswertbaren Fenstern; 9.549 BI-Prüfungen, 9.548 abgelehnt,
+  0 nicht berechenbar, **1 BI-Setup / 1 Plan / 1 Einstieg**, 0 No-Fill/offene
+  Verläufe. **NWSA 21.08.–03.09., +3,03 %, +1,12R, TP1+EOD, Grade B**.
+  Kein live verschicktes Signal und keine Broker-Ausführung.
+- [x] BI-Funnel rechnerisch abgeglichen:
+  11.950 Fenster = 9 laufend belegt + 95 ungültig/unvollständig +
+  2.295 Preisfilter + 2 Volumenfilter + 9.549 BI-Prüfungen.
+  Tagesabrufe **167/167**, 0 fehlgeschlagen/leer; individuelle Sitzungen
+  **12.101/12.800**, also **699 fehlend**. UI kennzeichnet korrekt PARTIAL.
+- [ ] BI-Abdeckung **nicht** abgeschlossen: tickerweise Fehltermine und historische
+  Instrumentidentität (Umbenennung/Delisting/Handelspause/Providerlücke) fehlen.
+  Erfolgreiche Tagesabrufe garantieren keine einzelne Aktienbeobachtung. Später
+  datenlose vorab ausgewählte Titel nicht löschen: Survivorship Bias. Backtest-
+  Universum verwendet keine vollständige historische Common-Stock-Typprüfung;
+  diese getrennte Live-Paritätsgrenze nicht als fertiges Scanner-Audit ausgeben.
+- [x] Neuer eng begrenzter lesender Momentum-Collector lokal geprüft:
+  `scripts/collect_momentum_candidate_evidence.py` und `.ps1`, nur vier feste
+  Kandidaten, Cache-Hash/Prozessidentität, keine Provider-/Konto-/SMTP-Zugriffe.
+  Ursprüngliche Preis-/Score-/Liquiditätsaliase samt Konflikten erhalten;
+  native und finale VRVP-Geometrie/Levelbeweise, Prozess-/Dateiwechsel geprüft.
+  Lesende unabhängige Schlussprüfung: kein offener konkreter Blocker.
+  Windows-PowerShell-5-Parserproblem mit case-distinct JSON-Aliasen reproduziert
+  und im neuen Wrapper behoben (case-sensitive Dictionary, Originalbytes bleiben).
+  **35 bestanden, 1 Symlink-Test Windows-bedingt übersprungen**. Finale XML:
+  `output/momentum-reader-qa-20261008-1351-r3.xml` (exakter finaler Teststand
+  einschließlich gespeicherter Original-Aliase); erste RED-Evidenz erhalten:
+  `output/momentum-reader-qa-20261008-1346.xml` (33 bestanden, 2 Fehler, 1 Skip;
+  ein Test-Assertionfehler und der reale neue Wrapper-Parserfehler).
+- [ ] **Operatorcheck ausstehend**: einmal lokal in Windows-PowerShell
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Projekt\TradingBot\scripts\collect_momentum_candidate_evidence.ps1"`.
+  Eng begrenzte Rückfrage gestellt, kein weiterer großer Gesamtexport.
+  Danach neue private `output/profitability/momentum-candidate-evidence-*.json`
+  lesen und am Original-Zeitstand gegenrechnen. Kein Serverupdate nötig;
+  originaler Tageskerzenpräfix ist in dieser finalen Cachedatei nicht gespeichert.
+- [x] Frische gezielte Offline-QA: **111 bestanden**, keine Fehler (eine
+  bekannte AnyIO-Rewrite-Warnung), isolierter Launcher ohne externe Provider/SMTP.
+  Momentum-Vertrag/Gates, Native-Plan-Mailintegration, BI-Diagnosefunnel und
+  adversarial Backtest-Gegenprüfungen. XML:
+  `output/mail-fix-qa-e3b9e38f5c1c47bea329317cd8e8295a/results.xml`.
+  Erster Sandbox-Start blieb ohne Ausgabe; nur die zwei exakt identifizierten
+  eigenen Testprozesse beendet. Die erfolgreiche Wiederholung lief mit denselben
+  Testargumenten unbuffered außerhalb der Prozess-Sandbox. Nicht als Produktfehler
+  oder vollständigen neuen Repositorylauf ausgeben.
+- [x] Abschließender lokaler Stand: drei neue Collector-/Wrapper-/Testdateien,
+  TODO und Account-Übergabe aktualisiert; **nicht committet/gepusht**.
+  Sender/Scanner/Frontend nicht geändert, kein neuer Server-Pull oder Testversand.
+  Historischer BI-Lauf hat auf dem Server seine eigene Auswertung gespeichert.
+  Vererbtes Deploy-/Calendar-/Commerce-/Dokumentations-WIP unverändert erhalten;
+  private Exporte/QA-Evidenz nicht veröffentlichen. Reguläre Mailzustellung
+  und vollständige historische Abdeckung bleiben bewusst offen.
+
+## Historischer Einstieg 08.10.2026, 12:45 Zürich – Accountwechsel
+
+**Zuerst lesen:** [Account-Übergabe](docs/HANDOFF_SIGNAL_MAIL_2026-10-08.md).
+Dieser Einstieg ersetzt ältere Aussagen „noch nicht installiert“ und alte
+Pull-Aufträge weiter unten. Die früheren Abschnitte bleiben historische Evidenz.
+
+- [x] Git und Remote frisch abgeglichen: HEAD und `origin/main`
+  **`8c682f4102b38fe30bfb214842f12e7d09203890`**. Produktreparatur
+  **`06d9860d1d7fb590e633d30bea2563229ea9ee1a`**; danach nur drei
+  Dokumentationsdateien geändert, keine weitere Produktänderung.
+- [x] Öffentliche Healthprüfung **08.10.2026, 12:44:59 Zürich**:
+  **healthy, Revision `8c682f4102b3`, Bundle `8f8a6c0c5bae`**.
+  Die Cup-/Mailreparatur ist damit inzwischen auf Hetzner vorhanden.
+  Kein erneuter Pull/Neustart allein für diese Übergabedokumentation nötig;
+  hier keine Produktionsänderung. Einzelne Dienstneustarts nicht separat geprüft.
+- [x] Vorhandene finale QA-XML erneut gelesen: **12.171 bestanden,
+  2 übersprungen, 0 Fehler/Errors**; kein neuer Testlauf.
+  Geprüfter Produkttree **`237fdd8199a628d749a8c380058c4a8595ee5f90`**
+  stimmt mit dem Produktcommit überein. Vier separate Deploy-Testdateien
+  bleiben ausgenommen, vererbtes WIP unverändert.
+- [ ] **Nächster Schritt: reguläre Signal-Mail live nachweisen.** Im vorhandenen
+  angemeldeten App-Tab Admin → Mailversand lesen; einen nach der Installation
+  abgeschlossenen passenden Lauf eindeutig bis finale Prüfung → Sender → SMTP
+  → Postfach verfolgen. Letzte Versandansicht ist noch **11:55:49**, also vor
+  dem jetzt bestätigten Update: SMTP 0 / ausgelassen 8 / Fehler 0 / Queue 0.
+  Keine neue Versandansicht in dieser Dokumentationsrunde gelesen. Technische
+  Testmail kam früher an; kein Nachweis einer regulären Signal-Mail.
+  Keine neue Testmail, Regelaufweichung oder Wiederholung großer Exporte auf Verdacht.
+- [ ] Danach neuer realer **BI-Backtest: 3 Monate / 200 Aktien / Mindestpreis 5 /
+  Mindestvolumen 200.000**; Datenabdeckung, 17/20-Kandidaten, Pläne, Entry/Fill,
+  No-Fill und offene Folgefenster getrennt prüfen. Wochenreport-Zustellkohorten
+  und ursprüngliche VIAV-/AST-/LSPD-Kerzen-/VRVP-Belege bleiben eigene Nachweise.
+  Vorhandene historische Studien berücksichtigen, nicht erneut als ungemacht behandeln.
+- [x] TODO und Anschlussauftrag aktualisiert. **Diese Übergabeänderungen bleiben
+  lokal, noch nicht committet/gepusht.** Keine neuen Programmcode-, Scan-, Mail-,
+  Einstellungs-, Datenbank- oder Serveränderungen; kein Testprozess gestartet.
+  Geschütztes Deploy-/Calendar-/Commerce-/Dokumentations-WIP und private Exporte
+  nicht mitveröffentlichen, löschen oder zurücksetzen.
+
 ## 08.10.2026 – Cup-Plan und Mailpfad: repariert, geprüft und gepusht
 
 Dieser Abschnitt ersetzt ältere Installations-/Cup-Angaben darunter. Historische
@@ -46,11 +233,12 @@ Tests und offene Live-Nachweise werden nicht nachträglich als abgeschlossen umg
   Nur die zwölf scoped Produkt-/Testdateien; vererbtes Deploy-/Calendar-/Commerce-
   und sonstiges Dokumentations-WIP sowie private Exporte bleiben unangetastet.
   TODO, Übergabe und Prüfbericht begleiten das Produkt als separater Doc-Commit.
-- [ ] Danach normaler Operator-Pull/API+BG-Neustart nach Ende aktiver Scans,
-  Healthrevision vergleichen und **reguläre Signal-Mail im Postfach** nachweisen.
-  Hier kein Serverupdate, Scanstart, Kontoeingriff oder zusätzlicher Testversand.
+- [x] Cup-Paket später auf Hetzner vorhanden: Health **12:44:59** bestätigt
+  `8c682f4102b3`; Installation nicht durch diesen Account ausgeführt.
+- [ ] **Reguläre Signal-Mail im Postfach** nachweisen. Hier kein Serverupdate,
+  Scanstart, Kontoeingriff oder zusätzlicher Testversand.
   Admin-Livefenster **11:55:49**: SMTP-Annahmen 0, ausgelassen 8, Fehler 0, Queue 0;
-  die neuen Cup-Änderungen sind noch nicht auf Hetzner installiert.
+  diese Versandzahlen stammen vor dem jetzt bestätigten Cup-Update.
   Separater lesender Sender-/Publisher-Abgleich: `—` in Transportspalten kann aus
   nicht erzeugten Ereignisschlüsseln entstehen; kein belegter Verlust des Sweep-
   Audits. Fehlende Zahlen nicht ohne Ereignisbeleg in 0 umwandeln.
@@ -60,9 +248,11 @@ Tests und offene Live-Nachweise werden nicht nachträglich als abgeschlossen umg
 
 [Aktueller Prüfbericht](docs/CUP_FINAL_PLAN_MAIL_RECOVERY_2026-10-08.md).
 
-## 08.10.2026 – Signal-Mails: Datenabbrüche repariert und gepusht; Livezustellung offen
+## Historische Runde 08.10.2026 – Datenabbrüche repariert und gepusht
 
-Dieser Einstieg ersetzt die Installationsangabe des Diagnosepakets unten.
+Damals ersetzte dieser Einstieg die Installationsangabe des Diagnosepakets unten.
+Der aktuelle Git-/Serverstand und nächste Schritt stehen am Anfang dieser TODO;
+alte Installationsaufträge und Abbruchbefunde hier nicht ungeprüft wiederholen.
 
 - [x] Nutzer-Tab verwendet, keine erneute Anmeldung/Export/Testmail gefordert.
   Live `/api/health`: **`healthy`, `df04ee0813bb`, Bundle `8f8a6c0c5bae`**.
