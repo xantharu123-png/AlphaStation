@@ -1,5 +1,31 @@
 # Account-Übergabe – Signal-Mails, 08.10.2026
 
+## Aktuellere Reparaturrunde: Historienabbrüche vor dem Sender
+
+Dieser Abschnitt ersetzt die frühere Installationsangabe unten. Live ist bereits
+**`df04ee0813bb` / `8f8a6c0c5bae` / healthy**. Das Diagnosepaket wurde installiert.
+Aktueller Cup-Versuch scheitert in der Historienphase (`scan_data_unavailable`),
+nicht in einem belegten SMTP-Aufruf. Sein konkreter Providerfehler ist unbekannt;
+SSH ist ohne interaktive Anmeldung nicht zugänglich.
+
+Danach wurden tatsächliche Turtle-Datenabbrüche sowie fehlende begrenzte
+Wiederholung transienter Strict-History-GETs reproduziert und repariert.
+[Aktueller Prüfbericht und Grenzen](STOCK_HISTORY_MAIL_RECOVERY_2026-10-08.md).
+46 neue Fälle, 414 gezielte bestehende Prüfungen und danach 109 Sender-/History-
+Prüfungen bestanden; diese Mengen überlappen, nicht addieren. Die vier neuen
+StrictFetcher-End-to-End-Fälle verwenden tatsächliche Plan-/Mailguards und
+simuliertes SMTP, kein Nachweis echter Postfachzustellung. Der exakte
+Produkt-Index-Snapshot bestand **12.124 Tests, 2 übersprungen, 0 Fehler/Errors**;
+nur die vier bekannten separaten Deploy-Testdateien ausgenommen.
+Produktcommit **`352ea08b07ca82164eec353b064c85fa4c2133e6`** wurde gepusht und
+`origin/main` per SHA bestätigt. Freigabegrenzen,
+unabhängige Barrieren, Kontoeinstellungen und Server unverändert.
+
+Nächste Schritte/Veröffentlichungsstand immer am aktuellen Anfang von `TODO.md`
+prüfen. Separater Cup-Planmetadaten-Kohärenzfehler bleibt ohne vollständig
+qualifizierten Gegenbeweis offen; Barrieren nicht pauschal löschen. Keine weitere
+Testmail oder wiederholte Exporte auf Verdacht. Vererbtes WIP bleibt geschützt.
+
 ## Einstieg und Auftrag
 
 Workspace: `C:\Projekt\TradingBot`, Windows/PowerShell. Zuerst diesen Bericht

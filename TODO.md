@@ -1,6 +1,62 @@
 # Aktuelle Aufgaben / Übergabe
 
-## 08.10.2026 – Diagnose-Reparatur gepusht; Installation/Signalnachweis offen
+## 08.10.2026 – Signal-Mails: Datenabbrüche repariert und gepusht; Livezustellung offen
+
+Dieser Einstieg ersetzt die Installationsangabe des Diagnosepakets unten.
+
+- [x] Nutzer-Tab verwendet, keine erneute Anmeldung/Export/Testmail gefordert.
+  Live `/api/health`: **`healthy`, `df04ee0813bb`, Bundle `8f8a6c0c5bae`**.
+  Das Diagnosepaket wurde vom Betreiber installiert; hier kein Serverupdate.
+- [x] Aktueller Cup-Versuch: `scan_data_unavailable`, Phase **Historie laden**,
+  4408/12586 geprüft, 576 Providerrequests, 71 Cachehits, noch kein neues Ergebnis.
+  Der zugrundeliegende HTTP-/Transportfehler ist ohne Originaljournal nicht bewiesen.
+  SSH-BatchMode weiterhin abgewiesen; kein Passwort gelesen oder gespeichert.
+- [x] Zwei Turtle-Abbruchfehler reproduziert und repariert: erfolgreiche leere
+  Antwort ohne optionales `results`-Array sowie defekte OHLCV noch nicht verfügbarer
+  Sitzungen konnten einen gültigen abgeschlossenen Tagesplan verhindern. Gemeinsamer
+  strenger 1D-Parser prüft weiterhin Envelope, Count und Zeitfolge für alle Kerzen;
+  benötigte abgeschlossene OHLCV bleiben Pflicht. Zusätzlich bisher akzeptierte
+  doppelte/zukünftige Zeitstempel und widersprüchliche Counts werden zurückgewiesen.
+- [x] Strikter Aktien-Historienabruf wiederholt nur Timeout, ConnectionError und
+  HTTP 500/502/503/504 begrenzt und mit identischer Query/Beobachtungszeit. Maximal
+  drei Versuche pro Abrufoperation, gemeinsames Budget von 20 Zusatzrequests mit
+  bestehenden OHLCV-Wiederholungen; Deadline/Pause/Abbruch/Ratelimiter erhalten.
+  Keine Wiederholung für 401/403/429/TLS/JSON/Schema, keine erfundenen Kerzen und
+  kein Symbol-Ausschluss bei permanentem Transportfehler.
+- [x] RED beobachtet: Turtle **12 fehlgeschlagen, 9 bestanden**; Transport
+  **14 fehlgeschlagen, 11 bestanden**. Danach **46 neue Gegenprüfungen bestanden**.
+  Breiter gezielter Nachlauf: **414 bestanden, 0 Fehler**. Evidenz:
+  `output/mail-fix-qa-3299b9196e1747f49dbd0a12ce9b7d5c/results.xml`.
+- [x] Echte StrictFetcher → Plan → finale Signalprüfung → simuliertes SMTP
+  → dauerhaftes TRADE-Journal-Integration abgeschlossen: **109 bestanden**, vier
+  neue LONG/SHORT × Timeout/503-End-to-End-Fälle. Unabhängige lesende Diffprüfung
+  beider Produktionsänderungen und dieser Senderfälle ohne konkrete Blocker.
+  XML: `output/mail-fix-qa-ccb79c699afa41dbad3955591d791900/results.xml`.
+- [x] Exakter Produkt-Index-Snapshot geprüft: **12.124 bestanden, 2 übersprungen,
+  0 Fehler/Errors**, 439,73s. Nur die vier bekannten separat offenen Deploy-
+  Testdateien ausgenommen, übriges Deploy-/Calendar-/Commerce-WIP in HEAD-Version.
+  Getesteter und committeter Tree `66fa66cbfd1396efae51ae4662f20361f0ff2703`.
+  XML: `output/release-verification-20261008-history-ba1ba993afc1/qa-fc5d4c279ef4/results.xml`.
+- [x] Genau sechs Produkt-/Testdateien committet und gepusht:
+  **`352ea08b07ca82164eec353b064c85fa4c2133e6`**, `origin/main` per SHA abgeglichen.
+  Kein privater Export oder vererbtes WIP enthalten. Frontend unverändert;
+  Bundle `8f8a6c0c5bae` erneut bestätigt. Begleitende Dokumentation folgt separat.
+  [Prüfbericht](docs/STOCK_HISTORY_MAIL_RECOVERY_2026-10-08.md).
+- [ ] Danach Operatorupdate und einen neuen vollständigen automatischen Lauf bis
+  **echter Signal-Mail im Postfach** belegen. Diese Datenreparaturen sind nicht als
+  alleinige Ursache aller fehlenden Mails oder als reale Zustellung nachgewiesen.
+- [ ] Separater bestätigter Cup-Kohärenzfehler: Cup ersetzt Planpreise, lässt aber
+  alte native Entscheidungsfelder bestehen. Zunächst vollständigen finalen Plan
+  gegen unabhängige Zonen reproduzieren; reale Barrieren nicht pauschal löschen
+  oder gemessene Cup-Ziele ohne gültigen Strukturbeleg freigeben.
+
+Nach Ende aktiver Scans normaler Operator-Pull und API/BG-Neustart, kein
+Deployskript/Installationswechsel. Danach Healthrevision mit tatsächlichem
+`origin/main` vergleichen; der Dokumentationscommit nach `352ea08` kann die
+Healthrevision ändern. Ein neuer vollständiger automatischer Lauf bleibt nötig;
+keine weitere technische Testmail oder Regelaufweichung auf Verdacht.
+
+## 08.10.2026 – Diagnose-Reparatur gepusht (historischer Veröffentlichungsstand)
 
 **Aktuelle Übergabe:** [Signal-Mails / Accountwechsel](docs/HANDOFF_SIGNAL_MAIL_2026-10-08.md).
 Dieser Abschnitt ersetzt den früheren Einstieg unten. Produktcommit
