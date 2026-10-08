@@ -25334,8 +25334,7 @@ def _turtle_scan_wrapper() -> None:
                 if resp.status_code != 200:
                     raise ScannerDataError("scan_data_incomplete", data_diagnostics)
                 payload = resp.json()
-                if (_scanner_payload_error(payload) or not isinstance(payload, dict)
-                        or not isinstance(payload.get("results"), list)):
+                if _scanner_payload_error(payload) or not isinstance(payload, dict):
                     raise ScannerDataError("scan_data_incomplete", data_diagnostics)
                 # Match the grouped split-adjusted reference. A missing legacy
                 # response flag stays compatible with the explicit request;
@@ -25345,19 +25344,21 @@ def _turtle_scan_wrapper() -> None:
                         "scan_data_incomplete",
                         dict(data_diagnostics, reason="history_adjustment_incompatible"),
                     )
-                # A corrupted required history is not a legitimate no-pattern
-                # outcome. The causal adapter may still omit valid open bars.
-                for raw in payload["results"]:
-                    if not isinstance(raw, dict):
-                        raise ScannerDataError("scan_data_incomplete", data_diagnostics)
-                    values = {key: stock_swing.number(raw.get(key)) for key in ("o", "h", "l", "c", "v", "t")}
-                    if (any(value is None for value in values.values())
-                            or min(values[key] for key in ("o", "h", "l", "c", "t")) <= 0
-                            or values["v"] < 0 or values["l"] > min(values["o"], values["c"])
-                            or values["h"] < max(values["o"], values["c"])):
-                        raise ScannerDataError("scan_data_incomplete", data_diagnostics)
+                # Validate response/chronology even for excluded sessions, but
+                # only completed, available daily OHLCV can affect this plan.
+                # A positively evidenced empty success excludes this symbol;
+                # it is not an outage of the whole provider or scan.
+                from modules.bi_market_data import BIAggregateDataError, parse_bi_daily_aggregates
+                try:
+                    validated = parse_bi_daily_aggregates(
+                        payload, completed_through=analysis_session, as_of=scan_now,
+                    )
+                except BIAggregateDataError as exc:
+                    raise ScannerDataError(
+                        "scan_data_incomplete", dict(data_diagnostics, reason=exc.reason),
+                    ) from None
                 from modules.stock_bars import completed_polygon_bars
-                bars = completed_polygon_bars(payload["results"], as_of=analysis_close)
+                bars = completed_polygon_bars(validated, as_of=analysis_close)
                 if len(bars) < 22:
                     continue  # 20 prior sessions + one completed signal session + ATR seed
                 if bars[-1]["date"] != analysis_session:

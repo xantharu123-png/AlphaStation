@@ -53,8 +53,11 @@ def fetch_stock_daily_history_strict(ticker, poly_key, *, completed_through=None
     Preserve the chart's 1095-calendar-day / 800-bar window. Empty success is
     an empty history, not a provider outage. Whole-series OHLCV defects get at
     most one identical-query retry (20 across an owning scan/sweep); no bad
-    candle is removed or repaired. Systemic errors and timestamps never qualify
-    for symbol-local isolation. Requests still use the shared rate limiter.
+    candle is removed or repaired. Transient GET transport failures get at most
+    three attempts, sharing that same 20-extra-request budget. Authority, TLS,
+    JSON, schema and timestamp errors are not retried by transport recovery and
+    never qualify for symbol-local isolation. All requests keep the rate limiter,
+    fixed observation window, cancellation points and owning scan deadline.
     """
     from zoneinfo import ZoneInfo
 
@@ -73,17 +76,36 @@ def fetch_stock_daily_history_strict(ticker, poly_key, *, completed_through=None
     def bump(name):
         counters[name] = int(counters.get(name, 0)) + 1
 
+    def request_reply():
+        for attempt in range(3):
+            stock_scan_runtime.checkpoint("history")
+            try:
+                reply = rate_limited_get(url, params=dict(params), timeout=15)
+            except requests.exceptions.SSLError:
+                raise StockHistoryDataError("scan_data_unavailable", "tls_failure") from None
+            except requests.exceptions.Timeout:
+                failure = StockHistoryDataError("scan_data_unavailable", "timeout")
+            except requests.exceptions.ConnectionError:
+                failure = StockHistoryDataError("scan_data_unavailable", "connection_failure")
+            except (requests.exceptions.RequestException, OSError):
+                raise StockHistoryDataError("scan_data_unavailable", "connection_failure") from None
+            else:
+                stock_scan_runtime.checkpoint("history")
+                if reply.status_code not in (500, 502, 503, 504):
+                    return reply
+                failure = StockHistoryDataError("scan_data_unavailable", "http_server_error")
+            if attempt == 2:
+                bump("transport_retry_failed")
+                raise failure from None
+            if int(budget.get("used", 0)) >= 20:
+                bump("transport_retry_budget_exhausted")
+                raise failure from None
+            budget["used"] = int(budget.get("used", 0)) + 1
+            bump("transport_retry_attempts")
+            stock_scan_runtime.budgeted_wait(0.5 * (attempt + 1), sleeper=time.sleep)
+
     def request_payload():
-        stock_scan_runtime.checkpoint("history")
-        try:
-            reply = rate_limited_get(url, params=dict(params), timeout=15)
-        except requests.exceptions.SSLError:
-            raise StockHistoryDataError("scan_data_unavailable", "tls_failure") from None
-        except requests.exceptions.Timeout:
-            raise StockHistoryDataError("scan_data_unavailable", "timeout") from None
-        except (requests.exceptions.RequestException, OSError):
-            raise StockHistoryDataError("scan_data_unavailable", "connection_failure") from None
-        stock_scan_runtime.checkpoint("history")
+        reply = request_reply()
         status = reply.status_code
         if status in (401, 403):
             raise StockHistoryDataError("scan_provider_unauthorized", "http_unauthorized")

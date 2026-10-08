@@ -74,7 +74,7 @@ def test_systemic_errors_keep_reason_and_never_become_local(monkeypatch, status,
         fetch()
     assert (caught.value.code, caught.value.reason, caught.value.symbol_local) == (code, reason, False)
     assert "secret" not in str(caught.value)
-    assert len(calls) == 1
+    assert len(calls) == (3 if status == 500 else 1)
 
 
 @pytest.mark.parametrize("exception,reason", [
@@ -88,7 +88,7 @@ def test_transport_not_isolated_or_retried_as_symbol(monkeypatch, exception, rea
         fetch()
     assert caught.value.reason == reason
     assert not caught.value.symbol_local
-    assert len(calls) == 1
+    assert len(calls) == (1 if reason == "tls_failure" else 3)
 
 
 @pytest.mark.parametrize("changes", [

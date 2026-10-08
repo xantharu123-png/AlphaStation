@@ -15,7 +15,8 @@ import sys
 import pytest
 
 
-def _probe(direction, directory, scenario="barrier", repeat_after_hours=None):
+def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
+           strict_transport_failure=None):
     """Import the application only after isolating state and blocking I/O."""
     from datetime import datetime, timedelta, timezone
     import smtplib
@@ -67,6 +68,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None):
             patch.object(smtplib, "SMTP_SSL", forbidden), \
             patch.object(Path, "exists", no_credentials):
         import api
+        from modules import data_fetchers
         from modules import stock_swing_contract as swing
 
         now = datetime(2026, 9, 18, 0 if repeat_after_hours is not None else 10,
@@ -143,19 +145,54 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None):
                    {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}.items()},
             }]}
 
+        strict_history_calls = []
+        strict_history_observations = []
+        real_strict_fetcher = data_fetchers.fetch_stock_daily_history_strict
+
+        def history_payload():
+            # Individual Polygon daily aggregates and grouped observations
+            # use the same exchange-session date, stamped at midnight NY.
+            # UTC midnight would relabel these bars as the previous session.
+            return {"status": "DELAYED", "adjusted": True,
+                "queryCount": len(history), "resultsCount": len(history),
+                "results": [grouped(row)["results"][0] for row in history]}
+
         def provider(url, **kwargs):
             if "/aggs/grouped/" in url:
                 row = latest if url.endswith("2026-09-17") else previous
                 return type("Response", (), {"status_code": 200,
                     "json": lambda self: grouped(row)})()
+            if strict_transport_failure is not None and "/aggs/ticker/TEST/range/1/day/" in url:
+                strict_history_calls.append({"url": url, "params": dict(kwargs.get("params") or {}),
+                                             "timeout": kwargs.get("timeout")})
+                if len(strict_history_calls) == 1:
+                    if strict_transport_failure == "timeout":
+                        raise data_fetchers.requests.exceptions.Timeout("offline transient request")
+                    if strict_transport_failure == "http503":
+                        return type("Response", (), {"status_code": 503,
+                            "json": lambda self: {"status": "ERROR"}})()
+                    raise AssertionError("Unknown strict-transport fixture")
+                return type("Response", (), {"status_code": 200,
+                    "json": lambda self: history_payload()})()
             return forbidden()
+
+        def daily_history_fixture(*args, **kwargs):
+            if strict_transport_failure is not None:
+                strict_history_observations.append({
+                    "completed_through": kwargs.get("completed_through"),
+                    "as_of": kwargs["as_of"].isoformat() if kwargs.get("as_of") else None,
+                })
+                return real_strict_fetcher(*args, **kwargs)
+            # Keep the historical builder-only probes unchanged; only the
+            # explicit transport scenarios exercise the real strict fetcher.
+            return [{**row, "date": datetime.fromtimestamp(
+                row["time"], timezone.utc).date().isoformat()} for row in history]
 
         with patch.object(api, "datetime", Clock), patch.object(swing, "datetime", Clock), \
                 patch.object(api, "rate_limited_get", provider), \
+                patch.object(data_fetchers, "rate_limited_get", provider), \
                 patch.object(api.req.sessions.Session, "request", forbidden), \
-                patch.object(api, "fetch_stock_daily_history_strict", lambda *a, **k: [
-                    {**row, "date": datetime.fromtimestamp(row["time"], timezone.utc).date().isoformat()}
-                    for row in history]), \
+                patch.object(api, "fetch_stock_daily_history_strict", daily_history_fixture), \
                 patch.object(api, "_fetch_recent_stock_4h_bars", lambda *a, **k: four_hour), \
                 patch.object(api, "_load_common_stock_universe", lambda **k: ({"TEST"}, "fixture")), \
                 patch.object(api, "fetch_business_quality", lambda *a, **k: {}), \
@@ -245,12 +282,15 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None):
                 "final": {key: final[key] for key in ("ok", "reason") if key in final},
                 "source": row.get("Trade_Setup_Source"),
                 "session": row.get("swing_analysis_session"),
+                "swing_reference_close": row.get("swing_reference_close"),
                 "mail_quality_ok": quality_ok, "mail_quality_reason": quality_reason,
                 "validated_fill": (final.get("candidate") or {}).get("fill_evidence_verified"),
                 "validated_price_mode": (final.get("candidate") or {}).get("price_mode"),
                 "smtp_messages": len(smtp_messages), "delivery_outcome": delivery_outcome,
                 "persisted_deliveries": persisted_deliveries,
                 "repeated_attempt": repeated_attempt,
+                "strict_history_calls": strict_history_calls,
+                "strict_history_observations": strict_history_observations,
             }))
 
 
@@ -339,6 +379,44 @@ def test_completed_daily_breakout_does_not_use_own_wick_as_previous_session_barr
     assert actual["persisted_deliveries"] == [["trade", "email", "stocks_swing", "ACTIVE", 0]]
 
 
+@pytest.mark.parametrize("direction,reference_close", [("LONG", 107.5), ("SHORT", 92.5)])
+@pytest.mark.parametrize("failure", ["timeout", "http503"])
+def test_transient_strict_history_recovery_reaches_real_gap_trade_sender(tmp_path, direction, reference_close, failure):
+    """One transient GET must not erase a qualified, fully guarded TRADE mail."""
+    result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), direction,
+                             str(tmp_path), "breakout_close", "", failure],
+                            capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = next(line for line in result.stdout.splitlines() if line.startswith("NATIVE_PLAN_RESULT="))
+    actual = json.loads(line.split("=", 1)[1])
+    calls = actual["strict_history_calls"]
+    assert len(calls) == 2 and calls[0] == calls[1], actual
+    assert calls[0] == {
+        "url": "https://api.polygon.io/v2/aggs/ticker/TEST/range/1/day/2023-09-19/2026-09-18",
+        "params": {"apiKey": "offline-fixture", "adjusted": "true", "sort": "asc", "limit": 50000},
+        "timeout": 15,
+    }
+    assert actual["strict_history_observations"] == [{
+        "completed_through": "2026-09-17", "as_of": "2026-09-18T10:00:00+00:00"}]
+    assert actual["session"] == "2026-09-17"
+    assert actual["swing_reference_close"] == reference_close
+    assert actual["levels"]["valid"] is True
+    assert actual["levels"]["native"] is True
+    assert actual["levels"]["estimated"] is False
+    assert actual["levels"]["direction"] == direction
+    assert actual["levels"]["rr_tp1"] >= 1.6
+    assert actual["structure_status"] == "ACCEPT", actual
+    assert actual["mail_quality_ok"] is True, actual
+    assert actual["suppression_reasons"] == [], actual
+    assert actual["alertable_now"] is True
+    assert actual["final"] == {"ok": True}, actual
+    assert actual["validated_fill"] is False
+    assert actual["validated_price_mode"] == "swing_delayed_close"
+    assert actual["smtp_messages"] == 1, actual
+    assert actual["delivery_outcome"] == "accepted"
+    assert actual["persisted_deliveries"] == [["trade", "email", "stocks_swing", "ACTIVE", 0]]
+
+
 @pytest.mark.parametrize("direction,stop", [("LONG", 95.), ("SHORT", 105.)])
 def test_reference_close_alone_cannot_be_its_own_opposing_barrier(direction, stop):
     """A price label at entry is not independently observed supply or demand."""
@@ -390,4 +468,5 @@ def test_reference_close_beside_actual_session_extreme_stays_blocking(direction)
 
 if __name__ == "__main__":
     _probe(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "barrier",
-           int(sys.argv[4]) if len(sys.argv) > 4 else None)
+           int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None,
+           sys.argv[5] if len(sys.argv) > 5 else None)
