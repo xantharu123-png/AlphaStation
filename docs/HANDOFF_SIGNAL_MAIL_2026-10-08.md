@@ -1,5 +1,34 @@
 # Account-Übergabe – Signal-Mails, 08.10.2026
 
+## Aktuell: Cup-Finalplan und Versandkontext repariert und gepusht
+
+Dieser Abschnitt ersetzt die älteren Installations-/Cup-Angaben unten.
+Health erneut **healthy, `5dbad583d3e9`, Bundle `8f8a6c0c5bae`**. Die vorherige
+History-/Turtle-Reparatur ist vom Betreiber installiert. Neuer Aktien-Sammellauf
+am 08.10. 11:18:55 abgeschlossen, 13 Kandidaten; Cup 11:18:52 abgeschlossen.
+Live-Mailfenster 11:55:49 SMTP 0 / ausgelassen 8 / Fehler 0 / Queue 0. Keine neue Testmail,
+kein Produktionsscan oder Serverupdate hier. Reguläre Signalzustellung offen.
+
+Der separate Cup-Fehler wurde mit echten, gemeinsamen historischen Kerzen
+reproduziert und lokal repariert: finale Preise/Entscheidung/Risiko/Zonen-/
+Herkunftsbelege sind einheitlich; Pattern-Stop bleibt bei VRVP erhalten;
+Measured Targets sind keine Strukturautorität. Derselbe finale Receipt gilt im
+Sender, Revalidator, Watch, Startup/REST und Reminder-Quellreader. Gültige negative
+Kandidaten bleiben Kontext, nicht Handelssignale. Keine Schwellenlockerung.
+
+262 breite gezielte Tests und danach 47 finale Cup-/Cache-/Watch-Tests bestanden
+(überlappende Mengen). Exakter finaler Produkt-Index **12.171 bestanden,
+2 übersprungen, 0 Fehler/Errors**, vier separate Deploy-Testdateien ausgenommen.
+Tree **`237fdd8199a628d749a8c380058c4a8595ee5f90`**; Produktcommit
+**`06d9860d1d7fb590e633d30bea2563229ea9ee1a`** gepusht und Remote-SHA bestätigt.
+Nur zwölf scoped Produkt-/Testdateien; Frontend unverändert. Details:
+[Cup-/Mail-Prüfbericht](CUP_FINAL_PLAN_MAIL_RECOVERY_2026-10-08.md).
+Dieser Bericht, TODO und Prüfnachweis begleiten das Produkt als separater Doc-Commit.
+Aktuelles HEAD/`origin/main` vor Operatorinstallation abgleichen; keine
+nachfolgenden Dokumentations-SHAs als ungeprüfte Codeänderung verwechseln.
+Geschütztes Deploy-/Calendar-/Commerce-/Dokumentations-WIP nicht mitveröffentlichen.
+Keine alten unbekannten Daten als Freigabe-/Postfachevidenz umdeuten.
+
 ## Aktuellere Reparaturrunde: Historienabbrüche vor dem Sender
 
 Dieser Abschnitt ersetzt die frühere Installationsangabe unten. Live ist bereits
@@ -22,8 +51,8 @@ Produktcommit **`352ea08b07ca82164eec353b064c85fa4c2133e6`** wurde gepusht und
 unabhängige Barrieren, Kontoeinstellungen und Server unverändert.
 
 Nächste Schritte/Veröffentlichungsstand immer am aktuellen Anfang von `TODO.md`
-prüfen. Separater Cup-Planmetadaten-Kohärenzfehler bleibt ohne vollständig
-qualifizierten Gegenbeweis offen; Barrieren nicht pauschal löschen. Keine weitere
+prüfen. Separater Cup-Planmetadaten-Kohärenzfehler ist in der neueren Runde oben
+repariert; Barrieren bleiben unverändert. Keine weitere
 Testmail oder wiederholte Exporte auf Verdacht. Vererbtes WIP bleibt geschützt.
 
 ## Einstieg und Auftrag

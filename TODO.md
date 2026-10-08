@@ -1,5 +1,65 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 08.10.2026 – Cup-Plan und Mailpfad: repariert, geprüft und gepusht
+
+Dieser Abschnitt ersetzt ältere Installations-/Cup-Angaben darunter. Historische
+Tests und offene Live-Nachweise werden nicht nachträglich als abgeschlossen umgedeutet.
+
+- [x] Vorherige Historienreparatur ist inzwischen vom Betreiber installiert:
+  `/api/health` erneut **healthy, `5dbad583d3e9`, Bundle `8f8a6c0c5bae`**.
+  Admin → Mailversand: automatischer Aktien-Sammellauf **08.10. 11:18:55
+  abgeschlossen, 13 Kandidaten**; Cup-Blattlauf 11:18:52 abgeschlossen.
+  Damit ist ein neuer vollständiger automatischer Lauf ohne früheren Datenabbruch
+  belegt, nicht die tatsächliche Auswertung jeder einzelnen Aktie oder Zustellung.
+- [x] Cup-Planfehler mit echten 260 abgeschlossenen Tageskerzen reproduziert:
+  alte native Entscheidungen bezogen sich auf andere Entry-/Stop-/Zielpreise.
+  Finalisierung erfolgt jetzt am tatsächlichen Cup-Entry und Handle-Stop mit
+  denselben unveränderten kausalen D/W/4H-Zonen. Gemessene Cup-Tiefenziele bleiben
+  separat markierte Projektionen; kein pauschales Entfernen realer Barrieren.
+- [x] Stop-Invaliderung gegen VRVP-Umschreibung geschützt; erster Widerstand,
+  R-Abstand, Entscheidung, Preis-Aliase und Herkunft neu auf den endgültigen Plan
+  gebunden. Projektion als TP1 führt zu REJECT; konkrete bestehende Ablehnungsgründe
+  bleiben erhalten. TP2-Projektion allein entwertet strukturelles TP1 nicht.
+- [x] Versions-/Kohärenzvertrag vor Sender und beiden finalen Kursprüfungen;
+  alte/widersprüchliche Cup-Pläne werden nicht durch einen hohen Score freigegeben.
+  Stop-Bestätigung = Muster-Schlusszeit, Daten-Cutoff separat; undatierte Muster
+  dürfen keine zeitgestempelte Strukturautorität aus einem fremden Snapshot übernehmen.
+- [x] Durable Cup-Watch-Projektion erhält alle erforderlichen Plan-/Zonenbelege,
+  bleibt begrenzt und nimmt keine beliebigen Zusatzfelder auf. Realer Offline-Pfad
+  Queue → Lease → bestätigte 5m-Kerzen → Promotion → echter Sender → simuliertes
+  SMTP → dauerhaftes TRADE-Journal nachgewiesen; keine neue technische Testmail.
+- [x] Startup/REST/Reminder-Quelle prüfen denselben finalen Cup-Vertrag. Junge
+  inkompatible Caches dürfen keinen Reparaturscan aufschieben oder einen alten
+  Fehler als behoben quittieren. Leere aktuelle Caches und kohärente negative
+  Kandidaten bleiben verwendbar; negative Kandidaten sind keine Mailfreigabe.
+- [x] **262 gezielte Tests bestanden**, danach **47 finale Cup-/Cache-/Watch-Tests
+  bestanden** einschließlich konkreter Fehlergrund-Erhaltung. Mengen überlappen.
+  Letzte XML: `output/mail-fix-qa-94e9d35e38544a019285bd92379e2f76/results.xml`.
+  Unabhängige lesende Schlussprüfung ohne offene konkrete Beanstandung.
+- [x] Exakter endgültiger Produkt-Index: **12.171 bestanden, 2 übersprungen,
+  0 Fehler/Errors**, 454,26s. Tree **`237fdd8199a628d749a8c380058c4a8595ee5f90`**.
+  XML: `output/release-verification-20261008-cup-release-5bb34e78aea4/qa-57fafe9b2612/results.xml`.
+  Die vier separat offenen Deploy-Testdateien ausdrücklich ausgenommen; kein
+  uneingeschränkt grüner Repositorylauf. Übriges vererbtes WIP in HEAD-Version.
+- [x] Produktcommit **`06d9860d1d7fb590e633d30bea2563229ea9ee1a`** gepusht,
+  `origin/main` direkt per SHA bestätigt. Frontend unverändert, Bundle geprüft.
+  Nur die zwölf scoped Produkt-/Testdateien; vererbtes Deploy-/Calendar-/Commerce-
+  und sonstiges Dokumentations-WIP sowie private Exporte bleiben unangetastet.
+  TODO, Übergabe und Prüfbericht begleiten das Produkt als separater Doc-Commit.
+- [ ] Danach normaler Operator-Pull/API+BG-Neustart nach Ende aktiver Scans,
+  Healthrevision vergleichen und **reguläre Signal-Mail im Postfach** nachweisen.
+  Hier kein Serverupdate, Scanstart, Kontoeingriff oder zusätzlicher Testversand.
+  Admin-Livefenster **11:55:49**: SMTP-Annahmen 0, ausgelassen 8, Fehler 0, Queue 0;
+  die neuen Cup-Änderungen sind noch nicht auf Hetzner installiert.
+  Separater lesender Sender-/Publisher-Abgleich: `—` in Transportspalten kann aus
+  nicht erzeugten Ereignisschlüsseln entstehen; kein belegter Verlust des Sweep-
+  Audits. Fehlende Zahlen nicht ohne Ereignisbeleg in 0 umwandeln.
+- [ ] Eigene ältere Nachweise bleiben offen: reale BI-Dreimonats-/Wochenreport-
+  Kohorten und fehlende Originalkerzen-Levelchecks. Nicht durch diese Cup-/Mail-
+  Reparatur als erledigt markieren; keine erfundene Trefferquote.
+
+[Aktueller Prüfbericht](docs/CUP_FINAL_PLAN_MAIL_RECOVERY_2026-10-08.md).
+
 ## 08.10.2026 – Signal-Mails: Datenabbrüche repariert und gepusht; Livezustellung offen
 
 Dieser Einstieg ersetzt die Installationsangabe des Diagnosepakets unten.
@@ -45,10 +105,10 @@ Dieser Einstieg ersetzt die Installationsangabe des Diagnosepakets unten.
 - [ ] Danach Operatorupdate und einen neuen vollständigen automatischen Lauf bis
   **echter Signal-Mail im Postfach** belegen. Diese Datenreparaturen sind nicht als
   alleinige Ursache aller fehlenden Mails oder als reale Zustellung nachgewiesen.
-- [ ] Separater bestätigter Cup-Kohärenzfehler: Cup ersetzt Planpreise, lässt aber
-  alte native Entscheidungsfelder bestehen. Zunächst vollständigen finalen Plan
-  gegen unabhängige Zonen reproduzieren; reale Barrieren nicht pauschal löschen
-  oder gemessene Cup-Ziele ohne gültigen Strukturbeleg freigeben.
+- [x] Separater Cup-Kohärenzfehler inzwischen reproduziert, repariert, geprüft und
+  unter **`06d9860`** gepusht; vollständiger finaler Plan gegen unveränderte kausale
+  Zonen. Siehe aktuellen Anfang und Prüfbericht. Keine pauschale Barrierenlöschung
+  oder Freigabe gemessener Cup-Ziele ohne gültigen Strukturbeleg.
 
 Nach Ende aktiver Scans normaler Operator-Pull und API/BG-Neustart, kein
 Deployskript/Installationswechsel. Danach Healthrevision mit tatsächlichem
