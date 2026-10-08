@@ -301,6 +301,7 @@ def _patch_next_session_dates(monkeypatch):
 
 
 def test_k2c_previous_close_promotes_only_after_fresh_next_session_trigger(monkeypatch):
+    from test_cup_final_plan_coherence import _causal_cup_inputs
     _mock_session(monkeypatch, allowed=True)
     _patch_next_session_dates(monkeypatch)
     monkeypatch.setattr(
@@ -308,11 +309,12 @@ def test_k2c_previous_close_promotes_only_after_fresh_next_session_trigger(monke
         "_fetch_recent_stock_5m_bars",
         lambda *_args, **_kwargs: _next_session_5m_trigger_bars(),
     )
-    bars = _cup_handle_bars(last_bar_date="2026-08-28")
+    candidate, snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
 
     row = api._apply_cup_handle_strategy_filter(
-        _mk_candidate(bars=bars),
+        candidate,
         {"min_dollar_volume": 2_000_000},
+        structure_snapshot=snapshot,
     )
 
     assert row is not None
@@ -587,6 +589,7 @@ def test_k2c_old_actual_trigger_is_not_revived_by_fresh_hold_bar(
 
 
 def test_k2c_next_session_trigger_runs_single_wire_and_tracker_intent(monkeypatch):
+    from test_cup_final_plan_coherence import _causal_cup_inputs
     _mock_mail_env(monkeypatch, allowed=True)
     _patch_next_session_dates(monkeypatch)
     monkeypatch.setattr(
@@ -597,9 +600,11 @@ def test_k2c_next_session_trigger_runs_single_wire_and_tracker_intent(monkeypatc
     monkeypatch.setattr(api, "_regime_mail_decision", lambda *a, **k: None)
     monkeypatch.setattr(api, "_has_open_equivalent_trade_safe", lambda *a, **k: False)
 
+    candidate, snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
     row = api._apply_cup_handle_strategy_filter(
-        _mk_candidate(bars=_cup_handle_bars(last_bar_date="2026-08-28")),
+        candidate,
         {"min_dollar_volume": 2_000_000},
+        structure_snapshot=snapshot,
     )
     assert row is not None
     assert row["entry_status"] == "NEXT_SESSION_TRIGGER_CONFIRMED"
@@ -774,11 +779,10 @@ def test_k2d_persisted_wait_queue_catches_trigger_between_full_sweeps_once(
         "_fetch_recent_stock_5m_bars",
         lambda *_args, **_kwargs: active_5m_bars["value"],
     )
+    from test_cup_final_plan_coherence import _causal_cup_inputs
+    candidate, snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
     wait_row = api._apply_cup_handle_strategy_filter(
-        _mk_candidate(
-            bars=_cup_handle_bars(last_bar_date=confirmation_date)
-        ),
-        {"min_dollar_volume": 2_000_000},
+        candidate, {"min_dollar_volume": 2_000_000}, structure_snapshot=snapshot,
     )
     assert wait_row is not None
     assert wait_row["entry_status"] == "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
@@ -788,12 +792,13 @@ def test_k2d_persisted_wait_queue_catches_trigger_between_full_sweeps_once(
     assert persisted_item["ticker"] == "CUPX"
     assert "_daily_bars" not in persisted_item["row"]
     assert set(persisted_item["row"]) <= (
-        api._CUP_HANDLE_WATCH_ROW_FIELDS | {"trade_setup", "cup_pattern_evidence"}
+        api._CUP_HANDLE_WATCH_ROW_FIELDS | api._CUP_HANDLE_WATCH_PLAN_FIELDS
+        | {"trade_setup", "cup_pattern_evidence", "structure_decision", "nearest_barrier",
+           "overhead_resistance", "break_reclaim", "break_reclaim_evidence",
+           "stop_pattern_evidence", "warning_codes", "level_quality"}
     )
-    assert persisted_item["row"]["cup_pattern_evidence"] == {
-        "version": "cup_geometry_v1", "status": "unavailable", "timeframe": "1D",
-        "reason": "missing_session", "symbol": "CUPX",
-    }
+    assert persisted_item["row"]["cup_pattern_evidence"] == wait_row["cup_pattern_evidence"]
+    assert api._cup_final_plan_contract_reason(persisted_item["row"]) is None
 
     # Monday's fresh trigger arrives without another full strategy sweep.
     session_state.update({

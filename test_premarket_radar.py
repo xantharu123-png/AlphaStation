@@ -227,7 +227,11 @@ def test_premarket_mail_sends_with_own_channel_and_warning(monkeypatch):
     )
 
 
-def test_premarket_mixed_batch_suppresses_cup_watch_per_row(monkeypatch):
+def test_premarket_mixed_batch_suppresses_cup_watch_per_row(monkeypatch, tmp_path):
+    from test_cup_final_plan_coherence import _causal_cup_inputs, _pin_cup_clock
+
+    _pin_cup_clock(monkeypatch, datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(api, "_CUP_HANDLE_WATCH_QUEUE_PATH", tmp_path / "cup_watch.json")
     monkeypatch.setattr(
         api,
         "_stock_trade_email_status",
@@ -266,22 +270,19 @@ def test_premarket_mixed_batch_suppresses_cup_watch_per_row(monkeypatch):
         or {"ok": True, "candidate": dict(row)},
     )
 
-    cup_watch = _pm_row(
-        ticker="CUPX",
-        Ticker="CUPX",
-        Strategy="Cup and Handle Breakout",
-        # Current detector receipt; confirmed shape does not authorize PM entry.
-        cup_pattern_version=api.CUP_PATTERN_CONTRACT_VERSION,
-        pattern_timeframe="1D",
-        cup_rim_level=9.95,
-        cup_confirmation_level=9.95,
-        cup_confirmation_close=10.0,
-        daily_close_confirmed=True,
-        daily_close_confirmation_date="2026-08-28",
-        last_daily_bar_date="2026-08-28",
-        entry_status="DAILY_CLOSE_CONFIRMED_WATCH_ONLY",
-        trade_signal="BEOBACHTEN",
+    # The real producer supplies the morphology receipt and final causal plan;
+    # a genuine confirmed Cup still cannot bypass its PM watch-only state.
+    candidate, snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
+    candidate["Strategy"] = "Cup and Handle Breakout"
+    cup_watch = api._apply_cup_handle_strategy_filter(
+        candidate, {"min_dollar_volume": 2_000_000}, structure_snapshot=snapshot,
     )
+    assert cup_watch is not None
+    assert api._cup_signal_contract_reason(cup_watch) is None
+    assert api._cup_final_plan_contract_reason(cup_watch) is None
+    assert cup_watch["daily_close_confirmation_date"] == "2026-08-28"
+    assert cup_watch["entry_status"] == "DAILY_CLOSE_CONFIRMED_WATCH_ONLY"
+    assert cup_watch["trade_signal"] == "BEOBACHTEN"
     genuine_pm = _pm_row(ticker="AAA", Ticker="AAA")
 
     api._send_strategy_scan_alerts(

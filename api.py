@@ -117,6 +117,8 @@ from modules.stock_symbols import valid_stock_symbol
 from modules.cup_shape import validate_cup_shape
 from modules.cup_signal_contract import (
     CUP_PATTERN_CONTRACT_VERSION,
+    CUP_PLAN_CONTRACT_VERSION,
+    cup_final_plan_contract_reason as _cup_final_plan_contract_reason,
     cup_signal_contract_reason as _cup_signal_contract_reason,
     cup_signal_contract_valid as _cup_signal_contract_valid,
 )
@@ -3033,6 +3035,7 @@ _ALERT_SUPPRESSION_LABELS = {
     "stock_market_closed_before_bear_mail": "Handelssitzung fuer Short-Signal-Mails nicht freigegeben",
     "estimated_trade_plan": "Entry/Stop/TP nur geschaetzt",
     "trade_rr_below_threshold": "R:R unter Mindestwert",
+    "trade_cup_final_plan_not_confirmed": "Cup-Plan veraltet oder widerspruechlich; neuer Scan erforderlich",
     "trade_target_not_structural": "Kursziel nicht durch Struktur bestaetigt",
     "trade_structure_not_confirmed": "Handelsstruktur nicht bestaetigt",
     "trade_breakout_not_confirmed": "Ausbruchs-/Rueckeroberungsbestaetigung fehlt",
@@ -4418,6 +4421,8 @@ def _alert_trade_plan_rejection_reason(
     require_native_levels: bool = True,
 ) -> Optional[str]:
     """Explain the existing plan gate without conflating evidence and R:R."""
+    if _cup_final_plan_contract_reason(row):
+        return "trade_cup_final_plan_not_confirmed"
     setup = row.get("trade_setup") if isinstance(row.get("trade_setup"), dict) else {}
 
     def _final_field(name: str) -> Any:
@@ -6817,6 +6822,7 @@ def _structure_reminder_server_row(ticker: str, scanner: str, direction: str) ->
     if unusable_reason(row):
         raise ValueError("server_scanner_data_invalid")
     if (not _cup_signal_contract_valid(row, strategy_name=canonical if canonical in STRATEGIES else None)
+            or _cup_final_plan_contract_reason(row) is not None
             or not _stock_wyckoff_row_contract_valid(row, expected_strategy=canonical)
             or not _stock_momentum_row_contract_valid(row)):
         raise ValueError("server_scanner_pattern_contract_invalid")
@@ -10109,6 +10115,7 @@ def _alert_decision_from_reasons(scanner_name: str, reasons: List[str]) -> Dict[
         "invalid_trade_plan",
         "bi_plan_not_released",
         "trade_rr_below_threshold",
+        "trade_cup_final_plan_not_confirmed",
         "trade_target_not_structural",
         "trade_structure_not_confirmed",
         "trade_breakout_not_confirmed",
@@ -13518,6 +13525,8 @@ def _revalidate_stock_swing_plan(row, *, now_ts, scanner_name):
     cup_reason = _cup_signal_contract_reason(row)
     if cup_reason:
         return {"ok": False, "reason": cup_reason}
+    if _cup_final_plan_contract_reason(row):
+        return {"ok": False, "reason": "trade_cup_final_plan_not_confirmed"}
     as_of = datetime.fromtimestamp(now_ts, timezone.utc)
     if scanner_name not in _STOCK_SWING_ALERT_SCANNERS or not _scanner_uses_swing_horizon(scanner_name):
         return {"ok": False, "reason": "swing_mode_not_allowed_for_scanner"}
@@ -13581,6 +13590,8 @@ def _revalidate_stock_strategy_mail_candidate(
     cup_reason = _cup_signal_contract_reason(row)
     if cup_reason:
         return {"ok": False, "reason": cup_reason}
+    if _cup_final_plan_contract_reason(row):
+        return {"ok": False, "reason": "trade_cup_final_plan_not_confirmed"}
     if stock_swing.is_swing(row):
         return _revalidate_stock_swing_plan(
             row, now_ts=float(now_ts if now_ts is not None else time.time()), scanner_name=scanner_name,
@@ -14312,6 +14323,8 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             if not isinstance(row, dict):
                 continue
             reason = _cup_signal_contract_reason(row, strategy_name=expected_cup_strategy)
+            if not reason and _cup_final_plan_contract_reason(row):
+                reason = "trade_cup_final_plan_not_confirmed"
             if reason:
                 cup_rejections[reason] = cup_rejections.get(reason, 0) + 1
             else:
@@ -19313,6 +19326,8 @@ def _build_structured_trade_setup(
     structure_snapshot: Optional[StructureSnapshot] = None,
     require_causal_structure: bool = False,
     diagnostics: Optional[Dict[str, Any]] = None,
+    pattern_invalidation_stop: Optional[float] = None,
+    pattern_invalidation_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build realistic sidebar trade levels from invalidation and target structure.
 
@@ -19475,7 +19490,20 @@ def _build_structured_trade_setup(
         rows.sort(key=lambda row: (float(row["room_distance"]), abs(float(row["price"]) - entry)))
         return rows
 
-    if side == "LONG":
+    pattern_stop = _alert_float(pattern_invalidation_stop, None)
+    if pattern_invalidation_stop is not None:
+        if (pattern_stop is None or pattern_stop <= 0
+                or not pattern_invalidation_source
+                or not ((side == "LONG" and pattern_stop < entry)
+                        or (side == "SHORT" and pattern_stop > entry))):
+            return _unavailable("invalid_pattern_invalidation")
+        # Only a detector-confirmed pattern supplies this optional stop. Targets
+        # and first-barrier admission still use the same causal zone snapshot.
+        stop = (min(pattern_stop, entry - min_risk) if side == "LONG"
+                else max(pattern_stop, entry + min_risk))
+        stop_source = pattern_invalidation_source
+        risk = abs(entry - stop)
+    elif side == "LONG":
         stop_candidates: List[tuple[float, str]] = []
         if directional_structure is not None:
             for zone in directional_structure.invalidation_candidates:
@@ -19756,7 +19784,8 @@ def _build_structured_trade_setup(
             if (side == "LONG" and stop < zone.lower < entry)
             or (side == "SHORT" and stop > zone.upper > entry)
         ]
-        selected_zone = min(stop_zones, key=lambda zone: abs(entry - (zone.lower if side == "LONG" else zone.upper)), default=None)
+        selected_zone = (None if pattern_stop is not None else min(
+            stop_zones, key=lambda zone: abs(entry - (zone.lower if side == "LONG" else zone.upper)), default=None))
         target_zones = [("tp1", first_barrier)]
         if not tp2_is_projection and first_barrier is not None and later_barriers:
             target_zones.append(("tp2", later_barriers[0]))
@@ -22180,24 +22209,102 @@ _CUP_HANDLE_WATCH_SETUP_FIELDS = frozenset({
     "direction", "trade_action", "entry_status", "entry", "stop_loss",
     "stop", "tp1", "tp2", "risk_reward", "live_rr", "rr_model", "source",
 })
+_CUP_HANDLE_WATCH_PLAN_FIELDS = frozenset({
+    "cup_plan_version", "structure_status", "structure_reason", "target_quality",
+    "barrier_gate", "barrier_gate_active", "entry_eligible", "room_to_barrier_r",
+    "risk", "rr", "rr_tp1", "rr_tp2", "atr", "model", "level_model",
+    "cup_measured_tp1", "cup_measured_tp2", "breakout_confirmation", "retest_status",
+    "retest_warning",
+}) | frozenset(
+    f"{prefix}_{field}" for prefix in ("stop", "tp1", "tp2")
+    for field in ("source", "source_family", "timeframe", "zone_id", "zone_low",
+                  "zone_high", "confirmed_at", "data_cutoff_at", "independence_key",
+                  "causal_structure_validated", "is_projection")
+)
+_CUP_WATCH_PAYLOAD_FIELDS = {
+    "decision": frozenset({"model", "status", "reason", "direction", "entry", "stop", "risk",
+        "target1", "target2", "barrier_distance", "barrier_r", "barrier_gate",
+        "entry_eligible", "geometry_updated_by"}),
+    "barrier": frozenset({"zone_id", "price", "zone_low", "zone_high", "lower", "upper",
+        "reference", "side", "side_at_reference", "timeframe", "confirmed_at", "as_of",
+        "distance_pct", "distance_r", "reclaim_boundary", "action", "break_state",
+        "overlapping", "below_minimum_reward", "projection_only", "independent_sources",
+        "independent_structural_sources", "touch_count", "strength", "is_near",
+        "source", "source_family", "independence_key", "data_cutoff_at", "causal_structure_validated",
+        "structural", "reclaimed", "breakout_confirmed", "minimum_reward", "minimum_rr",
+        "distance_atr", "entry_inside_zone"}),
+    "level": frozenset({"price", "source", "source_family", "timeframe", "zone_id",
+        "zone_low", "zone_high", "confirmed_at", "data_cutoff_at", "independence_key",
+        "causal_structure_validated", "is_projection"}),
+    "proof": frozenset({"model", "state", "reason", "direction", "zone_id", "boundary",
+        "zone_confirmed_at", "timeframe", "as_of", "break_closed_at", "last_completed_at",
+        "last_completed_close", "hold_bars_required", "hold_bars_observed", "retest_required",
+        "retest_observed", "completed_bars_used"}),
+    "history": frozenset({"model", "zone_id", "lower", "upper", "membership_confirmed_at"}),
+}
+
+
+def _cup_watch_scalars(raw: Any, fields: frozenset) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value for key, value in raw.items() if key in fields
+            and isinstance(value, (str, int, float, bool, type(None)))
+            and (not isinstance(value, float) or math.isfinite(value))
+            and (not isinstance(value, str) or len(value) <= 2048)}
+
+
+def _cup_watch_structure_payload(raw: Any, kind: str, *, symbol: str, depth: int = 0) -> Any:
+    """Bounded, code-owned JSON projection; no raw history/private payloads."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or depth > 5:
+        return {}
+    clean = _cup_watch_scalars(raw, _CUP_WATCH_PAYLOAD_FIELDS[kind])
+    nested = {
+        "decision": {"nearest_barrier": "barrier", "stop_evidence": "level",
+                     "target1_evidence": "level", "target2_evidence": "level",
+                     "break_reclaim": "proof"},
+        "barrier": {"break_reclaim": "proof", "break_reclaim_evidence": "proof",
+                    "reclaim_history": "history"},
+        "proof": {"reclaim_history": "history"},
+    }.get(kind, {})
+    for key, child_kind in nested.items():
+        if key in raw:
+            clean[key] = _cup_watch_structure_payload(
+                raw[key], child_kind, symbol=symbol, depth=depth + 1)
+    if kind == "level" and "pattern_evidence" in raw:
+        clean["pattern_evidence"] = _project_cup_geometry_evidence(raw["pattern_evidence"], symbol=symbol)
+    if kind == "history" and isinstance(raw.get("confirmed_at_by_direction"), dict):
+        clean["confirmed_at_by_direction"] = _cup_watch_scalars(
+            raw["confirmed_at_by_direction"], frozenset({"LONG", "SHORT"}))
+    return clean
 
 
 def _cup_handle_watch_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Whitelist only code-owned setup and market fields for persistence."""
-    clean = {
-        key: value
-        for key, value in dict(row or {}).items()
-        if key in _CUP_HANDLE_WATCH_ROW_FIELDS
-        and isinstance(value, (str, int, float, bool, type(None)))
-    }
+    clean = _cup_watch_scalars(row, _CUP_HANDLE_WATCH_ROW_FIELDS | _CUP_HANDLE_WATCH_PLAN_FIELDS)
+    symbol = _extract_alert_ticker(row)
     setup = row.get("trade_setup") if isinstance(row, dict) else None
     if isinstance(setup, dict):
-        clean["trade_setup"] = {
-            key: value
-            for key, value in setup.items()
-            if key in _CUP_HANDLE_WATCH_SETUP_FIELDS
-            and isinstance(value, (str, int, float, bool, type(None)))
-        }
+        clean["trade_setup"] = _cup_watch_scalars(
+            setup, _CUP_HANDLE_WATCH_SETUP_FIELDS | _CUP_HANDLE_WATCH_PLAN_FIELDS)
+    for source, target in ((row, clean), (setup, clean.get("trade_setup"))):
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            continue
+        for key, kind in (("structure_decision", "decision"), ("nearest_barrier", "barrier"),
+                          ("overhead_resistance", "barrier"), ("break_reclaim", "proof"),
+                          ("break_reclaim_evidence", "proof")):
+            if key in source:
+                target[key] = _cup_watch_structure_payload(source[key], kind, symbol=symbol)
+        if "stop_pattern_evidence" in source:
+            target["stop_pattern_evidence"] = _project_cup_geometry_evidence(
+                source["stop_pattern_evidence"], symbol=symbol)
+        if isinstance(source.get("warning_codes"), (list, tuple)):
+            target["warning_codes"] = [v for v in source["warning_codes"][:16]
+                                       if isinstance(v, str) and len(v) <= 256]
+    if "trade_setup" in clean:
+        clean["trade_setup"]["level_quality"] = trade_level_quality(clean["trade_setup"])
+        clean["level_quality"] = clean["trade_setup"]["level_quality"]
     if isinstance(row, dict) and "cup_pattern_evidence" in row:
         clean["cup_pattern_evidence"] = _project_cup_geometry_evidence(
             row["cup_pattern_evidence"], symbol=_extract_alert_ticker(row),
@@ -22222,7 +22329,8 @@ def _queue_cup_handle_next_session_watch(
     breakout_level: Any,
 ) -> bool:
     """Persist one WAIT row without affecting scanner/mail behavior on error."""
-    if not _cup_signal_contract_valid(row, strategy_name="Cup and Handle Breakout"):
+    if (not _cup_signal_contract_valid(row, strategy_name="Cup and Handle Breakout")
+            or _cup_final_plan_contract_reason(row)):
         return False
     ticker = _extract_alert_ticker(row)
     expiry_ts = _cup_handle_watch_expiry_ts(target_session_date)
@@ -22233,6 +22341,9 @@ def _queue_cup_handle_next_session_watch(
         return False
     now_ts = time.time()
     identity = f"{ticker}|{confirmation_date}|{target_session_date}"
+    stored_row = _cup_handle_watch_row(row)
+    if _cup_final_plan_contract_reason(stored_row):
+        return False
     payload = {
         "id": identity,
         "ticker": ticker,
@@ -22242,7 +22353,7 @@ def _queue_cup_handle_next_session_watch(
         "created_at": now_ts,
         "updated_at": now_ts,
         "expires_at": expiry_ts,
-        "row": _cup_handle_watch_row(row),
+        "row": stored_row,
     }
     try:
         return bool(
@@ -22262,7 +22373,9 @@ def _queue_cup_handle_next_session_watch(
 def _promote_cup_handle_watch_row(
     queued_row: Dict[str, Any], trigger_state: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    if not _cup_signal_contract_valid(queued_row, strategy_name="Cup and Handle Breakout"):
+    if (not _cup_signal_contract_valid(queued_row, strategy_name="Cup and Handle Breakout")
+            or _cup_final_plan_contract_reason(queued_row)
+            or trigger_state.get("confirmed") is not True):
         return None
     observed_ts = _stock_market_timestamp_seconds(
         trigger_state.get("trigger_observed_ts")
@@ -22353,6 +22466,7 @@ def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[st
             valid = bool(
                 isinstance(row, dict)
                 and _cup_signal_contract_valid(row, strategy_name="Cup and Handle Breakout")
+                and _cup_final_plan_contract_reason(row) is None
                 and ticker
                 and level
                 and ticker == _extract_alert_ticker(row)
@@ -22441,9 +22555,127 @@ def _cup_handle_watch_monitor_wrapper(now_ts: Optional[float] = None) -> Dict[st
     return {"claimed": len(claims), "triggered": triggered, "completed": completed}
 
 
+def _finalize_cup_structure_plan(candidate, detected, proposal, snapshot, *, confirmation_date):
+    """Bind a detected Cup plan to its own prices and the same causal zones.
+
+    Measured cup depth remains pattern context, never borrowed structural TP
+    evidence. No serialized legacy verdict is sufficient to authorize a plan.
+    """
+    entry, stop = detected["entry"], detected["stop_loss"]
+    final = dict(proposal)
+    final.update({
+        "stop": stop, "stop_source": "confirmed cup handle low (1D) invalidation",
+        "stop_is_projection": False,
+        "tp1_source": "measured cup depth projection",
+        "tp2_source": "measured cup depth projection",
+        "tp1_is_projection": True, "tp2_is_projection": True,
+        "target_quality": "PROJECTION_ONLY_NO_CONFIRMED_BARRIER",
+        "structure_status": "REJECT", "structure_reason": "causal_structure_missing",
+        "nearest_barrier": None, "barrier_gate": None, "barrier_gate_active": False,
+        "entry_eligible": False,
+    })
+    diagnostics = {}
+    ticker = _extract_alert_ticker(candidate)
+    cutoff = (stock_swing.session_close(candidate["swing_analysis_session"])
+              if stock_swing.is_swing(candidate) else None)
+    pattern_close = stock_swing.session_close(confirmation_date) if confirmation_date else None
+    now = datetime.now(timezone.utc)
+    if (isinstance(snapshot, StructureSnapshot) and snapshot.symbol == ticker
+            and snapshot.as_of <= now
+            and (cutoff is None or snapshot.as_of == cutoff)
+            and pattern_close is not None and snapshot.as_of >= pattern_close):
+        atr = snapshot.atr_by_timeframe.get("1D")
+        built = _build_structured_trade_setup(
+            "LONG", entry, atr, None, None, None, None,
+            structure_snapshot=snapshot, require_causal_structure=True,
+            pattern_invalidation_stop=stop,
+            pattern_invalidation_source=final["stop_source"],
+            diagnostics=diagnostics,
+        )
+        if built:
+            # The native targets are selected again at the Cup entry, not
+            # copied from the quote-relative plan. Keep the handle's true
+            # invalidation behind it when adding volume-profile confluence.
+            built.update({
+                "stop_source_family": "cup_handle",
+                "stop_confirmed_at": pattern_close.astimezone(timezone.utc).isoformat(),
+                "stop_data_cutoff_at": snapshot.as_of.isoformat(),
+                "stop_pattern_evidence": _project_cup_geometry_evidence(
+                    detected.get("cup_pattern_evidence"), symbol=ticker),
+            })
+            vrvp = build_vrvp_structure(
+                candidate.get("_daily_bars", []), entry, "LONG",
+                timeframe="1D", num_bins=24, min_bars=30, lookback=90,
+                as_of=snapshot.as_of, date_session_context="us_equity_regular",
+            )
+            final = apply_vrvp_to_trade_setup(
+                built, vrvp, direction="LONG", asset_type="stock_swing", atr=atr,
+                preserve_invalidation_stop=True,
+            )
+            final.update({
+                "direction": "LONG", "trade_action": proposal["trade_action"],
+                "entry_status": proposal["entry_status"],
+                "source": "cup_handle_1d_breakout",
+                "rr_model": "50/50 first opposing structural targets",
+            })
+        else:
+            final["structure_reason"] = diagnostics.get("reason", "causal_structure_unavailable")
+            # Keep a crossed but unconfirmed zone visible as a negative
+            # decision; it is not authority for the measured pattern targets.
+            if isinstance(diagnostics.get("barrier"), dict):
+                final["nearest_barrier"] = dict(diagnostics["barrier"])
+                final["barrier_gate"] = "CAUSAL_BARRIER_METADATA_REQUIRED"
+                final["barrier_gate_active"] = True
+    if final.get("tp1_is_projection") is True:
+        # VRVP may replace only TP2 while TP1 still lacks a confirmed target.
+        # Keep the final status coherent with the per-level admission guard.
+        negative_reason = (final.get("structure_reason")
+                           if final.get("structure_status") in {
+                               "REJECT", "STRUCTURE_UNAVAILABLE",
+                               "WAIT_BREAK_RECLAIM", "WAIT_BREAK_SUPPORT"} else None)
+        final.update(structure_status="REJECT",
+                     structure_reason=negative_reason or "causal_structure_missing")
+    geometry = trade_geometry(final["entry"], final["stop"], final["tp1"], final["tp2"], "LONG")
+    if geometry.get("valid") and geometry["risk"] / final["entry"] > 0.10 + 1e-12:
+        final.update(structure_status="REJECT", structure_reason="cup_invalidation_exceeds_stop_cap")
+    final.update({"stop_loss": final["stop"], "risk": geometry.get("risk"),
+                  "rr": geometry.get("rr"), "risk_reward": geometry.get("rr"),
+                  "live_rr": geometry.get("rr"),
+                  "rr_tp1": geometry.get("rr_tp1"), "rr_tp2": geometry.get("rr_tp2")})
+    decision = dict(final.get("structure_decision") or {})
+    decision.update(entry=final["entry"], stop=final["stop"], risk=final["risk"],
+                    target1=final["tp1"], target2=final["tp2"], direction="LONG",
+                    status=final["structure_status"], reason=final["structure_reason"],
+                    nearest_barrier=final.get("nearest_barrier"),
+                    barrier_gate=final.get("barrier_gate"),
+                    geometry_updated_by="cup_handle_final_plan")
+    final["structure_decision"] = decision
+    live_geometry = trade_geometry(
+        candidate.get("price", candidate.get("Preis")), final["stop"], final["tp1"], final["tp2"], "LONG")
+    final["live_rr"] = live_geometry.get("rr") if live_geometry.get("valid") else None
+    final["cup_plan_version"] = CUP_PLAN_CONTRACT_VERSION
+    if final.get("stop_source_family") == "cup_handle":
+        decision["stop_evidence"] = {
+            "price": final["stop"], "source": final["stop_source"],
+            "source_family": "cup_handle",
+            "confirmed_at": final.get("stop_confirmed_at"),
+            "data_cutoff_at": final.get("stop_data_cutoff_at"),
+            "pattern_evidence": final.get("stop_pattern_evidence"),
+            "is_projection": False,
+        }
+    if (not geometry.get("valid") or final.get("barrier_gate")
+            or str(final.get("structure_status") or "").startswith(("REJECT", "WAIT"))
+            or final.get("tp1_is_projection") is True):
+        final["entry_eligible"] = False
+        decision["entry_eligible"] = False
+    final["level_quality"] = trade_level_quality(final)
+    return final
+
+
 def _apply_cup_handle_strategy_filter(
     candidate: Dict[str, Any], strat: Dict[str, Any], *,
     diagnostics: Optional[Dict[str, Any]] = None,
+    structure_snapshot: Optional[StructureSnapshot] = None,
 ) -> Optional[Dict[str, Any]]:
     def rejected(reason: str) -> None:
         if isinstance(diagnostics, dict):
@@ -22536,6 +22768,9 @@ def _apply_cup_handle_strategy_filter(
         "rr_model": "50/50 TP1/TP2 measured cup depth",
         "source": "cup_handle_1d_breakout",
     }
+    trade_setup = _finalize_cup_structure_plan(
+        enriched, setup, trade_setup, structure_snapshot,
+        confirmation_date=confirmation_bar_date)
     enriched.update({
         "pattern": "Cup and Handle Breakout",
         "pattern_type": "cup_handle_breakout",
@@ -22554,18 +22789,23 @@ def _apply_cup_handle_strategy_filter(
         "Breakout_Level": setup["cup_lip"],
         "Handle_Low": setup["handle_low"],
         "Breakout_RVOL": setup["breakout_rvol"],
-        "entry": setup["entry"],
-        "Entry": setup["entry"],
-        "stop_loss": setup["stop_loss"],
-        "StopLoss": setup["stop_loss"],
-        "tp1": setup["tp1"],
-        "TP1": setup["tp1"],
-        "tp2": setup["tp2"],
-        "TP2": setup["tp2"],
-        "risk_reward": setup["risk_reward"],
-        "live_rr_ratio": setup["live_rr_ratio"],
+        "entry": trade_setup["entry"],
+        "Entry": trade_setup["entry"],
+        "stop_loss": trade_setup["stop"],
+        "StopLoss": trade_setup["stop"],
+        "tp1": trade_setup["tp1"],
+        "TP1": trade_setup["tp1"],
+        "tp2": trade_setup["tp2"],
+        "TP2": trade_setup["tp2"],
+        "risk_reward": trade_setup["risk_reward"],
+        "R_R": trade_setup["risk_reward"],
+        "live_rr_ratio": trade_setup["live_rr"],
+        "cup_plan_version": CUP_PLAN_CONTRACT_VERSION,
+        "cup_measured_tp1": setup["tp1"],
+        "cup_measured_tp2": setup["tp2"],
         "entry_distance_pct": setup["extension_pct"],
-        "target_model": "cup_depth_measured_move",
+        "target_model": "cup_causal_structure_targets",
+        "Trade_Setup_Source": "cup_handle_1d_breakout",
         "trade_signal": "JETZT_TRADEN",
         "trade_action": "LONG_NOW",
         "entry_status": "BREAKOUT_CONFIRMED",
@@ -22584,6 +22824,18 @@ def _apply_cup_handle_strategy_filter(
         "last_daily_bar_date": confirmation_bar_date,
         "data_gaps": bool(setup.get("data_gaps")),  # AUDIT N-4 (Anzeige-Info)
     })
+    # One final verdict for scanner, sidebar and mail guard. Never leave a
+    # quote-relative native decision beside replacement Cup geometry.
+    for field in ("structure_status", "structure_reason", "structure_decision",
+                  "target_quality", "nearest_barrier", "barrier_gate", "barrier_gate_active",
+                  "tp1_is_projection", "tp2_is_projection", "level_quality", "entry_eligible"):
+        if field in trade_setup:
+            enriched[field] = trade_setup[field]
+        else:
+            enriched.pop(field, None)
+    enriched["overhead_resistance"] = trade_setup.get("nearest_barrier")
+    enriched["cup_plan_status"] = trade_setup["structure_status"]
+    enriched["cup_plan_reason"] = trade_setup["structure_reason"]
     if stock_swing.is_swing(candidate):
         # The measured cup breakout is confirmed by the completed 1D candle;
         # do not demand a realtime next-session 5m cross for a swing plan.
@@ -23002,10 +23254,11 @@ def _apply_special_strategy_post_filter(
         # Cup's unchanged generic score selected this exact slot before native
         # work. Pop the private context before copying/enriching any public row.
         native_context = candidate.pop("_deferred_native_plan", None)
+        native_snapshot = None
         if native_context is not None:
             native_diagnostics = diagnostics if diagnostics is not None else {}
             try:
-                _enrich_stock_strategy_native_plan(candidate, native_context, native_diagnostics)
+                native_snapshot = _enrich_stock_strategy_native_plan(candidate, native_context, native_diagnostics)
             except stock_scan_runtime.ScanWorkTimeout:
                 raise
             except ScannerDataError as data_error:
@@ -23051,7 +23304,11 @@ def _apply_special_strategy_post_filter(
                 continue
         if strat.get("needs_cup_handle"):
             terminal_diagnostic: Dict[str, Any] = {}
-            enriched = _apply_cup_handle_strategy_filter(enriched, strat, diagnostics=terminal_diagnostic)
+            snapshot_args = ({"structure_snapshot": native_snapshot}
+                             if isinstance(native_snapshot, StructureSnapshot) else {})
+            enriched = _apply_cup_handle_strategy_filter(
+                enriched, strat, diagnostics=terminal_diagnostic,
+                **snapshot_args)
             if not enriched:
                 checked_candidate(terminal_diagnostic.get("reason", "other_special_filter_rejected"))
                 continue
@@ -23617,6 +23874,7 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
     analysis_as_of = context["analysis_as_of"]
     _setup_direction = str(context.get("direction") or "").upper()
     _plan_diagnostics = {"status": "unavailable", "reason": "direction_missing"}
+    _level_snapshot = None
     if _setup_direction in ("LONG", "SHORT"):
         _plan_diagnostics["reason"] = "plan_unavailable"
         # Fetch 4H only for candidates that survived all broad
@@ -23735,6 +23993,8 @@ def _enrich_stock_strategy_native_plan(strategy_row, context, scan_diag):
     _plan_counts = scan_diag.setdefault("plan_build_counts", {})
     _plan_reason = _plan_diagnostics["reason"]
     _plan_counts[_plan_reason] = _plan_counts.get(_plan_reason, 0) + 1
+    # Typed evidence is passed only within this scan; never persisted in rows.
+    return _level_snapshot
 
 
 def _elliott_scan_wrapper():
@@ -28118,6 +28378,9 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
             if name == "strategy_scan":
                 if payload.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION:
                     return None
+                if any(not _cup_signal_contract_valid(row)
+                       or _cup_final_plan_contract_reason(row) is not None for row in rows):
+                    return None
                 # Manual leaf scans also write the shared cache. Their mtime
                 # must not make another hourly strategy's old cache reusable.
                 for strategy in _AUTO_STOCK_ALERT_STRATEGIES:
@@ -28125,6 +28388,11 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
                     leaf = _scan_cache_payload(leaf_path)
                     if (leaf is None or leaf.get("partial")
                             or leaf.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION):
+                        return None
+                    if any(not isinstance(row, dict)
+                           or not _cup_signal_contract_valid(row, strategy_name=strategy)
+                           or _cup_final_plan_contract_reason(row) is not None
+                           for row in leaf["results"]):
                         return None
                     leaf_stamp = os.path.getmtime(leaf_path)
                     if not math.isfinite(leaf_stamp) or leaf_stamp > now:
@@ -33183,6 +33451,7 @@ def get_scan_results(
         }
 
     elliott_cache_warning = None
+    cup_cache_warning = None
     if is_generic_stock_strategy:
         result_clock = datetime.now(timezone.utc)
         unverified_count = len(results)
@@ -33208,13 +33477,19 @@ def get_scan_results(
             diagnostics.update(elliott_cache_session=analysis_session,
                                elliott_required_session=required_session,
                                elliott_contract_rejected=unverified_count - len(results))
-        cup_verified = [row for row in results if _cup_signal_contract_valid(
+        cup_shape_verified = [row for row in results if _cup_signal_contract_valid(
             row, strategy_name=resolved_strategy or strategy,
         )]
+        cup_verified = [row for row in cup_shape_verified
+                        if _cup_final_plan_contract_reason(row) is None]
         cup_rejected = len(results) - len(cup_verified)
         if cup_rejected:
             diagnostics = dict(diagnostics or {})
             diagnostics["cup_contract_rejected"] = cup_rejected
+            cup_cache_warning = ("cup_final_plan_unverified"
+                                 if len(cup_verified) < len(cup_shape_verified)
+                                 else "cup_pattern_unverified")
+            diagnostics["warning"] = cup_cache_warning
         results = cup_verified
         # Shared legacy caches may belong to another strategy. In particular,
         # a Gap row must not become a Wyckoff signal just because it has a good
@@ -33267,6 +33542,11 @@ def get_scan_results(
         quality["cache_stale_reason"] = elliott_cache_warning
         warnings.insert(0, "Elliott-Ergebnis ist veraltet oder der Sessionnachweis fehlt - bitte Scan neu starten")
         quality["warnings"] = warnings
+    if cup_cache_warning:
+        quality["cache_status"] = "stale"
+        quality["cache_stale_reason"] = cup_cache_warning
+        warnings.insert(0, "Cup-Plan veraltet oder widerspruechlich - bitte Scan neu starten")
+        quality["warnings"] = warnings
     if scanner_name in _BI_SIGNAL_SCANNERS:
         exclusion_warning = _bi_data_exclusion_warning(diagnostics)
         if exclusion_warning:
@@ -33280,6 +33560,7 @@ def get_scan_results(
         scan_state, latest_attempt = _stock_strategy_result_attempt(
             resolved_strategy, scan_state, cached_at,
             cache_complete=strategy_scoped_cache and not is_partial and not stale_strategy_cache
+            and cup_cache_warning is None
             and (diagnostics or {}).get("coverage") in ("complete", "complete_with_exclusions"),
         )
         diagnostics = dict(diagnostics or {})

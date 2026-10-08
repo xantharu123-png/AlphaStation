@@ -16,6 +16,7 @@ from typing import Any
 
 
 CUP_PATTERN_CONTRACT_VERSION = "cup_bowl_close_v2"
+CUP_PLAN_CONTRACT_VERSION = "cup_causal_structure_v1"
 
 _CUP_PROVENANCE_FIELDS = frozenset({
     "cup_pattern_version", "cup_confirmation_close", "cup_confirmation_level",
@@ -155,3 +156,59 @@ def cup_signal_contract_valid(
     return cup_signal_contract_reason(
         row, strategy_name=strategy_name, strategy=strategy,
     ) is None
+
+
+def cup_final_plan_contract_reason(row: Any) -> str | None:
+    """Require the finalized Cup receipt after cache/watch round-trips.
+
+    This checks coherence, not positive admission. A coherent REJECT or WAIT
+    retains its negative verdict; all existing structure/mail gates still run.
+    Legacy measured-only plans must be rescanned, not upgraded during delivery.
+    """
+    if not is_cup_signal(row):
+        return None
+    setup = row.get("trade_setup") if isinstance(row, dict) else None
+    if (not isinstance(setup, dict)
+            or row.get("cup_plan_version") != CUP_PLAN_CONTRACT_VERSION
+            or setup.get("cup_plan_version") != CUP_PLAN_CONTRACT_VERSION):
+        return "cup_final_plan_legacy_or_missing"
+    decision = row.get("structure_decision")
+    if not isinstance(decision, dict) or decision != setup.get("structure_decision"):
+        return "cup_final_plan_decision_mismatch"
+    for name in ("structure_status", "structure_reason", "target_quality",
+                 "nearest_barrier", "barrier_gate", "tp1_is_projection", "tp2_is_projection"):
+        if name not in row or name not in setup or row[name] != setup[name]:
+            return "cup_final_plan_metadata_mismatch"
+    if (not isinstance(row["structure_status"], str)
+            or row["structure_status"] not in {"ACCEPT", "WAIT_BREAK_RECLAIM", "REJECT", "STRUCTURE_UNAVAILABLE"}
+            or not isinstance(row["target_quality"], str) or not row["target_quality"]
+            or type(row["tp1_is_projection"]) is not bool
+            or type(row["tp2_is_projection"]) is not bool):
+        return "cup_final_plan_metadata_invalid"
+    prices = []
+    for aliases, nested_name, decision_name in (
+        (("Entry", "entry"), "entry", "entry"),
+        (("StopLoss", "stop_loss"), "stop", "stop"),
+        (("TP1", "tp1"), "tp1", "target1"),
+        (("TP2", "tp2"), "tp2", "target2"),
+    ):
+        price = _positive_number(setup.get(nested_name))
+        if price is None or _positive_number(decision.get(decision_name)) != price:
+            return "cup_final_plan_geometry_mismatch"
+        if not any(alias in row for alias in aliases):
+            return "cup_final_plan_geometry_mismatch"
+        if any(_positive_number(row[alias]) != price for alias in aliases if alias in row):
+            return "cup_final_plan_geometry_mismatch"
+        prices.append(price)
+    entry, stop, tp1, tp2 = prices
+    risk = _positive_number(decision.get("risk"))
+    if (not stop < entry < tp1 < tp2 or risk is None
+            or decision.get("direction") != "LONG" or setup.get("direction") != "LONG"
+            or ("stop_loss" in setup and _positive_number(setup["stop_loss"]) != stop)
+            or not math.isclose(risk, entry - stop, rel_tol=1e-10, abs_tol=1e-8)
+            or decision.get("status") != row["structure_status"]
+            or decision.get("reason") != row["structure_reason"]
+            or decision.get("barrier_gate") != row["barrier_gate"]
+            or decision.get("nearest_barrier") != row["nearest_barrier"]):
+        return "cup_final_plan_geometry_mismatch"
+    return None

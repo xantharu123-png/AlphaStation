@@ -685,6 +685,8 @@ def test_literal_suppression_scanner_calls_are_allowlisted():
 
 
 def test_cup_watch_unconfirmed_claim_is_counted_once_by_owner(monkeypatch):
+    from test_cup_final_plan_coherence import _causal_cup_inputs
+
     calls = []
     finished = []
     monkeypatch.setattr(
@@ -695,6 +697,11 @@ def test_cup_watch_unconfirmed_claim_is_counted_once_by_owner(monkeypatch):
     monkeypatch.setattr(
         api, "_previous_us_exchange_trading_date_str", lambda _date: "2026-08-28"
     )
+    candidate, snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
+    watch = api._apply_cup_handle_strategy_filter(
+        candidate, {"min_dollar_volume": 2_000_000}, structure_snapshot=snapshot)
+    assert watch is not None
+    assert api._cup_final_plan_contract_reason(watch) is None
     monkeypatch.setattr(
         api,
         "_claim_cup_handle_watches",
@@ -702,18 +709,13 @@ def test_cup_watch_unconfirmed_claim_is_counted_once_by_owner(monkeypatch):
             "id": "claim-1",
             "lease_owner": "owner",
             "generation": 1,
-            "ticker": "ONE",
-            "breakout_level": 10.0,
+            "ticker": "CUPX",
+            "breakout_level": 101.2,
             "confirmation_date": "2026-08-28",
             "target_session_date": "2026-08-31",
-            # Current daily pattern, still awaiting the next-session trigger.
-            "row": {
-                "ticker": "ONE",
-                "cup_pattern_version": api.CUP_PATTERN_CONTRACT_VERSION,
-                "pattern_timeframe": "1D", "cup_rim_level": 10.0,
-                "cup_confirmation_level": 10.0,
-                "cup_confirmation_close": 10.0 * 1.002,
-            },
+            # Genuine current detector/finalizer result. The downstream
+            # trigger remains unconfirmed; no plan guard is bypassed.
+            "row": watch,
         }],
     )
     monkeypatch.setattr(

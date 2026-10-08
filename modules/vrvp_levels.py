@@ -1583,6 +1583,7 @@ def apply_vrvp_to_trade_setup(
     direction: Optional[str] = None,
     asset_type: str = "stock",
     atr: Optional[float] = None,
+    preserve_invalidation_stop: bool = False,
 ) -> Dict[str, Any]:
     """Return setup enriched with VRVP support/resistance where it improves structure."""
     if not isinstance(setup, dict):
@@ -1614,14 +1615,16 @@ def apply_vrvp_to_trade_setup(
         enriched["vrvp_atr_warning"] = "implausible_atr_ignored"
         atr_value = 0.0
     used: List[str] = []
-    native_invalidation_stop = stop if (
+    native_invalidation_stop = stop if (preserve_invalidation_stop or (
         enriched.get("stop_causal_structure_validated") is True
         and enriched.get("stop_zone_id")
         and enriched.get("stop_confirmed_at")
-    ) else None
+    )) else None
     # Stop only moves to a nearby VRVP invalidation zone when it does not widen
     # risk too aggressively. Otherwise we keep the existing structure stop.
-    stop_candidates = _stop_zone_candidates(vrvp, side, entry)
+    # A detector-specific invalidation is already fixed by its own geometry
+    # and stop cap. Confluence may select targets, not replace that stop.
+    stop_candidates = [] if preserve_invalidation_stop else _stop_zone_candidates(vrvp, side, entry)
     if stop_candidates:
         for candidate in stop_candidates:
             boundary = float(candidate["invalidation_boundary"])

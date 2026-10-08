@@ -1,6 +1,6 @@
 """Synthetic sweep lifecycle tests: no providers, live scans, SMTP or broker I/O."""
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
@@ -191,18 +191,40 @@ def test_actual_leaf_can_preserve_sweep_aggregate_without_changing_default_behav
 
 def test_existing_combined_guard_preserves_strategy_dedupe_and_next_sweep_cooldown(monkeypatch, tmp_path):
     from test_cluster_warning_mail import _mock_sweep_env, _sweep_row
-    rows = {STRATEGIES[1]: [_sweep_row("DUP"), _sweep_row("DUP"), _sweep_row("OTHER")],
-            STRATEGIES[3]: [_sweep_row("DUP")]}
-    # This fixture represents a current, close-confirmed Cup result; the test
-    # isolates strategy-aware dedupe rather than rejection of legacy patterns.
-    rows[STRATEGIES[3]][0].update(
-        cup_pattern_version=api.CUP_PATTERN_CONTRACT_VERSION,
-        pattern_timeframe="1D", cup_rim_level=9.95,
-        cup_confirmation_level=9.95, cup_confirmation_close=10.0,
-    )
+    from test_cup_final_plan_coherence import _causal_cup_inputs, _pin_cup_clock
+    from test_cup_handle_audit_fixes import _next_session_5m_trigger_bars
+
     real_guard = api._send_strategy_scan_alerts
-    cache, _, state = _mock_sweep(monkeypatch, tmp_path, rows)
     sent = _mock_sweep_env(monkeypatch, {"DUP", "OTHER"})
+    _pin_cup_clock(monkeypatch, datetime(2026, 8, 31, 14, 0, 10, tzinfo=timezone.utc))
+    monkeypatch.setattr(api, "_CUP_HANDLE_WATCH_QUEUE_PATH", tmp_path / "cup_watch.json")
+    monkeypatch.setattr(api, "_fetch_recent_stock_5m_bars",
+                        lambda *a, **k: _next_session_5m_trigger_bars())
+    candidate, source_snapshot = _causal_cup_inputs(monkeypatch, far_targets=True)
+    candidate.update(ticker="DUP", Ticker="DUP", Strategy=STRATEGIES[3])
+    # Rebuild for DUP from the same completed OHLCV. Relabeling CUPX's already
+    # minted receipt/snapshot would be foreign-symbol evidence, not a producer.
+    snapshot = api._build_stock_level_snapshot(
+        candidate["_daily_bars"], symbol="DUP", current_price=candidate["price"],
+        direction="LONG", atr14=source_snapshot.atr_by_timeframe["1D"],
+        as_of=source_snapshot.as_of, four_hour_bars=[], spread=0.02,
+        signal_session="2026-08-28",
+    )
+    assert isinstance(snapshot, api.StructureSnapshot)
+    assert snapshot.symbol == "DUP"
+    cup_row = api._apply_cup_handle_strategy_filter(
+        candidate, {"min_dollar_volume": 2_000_000}, structure_snapshot=snapshot,
+    )
+    assert cup_row is not None
+    assert api._cup_signal_contract_reason(cup_row) is None
+    assert api._cup_final_plan_contract_reason(cup_row) is None
+    assert api._alert_trade_plan_rejection_reason(cup_row) is None
+    assert cup_row["entry_status"] == "NEXT_SESSION_TRIGGER_CONFIRMED"
+    assert cup_row["next_session_trigger_type"] == "fresh_5m_cross"
+
+    rows = {STRATEGIES[1]: [_sweep_row("DUP"), _sweep_row("DUP"), _sweep_row("OTHER")],
+            STRATEGIES[3]: [cup_row]}
+    cache, _, state = _mock_sweep(monkeypatch, tmp_path, rows)
     monkeypatch.setattr(api, "_adr_ticker_set", lambda: set())
     monkeypatch.setattr(api, "_attach_stock_company_name", lambda row, *a, **k: dict(row))
     monkeypatch.setattr(api, "_enrich_stock_alert_5m_state", lambda _scanner, row, *a, **k: dict(row))
