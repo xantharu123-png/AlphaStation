@@ -1,5 +1,90 @@
 # Account-Übergabe – Signal-Mails, 08.10.2026
 
+## Neuer Auftrag – 10.10.2026, 23:10 Zürich: Landingpage-Texte zurücknehmen
+
+Der Nutzer hat ausdrücklich die Rücknahme der eigenmächtigen Marketing-Umschreibung
+verlangt. Lokal sind die Juli-/August-Texte anhand `8e28962^` / `3efcfed` wiederhergestellt.
+Nur `AuthPage`-Copy und generiertes Frontend-Bundle geändert; kein neuer Wortlaut.
+Login/Legal/Tarifdaten, BI-17/20, Paper-Modi, Scanner/Mail/Backtest unverändert.
+Auch die alten statischen Kundenstimmen wurden textlich zurückgesetzt; ihre Echtheit
+oder aktuelle Erfolgs-/Echtzeitbehauptungen sind dadurch nicht nachgewiesen.
+
+Lokale Darstellung, Features, Pricing, FAQ und Login-Dialog überprüft.
+Bundleprüfung erfolgreich: `26922d75a963`. Screenshot unter
+`output/playwright/landing-rollback-20261010/landing-restored-desktop.png`.
+Vollständiger isolierter QA-Lauf abgeschlossen: **12.312 bestanden / 97 fehlgeschlagen /
+7 übersprungen / 1 bekannte AnyIO-Rewrite-Warnung**, 526,51 Sekunden. **Kein Gesamtpass.**
+XML mit sämtlichen Fehlernamen: `output/landing-rollback-20261010/qa-f94762f5d082/results.xml`.
+Alle 97 Fehler liegen in vier Deployment-Suites (Auto-Update 55, Migration 10,
+Retirement 5, Security-Reaudit 27); WindowsApps-/WSL-Bash kann die Windowspfade
+nicht öffnen. Die Skips betreffen Windows-Symlink-/Linux-/POSIX-Verträge.
+Git-Bash-Gegenprobe des Tests `test_auto_update_probe_uses_command_scoped_safe_directory`
+bleibt rot: Fake-Git-Fixture wird nicht genutzt, tatsächliches lokales HEAD statt
+Testrevision. Nicht behaupten, ein Shellwechsel hätte alle Fehler beseitigt.
+XML `output/landing-rollback-20261010/deployment-git-bash-targeted/qa-373d94e1a7c5/results.xml`.
+Anfänglicher Sandboxlauf ohne Ausgabe und abgebrochener Git-Bash-Suiteversuch sind
+keine Pässe. Deployment-/Testharness nicht im Copy-Rollback repariert.
+
+**Veröffentlichung 10.10., 23:30 Zürich:** Nutzer hat Commit/Push ausdrücklich
+beauftragt. Source-Commit `702fec7ded1c46979f25b0899422335c7b7ac652` ist gepusht;
+Remote-main unmittelbar danach per `git ls-remote` identisch bestätigt.
+Nur `frontend/index.html` und `frontend/app.bundle.js` (76+/76− zusammen).
+Auf dem exakten isolierten Index-Snapshot `bda612d6ad135c01941d8c3a540a2aa908e1b987`
+zusätzlich **1.003 passed / 0 failed / 0 skipped / 1 AnyIO-Rewrite-Warnung**,
+153,34 Sekunden: alle 37 Frontend-Suites plus `test_auth_session_security.py`.
+XML: `output/landing-rollback-publish-20261010-498e0cae9f44/qa-09a3e3201e0e/results.xml`.
+Kein neuer Gesamtlauf; die zuvor dokumentierten Deployment-Fehler bleiben offen.
+Bundle reproduziert nach Normalisierung der CRLF/LF-Zeilenenden, unabhängiger
+Copy-/AST-Abgleich ohne funktionale Änderungen. Diese beiden Dokumente werden
+separat veröffentlicht; sonstiges WIP nicht übernommen.
+
+Kein Pull/Neustart/Servereingriff. Normalen Operator-Pull bereitstellen,
+kein Deployskript oder Installationsumbau. Vorhandenes WIP erhalten.
+Reguläre Mailzustellung weiterhin offen. Die vorgeschlagenen BI-/Report-Korrekturen
+darunter sind nicht durch den Copy-Rollback freigegeben.
+
+## Maßgeblicher Anschlussstand – 10.10.2026, 22:55 Zürich
+
+Frisch geprüft: lokales HEAD und GitHub-main sind `47d0b9ed93c29630381ed18c82c38b0479909b1d`.
+Hetzner-Health **20:49:43 UTC** ist healthy mit `47d0b9ed93c2` / Frontend `8f8a6c0c5bae`.
+Der alte Hinweis „Hetzner nicht aktualisiert“ darunter ist historisch. Kein Servereingriff
+dieser Runde. Vererbtes WIP erhalten, keine Landingpage-/Produktänderung.
+
+Isolierter Mail-/Plan-Subset: **162 passed / 1 skipped / 1 AnyIO-Rewrite-Warnung**,
+87,20 Sekunden; XML `output/mail-fix-qa-0cb9c86217e542958c52faa769c5518d/results.xml`.
+Keine echte SMTP-/Providerverbindung. Kein Gesamtlauf; separater Agentensandboxlauf
+ohne Ausgabe abgebrochen, nicht als Testpass werten. Sender-Quellprüfung findet keinen
+neuen belegten falschen Blocker. Reguläre aktuelle Zustellung bleibt offen.
+
+In-App-Seite geöffnet, Anmeldung fehlt; Nutzer hat statt Anmeldebestätigung nach
+Landingpage-Änderungen und den geplanten Korrekturen gefragt. Native Browserprüfung
+wegen nicht eindeutig bestimmbarer Adresse sicherheitsseitig gestoppt; diese Runde
+keine weitere Browserautomation. Nur die bestehende Landingpage gelesen.
+
+Drei begrenzte Befunde zur Nutzerentscheidung, **noch nicht umgesetzt**:
+
+1. Wochenreport-Betreff: aktueller reiner Trackerpfad zählt denselben Fall bei ungeklärter
+   Obergrenze gleichzeitig numerisch resolved und evidence-unresolved. Betreff zeigt
+   1/1 für insgesamt 1, Body korrekt 0/1. Betreff aus validierten disjunkten
+   `report_counts`; bekannte Teil-R-Werte nicht löschen. Testeinstieg:
+   `test_weekly_report_delivery_presentation.py::test_unknown_upper_order_blocks_even_if_lower_value_is_numerical`.
+2. BI-Diagnosevalidator: akzeptiert explizite 200 Ticker × 64 Testsitzungen bei nur 200
+   erwarteten individuellen Sitzungen. Optionales `expected_test_sessions` muss bei
+   Vorhandensein den Nenner binden; alte Diagnosen ohne Feld kompatibel erhalten.
+   Testeinstieg `test_bi_backtest_diagnostics_api.py`; reine Logik
+   `modules/backtest_diagnostics.py`. Kein Beleg, dass der echte Oct8-Nenner falsch war:
+   Kalender bestätigt 167 Abrufsitzungen, 64 Testsitzungen, 12.800 tickerweise Sitzungen.
+3. BI-699-Fehltermine: vorhandene gespeicherte Mapping
+   `diagnostics.coverage.missing_sessions_by_ticker` nur in eingeklappten Prüfdetails
+   sichtbar machen. Keine neue Datenabfrage, keine ungeprüfte Ursachenzuordnung.
+   Reader bereits GET `/api/backtest-results` für gespeicherte Requestidentität.
+
+Der Nutzer verlangt jetzt genaue Erklärung vor Zustimmung. Nicht so tun, als wäre
+die Umsetzung freigegeben oder als erklärten diese Darstellungs-/Validatorbefunde
+die fehlenden regulären Mails. Zweistündige Fortsetzung unterbrochen, nicht abgeschlossen.
+Aktuelle ausführliche TODO enthält sichere nächste Schritte. Nur diese beiden
+Dokumente geändert, noch nicht committet/gepusht.
+
 ## Maßgeblicher Anschlussstand – 08.10.2026, 14:59 Zürich
 
 Der Operator hat den eng begrenzten Check ausgeführt. **Nicht erneut nach Export fragen.**

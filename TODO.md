@@ -1,5 +1,140 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 10.10.2026, 23:10 Zürich – ausdrücklich verlangte Landingpage-Rücknahme
+
+Der Nutzer verlangt jetzt die Rücknahme der eigenmächtigen Landingpage-Textänderung.
+Diese Freigabe gilt nur für die Rücknahme, nicht für neue Werbetexte oder die unten
+noch offenen BI-/Wochenreport-Reparaturen. Anschließend hat der Nutzer ausdrücklich
+Commit/Push und den normalen Server-Pull beauftragt; keine Serveraktion hier.
+
+- [x] Historie unabhängig abgeglichen: Marketing-Umschreibung begann in
+  `8e28962` (20.07.), weitere Texte in `e9cba06` (13.08.). Originalreferenz für
+  diese Texte: `3efcfedc5b72754774c131bf1f433a8f86763b5a` / `8e28962^`.
+- [x] Nur betroffene Marketingtexte in `frontend/index.html` zurückgesetzt:
+  Hero, Vergleich, Featuretexte, Scanner-Kurztexte, Setup-/Schritttexte,
+  Testimonials, Preisüberschrift/-Badge, Schluss-CTA und Markt-FAQ.
+  Keine neue kreative Fassung. Layout und Navigation unverändert.
+- [x] Login, Passwortreset, Cookies, Rechtstexte, dynamische Tarife,
+  spätere BI-17/20-Beschreibung und tatsächliche Paper-Modi/-Sicherungen erhalten.
+  Backend, Scanner, Mail und Backtest unverändert. Kein vollständiger Commit-Revert.
+- [x] Bundle neu gebaut und geprüft: `26922d75a963`; `git diff --check` erfolgreich.
+  Unabhängiger Diff-/AST-Abgleich: außerhalb der Copy-Literale keine Funktionsänderung;
+  vor `AuthPage` und ab `PricingPage` identisch zu HEAD.
+- [x] Lokaler Browserbeleg: ursprüngliche Überschrift und weitere Texte sichtbar;
+  Features-/Pricing-Navigation, drei Tarifkarten, FAQ-Aufklappen und Login-Dialog
+  geprüft. Keine Anmeldung, Zahlung, Mail oder Produktions-API-Aktion.
+  Screenshot: `output/playwright/landing-rollback-20261010/landing-restored-desktop.png`.
+  Der lokale statische Server hat kein Backend; erwartete API-404 sind kein Live-Test.
+- [x] Gesamttest abgeschlossen, **kein grüner Gesamtlauf**: **12.312 bestanden,
+  97 fehlgeschlagen, 7 übersprungen, 1 bekannte AnyIO-Rewrite-Warnung**,
+  526,51 Sekunden. Isolierter Launcher `scripts/run_offline_tests.py`;
+  alle Fehlernamen und Gründe in
+  `output/landing-rollback-20261010/qa-f94762f5d082/results.xml`.
+  Die 97 Fehler liegen ausschließlich in `test_deploy_auto_update` (55),
+  `test_deploy_migration` (10), `test_deploy_retirement` (5) und
+  `test_deploy_security_reaudit` (27): WindowsApps-/WSL-Bash erhält Windowspfade
+  und meldet `No such file or directory`. Nicht ungefragt Deploymentcode ändern.
+  Die sieben Skips betreffen Windows-Symlink-/Linux-Dateisystem-/POSIX-Verträge.
+  Gegenprüfung mit Git-Bash ist **ebenfalls kein Pass**: der einzelne Test
+  `test_auto_update_probe_uses_command_scoped_safe_directory` scheitert dann
+  an der nicht wirksamen Fake-Git-Fixture (echte lokale Revision statt Testrevision).
+  XML: `output/landing-rollback-20261010/deployment-git-bash-targeted/qa-373d94e1a7c5/results.xml`.
+  Weiterer Git-Bash-Deploymentlauf nach wiederholten Fehlern beendet, keine
+  positive QA daraus ableiten. Keine dieser Gegenprüfungen verändert Hetzner.
+  Erster Sandboxlauf blieb beim Import ohne Ausgabe hängen, wurde beendet und
+  zählt nicht als Testpass. Wiederholung nutzt ausschließlich die getrennten Test-DBs,
+  fiktive Zugangsdaten und die SMTP-/Netzsperren des vorhandenen QA-Launchers.
+- [x] Alte Zahlen-/Echtzeit-/Erfolgsbehauptungen und Kundenstimmen wurden als
+  historische Copy wiederhergestellt, nicht als aktuelle Tatsachen validiert.
+  Die Rücknahme ist kein Nachweis von Trefferquote oder echten Testimonials.
+- [x] Zusätzliche Freigabeprüfung auf dem isolierten **Git-Index-Snapshot**
+  `bda612d6ad135c01941d8c3a540a2aa908e1b987`: **1.003 bestanden, 0 Fehler,
+  0 Skips, 1 bekannte AnyIO-Rewrite-Warnung**, 153,34 Sekunden. Alle 37
+  `test_frontend*.py`-Dateien plus `test_auth_session_security.py`. Kein Gesamtlauf.
+  XML: `output/landing-rollback-publish-20261010-498e0cae9f44/qa-09a3e3201e0e/results.xml`.
+  Bundle-Neubau stimmt nach Zeilenenden-Normalisierung vollständig überein;
+  unabhängiger AST-/Copy-Abgleich bestätigt ausschließlich historische Textwerte.
+- [x] **10.10., 23:30 Zürich:** Source-Rücknahme committet und gepusht:
+  `702fec7ded1c46979f25b0899422335c7b7ac652`. Remote-main danach per
+  `git ls-remote` identisch bestätigt. Commit enthält ausschließlich
+  `frontend/index.html` und `frontend/app.bundle.js` (76+/76− zusammen).
+  TODO/Übergabe werden getrennt veröffentlicht; kein vererbtes WIP vorgemerkt.
+- [ ] Auf Hetzner noch nicht installiert. Operator erhält normalen `git pull --ff-only`
+  plus üblichen Dienstneustart/Healthcheck; kein Deployskript oder Installationsumbau.
+  Keine automatischen Serveränderungen oder neuen Texte ohne Nutzerauftrag.
+
+**Noch offen:** reguläre Signalzustellung und die unten dokumentierten
+BI-/Wochenreport-Befunde bleiben unverändert offen. Nicht durch diesen Copy-Rollback
+als erledigt kennzeichnen. Rücknahme und begrenzte Browser-/Bundleprüfung sind
+abgeschlossen und Source-Rücknahme veröffentlicht; Serverinstallation und
+Deployment-Testharness bleiben offen.
+
+## 10.10.2026, 22:55 Zürich – Anschlussprüfung, Umsetzung noch nicht freigegeben
+
+Dieser Abschnitt ersetzt die älteren Serverstatus-Angaben, nicht deren historische
+Kurs-/Versandbelege. Nutzerauftrag: vorhandene Arbeit bis zu zwei Stunden fortsetzen,
+bei früherer Erledigung nicht künstlich verlängern. Nach der Prüfung fragt der Nutzer
+nach den genauen vorgeschlagenen Korrekturen; noch keine Zustimmung zu deren Design.
+
+- [x] Checkout und veröffentlichten Stand frisch verglichen: HEAD und Remote-main
+  `47d0b9ed93c29630381ed18c82c38b0479909b1d`. Vererbtes Deployment-/Dokumentations-/
+  Calendar-/Commerce-WIP unverändert erhalten; gelöschtes Deployskript nicht ersetzt.
+- [x] Öffentlicher Hetzner-Healthcheck **10.10., 20:49:43 UTC**: healthy,
+  Revision `47d0b9ed93c2`, Frontend `8f8a6c0c5bae`. Richtungsfix ist also installiert;
+  hier kein Pull, Neustart oder Servereingriff erfolgt.
+- [x] **Keine Landingpage- oder sonstige Produktänderung in dieser Fortsetzung.**
+  `git diff --numstat -- frontend/index.html` leer. Nur vorhandene Seite geöffnet.
+- [x] Isolierter Mail-/Plan-Regressionslauf: **162 bestanden, 1 übersprungen,
+  1 bekannte AnyIO-Assertion-Rewrite-Warnung**, 87,20 Sekunden. Sechs Dateien:
+  `test_stock_native_plan_mail_integration.py`, `test_stock_strategy_final_revalidation.py`,
+  `test_stock_swing_mail_isolation.py`, `test_mail_pipeline_audit_regressions.py`,
+  `test_level_zone_directional_reclaim.py`, `test_momentum_candidate_evidence_reader.py`.
+  Private XML: `output/mail-fix-qa-0cb9c86217e542958c52faa769c5518d/results.xml`.
+  Fiktive Zugangsdaten/disposable DBs, externe I/O/SMTP gesperrt. Kein Gesamtlauf.
+  Separater Agenten-Sandboxlauf hing ohne Ausgabe und wurde nur in seiner eigenen
+  Session beendet; daraus keinen Testpass ableiten.
+- [x] Unabhängige Quellprüfung des täglichen Senderpfads: kein neuer kausal
+  belegter Mailblocker. Referenzprüfung pro Zeile, täglicher Cooldownnamespace,
+  finale 1D-Prüfung und Claim-Erneuerung vorhanden. Theoretischer Dedupe-Randfall
+  ohne Producer-/Originalcache-Reproduktion ist ausdrücklich kein bestätigter Fehler.
+- [ ] **Aktuelle reguläre Mailentscheidung/Zustellung offen.** Neu geöffneter
+  In-App-Tab war nicht angemeldet; Anmeldung angefragt, aber nicht bestätigt.
+  Native Browserkontrolle anschließend toolseitig aus Sicherheitsgründen beendet:
+  aktuelle Adresse nicht eindeutig bestimmbar. In dieser Runde keine weitere
+  UI-Automation versuchen. Kein neuer Export/Testversand oder Kontoeingriff.
+- [x] BI-Kalender rein offline nachgerechnet: Abruf 09.02.–07.10. = 167 Sitzungen;
+  Studie 09.07.–07.10. = 64 Sitzungen, 200 × 64 = 12.800. Labor Day ausgeschlossen.
+  Das erklärt die 699 fehlenden Sitzungen nicht; Abruf-Erfolg ist keine lückenlose
+  tickerweise Datenabdeckung. Keine datenlosen Titel nachträglich herausrechnen.
+- [ ] **Reproduzierter BI-Diagnosefehler, noch nicht behoben:** Validator akzeptiert
+  200 Ticker / explizit 64 Testsitzungen, aber nur 200 erwartete individuelle
+  Sitzungen als vollständige Diagnose. Optionales `expected_test_sessions` bei
+  Vorhandensein streng prüfen und Produktgleichung validieren. Legacy-Diagnosen
+  ohne dieses Feld kompatibel lassen. Nicht als Ursache des realen 699-Befunds ausgeben.
+- [ ] **BI-Fehltermine zugänglich machen, noch nicht umgesetzt:** vollständiges
+  `diagnostics.coverage.missing_sessions_by_ticker` wird bereits gespeichert und
+  vom Cache-GET zurückgegeben; UI zeigt nur Summen. Vorgeschlagen: ausschließlich
+  in eingeklappten Prüfdetails Ticker, Anzahl und Termine zeigen, keine erfundene
+  Ursache, keine neue Providerabfrage und keine Änderung des Kohortennenners.
+- [ ] **Reproduzierter Wochenreport-Betrefffehler, noch nicht behoben:** ein Ergebnis
+  mit bekanntem unteren −1R-Pfad, aber ungeklärter Obergrenze liefert im wirklichen
+  reinen Trackerpfad `report_counts` 0 resolved / 1 evidence_unresolved, während
+  der Betreff 1 resolved / 1 unresolved behauptet. Numerische R-Abdeckung ist
+  keine vollständige Evidenzauflösung. Betreff aus disjunkten validierten
+  `report_counts` ableiten; Teil-R-Werte erhalten. Body trennt bereits korrekt.
+- [ ] Alte tatsächliche −47,5R-Kohorte weiterhin nicht nachgerechnet. Zahlen sind
+  rechnerisch möglich, 86 = 45 + 40 + 1 ohne Einstieg. Bestehender Sep26-Export
+  hat keine vollständigen kanonischen Versandbindungen; weder neue aktuelle
+  Bilanz noch einzelne reale Gap-Verluste daraus behaupten. Deskriptives
+  `/api/signal-performance` ist kein strikter Wochenversand-Kohortennachweis.
+
+**Nächster Schritt:** dem Nutzer die drei begrenzten Diagnose-/Darstellungskorrekturen
+erklären; Zustimmung abwarten, dann reproduzierende Tests vor minimalen Reparaturen.
+Scannerregeln, Mailgrenzen und Landingpage bleiben unverändert. Erst danach QA,
+unabhängige Nachprüfung und eng begrenztes Commit/Push. Diese Runde änderte nur
+TODO/Übergabe; noch kein Commit/Push. Die zweistündige Arbeitsphase wurde wegen
+Browser-Sicherheitsstopp und offener Designrückfrage unterbrochen, nicht als erledigt markiert.
+
 ## 08.10.2026, 14:59 Zürich – Momentum-Belege ausgewertet, Richtungsfix gepusht
 
 Dieser Abschnitt ist der neue Arbeitsstand; der 13:49-Stand darunter ist historisch.
