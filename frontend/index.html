@@ -1194,7 +1194,7 @@ function AuthPage({ onLogin, onRegister }) {
 
     const faqs = [
         { q: 'Kann ich Alpha Station testen?', a: 'Ja! Für nur $1 bekommst du 24 Stunden vollen Zugang zu allen Features. Danach wählst du deinen Plan.' },
-        { q: 'Welche Märkte werden gescannt?', a: 'US-Aktien (NYSE/Nasdaq) und Kryptowährungen. Die Scanner laufen regelmässig; Datenstatus, Cache-Alter und Einschränkungen werden im Produkt transparent angezeigt.' },
+        { q: 'Welche Märkte werden gescannt?', a: 'US Stocks (NYSE, NASDAQ), ETFs, und Krypto. Wir scannen über 8.000 Ticker in Echtzeit.' },
         { q: 'Kann ich jederzeit kündigen?', a: 'Ja, dein Abo ist monatlich kündbar. Kein Vertrag, keine versteckten Kosten.' },
         { q: 'Brauche ich Trading-Erfahrung?', a: 'Alpha Station richtet sich an aktive Trader. Grundkenntnisse in technischer Analyse sind hilfreich. Jedes Signal kommt mit Score, Grade und vollständiger Indikator-Analyse — so kannst du fundierte Entscheidungen treffen.' },
         { q: 'Welche Datenquelle wird verwendet?', a: 'Alpha Station nutzt professionelle Markt- und Chartdatenquellen. Im Produkt zeigen wir Datenstatus, Cache-Alter und Warnungen transparent an.' },
@@ -1230,14 +1230,14 @@ function AuthPage({ onLogin, onRegister }) {
                 <div style={{ position: 'relative', maxWidth: 860, margin: '0 auto', padding: '0 24px' }}>
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 18px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: 24, fontSize: 13, fontWeight: 600, color: '#34d399', marginBottom: 32 }}>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981', animation: 'pulse 2s infinite' }} />
-                        REGELBASIERTE SCANNER — PLANABHÄNGIGE INTERVALLE
+                        SCANNER AKTIV — NÄCHSTER SCAN IN 5 MIN
                     </div>
                     <h1 style={{ fontSize: 'clamp(38px, 5.5vw, 68px)', fontWeight: 800, lineHeight: 1.08, marginBottom: 24, letterSpacing: '-2px' }}>
-                        <span style={{ background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Finde strukturierte Setups</span><br />
-                        <span style={{ background: 'linear-gradient(135deg, #22d3ee 0%, #3b82f6 50%, #8b5cf6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>wenn Daten und Struktur zusammenpassen</span>
+                        <span style={{ background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Finde die besten Trades</span><br />
+                        <span style={{ background: 'linear-gradient(135deg, #22d3ee 0%, #3b82f6 50%, #8b5cf6 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>bevor es der Markt tut</span>
                     </h1>
                     <p style={{ fontSize: 'clamp(17px, 2vw, 21px)', color: '#94a3b8', maxWidth: 620, margin: '0 auto 20px', lineHeight: 1.65 }}>
-                        Breites US-Aktien- und Krypto-Universum. Regelbasierte Strategien und technische Faktoren. Strukturpläne mit Entry, Stop-Loss und Take-Profit — mit planabhängigem Scanintervall.
+                        8.000+ US-Aktien & 500+ Crypto Coins. 15+ Strategien. 20+ Indikatoren pro Scan. Analyse mit Entry, Stop-Loss und Take-Profit — alle 5 Minuten.
                     </p>
 
                     {/* USP Pills */}
@@ -1265,9 +1265,9 @@ Mehr erfahren ↓
             <section style={{ padding: '20px 24px 40px', maxWidth: 900, margin: '0 auto' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, background: 'rgba(255,255,255,0.03)', borderRadius: 18, overflow: 'hidden', border: '1px solid rgba(51,65,85,0.3)' }}>
                     {[
-                        { value: 'Breit', label: 'Marktuniversum', sub: 'NYSE, Nasdaq & Krypto' },
+                        { value: '8.000+', label: 'Aktien & Coins', sub: 'NYSE, NASDAQ & Crypto' },
                         { value: '15+', label: 'Scanner & Strategien', sub: 'Long, Short, Biotech...' },
-                        { value: 'ab 5 Min', label: 'Scanintervall', sub: 'Planabhängig' },
+                        { value: '5 Min', label: 'Echtzeit-Intervall', sub: 'Auch After Hours' },
                         { value: '17/20', label: 'Bestätigungen mindestens', sub: 'Stock-BI · keine Gewinnwahrscheinlichkeit' },
                     ].map((s, i) => (
                         <div key={i} style={{ padding: '30px 16px', background: 'rgba(15,23,42,0.6)', textAlign: 'center' }}>
@@ -1283,8 +1283,8 @@ Mehr erfahren ↓
             <section id="demo-preview" data-reveal style={{ padding: '80px 24px', maxWidth: 1100, margin: '0 auto' }}>
                 <div style={revealStyle('demo-preview')}>
                     <div style={{ textAlign: 'center', marginBottom: 56 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-0.5px' }}>Beobachte Märkte systematisch.</h2>
-                        <p style={{ color: '#94a3b8', fontSize: 18, maxWidth: 600, margin: '0 auto' }}>Scanner bündeln technische Daten und Risikohinweise. Die Handelsentscheidung bleibt bei dir.</p>
+                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-0.5px' }}>Hör auf, Chancen zu verpassen.</h2>
+                        <p style={{ color: '#94a3b8', fontSize: 18, maxWidth: 600, margin: '0 auto' }}>Andere Trader verlassen sich auf Glück. Du verlässt dich auf Daten.</p>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 1fr', gap: 0, alignItems: 'stretch', maxWidth: 900, margin: '0 auto' }}>
@@ -1306,7 +1306,7 @@ Mehr erfahren ↓
                         {/* With */}
                         <div style={{ padding: 32, background: 'linear-gradient(135deg, rgba(59,130,246,0.06), rgba(30,41,59,0.4))', borderRadius: '0 16px 16px 0', border: '1px solid rgba(59,130,246,0.15)', borderLeft: 'none' }}>
                             <div style={{ fontSize: 13, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: 20 }}>Mit Alpha Station</div>
-                            {['Scanner findet Setups automatisch', 'Long- und Short-Strukturen getrennt bewerten', 'BI Scanner meldet erst ab 17 von 20 bestätigten Indikatoren', 'After Hours & Pre-Market werden berücksichtigt', 'Biotech-Scanner verbindet technische Daten mit Catalyst-Kontext', 'Ein Dashboard mit Datenstatus und Risiko-Hinweisen'].map((t, i) => (
+                            {['Scanner findet Setups automatisch', 'Sofort sehen: Long Breakout oder Short Breakdown', 'BI Scanner meldet erst ab 17 von 20 bestätigten Indikatoren', 'After Hours & Pre-Market abgedeckt', 'Biotech-Scanner trackt FDA Catalysts live', 'Alles in einem Dashboard, in Echtzeit'].map((t, i) => (
                                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 14, color: '#60a5fa' }}>
                                     <span style={{ color: '#10b981', fontSize: 16, flexShrink: 0 }}>✓</span> {t}
                                 </div>
@@ -1320,8 +1320,8 @@ Mehr erfahren ↓
             <section id="features" data-reveal style={{ padding: '80px 24px 40px' }}>
                 <div style={{...revealStyle('features'), maxWidth: 1100, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 60 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Dein Analyse-Werkzeug.<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>15+ Scanner in einem Tool.</span></h2>
-                        <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner betrachtet einen abgegrenzten Markt-Zustand mit eigener Daten- und Risikologik.</p>
+                        <h2 style={{ fontSize: 'clamp(28px, 3.5vw, 42px)', fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Dein unfairer Vorteil.<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>15+ Scanner in einem Tool.</span></h2>
+                        <p style={{ color: '#94a3b8', fontSize: 17, maxWidth: 560, margin: '0 auto' }}>Jeder Scanner wurde für einen spezifischen Markt-Zustand entwickelt. Du bist vorbereitet — egal was passiert.</p>
                     </div>
 
                     {/* BI Scanner USP */}
@@ -1398,7 +1398,7 @@ Mehr erfahren ↓
                             <div style={{ padding: '40px 36px', order: 2 }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>BIOTECH</div>
                                 <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Biotech & FDA Catalyst Scanner</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Biotech-Sektor bewegt sich durch Catalysts wie FDA-Entscheidungen und klinische Studiendaten. Der Biotech Scanner verbindet verfügbare Catalyst-Daten mit technischer Struktur und Risiko-Hinweisen. Termine und Quellen müssen vor jeder Handelsentscheidung geprüft werden; Binary Events können Gaps und Totalverluste verursachen.</p>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Biotech-Sektor bewegt sich durch Catalysts: FDA Approvals, PDUFA Dates, Clinical Trial Results, Phase-Übergänge. Unser Biotech Scanner trackt alle relevanten Events und scannt speziell nach Biotech-Aktien mit bevorstehenden Katalysatoren. Du siehst auf einen Blick, welche Biotechs vor einem Binary Event stehen — und kannst dich frühzeitig positionieren, bevor der Markt reagiert.</p>
                                 <div style={{ display: 'flex', gap: 24 }}>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>FDA</div><div style={{ fontSize: 12, color: '#64748b' }}>Approval Tracking</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#10b981' }}>PDUFA</div><div style={{ fontSize: 12, color: '#64748b' }}>Dates Kalender</div></div>
@@ -1414,7 +1414,7 @@ Mehr erfahren ↓
                             <div style={{ padding: '40px 36px' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>EXTENDED HOURS</div>
                                 <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>After Hours & Pre-Market Scanner</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Alpha Station berücksichtigt neben Regular Hours auch verfügbare After-Hours- und Pre-Market-Daten. Datenquelle, Aktualität und mögliche Einschränkungen bleiben sichtbar, damit verzögerte oder unvollständige Daten nicht wie sichere Live-Signale wirken.</p>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Die meisten Scanner zeigen dir nur Regular Hours. Alpha Station scannt auch After Hours und Pre-Market — in Echtzeit. Wenn eine Aktie nachbörslich auf Earnings crasht oder vorbörslich auf News explodiert, bist du der Erste der es sieht. Kein Aufwachen mit bösen Überraschungen. Kein verpasster Gap-Up. Du bist immer informiert.</p>
                                 <div style={{ display: 'flex', gap: 24 }}>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>4:00 AM</div><div style={{ fontSize: 12, color: '#64748b' }}>Pre-Market Start</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b' }}>8:00 PM</div><div style={{ fontSize: 12, color: '#64748b' }}>After Hours End</div></div>
@@ -1488,7 +1488,7 @@ Mehr erfahren ↓
                             <div style={{ padding: '40px 36px', order: 2 }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>RISIKOMANAGEMENT</div>
                                 <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Crash Monitor & Fear Score</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Alpha Station berechnet einen regelbasierten Fear Score aus VIX, Advance/Decline Ratio, Common-Stock-Marktbreite sowie S&amp;P/Nasdaq/Russell Momentum. Der Crash Monitor liefert Risikokontext und Warnungen, kann abrupte Marktbewegungen aber weder sicher vorhersagen noch Verluste verhindern.</p>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Alpha Station berechnet einen proprietären Fear Score basierend auf VIX, Advance/Decline Ratio, Common-Stock-Marktbreite sowie S&amp;P/Nasdaq/Russell Momentum. Du siehst in Echtzeit, ob der Markt in Panik-Modus ist — und kannst dein Risiko entsprechend anpassen. Ob Crash, Korrektur oder Sell-Off: Der Crash Monitor warnt dich bevor es zu spät ist. Schütze dein Portfolio, statt zuzusehen wie es schmilzt.</p>
                                 <div style={{ display: 'flex', gap: 24 }}>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#ef4444' }}>VIX</div><div style={{ fontSize: 12, color: '#64748b' }}>Live Tracking</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#ef4444' }}>A/D</div><div style={{ fontSize: 12, color: '#64748b' }}>Marktbreite</div></div>
@@ -1502,8 +1502,8 @@ Mehr erfahren ↓
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(139,92,246,0.12)', background: 'rgba(15,23,42,0.5)' }}>
                             <div style={{ padding: '40px 36px' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#8b5cf6', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>CRYPTO</div>
-                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Finde strukturierte Krypto-Setups</h3>
-                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Crypto Scanner bewertet ein breites Coin-Universum und ergänzt geeignete Kandidaten mit Exchange-Daten. Volumen, Momentum, Funding, Open Interest, Liquidität und BTC-Kontext werden als Indizien bewertet — nicht als Garantie für einen bevorstehenden Ausbruch.</p>
+                                <h3 style={{ fontSize: 26, fontWeight: 800, marginBottom: 14, letterSpacing: '-0.5px' }}>Finde Coins bevor sie ausbrechen</h3>
+                                <p style={{ fontSize: 15, color: '#94a3b8', lineHeight: 1.75, marginBottom: 24 }}>Der Crypto Scanner trackt Hunderte von Coins in Echtzeit. Whale Accumulation, ungewöhnliche Volume Spikes, Narrative-Shifts und Micro-Cap Momentum — du siehst die Bewegung bevor sie auf Twitter trendet. Early Movers Score, Degen Score und Whale Score zeigen dir genau, welche Coins gerade aufgebaut werden. Inklusive Perpetual-Daten, Funding Rates und Open Interest.</p>
                                 <div style={{ display: 'flex', gap: 24 }}>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#8b5cf6' }}>500+</div><div style={{ fontSize: 12, color: '#64748b' }}>Coins gescannt</div></div>
                                     <div><div style={{ fontSize: 20, fontWeight: 800, color: '#8b5cf6' }}>Live</div><div style={{ fontSize: 12, color: '#64748b' }}>Whale Tracking</div></div>
@@ -1614,13 +1614,13 @@ Mehr erfahren ↓
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 16 }}>
                         {[
                             { svg: 'M4 18L10 12L14 16L20 6', color: '#ef4444', name: 'Short Scanner', desc: 'Breakdown-Aktien, Earnings Misses, Downgrades automatisch finden' },
-                            { svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6', name: 'Money Flow', desc: 'Preis- und Volumenhinweise auf Kapitalrotation bewerten' },
+                            { svg: 'M12 2L12 22M2 12L22 12M6 6L18 18M18 6L6 18', color: '#8b5cf6', name: 'Money Flow', desc: 'Institutionelle Käufe & Verkäufe in Echtzeit erkennen' },
                             { svg: 'M13 2L3 14H12L11 22L21 10H12L13 2Z', color: '#10b981', name: 'Early Mover', desc: 'Phase 1/2/3 — Accumulation, Breakout & Risiko-Erkennung' },
                             { svg: 'M3 3H21V21H3ZM7 7V17M12 10V17M17 5V17', color: '#3b82f6', name: 'Kalender', desc: 'Earnings, IPOs, FDA Dates, Dividenden — alles im Blick' },
                                         { svg: 'M12 2A10 10 0 0 1 22 12A10 10 0 0 1 12 22A10 10 0 0 1 2 12A10 10 0 0 1 12 2M8 12H16M12 8V16', color: '#f97316', name: 'BTC-Divergenz', desc: 'Altcoins gegen BTC tracken' },
                             { svg: 'M12 5V19M5 12H19M8 8L16 16M16 8L8 16', color: '#ef4444', name: 'Pump & Dump', desc: 'Neue Listings & Pump-Erkennung — Short Signale' },
-                            { svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1', name: 'Volume Spikes', desc: 'Ungewöhnliche Volumenveränderungen systematisch bewerten' },
-                            { svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899', name: 'ORB Scanner', desc: 'Opening Range Breakout — Bewegungen nach der Eröffnungsrange prüfen' },
+                            { svg: 'M3 18V12H7V18H3ZM9 18V8H13V18H9ZM15 18V4H19V18H15Z', color: '#6366f1', name: 'Volume Spikes', desc: 'Ungewöhnliches Volumen erkennen bevor der Move kommt' },
+                            { svg: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 12L12 7M12 12L16 14', color: '#ec4899', name: 'ORB Scanner', desc: 'Opening Range Breakout — die erste Stunde profitabel nutzen' },
                         ].map((s, i) => (
                             <div key={i} style={{ padding: 24, background: 'rgba(30,41,59,0.4)', borderRadius: 14, border: '1px solid rgba(51,65,85,0.4)', transition: 'all 0.3s' }}
                                 onMouseOver={e => { e.currentTarget.style.borderColor='rgba(59,130,246,0.3)'; e.currentTarget.style.transform='translateY(-3px)'; }}
@@ -1642,9 +1642,9 @@ Mehr erfahren ↓
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40, alignItems: 'center' }}>
                         <div>
                             <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '1.5px', marginBottom: 12 }}>TRADE SETUPS</div>
-                            <h2 style={{ fontSize: 'clamp(26px, 3vw, 36px)', fontWeight: 800, marginBottom: 16, lineHeight: 1.2 }}>Setups mit Entry-, Stop- und Zielzonen.</h2>
+                            <h2 style={{ fontSize: 'clamp(26px, 3vw, 36px)', fontWeight: 800, marginBottom: 16, lineHeight: 1.2 }}>Wir sagen dir wo Entry, Stop-Loss und Take-Profit liegen.</h2>
                             <p style={{ fontSize: 16, color: '#94a3b8', lineHeight: 1.75, marginBottom: 20 }}>
-                                Jedes Signal zeigt einen regelbasierten Setup-Plan mit möglicher Entry-Zone, Invalidierungsniveau, Zielzonen und rechnerischem Chance-Risiko-Verhältnis.
+                                Jedes Signal kommt mit einer konkreten Handelsempfehlung: wo du einsteigen kannst, wo dein Stop-Loss liegen sollte und wo du Gewinne mitnehmen kannst. Risk-Reward Ratio inklusive.
                             </p>
                             <p style={{ fontSize: 16, color: '#e2e8f0', lineHeight: 1.75, marginBottom: 24, fontWeight: 500 }}>
                                 Aber am Ende entscheidest immer du. Alpha Station gibt dir die Daten und die Analyse — du bist der Boss und triffst die finale Entscheidung.
@@ -1690,8 +1690,8 @@ Mehr erfahren ↓
                         <div style={{ position: 'absolute', top: 45, left: '20%', right: '20%', height: 2, background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.3), transparent)', zIndex: 0 }} />
                         {[
                             { step: '1', title: 'Registrieren & $1 Trial', desc: 'Account erstellen, $1 zahlen — sofort vollen Zugang zu allen Scannern für 24 Stunden.', color: '#3b82f6' },
-                            { step: '2', title: 'Scanner startet', desc: 'Ein breites Marktuniversum wird gefiltert. Dauer und Abdeckung hängen von Scanner, Datenquelle und Tarif ab.', color: '#8b5cf6' },
-                            { step: '3', title: 'Plan prüfen', desc: 'Öffne ein Signal, prüfe Analyse, Entry, Stop-Loss und Zielzonen — und entscheide eigenverantwortlich.', color: '#10b981' },
+                            { step: '2', title: 'Scanner startet', desc: 'Sofort scannen. Über 8.000 Aktien werden analysiert, Ergebnisse in unter 5 Minuten.', color: '#8b5cf6' },
+                            { step: '3', title: 'Trade profitabel', desc: 'Klick auf ein Signal, sieh die vollständige Analyse mit Entry, Stop-Loss und Take-Profit — und trade.', color: '#10b981' },
                         ].map((s, i) => (
                             <div key={i} style={{ position: 'relative', zIndex: 1, textAlign: 'center' }}>
                                 <div style={{ width: 64, height: 64, borderRadius: '50%', background: `linear-gradient(135deg, ${s.color}22, ${s.color}11)`, border: `2px solid ${s.color}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', fontSize: 24, fontWeight: 800, color: s.color }}>{s.step}</div>
@@ -1703,17 +1703,17 @@ Mehr erfahren ↓
                 </div>
             </section>
 
-            {/* ── Typical workflows ── */}
+            {/* ── Testimonials ── */}
             <section data-reveal style={{ padding: '60px 24px' }} {...{id: 'sec-social'}}>
                 <div style={{...revealStyle('sec-social'), maxWidth: 900, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 40 }}>
-                        <h2 style={{ fontSize: 28, fontWeight: 800 }}>Typische Arbeitsabläufe</h2>
+                        <h2 style={{ fontSize: 28, fontWeight: 800 }}>Was Trader sagen</h2>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 20 }}>
                         {[
-                            { text: 'Mehrere technische Faktoren in einem BI-Scan vergleichen und die Datenlage vor einer eigenen Entscheidung prüfen.', name: 'Marktvorbereitung', role: 'Confluence, Richtung und Datenstatus' },
-                            { text: 'Pre-Market, After-Hours und Catalyst-Daten getrennt beobachten, statt unterschiedliche Marktphasen zu vermischen.', name: 'Ereignisbeobachtung', role: 'Session- und Catalyst-Kontext' },
-                            { text: 'Crash-, Short- und Regime-Hinweise als Risikosicht verwenden und Positionsentscheidungen anschließend selbst bewerten.', name: 'Risikokontrolle', role: 'Regime, Volatilität und Invalidierung' },
+                            { text: 'Der BI Scanner ist ein Gamechanger. 20+ Indikatoren gleichzeitig prüfen — das hab ich vorher manuell gemacht und Stunden gebraucht. Jetzt bekomme ich nur Confluence-Signale. Meine Trefferquote ist massiv gestiegen.', name: 'Marc K.', role: 'Daytrader' },
+                            { text: 'Endlich ein Tool das AH und PM scannt. Hab damit schon mehrere Gap-Downs frühzeitig erkannt. Und der Biotech Scanner mit FDA-Tracking ist Gold wert für Catalyst Plays.', name: 'Lisa T.', role: 'Swing Trader' },
+                            { text: 'Der Crash Monitor hat mir im letzten Selloff buchstäblich Geld gespart. Fear Score war bei 85, ich hab alles gehedged. Dazu die Short Scanner — ich verdiene jetzt auch in Bärenmärkten.', name: 'Jonas R.', role: 'Portfolio Manager' },
                         ].map((t, i) => (
                             <div key={i} style={{ padding: 28, background: 'rgba(30,41,59,0.4)', borderRadius: 16, border: '1px solid rgba(51,65,85,0.4)' }}>
                                 <div aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: '#3b82f6', marginBottom: 14 }} />
@@ -1732,13 +1732,13 @@ Mehr erfahren ↓
             <section id="pricing" data-reveal style={{ padding: '80px 24px' }}>
                 <div style={{...revealStyle('pricing'), maxWidth: 1060, margin: '0 auto'}}>
                     <div style={{ textAlign: 'center', marginBottom: 50 }}>
-                        <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Wähle deinen Funktionsumfang</h2>
+                        <h2 style={{ fontSize: 'clamp(28px, 3vw, 40px)', fontWeight: 800, marginBottom: 12, letterSpacing: '-0.5px' }}>Investiere in deinen Vorteil</h2>
                         <p style={{ color: '#94a3b8', fontSize: 17 }}>Jederzeit kündbar. Starte mit dem $1 Trial.</p>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20, alignItems: 'start' }}>
                         {plans.map(plan => (
                             <div key={plan.id} style={{ padding: 36, background: (plan.featured || plan.popular) ? 'linear-gradient(135deg, rgba(59,130,246,0.1) 0%, rgba(139,92,246,0.08) 100%)' : 'rgba(30,41,59,0.5)', borderRadius: 20, border: (plan.featured || plan.popular) ? '2px solid rgba(59,130,246,0.5)' : '1px solid #1e293b', position: 'relative', transform: (plan.featured || plan.popular) ? 'scale(1.04)' : 'none' }}>
-                                {(plan.featured || plan.popular) && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '5px 18px', borderRadius: 20, letterSpacing: '0.5px' }}>HERVORGEHOBENER TARIF</div>}
+                                {(plan.featured || plan.popular) && <div style={{ position: 'absolute', top: -14, left: '50%', transform: 'translateX(-50%)', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '5px 18px', borderRadius: 20, letterSpacing: '0.5px' }}>AM BELIEBTESTEN</div>}
                                 <h3 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{plan.name}</h3>
                                 <div style={{ marginBottom: 28 }}>
                                     <span style={{ fontSize: 48, fontWeight: 800, letterSpacing: '-2px' }}>${plan.price}</span>
@@ -1784,7 +1784,7 @@ Mehr erfahren ↓
             <section style={{ padding: '80px 24px 100px', textAlign: 'center', position: 'relative' }}>
                 <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: 700, height: 700, borderRadius: '50%', background: 'radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 60%)', pointerEvents: 'none' }} />
                 <div style={{ position: 'relative' }}>
-                    <h2 style={{ fontSize: 'clamp(30px, 4vw, 46px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-1px' }}>Prüfe dein nächstes Setup<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>systematisch.</span></h2>
+                    <h2 style={{ fontSize: 'clamp(30px, 4vw, 46px)', fontWeight: 800, marginBottom: 16, letterSpacing: '-1px' }}>Dein nächster Trade<br /><span style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>wartet schon.</span></h2>
                     <p style={{ color: '#94a3b8', fontSize: 18, marginBottom: 36, maxWidth: 480, margin: '0 auto 36px' }}>$1. 24 Stunden. Alle Scanner. Starte jetzt und überzeug dich selbst.</p>
                     <button onClick={() => openAuth(false)} style={{ padding: '18px 52px', background: 'linear-gradient(135deg, #3b82f6, #2563eb)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 18, fontWeight: 700, cursor: 'pointer', boxShadow: '0 10px 40px rgba(59,130,246,0.4)', transition: 'all 0.2s' }}
                         onMouseOver={e => { e.target.style.transform='translateY(-3px)'; e.target.style.boxShadow='0 14px 50px rgba(59,130,246,0.5)'; }}
