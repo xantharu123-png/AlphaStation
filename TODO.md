@@ -47,9 +47,17 @@ dabei ohne strukturelles TP1 freigegeben; Scanner- und Trade-Mailgrenzen bleiben
   Code-/Testinhalt gegen die tatsächlichen Index-Blobs geprüft, einschließlich
   der regulären Windows-CRLF-Konvertierung beim Git-Checkout. Vorgemerkte Änderungen
   nur in sieben vorgesehenen Dateien; keine privaten Exporte oder übriges WIP.
-- [ ] Feature noch nicht committet/gepusht oder auf Hetzner installiert.
-  Letzter tatsächlicher Health-Beleg bleibt Server `47d0b9ed93c2`; keine neue
-  Signal-/Beobachtungszustellung im echten Postfach nachgewiesen.
+- [x] Feature committet und gepusht: **`7be76b50b518359fb8cfa1d1ce66878fe5fa1685`**.
+  Genau sieben Mail-Code-/Test-/Übergabedateien; privates `output/` und übernommenes
+  übriges WIP nicht gestaged oder veröffentlicht. Zusätzlicher Git-Archiv-Abzug
+  ebenfalls **180 passed / 0 failed / 0 skipped**, 1 bekannte AnyIO-Warnung,
+  97,98 s; XML `output/breakout-release-index-20261011/qa-raw/qa-3dce3e1e4434/results.xml`.
+  Das ist eine Wiederholung derselben 180 Fälle, keine zusätzliche 180er-Abdeckung.
+- [ ] **Serverupdate und tatsächliche Zustellung offen.** Frischer öffentlicher
+  Healthcheck nach QA: `healthy`, Server `47d0b9ed93c2`, Bundle `8f8a6c0c5bae`,
+  Serverzeit `2026-10-10T22:38:09.186826` ohne expliziten Offset. Der neue Mail-Code
+  ist dort nicht installiert. Nach normalem Pull/Neustart Serverrevision prüfen,
+  danach nächste tatsächlich qualifizierte Beobachtungs-/Signalzustellung.
 - [ ] **Cup nicht in diesem neuen Pfad:** dessen Finalizer setzt Projektions-TP1
   derzeit auf REJECT/causal_structure_missing. Ohne getrennten echten Beleg darf das
   nicht als reiner „historischer Gegenlevel fehlt“-Fall umgangen werden. BI/Krypto,

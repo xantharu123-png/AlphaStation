@@ -112,15 +112,25 @@ historisch nachgebaut; keine Allzeithoch-/Providerfehler-Behauptung.
   vorgemerkte Änderungen; kein privates `output/` und kein übriges WIP im Commit.
   API stimmt roh mit dem Index-Blob überein; die LF-Testdateien stimmen nach
   regulärer Git-CRLF-Checkout-Konvertierung mit ihren Index-Blobs überein.
+- Zusätzlicher Abzug über Git-Archiv: nochmals **180 passed / 0 failed / 0 skipped**,
+  1 bekannte AnyIO-Warnung, 97,98 s. XML
+  `output/breakout-release-index-20261011/qa-raw/qa-3dce3e1e4434/results.xml`.
+  Derselbe unveränderte Inhalt und dieselben Fälle, keine zusätzliche Abdeckung;
+  auch Git-Archiv nutzt unter `core.autocrlf=true` die normale Checkout-Konvertierung.
 
 Externe Netzwerkverbindungen und echtes SMTP sind in allen Offline-Läufen gesperrt;
 Testadressen sind `.invalid`, Auth-/Tracker-/Outbox-/Dedupe-Daten temporär isoliert.
 Ein vor dem letzten Patch angehaltener Gesamtlauf und ein während einer Teständerung
 gestarteter kombinierter Lauf mit alter Text-Erwartung zählen nicht als finaler Pass.
 
-## Noch nicht live bestätigt
+## Veröffentlichung und offene Live-Prüfung
 
-Letzter tatsächlicher Server-Healthbeleg: `47d0b9ed93c2`. Feature noch nicht
+Feature-Commit `7be76b50b518359fb8cfa1d1ce66878fe5fa1685` ist erfolgreich nach
+`origin/main` gepusht. Nur sieben Mail-Code-/Test-/Übergabedateien veröffentlicht.
+Privates `output/` und die übrigen übernommenen Änderungen bleiben lokal und unberührt.
+
+Frischer tatsächlicher Healthbeleg: healthy, `47d0b9ed93c2`, Bundle `8f8a6c0c5bae`,
+Serverzeit `2026-10-10T22:38:09.186826` ohne expliziten Offset. Feature dort noch nicht
 installiert; keine echte neue Beobachtungs-Mail oder reguläre Signal-Mail im Postfach
 nachgewiesen. Keine Testmail, kein Replay, Pull, Neustart oder Produktions-Codeänderung
 durch diesen Arbeitsschritt. Nach Veröffentlichung muss die Serverrevision und danach

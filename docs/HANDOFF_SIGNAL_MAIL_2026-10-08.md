@@ -39,8 +39,17 @@ Quellen wiederholt, 63 passed. Die zusätzliche Kontrolle des separat exportiert
 Git-Index besteht: **180 passed / 0 failed / 0 skipped**, 1 bekannte AnyIO-Warnung,
 116,91 s. XML `output/breakout-release-index-20261011/qa/qa-f8bde43536ef/results.xml`.
 Veröffentlichungsinhalt gegen die echten Index-Blobs geprüft; normale Git-CRLF-
-Konvertierung bei LF-Testdateien berücksichtigt. Feature nicht committet/gepusht/deployt;
-keine echte Zustellung dieser Hinweise bestätigt. Details im neuen
+Konvertierung bei LF-Testdateien berücksichtigt. Zusätzlicher Git-Archiv-Abzug:
+erneut 180 passed, 0 failed/skip, 1 bekannte AnyIO-Warnung, 97,98 s; dieselben Fälle,
+keine verdoppelte Abdeckung. XML
+`output/breakout-release-index-20261011/qa-raw/qa-3dce3e1e4434/results.xml`.
+**Feature veröffentlicht:** `7be76b50b518359fb8cfa1d1ce66878fe5fa1685`, Commit/Push
+erfolgreich. Genau sieben vorgemerkte Dateien; privates `output/` und übriges WIP
+ausgenommen. **Nicht auf Hetzner installiert, keine echte Zustellung bestätigt.**
+Frischer Healthcheck: healthy, `47d0b9ed93c2`, Bundle `8f8a6c0c5bae`, Serverzeit
+`2026-10-10T22:38:09.186826` ohne expliziten Offset. Nächster Schritt: normaler
+Pull nach Abschluss laufender Scans, Dienste neu starten, Revision prüfen und
+nächste qualifizierte reale Zustellung nachweisen. Kein Deploy-Skript nötig. Details im neuen
 `docs/BREAKOUT_OBSERVATION_MAIL_2026-10-11.md`.
 
 Cup bewusst NICHT zugelassen: aktueller Finalizer macht aus Projektions-TP1 ein
