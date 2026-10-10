@@ -133,15 +133,29 @@ def test_delivery_release_never_deletes_a_sent_marker(tmp_path):
     assert email_dedupe_active(path, "signal", 3600, now=1002.0)
 
 
-def test_api_and_background_service_share_atomic_dedupe_helpers():
+def test_api_and_background_service_share_atomic_dedupe_helpers(monkeypatch, tmp_path):
+    import api
+
     api_source = (ROOT / "api.py").read_text(encoding="utf-8")
     bg_source = (ROOT / "bg_service.py").read_text(encoding="utf-8")
     for source in (api_source, bg_source):
         assert "from modules.email_dedupe import" in source
         assert "_shared_email_delivery_claim" in source
         assert "_shared_email_delivery_mark" in source
-        assert "claim_ttl_seconds=900" in source
+    assert "claim_ttl_seconds=900" in bg_source
     assert "_email_dedupe_release(dedupe_key, claimed_at=now)" in api_source
+
+    # Ordinary TRADE claims retain the 900-second lease even when WATCH
+    # notices pass an explicit longer lease. Exercise the real durable store,
+    # not whether the implementation spells the default as a source literal.
+    path = str(tmp_path / "dedupe.json")
+    monkeypatch.setattr(api, "_mail_outbox", None)
+    monkeypatch.setattr(api, "_EMAIL_DEDUPE_FILE", path)
+    assert api._email_dedupe_claim("ordinary-trade", 8 * 3600, now=1000.0)
+    assert not api._email_dedupe_claim("ordinary-trade", 8 * 3600, now=1899.0)
+    assert api._email_dedupe_claim("ordinary-trade", 8 * 3600, now=1901.0)
+    api._email_dedupe_mark("ordinary-trade", now=1902.0)
+    assert not api._email_dedupe_claim("ordinary-trade", 8 * 3600, now=1903.0)
 
 
 def _source_section(source, start_marker, end_marker):

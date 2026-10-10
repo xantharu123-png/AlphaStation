@@ -238,6 +238,7 @@ from modules.vrvp_levels import (
     trade_level_quality,
 )
 from modules.level_zones import (
+    LEVEL_ZONE_MODEL_VERSION,
     _coerce_datetime as _level_coerce_datetime,
     StructureSnapshot,
     build_structure_snapshot,
@@ -3193,6 +3194,8 @@ def _alert_dedupe_ttl_seconds(scanner_name: str) -> int:
 
 def _email_dedupe_ttl_for_key(key: str) -> int:
     key = str(key or "")
+    if key.removeprefix("__delivery_claim__:").startswith("stock_breakout_notice_v1_"):
+        return max(_alert_dedupe_ttl_seconds("stock_strategy"), 7 * 86400)
     if key.startswith("crash_stock_"):
         return _CRASH_ALERT_DEDUPE_SEC
     if key.startswith("crash_summary_") or key.startswith("bear_summary_"):
@@ -3278,7 +3281,8 @@ def _email_dedupe_mark(key: str, now: Optional[float] = None) -> None:
         print(f"[Alert] Dedupe-Markierung konnte nicht gespeichert werden: {exc}")
 
 
-def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None) -> bool:
+def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None,
+                        *, claim_ttl_seconds: int = 900) -> bool:
     """Acquire a short send lease while respecting the full sent TTL."""
     try:
         if (
@@ -3295,7 +3299,7 @@ def _email_dedupe_claim(key: str, ttl_seconds: int, now: Optional[float] = None)
             # Ten candidates may each perform snapshot + path checks before
             # SMTP. The lease still stays far below the former eight-hour
             # cooldown while safely covering bounded provider latency.
-            claim_ttl_seconds=900,
+            claim_ttl_seconds=claim_ttl_seconds,
             now=now,
         )
     except Exception as exc:
@@ -14297,6 +14301,223 @@ def _regime_mail_decision(
         return None
 
 
+def _stock_breakout_notice_evidence(row, now_ts, state=None):
+    """Separate confirmed 1D observation; never relax the full trade gate."""
+    clock = datetime.fromtimestamp(now_ts, timezone.utc)
+    if not isinstance(row, dict) or not stock_swing.validate(row, clock):
+        return None
+    strategy = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(
+        row.get("Strategy") or row.get("strategy") or ""))
+    if strategy not in {"Momentum Breakout Long", "Gap Momentum Long", "Gap Momentum Short"}:
+        return None
+    if _cup_signal_contract_reason(row) or _cup_final_plan_contract_reason(row):
+        return None
+    if state is None:
+        try:
+            state = _classify_alert_candidate("stock_strategy", row, now_ts, cache_only=True)
+        except RuntimeError:
+            # Missing cached reference is not permission to fetch a different
+            # universe or to abort all the unaffected full trade candidates.
+            return None
+    # The notice owns a different key. A previous TRADE must neither silence
+    # this observation nor let this observation consume a later TRADE identity.
+    reasons = set(state.get("suppression_reasons") or []) - {
+        "cooldown_active", "persistent_dedupe_active"}
+    if reasons != {"trade_target_not_structural"}:
+        return None
+    quality_ok, _ = _stock_strategy_mail_quality_state(
+        row, daily_close_confirmed_mode=True,
+        market_status=_stock_trade_email_status(clock), now_utc=clock)
+    if not quality_ok:
+        return None
+    setup = row.get("trade_setup")
+    if not isinstance(setup, dict):
+        return None
+    # Missing causal structure and WEAK targets share the old rejection token
+    # with projections. Admit only a genuinely absent opposing historical level.
+    for container in (setup, row):
+        for key, expected in (
+            ("target_quality", "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"),
+            ("structure_status", "ACCEPT"),
+            ("structure_reason", "no_confirmed_opposing_barrier"),
+        ):
+            if key in container and container[key] != expected:
+                return None
+        if container.get("nearest_barrier") is not None or container.get("barrier_gate"):
+            return None
+        if container.get("barrier_gate_active"):
+            return None
+        if "tp1_is_projection" in container and container["tp1_is_projection"] is not True:
+            return None
+        decision = container.get("structure_decision")
+        if decision is not None and (not isinstance(decision, dict)
+                or decision.get("status") != "ACCEPT"
+                or decision.get("reason") != "no_confirmed_opposing_barrier"
+                or decision.get("nearest_barrier") is not None or decision.get("barrier_gate")):
+            return None
+    if (setup.get("target_quality") != "PROJECTION_ONLY_NO_CONFIRMED_BARRIER"
+            or setup.get("tp1_is_projection") is not True
+            or setup.get("structure_status") != "ACCEPT"
+            or setup.get("structure_reason") != "no_confirmed_opposing_barrier"
+            or not isinstance(setup.get("structure_decision"), dict)
+            or setup.get("stop_is_projection") is not False):
+        return None
+    levels = _alert_trade_levels(row)
+    if not levels.get("valid") or not levels.get("native") or levels.get("estimated"):
+        return None
+    # The projection rejection precedes these checks in the full-plan guard.
+    # A missing historical target must not hide another geometry/quality defect.
+    quality = _alert_trade_plan_quality(levels)
+    effective_rr = stock_swing.number(quality.get("effective_rr"))
+    if (quality.get("tp1_ok") is False or quality.get("issues")
+            or effective_rr is None or effective_rr < _ALERT_MIN_LEVEL_RR):
+        return None
+    close = stock_swing.number(row.get("swing_reference_close"))
+    direction = _infer_alert_direction(row)
+    if direction not in {"LONG", "SHORT"}:
+        return None
+    if direction != ("SHORT" if strategy == "Gap Momentum Short" else "LONG"):
+        return None
+    for key in ("price", "Preis", "Price", "current_price"):
+        if key in row and (stock_swing.number(row[key]) is None
+                or not math.isclose(float(row[key]), close, abs_tol=0.0051)):
+            return None
+    if (not math.isclose(levels["entry"], close, abs_tol=0.0051)
+            or levels["direction"] != direction):
+        return None
+    level = None
+    if strategy == "Momentum Breakout Long":
+        if (type(row.get("Momentum_Contract_Version")) is not int
+                or not _stock_momentum_row_contract_valid(row, as_of=clock)):
+            return None
+        level = stock_swing.number(row.get("Breakout_Level"))
+    else:
+        snapshot = row.get("Level_Structure") or row.get("level_structure")
+        if not isinstance(snapshot, dict):
+            return None
+        if ("Level_Structure" in row and "level_structure" in row
+                and row["Level_Structure"] != row["level_structure"]):
+            return None
+        flags, zones = snapshot.get("quality_flags", []), snapshot.get("zones", [])
+        if (not isinstance(flags, (list, tuple)) or any(not isinstance(flag, str) for flag in flags)
+                or not isinstance(zones, (list, tuple))):
+            return None
+        if (snapshot.get("model") != LEVEL_ZONE_MODEL_VERSION
+                or snapshot.get("symbol") != _extract_alert_ticker(row)
+                or snapshot.get("asset_class") != "stock" or snapshot.get("horizon") != "swing"
+                or stock_swing.number(snapshot.get("current_price")) is None
+                or not math.isclose(float(snapshot["current_price"]), close, abs_tol=0.0051)
+                or {"no_completed_bars", "no_confirmed_levels", "structure_unavailable"}
+                    .intersection(flags)):
+            return None
+        reference_ts = _stock_market_timestamp_seconds(row["scan_price_observed_at"])
+        if _stock_market_timestamp_seconds(snapshot.get("as_of")) != reference_ts:
+            return None
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            origin = "resistance" if direction == "LONG" else "support"
+            if origin not in (zone.get("origin_roles") or []):
+                continue
+            barrier = {"zone_id": zone.get("zone_id"), "zone_low": zone.get("lower"),
+                       "zone_high": zone.get("upper"), "confirmed_at": zone.get("confirmed_at"),
+                       "side": "resistance" if direction == "LONG" else "support",
+                       "break_reclaim_evidence": zone.get("break_reclaim_evidence"),
+                       "reclaim_history": zone.get("reclaim_history")}
+            proof = _confirmed_trade_break_evidence(row, barrier)
+            if (proof and proof.get("state") == "BREAK_CONFIRMED"
+                    and proof.get("timeframe") == "1D"
+                    and _stock_market_timestamp_seconds(proof.get("as_of")) == reference_ts
+                    and _stock_market_timestamp_seconds(proof.get("last_completed_at")) == reference_ts
+                    and math.isclose(float(proof["last_completed_close"]), close, abs_tol=0.0051)):
+                level = stock_swing.number(proof.get("boundary"))
+                break
+        if level is None:
+            return None
+    ticker = _extract_alert_ticker(row)
+    if not ticker or level is None:
+        return None
+    session = row["swing_analysis_session"]
+    identity = json.dumps([ticker, strategy, direction, session, level], separators=(",", ":"))
+    return {"ticker": ticker, "strategy": strategy, "direction": direction,
+            "level": level, "close": close, "session": session,
+            "cooldown_key": "stock_breakout_notice_v1_" + hashlib.sha256(identity.encode()).hexdigest()}
+
+
+def _stock_breakout_notice_html(row, evidence):
+    """Only observed breakout facts, without projected prices or trade claims."""
+    return (
+        "<html><body><h2>Ausbruch bestätigt – Beobachtung</h2>"
+        f"<p><b>{html.escape(evidence['ticker'])}</b> · {html.escape(evidence['strategy'])}"
+        f" · {html.escape(evidence['direction'])}</p>"
+        f"<p>Tagesschluss {html.escape(evidence['session'])}: ${evidence['close']:.4f}"
+        f" · Ausbruch-Level ${evidence['level']:.4f}</p>"
+        "<p>Historisches Kursziel nicht bestätigt – kein freigegebener Handelsplan.</p>"
+        "<p>Rückteststatus im Chart prüfen. Kein Livekurs und keine ausgeführte Order.</p>"
+        "</body></html>"
+    )
+
+
+def _send_stock_breakout_notices(rows, *, max_rows):
+    """Bounded WATCH delivery; no trade intent, tracker row or trade cooldown."""
+    attempted = 0
+    for row in rows[:50]:
+        if attempted >= max_rows:
+            break
+        key, claimed_at, owned = None, time.time(), False
+        _set_last_delivery_outcome("not_attempted")
+        try:
+            evidence = _stock_breakout_notice_evidence(row, claimed_at)
+            if evidence is None:
+                continue
+            key = evidence["cooldown_key"]
+            # A session observation remains reserved after an uncertain DATA
+            # result even without an outbox. A crash may miss this observation,
+            # never suppressing a new session or an independent full TRADE.
+            ttl = _email_dedupe_ttl_for_key(key)
+            if (claimed_at - _EMAIL_COOLDOWN.get(key, 0) < ttl
+                    or not _email_dedupe_claim(key, ttl, now=claimed_at,
+                                               claim_ttl_seconds=ttl)):
+                continue
+            owned = True
+            body = _stock_breakout_notice_html(row, evidence)
+            current = time.time()
+            if current - claimed_at >= 300:
+                if not _email_dedupe_renew(key, claimed_at=claimed_at, now=current):
+                    _email_dedupe_release(key, claimed_at=claimed_at)
+                    continue
+                claimed_at = current
+            # Rendering can cross a daily-session boundary. Recheck the proof
+            # and its independent identity immediately before the sender call.
+            final = _stock_breakout_notice_evidence(row, time.time())
+            if final != evidence:
+                _email_dedupe_release(key, claimed_at=claimed_at)
+                continue
+            attempted += 1
+            sent = _send_email_alert(
+                f"Ausbruch bestätigt: {evidence['ticker']} – {evidence['strategy']}", body,
+                mail_class="watch", mail_channel="stocks_swing", trade_horizon="swing",
+                delivery_dedupe_keys=[key], rendered_at=datetime.now(timezone.utc),
+                # A historical observation is rebuilt from a fresh scan on a
+                # definite failure, not blindly replayed after the next session.
+                queue_on_failure=False,
+            )
+            if sent:
+                accepted_at = time.time()
+                _EMAIL_COOLDOWN[key] = accepted_at
+                _email_dedupe_mark(key, now=accepted_at)
+            else:
+                _email_dedupe_release_after_send(key, claimed_at=claimed_at)
+        except Exception as exc:
+            if owned:
+                _email_dedupe_release_after_send(key, claimed_at=claimed_at)
+            _record_email_event("Ausbruch-Beobachtung", "error",
+                                f"stock_breakout_notice_error:{type(exc).__name__}")
+            # An optional observation must not abort any unaffected delivery.
+            continue
+    return attempted
+
+
 def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]], market_type: str = "stocks") -> None:
     """Mail top S/A strategy rows when a manual or scheduled strategy scan produces them."""
     if market_type == "stocks" and _unsupported_stock_strategy(strategy_name):
@@ -14428,6 +14649,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 return
     now = time.time()
     alerts = []
+    breakout_notice_rows = []
     # Shadow-Tracking (AUDIT 2026-07-31): Rows, die NUR an den Swing-Timing-
     # Gates scheitern, werden still als mail_class='shadow' geloggt (keine
     # Mail, kein Statistik-Einfluss) — Forward-Messung der Gate-Kosten.
@@ -14509,6 +14731,14 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         else:
             state = _classify_alert_candidate(scanner_key, row, now)
         if not state["alertable_now"]:
+            if market_type == "stocks":
+                try:
+                    if _stock_breakout_notice_evidence(row, now, state):
+                        breakout_notice_rows.append(row)
+                except Exception as exc:
+                    # Optional notice discovery is isolated too, not just SMTP.
+                    _record_email_event("Ausbruch-Beobachtung", "error",
+                                        f"stock_breakout_notice_precheck_error:{type(exc).__name__}")
             for reason in state["suppression_reasons"]:
                 suppressed[reason] = suppressed.get(reason, 0) + 1
             shadow_reasons = _shadow_trackable_reasons(
@@ -14554,8 +14784,18 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             scanner_key, shadow_rows, mail_class="shadow", channel="shadow"
         )
 
+    # Full plans are attempted first. Optional observations use only the actual
+    # remaining row budget, including definite/uncertain normal send attempts.
+    remaining_email_rows = _ALERT_EMAIL_MAX_ROWS
+
+    def _finish_breakout_notices():
+        return _send_stock_breakout_notices(
+            breakout_notice_rows, max_rows=max(0, remaining_email_rows),
+        ) if breakout_notice_rows else 0
+
     if not alerts:
-        if market_type == "stocks":
+        notice_attempts = _finish_breakout_notices()
+        if market_type == "stocks" and not notice_attempts:
             _record_email_event(
                 f"Aktien Strategie Alert - {strategy_name}",
                 "skipped",
@@ -14598,6 +14838,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
             "skipped",
             "all_strategy_rows_claimed_by_parallel_sender",
         )
+        _finish_breakout_notices()
         return
 
     # The provider-backed final validation is intentionally deferred until all
@@ -14607,8 +14848,6 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     # A row quota for sender calls is shared by existing WATCH groups and
     # actionable single-row messages. Final revalidation failures do not spend
     # it; failed or uncertain sends do, keeping attempts bounded.
-    remaining_email_rows = _ALERT_EMAIL_MAX_ROWS
-
     def _take_mail_row_quota(candidates):
         kept = list(candidates[:remaining_email_rows])
         for deferred in candidates[remaining_email_rows:]:
@@ -14880,6 +15119,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     )
     _regime = _market_yellow_decision
     if not email_alerts:
+        _finish_breakout_notices()
         return
 
     # Breaker RED is cell-local.  Send each affected cell as its own watch
@@ -15029,6 +15269,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 if id(alert) not in _breaker_alert_ids
             ]
             if not email_alerts:
+                _finish_breakout_notices()
                 return
 
     if _regime:
@@ -15069,6 +15310,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                     "skipped",
                     "market_regime_yellow_filtered_all",
                 )
+                _finish_breakout_notices()
                 return
             _regime_score_floor = _boosted
     # A ticker can qualify in multiple scanners at the same time.  Do not mail
@@ -15109,6 +15351,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 "skipped",
                 f"open_equivalent_trade:{equivalent_count}",
             )
+            _finish_breakout_notices()
             return
 
     # Live stock rows are deliberately delivered one message at a time.  Each
@@ -15314,6 +15557,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
                 "skipped",
                 "no_mail_adjacent_revalidated_rows",
             )
+        _finish_breakout_notices()
         return
 
     rows = ""
@@ -15425,6 +15669,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
         for a in email_alerts
     ]
     try:
+        remaining_email_rows -= len(email_alerts)
         sent = _send_email_alert(
             f"{label}: Top {count_text} Setup(s) - {strategy_name}{_dailyclose_subject_suffix}",
             body,
@@ -15453,6 +15698,7 @@ def _send_strategy_scan_alerts(strategy_name: str, results: List[Dict[str, Any]]
     else:
         for alert in email_alerts:
             _email_dedupe_release_after_send(alert["cooldown_key"], claimed_at=now)
+    _finish_breakout_notices()
 
 
 def _new_listing_nested_signal(entry: Dict[str, Any]) -> Dict[str, Any]:

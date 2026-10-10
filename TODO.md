@@ -1,5 +1,135 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 11.10.2026 – Freigegebene Ausbruch-Beobachtung und Watch-Opt-in
+
+Diese Fortsetzung ersetzt den Diagnose-only-Stand darunter: Der Nutzer hat die
+separate Ausbruch-Benachrichtigung freigegeben und ausdrücklich **„Ja,
+Beobachtungs-Mails aktivieren“** bestätigt. Kein vollständiger Handelsplan wird
+dabei ohne strukturelles TP1 freigegeben; Scanner- und Trade-Mailgrenzen bleiben bestehen.
+
+- [x] Im angemeldeten eigenen Account war **Watchlist-Mails AUS**. Auf **AN**
+  gesetzt; Erfolgsmeldung „Alert-Einstellungen gespeichert“ und erneute sichtbare
+  Account-Ansicht bestätigen AN. Signal-Mails, Swing-Modus und andere Kanäle nicht geändert.
+- [x] Separater WATCH-Pfad lokal implementiert für **Momentum Breakout Long,
+  Gap Momentum Long und Gap Momentum Short**: abgeschlossene aktuelle 1D-Session,
+  bestätigter numerischer Ausbruch, kausaler nativer Stop und ausschließlich der
+  fehlende historische Gegenlevel als Trade-Mail-Sperre. Keine erfundenen Kursziele,
+  keine Entry-/Stop-/TP-/R-Werte in dieser Beobachtungs-Mail, kein Trade-Tracker-Eintrag.
+- [x] Eigener dauerhafter Doppelschutz; bestehende Trade-Identität bleibt unberührt.
+  WATCH-Empfängerpräferenz gilt; unklare SMTP-Annahme wird nicht blind erneut gesendet.
+  Trade-Mails und Hinweise teilen das bestehende Senderlimit.
+- [x] Native OHLCV-Produzenten bis echtem Sender mit simuliertem SMTP: Momentum,
+  Gap Long und Gap Short, **3 passed**; XML
+  `output/breakout-notice-20261010-gap/qa-d88750f17f45/results.xml`.
+- [x] Erste Grenzprüfung **68 passed**; XML
+  `output/breakout-notice-20261010-contract/qa-1dec025c0a0f/results.xml`.
+  Vor Implementierung reproduzierte ein RED-Test die fehlende Beobachtungs-Mail.
+- [x] Zusätzliche Zeitwechsel-/Lease-/Mischbudget-/Fehlerisolations-Prüfungen und
+  unabhängiger Code-Review abgeschlossen; alle reproduzierten Review-Funde behoben.
+  Finaler kombinierter Offline-Lauf: **170 passed / 0 failed / 0 skipped**,
+  1 bekannte AnyIO-Warnung, 111,23 s. Darin **89 neue Grenzfälle** sowie die echten
+  nativen Produzenten und bestehenden Mail-Suites. XML
+  `output/breakout-notice-final-combined-20261011/qa-2a7b0b830707/results.xml`.
+- [x] Vollständiger Lauf auf eingefrorenen Quellen: **12.404 passed / 97 failed /
+  7 skipped**, 1 bekannte AnyIO-Warnung, 663,07 s. Kein Gesamtpass.
+  Die sortierten konkreten Fehlernamen stimmen exakt mit der Vorher-Baseline
+  überein: Deploy Auto-Update 55, Migration 10, Retirement 5, Security-Reaudit 27.
+  **Keine zusätzlichen Fehler**; API-Quellhash vor/nach dem Lauf unverändert.
+  XML `output/breakout-notice-frozen-full-20261011/qa-8f5b343e5834/results.xml`.
+  Ein vorheriger Lauf mit sechs zusätzlichen Fehlern wurde nicht beschönigt:
+  eine veraltete Quelltext-Literalprüfung ist jetzt durch echte Dedupe-Prüfung
+  ersetzt; fünf historische Quell-Freeze-Guards erkannten korrekt eine reine
+  Zeilenendungsänderung während jenes Laufs. Separate Wiederholung **63 passed**;
+  sämtliche Details und Fehlernamen im Prüfbericht.
+- [x] Zusätzliche Veröffentlichungskontrolle aus einem separaten Abzug des
+  Git-Index: **180 passed / 0 failed / 0 skipped**, 1 bekannte AnyIO-Warnung,
+  116,91 s. XML `output/breakout-release-index-20261011/qa/qa-f8bde43536ef/results.xml`.
+  Code-/Testinhalt gegen die tatsächlichen Index-Blobs geprüft, einschließlich
+  der regulären Windows-CRLF-Konvertierung beim Git-Checkout. Vorgemerkte Änderungen
+  nur in sieben vorgesehenen Dateien; keine privaten Exporte oder übriges WIP.
+- [ ] Feature noch nicht committet/gepusht oder auf Hetzner installiert.
+  Letzter tatsächlicher Health-Beleg bleibt Server `47d0b9ed93c2`; keine neue
+  Signal-/Beobachtungszustellung im echten Postfach nachgewiesen.
+- [ ] **Cup nicht in diesem neuen Pfad:** dessen Finalizer setzt Projektions-TP1
+  derzeit auf REJECT/causal_structure_missing. Ohne getrennten echten Beleg darf das
+  nicht als reiner „historischer Gegenlevel fehlt“-Fall umgangen werden. BI/Krypto,
+  andere Scanner und die älteren Backtest-/Report-Aufgaben dadurch nicht erledigt.
+
+Keine neue Landingpage-Fassung, Testmail, Scan, Provider-Replay, Serverinstallation
+oder Änderung anderer Konten. Inherited Deploy-/Dokumentations-WIP bleibt erhalten.
+Enge Implementierung und Prüfnachweise: `docs/BREAKOUT_OBSERVATION_MAIL_2026-10-11.md`.
+
+## 10.10.2026 – Maildiagnose nach bestätigter Anmeldung
+
+Aktueller Auftrag: **finden, weshalb reguläre Signal-Mails ausbleiben**. Nur Diagnose;
+keine neue Landingpage-Fassung, keine Lockerung von Mailregeln, kein Testversand,
+Scanstart, Pull oder Neustart. Die Anmeldung ist diesmal tatsächlich erfolgt und
+Admin → Mailversand wurde gelesen. Ältere fehlende Login-Belege darunter sind historisch.
+
+- [x] Frischer öffentlicher Healthcheck: `healthy`, Serverrevision `47d0b9ed93c2`,
+  Frontend `8f8a6c0c5bae`, Serverzeit `2026-10-10T21:34:25.555683` ohne explizite
+  Zeitzone. Landing-Rücknahme `702fec7` / Dokumentations-HEAD `45d12ee` noch nicht
+  auf diesem Server sichtbar; **nicht** Ursache der Kursziel-Sperre.
+- [x] Live-Versandansicht **10.10., 23:37:41 Zürich**: 1 berechtigter Swing-Empfänger,
+  1 Crypto-Empfänger; im begrenzten RAM-Fenster 0 SMTP-Annahmen / 50 ausgelassene
+  Entscheidungen / 0 Versandfehler / 0 Warteschlange. Die 50 sichtbaren Ereignisse
+  sind Krypto-Ablehnungen. Das Fenster ist maximal 50 Ereignisse / 24 Stunden und
+  beweist weder die vollständige Tageshistorie noch die Fehlerfreiheit von SMTP.
+- [x] Persistierter letzter Auto-Sweep: **10.10., 05:55:04 Zürich**, abgeschlossen,
+  30 Kandidaten. Transportspalten zeigen `—`, nicht bestätigte Nullwerte: fehlende
+  gespeicherte Eventzähler sind **kein** Nachweis eines nie erfolgten Aufrufs.
+  Aktuelle Cache-Vorprüfung: 30 Aktienstrategie-Kandidaten, 0 freigegebene Signale.
+  BI Long/Short und ORB haben in dieser Vorprüfung keine Kandidaten.
+- [x] Zwei konkrete starke Momentum-Kandidaten aus Referenzsession **09.10.**
+  gelesen, einschließlich aufgeklappter Mailgründe:
+  - TBBB: Trade-Score 92 / Minimum 80, Tagesqualität 85/96 / Minimum 78,
+    Setup-Score 86; Ausbruch bestätigt, Rücktest offen.
+  - PLTR: Trade-Score 91 / Minimum 80, Tagesqualität 88/96 / Minimum 78,
+    Setup-Score 83; Ausbruch bestätigt, Rücktest offen.
+  - Beide haben als konkrete Mailablehnung **„Kursziel nicht durch Struktur
+    bestaetigt“** (`trade_target_not_structural`). Nicht pauschal Score, fehlenden
+    Empfänger oder fehlenden Rücktest als Ursache dieser beiden Fälle ausgeben.
+- [x] Harte Zielregel im Quellpfad nachvollzogen: `api.py:4457` lehnt
+  `target_quality=PROJECTION_ONLY*`, `WEAK_*` oder `tp1_is_projection=true` ab.
+  Bei keinem bestätigten Gegenlevel baut `api.py:19658` dennoch einen Plan mit
+  `structure_status=ACCEPT`, Grund `no_confirmed_opposing_barrier`, aber nur
+  Projektionszielen; `api.py:19753` kennzeichnet diese entsprechend. Der Mailguard
+  verwirft ihn. Die Regel stammt aus `82f5463` (23.08.); `d06b8af` (30.09.) macht
+  den Grund präziser sichtbar, führte die Grundsperre nicht erst neu ein.
+  Gemeinsamer Guard gilt auch für BI, Turtle, Cup, ORB, Bear und Biotech.
+  **TP2-Projektion allein ist erlaubt**, wenn TP1 bestätigt strukturell ist.
+  Kein reproduzierter Beleg für ein falsches Projektionsflag auf einem echten TP1.
+- [x] Unabhängige, enge Offline-Gegenprobe: **8 passed / 0 failed / 0 skipped**,
+  1 bekannte AnyIO-Warnung; echte native Gap-Produzenten LONG/SHORT bis echtem
+  Sender und simuliertem SMTP, negative Gegenbarrieren und Daily-Cooldown-Isolation.
+  XML `output/signal-sender-boundary-audit-20261010/qa-4d70f316e652/results.xml`.
+  Fehlender FastAPI-Import und abgebrochener stummer Sandboxlauf davor zählen nicht.
+- [x] Zielpolitik separat reproduziert: **4 vorhandene Tests passed**, danach
+  **1 überlappender Test mit temporärer Ablaufbeobachtung passed**, keine Sourceänderung.
+  Echtes OHLCV → nativer Cup-Plan: kausaler Stop, Struktur `ACCEPT`, keine Gegenbarriere,
+  `PROJECTION_ONLY_NO_CONFIRMED_BARRIER`, beide Ziel-Projektionsflags true →
+  `trade_target_not_structural`. XML unter
+  `output/signal-target-policy-audit-20261010/qa-f8a531212112/results.xml` und
+  `qa-560f48d06ca2/results.xml`. Kein unabhängiger historischer TBBB-/PLTR-Nachbau.
+- [x] Abgrenzung: Technische Testmail und Crash-Mails nutzen separate Info-Pfade;
+  deren Zustellung beweist keine Freigabe des regulären Trade-Pfads. Fehlende Queue
+  beweist nichts über Senderkorrektheit. Kein neu reproduzierter universeller
+  Sender-/Cooldownfehler. Reguläre tatsächliche Zustellung weiterhin nicht belegt.
+- [ ] Originale TBBB-/PLTR-Zonen und Ziel-Provenienz nicht aus vollständigen
+  Originalkerzen unabhängig nachgerechnet. Nicht behaupten, beide lägen am Allzeithoch,
+  es existiere definitiv kein Widerstand oder der Provider habe eine Zone ausgelassen.
+- [ ] Fachliche Entscheidung vor Regeländerung: Ein bestätigter Ausbruch ohne
+  historische Gegenbarriere ist nicht dasselbe wie ein vollständig belegter
+  Entry/Stop/TP-Plan. Der derzeitige Guard unterdrückt solche Mails vollständig.
+  Für eine Änderung explizit zwischen Ausbruch-Benachrichtigung und freigegebenem
+  Handelsplan unterscheiden; keine erfundenen Strukturziele und keine pauschale
+  Senkung von Score-/Liquiditäts-/R:R-Grenzen.
+
+**Arbeitsstand:** aktueller Pre-SMTP-Blocker konkret lokalisiert, nicht als reparierter
+Maildienst ausgegeben. Wochenendpause heute erklärt zusätzlich ausbleibende neue
+automatische Aktienläufe, nicht die vergangenen Wochen. Nur TODO/Übergabe aktualisiert;
+keine Produkt-/Serveränderung, diese Dokumentationsänderung noch nicht committet/gepusht.
+
 ## 10.10.2026, 23:10 Zürich – ausdrücklich verlangte Landingpage-Rücknahme
 
 Der Nutzer verlangt jetzt die Rücknahme der eigenmächtigen Landingpage-Textänderung.

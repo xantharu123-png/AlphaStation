@@ -44,6 +44,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
     os.environ["GMAIL_APP_PASSWORD"] = "offline-test-only"
     os.environ["ALERT_EMAIL"] = "recipient@example.invalid"
     os.environ["ALERT_SEND_TO_SUBSCRIBERS"] = "0"
+    os.environ["ALERT_OPERATOR_WATCH_OPTIN"] = "1"
 
     def forbidden(*args, **kwargs):
         raise AssertionError("External network or SMTP is forbidden in this test")
@@ -93,7 +94,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
         for index, session in enumerate(sessions):
             values = {"open": 100., "high": 116., "low": 96.,
                       "close": 100., "volume": 1_000_000.}
-            if scenario in {"unreclaimed", "breakout_close"}:
+            if scenario in {"unreclaimed", "breakout_close", "no_target", "gap_no_target"}:
                 values["high"] = 103.
                 if scenario == "unreclaimed" and index == len(sessions) - 10:
                     # An independently confirmed older high remains blocking.
@@ -115,7 +116,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                               volume=4_000_000.)
                 if scenario == "reclaimed":
                     values.update(open=104., high=110.3, low=98., close=107., volume=5_000_000.)
-                if scenario == "breakout_close":
+                if scenario in {"breakout_close", "no_target", "gap_no_target"}:
                     # Confirmed close through the PRIOR range. The signal's
                     # own tiny wick is not a preceding-session resistance.
                     values.update(high=107.55)
@@ -195,10 +196,12 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                 patch.object(api, "fetch_stock_daily_history_strict", daily_history_fixture), \
                 patch.object(api, "_fetch_recent_stock_4h_bars", lambda *a, **k: four_hour), \
                 patch.object(api, "_load_common_stock_universe", lambda **k: ({"TEST"}, "fixture")), \
+                patch.object(api, "_load_common_stock_universe_cached", lambda: ({"TEST"}, "fixture")), \
                 patch.object(api, "fetch_business_quality", lambda *a, **k: {}), \
                 patch.object(api, "_get_market_context_snapshot", lambda: {}), \
                 patch.object(api, "_strategy_cache_path", lambda *a, **k: str(target / "strategy.json")):
-            rows = api._strategy_scan_wrapper("Gap Momentum " + direction.title(),
+            strategy = "Momentum Breakout Long" if scenario == "no_target" else "Gap Momentum " + direction.title()
+            rows = api._strategy_scan_wrapper(strategy,
                                               send_email=False, publish_generic_cache=False)
             assert len(rows) == 1, rows
             row = rows[0]
@@ -212,7 +215,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
             delivery_outcome = None
             persisted_deliveries = []
             repeated_attempt = None
-            if scenario in {"reclaimed", "breakout_close"}:
+            if scenario in {"reclaimed", "breakout_close", "no_target", "gap_no_target"}:
                 from modules import regime_filter
 
                 class OfflineSMTP:
@@ -245,11 +248,11 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                         patch.object(api.time, "time", lambda: now.timestamp()), \
                         patch.object(api, "_EMAIL_STARTUP_TIME", now.timestamp()-600), \
                         patch.object(regime_filter, "DEFAULT_STATE_PATH", target / "regime.json"):
-                    api._send_strategy_scan_alerts("Gap Momentum " + direction.title(), rows, "stocks")
+                    api._send_strategy_scan_alerts(strategy, rows, "stocks")
                     delivery_outcome = api._last_delivery_outcome()
                     if repeat_after_hours is not None:
                         now += timedelta(hours=repeat_after_hours)
-                        second_rows = api._strategy_scan_wrapper("Gap Momentum " + direction.title(),
+                        second_rows = api._strategy_scan_wrapper(strategy,
                             send_email=False, publish_generic_cache=False)
                         assert len(second_rows) == 1
                         second_state = api._classify_alert_candidate("stock_strategy", second_rows[0], now.timestamp())
@@ -260,7 +263,7 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                             "alertable_now": second_state["alertable_now"],
                             "open_equivalent": api._has_open_equivalent_trade_safe("stock_strategy", second_rows[0]),
                         }
-                        api._send_strategy_scan_alerts("Gap Momentum " + direction.title(), second_rows, "stocks")
+                        api._send_strategy_scan_alerts(strategy, second_rows, "stocks")
                         repeated_attempt["last_decision"] = api._EMAIL_SEND_LOG[-1].get("reason")
                 # SMTP acceptance alone could also mean a downgraded WATCH.
                 # Assert the actual durable delivery class after finalization.
@@ -274,6 +277,11 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                         ).fetchall()
                     finally:
                         connection.close()
+            from email import message_from_string
+            decoded = [message_from_string(message) for message in smtp_messages]
+            bodies = [part.get_payload(decode=True).decode("utf-8")
+                      for message in decoded for part in message.walk()
+                      if part.get_content_type() == "text/html"]
             print("NATIVE_PLAN_RESULT=" + json.dumps({
                 "levels": levels, "raw_score": row["score"], "adjusted_score": state["score"],
                 "structure_status": row.get("structure_status"),
@@ -291,7 +299,31 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
                 "repeated_attempt": repeated_attempt,
                 "strict_history_calls": strict_history_calls,
                 "strict_history_observations": strict_history_observations,
+                "row": row, "mail_bodies": bodies,
             }))
+
+
+@pytest.mark.parametrize("direction,scenario", [
+    ("LONG", "no_target"), ("LONG", "gap_no_target"), ("SHORT", "gap_no_target"),
+])
+def test_real_confirmed_breakout_without_historical_target_sends_notice_not_trade(tmp_path, direction, scenario):
+    result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), direction,
+                             str(tmp_path), scenario],
+                            capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = next(line for line in result.stdout.splitlines() if line.startswith("NATIVE_PLAN_RESULT="))
+    actual = json.loads(line.split("=", 1)[1])
+    assert actual["structure_status"] == "ACCEPT", actual
+    assert actual["mail_quality_ok"] is True, actual
+    assert actual["suppression_reasons"] == ["trade_target_not_structural"], actual
+    assert actual["alertable_now"] is False  # Full trade admission stays unchanged.
+    assert actual["smtp_messages"] == 1, actual
+    assert actual["delivery_outcome"] == "accepted"
+    assert actual["persisted_deliveries"] == []
+    assert "Ausbruch" in actual["mail_bodies"][0]
+    assert "kein freigegebener Handelsplan" in actual["mail_bodies"][0]
+    assert "Stop Loss" not in actual["mail_bodies"][0]
+    assert "TP1" not in actual["mail_bodies"][0]
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
