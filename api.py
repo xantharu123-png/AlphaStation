@@ -14304,7 +14304,7 @@ def _regime_mail_decision(
 def _stock_breakout_notice_evidence(row, now_ts, state=None):
     """Separate confirmed 1D observation; never relax the full trade gate."""
     clock = datetime.fromtimestamp(now_ts, timezone.utc)
-    if not isinstance(row, dict) or not stock_swing.validate(row, clock):
+    if not isinstance(row, dict) or not stock_swing.breakout_notice_current(row, clock):
         return None
     strategy = STOCK_STRATEGY_LOOKUP.get(_normalize_strategy_key(
         row.get("Strategy") or row.get("strategy") or ""))
@@ -28629,6 +28629,12 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
             if name == "strategy_scan":
                 if payload.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION:
                     return None
+                swing_clock = datetime.fromtimestamp(now, timezone.utc)
+                swing_close = (stock_swing.session_close(stock_swing.completed_sessions(swing_clock, 1)[0])
+                               if stock_swing.enabled() else None)
+                if swing_close is not None and any(
+                        not stock_swing.validate(row, swing_clock) for row in rows):
+                    return None
                 if any(not _cup_signal_contract_valid(row)
                        or _cup_final_plan_contract_reason(row) is not None for row in rows):
                     return None
@@ -28640,6 +28646,18 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
                     if (leaf is None or leaf.get("partial")
                             or leaf.get("cache_version") != STOCK_STRATEGY_CACHE_VERSION):
                         return None
+                    # Even an empty current-version result must identify its
+                    # completed session. A recent write of yesterday's data
+                    # cannot defer discovery of the newly available close.
+                    if swing_close is not None:
+                        leaf_diag = leaf.get("diagnostics")
+                        if (not isinstance(leaf_diag, dict)
+                                or leaf_diag.get("strategy") != strategy
+                                or leaf_diag.get("coverage") not in {"complete", "complete_with_exclusions"}
+                                or leaf_diag.get("data_mode") != stock_swing.MODE
+                                or _stock_attempt_datetime(leaf_diag.get("analysis_as_of")) != swing_close
+                                or any(not stock_swing.validate(row, swing_clock) for row in leaf["results"])):
+                            return None
                     if any(not isinstance(row, dict)
                            or not _cup_signal_contract_valid(row, strategy_name=strategy)
                            or _cup_final_plan_contract_reason(row) is not None
@@ -28670,13 +28688,16 @@ def _startup_scan_cache_time(name: str, now: float) -> Optional[float]:
 
 
 def _scheduler_task_order(scan_tasks, last_run_times):
-    """Oldest due heavy job first; long hourly rounds cannot starve BI/Biotech."""
+    """New daily close first once ready, then oldest heavy job; light slots stay."""
+    clock = datetime.now(timezone.utc)
     def due_at(task):
         name, _ = task
         with _scan_lock:
             previous = max(last_run_times.get(name, 0),
                            _scan_status.get(name, {}).get("_resume_completed_at", 0))
-        return previous + _effective_scan_interval_min(name) * 60 if previous else 0
+        post_close_due = name == "strategy_scan" and stock_swing.post_close_scan_due(previous, clock)
+        interval_due = previous + _effective_scan_interval_min(name) * 60 if previous else 0
+        return (0 if post_close_due else 1, interval_due)
 
     heavy = iter(sorted((task for task in scan_tasks if _is_heavy_stock_worker(task[0])), key=due_at))
     # Keep light-job/dependency order unchanged; only exchange the heavy slots.
@@ -28801,7 +28822,8 @@ def _scheduler_loop():
                 # AUDIT 2026-07-29 (Punkt C): dynamischer Takt — strategy_scan
                 # im Opening-Fenster (9:25–11:30 ET) alle 10 statt 30 Minuten.
                 interval_sec = _effective_scan_interval_min(name) * 60
-                elapsed = now - max(last_run_times.get(name, 0), _scan_status[name].get("_resume_completed_at", 0))
+                previous = max(last_run_times.get(name, 0), _scan_status[name].get("_resume_completed_at", 0))
+                elapsed = now - previous
                 is_running = _scan_status[name]["running"]
                 started_at = _scan_status[name].get("_started_at")
 
@@ -28814,7 +28836,9 @@ def _scheduler_loop():
                 with _scan_lock:
                     _scan_status[name]["next_run"] = scan_schedule.schedule_snapshot(name)["next_eligible_at"]
                 continue
-            if elapsed >= interval_sec and not is_running:
+            post_close_due = name == "strategy_scan" and stock_swing.post_close_scan_due(
+                previous, datetime.fromtimestamp(now, timezone.utc))
+            if (elapsed >= interval_sec or post_close_due) and not is_running:
                 if name == "market_context" and _scan_status.get("crash_monitor", {}).get("running"):
                     print("[Scheduler] market_context skip: crash_monitor laeuft gerade")
                     continue

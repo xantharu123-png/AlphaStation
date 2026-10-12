@@ -1,5 +1,112 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 12.10.2026 – TBBB/PLTR: Schlusskurs-Versand lokal korrigiert, Veröffentlichung offen
+
+- [x] Nutzerauftrag „erledigen“: ausschließlich bestätigte Schlusskurs-Ausbrüche
+  zeitnah versenden, keine verspätete Erstnachholung und keine Umbenennung.
+  `brainstorming` begrenzt den Umfang; TDD und unabhängiger Review verwendet.
+- [x] Separater Erstversand-Vertrag verlangt dieselbe New-York-Kalenderdate wie
+  die Referenzsession. Freitagsdaten bleiben allgemeine Swing-Evidenz am Montag,
+  dürfen aber keine erstmals erzeugte Ausbruchsmail am Montag mehr auslösen.
+  Die gemeinsame Evidenzprüfung greift auch unmittelbar vor dem Sender erneut.
+- [x] Bestehender Scheduler prüft ab tatsächlichem Sessionclose + 15 Minuten
+  zusätzlich zum Stundenintervall; die erste neue Schlusskursrunde erhält unter
+  schweren Jobs Vorrang. Laufende/manuell pausierte Worker werden nicht verdrängt.
+  Verweigerte Aufnahme bleibt fällig; ein gestarteter Versuch verbraucht den
+  Sondertrigger und wird bei Fehler erst im normalen Intervall wieder versucht.
+- [x] Neustart verwirft frisch geschriebene alte Session-Caches; auch leere
+  Ergebnisse benötigen vollständige, passende Producer-Metadaten. Ein aktueller
+  leerer Cache bleibt wiederverwendbar. Kein Cache-Erfolg wird vorgetäuscht.
+- [x] Morgen-/Mittags-Gap-Termine, globale Swing-Gültigkeit, vollständige
+  Trade-Mailgrenzen, Doppelschutz, öffentliche Texte und Installation unverändert.
+  Die separate Erst-Ausbruchsmail-Grenze gilt auch für Gap, nicht für dessen
+  Scantermine oder den bestehenden vollständigen Handelsplan-/Rücktestversand.
+- [x] RED: bestehende 89 Mailtests bestanden; neue Integration zeigte
+  6 fehlgeschlagene Fälle / 1 bestandenen Kontrollfall. Separate pure RED:
+  95 fehlgeschlagen, danach 97 bestanden einschließlich austauschbarer Uhr.
+- [x] GREEN: 299 integrierte Tests bestanden, anschließend 163 überlappende
+  Kompatibilitäts-/Mitternachts-/Metadaten-/Retry-Fälle bestanden. Nicht addieren.
+  XMLs und unveränderte Produktquellen im Prüfbericht dokumentiert.
+- [x] Unabhängiger read-only Review: kein Critical/Important-Fund; finale
+  Regression und separater Veröffentlichungs-Abzug ebenfalls abgeschlossen.
+- [x] Separater Veröffentlichungs-Abzug: **366 passed / 0 failed / 0 skipped**,
+  zehn Produkt-/Testdateien gegen Inhalt/EOL-Konvertierung abgeglichen;
+  keine privaten Diagnose- oder übernommenen Deployment-Änderungen enthalten.
+- [x] Öffentlicher Nur-Lese-Healthcheck 12.10. ca. 07:50 UTC: healthy,
+  `2799972938ee`. Neue Zeitkorrektur noch nicht auf Hetzner installiert.
+- [x] Eingefrorener Gesamttest: **12.517 passed / 97 failed / 7 skipped**,
+  1 bekannte AnyIO-Warnung, 481,03 s. Exakt dieselben 97 Fehlernamen wie vorher,
+  keine zusätzlichen/geänderten Fehler; 113 neue Fälle bestanden.
+  Kein Gesamt-PASS: Windows-/Deployment-Baseline bleibt separat offen.
+  API-/Swing-Modulhash vor/nach dem Lauf identisch; XML im Prüfbericht.
+- [ ] Eigene Dateien gezielt committen/pushen; privates `output/`, bisherige
+  Deployment-Löschung und anderes übernommenes WIP nicht mitveröffentlichen.
+- [ ] Neue Serverrevision und nächste reguläre Schlusskurs-Zustellung nach
+  Nutzer-Pull/Neustart bestätigen. Kein produktiver Scan, SMTP, Pull, Neustart
+  oder Einstellungswechsel wurde für diese lokale Korrektur ausgeführt.
+
+### Vorheriger Diagnosebeleg
+
+- [x] Nutzer belegt zwei tatsächlich erhaltene Aktien-Beobachtungs-Mails:
+  TBBB und PLTR, Versand 04:23 UTC / 06:23 MESZ, Referenzsession 09.10.2026.
+  WATCH-Zustellung damit für diese beiden Hinweise bestätigt; kein Nachweis
+  einer vollständigen Trade-Mail oder einer ausgeführten Order.
+- [x] Kalender-/Metadatenprobe mit aktuellem Code: am Versandzeitpunkt
+  New York 00:23, letzte abgeschlossene Sessions 09.10. und 08.10.;
+  Freitagsreferenz gültig, Donnerstagsreferenz abgelehnt. Kein neuer Montagskurs.
+  Die angegebenen Schlusskurse liegen 1,5528 % bzw. 2,2549 % über den
+  angegebenen Ausbruchlevels; Originalkerzen nicht unabhängig nachgerechnet.
+- [x] Versandpfad und Scheduler read-only geprüft: automatischer Momentum-Lauf
+  werktags auch vor US-Eröffnung erlaubt; WATCH verwendet abgeschlossene 1D-
+  Session statt Live-Ausführung. Versandzeit ist nicht Ausbruchszeit.
+- [ ] Exakter Auslöser des 04:23-Versands (Startlauf, Intervall, manuell etc.)
+  ohne zugehörigen Serverjournal-/Laufbeleg nicht bestimmt.
+- [x] Nutzer verlangt unveränderte Bezeichnung **„Ausbruch bestätigt“**, keine
+  Umbenennung in Beobachtung/Watchlist. Keine Produkttexte geändert.
+- [x] Veröffentlichung des neuen Sendepfads laut Git erst Sonntag, 11.10.,
+  00:41 MESZ (`7be76b5`); dieser Pfad konnte am Freitag noch nicht senden.
+  Vorherige Ablehnung wegen fehlendem strukturellem Ziel im Prüfbericht belegt.
+- [x] Frischegrenze reproduziert: Freitagsschluss ist ab 20:15 UTC verfügbar,
+  wird Montag um 04:23 UTC aber noch immer akzeptiert, **56 h 23 min** später.
+  „Letzte abgeschlossene Sitzung“ schützt vor falschem Tagesbezug, begrenzt
+  jedoch nicht das Versandalter. Kein dedizierter Schlusskurs-Versandlauf in
+  dieser Strecke; bestehende Tests decken den Sessionwechsel, nicht diese
+  Freitag-Montag-Erstzustellung ab.
+- [x] Neue Anforderung: Ausbruchsmail zeitnah nach Verfügbarkeit der bestätigten
+  Schlusskursdaten, nicht als Erstnachholung zwei Tage später. Versandalter und
+  Schlusskurs-Lauf gesondert korrigieren/prüfen; nicht pauschal alle weiterhin
+  aktuellen Swing-Pläne oder die vereinbarten morgendlichen Gap-Läufe sperren.
+  Lokal jetzt umgesetzt; Veröffentlichung/Serverprüfung siehe aktueller Stand oben.
+
+## 11.10.2026 – FETUSDT-Verlustmeldung, 15× Futures (Diagnose offen)
+
+- [x] Konkrete vom Nutzer erhaltene Crypto-Long-Mail geprüft: Binance FETUSDT,
+  17:56 MESZ, Entry 0,2356 / Stop 0,23193 / TP1 0,24977 / TP2 0,25259.
+  Die echte Krypto-Zustellung ist vom Nutzer belegt; das bestätigt nicht zugleich
+  die noch offene Aktien-Signalzustellung. Frischer öffentlicher Healthcheck:
+  `healthy`, Serverrevision **2799972938ee**, 21:17 UTC. Update inzwischen installiert,
+  nicht durch diese Fortsetzung ausgeführt.
+- [x] Preisrisiko 1,557725 %, bei gleichem tatsächlichem Entry und 15× ungefähr
+  23,365874 % anfängliche Positionsmargin vor Kosten; gewichtetes R:R 4,245232.
+  Kein belegter Dezimal-/1000×-Kontraktfehler. App kennt keine Kontomargin oder
+  Liquidationsgrenze und setzt keine Binance-Stop-Order.
+- [x] Öffentliche Binance-USD-M-Last-/Mark-Price-Historie unabhängig gelesen:
+  15:56–21:19:59 UTC, jeweils 324/324 abgeschlossene Minuten, null Lücken.
+  Tief Last 0,23260 / Mark 0,23286922, beide über dem Mail-Stop; TP1 nicht berührt.
+  Das erklärt allein keine Liquidation ab Mail-Entry; es ist kein Broker-Fillbeleg.
+- [ ] Tatsächliche Entry-/Exit-Fills, Zeitpunkt, Isolated/Cross, Stop-Auftrag und
+  Liquidations-/Abschlussbeleg fehlen. Verlustursache nicht als geklärt abhaken.
+- [ ] Zwei konkrete Darstellungs-/Datenweitergabeprobleme bestätigt, noch nicht
+  repariert: doppelte Rücktestwarnung; berechneter ATR fehlt in der Mail-Telemetrie.
+  Originaler ausgewählter Stop-Anker und damalige Strukturkerzen fehlen ebenfalls.
+- [ ] Frische Offline-Suites starteten im Windows-Asyncio-Loopback nicht bis zur
+  Testausführung; kein PASS und keine Krypto-Assertion-Failure behaupten. Eigene
+  hängende Versuche beendet. Keine Scanner-/Mailgrenzen, Kontoeinstellungen,
+  Orders, Scans, Produktdateien oder Serverdienste geändert.
+
+Privater Fallbeleg und Quellen: `output/fet-mail-review-20261011/CASE.md`.
+Kein weiterer Pull erforderlich für den bereits installierten Stand.
+
 ## 11.10.2026 – Freigegebene Ausbruch-Beobachtung und Watch-Opt-in
 
 Diese Fortsetzung ersetzt den Diagnose-only-Stand darunter: Der Nutzer hat die

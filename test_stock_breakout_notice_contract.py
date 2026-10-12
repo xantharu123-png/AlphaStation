@@ -20,7 +20,7 @@ from modules import stock_swing_contract as swing
 from modules.trade_levels import TP1_KEYS, TP2_KEYS
 
 
-NOW = datetime(2026, 9, 18, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 17, 21, tzinfo=timezone.utc)
 NOW_TS = NOW.timestamp()
 
 
@@ -167,6 +167,43 @@ def test_native_projection_breakout_is_an_observation_not_trade_admission(native
     assert 0 < proof["level"] < proof["close"]
     assert row == before
     assert api._alert_trade_plan_ok(row) is False
+
+
+def test_first_breakout_notice_is_not_sent_on_the_next_new_york_date(native_row, monkeypatch):
+    """Latest daily Swing evidence alone must not resurrect yesterday's breakout."""
+    clock = _moving_clock(monkeypatch)
+    clock["now"] = datetime(2026, 9, 18, 10, tzinfo=timezone.utc)
+    assert swing.validate(native_row, clock["now"]) is True
+    messages = _wire(monkeypatch)
+    assert api._send_stock_breakout_notices([deepcopy(native_row)], max_rows=1) == 0
+    assert messages == []
+    assert api._EMAIL_COOLDOWN == {}
+
+
+def test_combined_guard_does_not_mail_old_breakout_as_new(native_row, monkeypatch, tmp_path):
+    clock = _moving_clock(monkeypatch)
+    clock["now"] = datetime(2026, 9, 18, 10, tzinfo=timezone.utc)
+    _mixed_scan_context(monkeypatch, tmp_path, {"TEST"})
+    messages = _wire(monkeypatch)
+    api._send_strategy_scan_alerts("Aktien Auto-Sweep", [deepcopy(native_row)], "stocks")
+    assert messages == []
+    assert api._EMAIL_COOLDOWN == {}
+
+
+def test_rendering_across_new_york_midnight_does_not_send_still_swing_valid_notice(native_row, monkeypatch):
+    clock = _moving_clock(monkeypatch)
+    clock["now"] = datetime(2026, 9, 18, 3, 59, 59, tzinfo=timezone.utc)
+    messages = _wire(monkeypatch)
+    render = api._stock_breakout_notice_html
+    def cross_midnight(*args, **kwargs):
+        html = render(*args, **kwargs)
+        clock["now"] = datetime(2026, 9, 18, 4, tzinfo=timezone.utc)
+        return html
+    monkeypatch.setattr(api, "_stock_breakout_notice_html", cross_midnight)
+    assert api._send_stock_breakout_notices([deepcopy(native_row)], max_rows=1) == 0
+    assert swing.validate(native_row, clock["now"]) is True
+    assert messages == []
+    assert api._EMAIL_COOLDOWN == {}
 
 
 @pytest.mark.parametrize("mutation", [

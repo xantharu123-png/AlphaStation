@@ -74,6 +74,8 @@ def _probe(direction, directory, scenario="barrier", repeat_after_hours=None,
 
         now = datetime(2026, 9, 18, 0 if repeat_after_hours is not None else 10,
                        0, tzinfo=timezone.utc)
+        if scenario in {"no_target", "gap_no_target"}:
+            now = datetime(2026, 9, 17, 21, tzinfo=timezone.utc)
 
         class Clock(datetime):
             @classmethod

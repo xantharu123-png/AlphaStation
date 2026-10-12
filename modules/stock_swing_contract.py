@@ -13,6 +13,7 @@ MODE = "completed_daily_swing"
 SOURCE = "polygon_completed_1d_swing"
 DELAY_SECONDS = 15 * 60
 NY = ZoneInfo("America/New_York")
+_DATETIME_TYPE = datetime  # Keep type validation independent of clock overrides.
 
 
 def enabled():
@@ -97,6 +98,43 @@ def validate(row, as_of=None):
         "swing_analysis_session", "scan_price_observed_at", "scan_price_source",
         "swing_timeframe", "trade_horizon", "swing_data_delay_seconds",
     )) and row.get("fill_evidence_verified") is False
+
+
+def breakout_notice_current(row, as_of):
+    """First breakout notices belong to the reference session's New York day.
+
+    Normal swing validity still follows the latest completed session, including
+    weekends. A new notice must not present that older close as today's event.
+    """
+    if not isinstance(as_of, _DATETIME_TYPE) or as_of.tzinfo is None:
+        return False
+    try:
+        if as_of.utcoffset() is None:
+            return False
+        return validate(row, as_of) and row.get("swing_analysis_session") == (
+            as_of.astimezone(NY).date().isoformat()
+        )
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+
+def post_close_scan_due(previous_started_at, as_of):
+    """Starter's current-session close needs a scan once delayed data is ready."""
+    if not enabled() or not isinstance(as_of, _DATETIME_TYPE) or as_of.tzinfo is None:
+        return False
+    try:
+        if as_of.utcoffset() is None:
+            return False
+        session = completed_sessions(as_of, 1)[0]
+        if session != as_of.astimezone(NY).date().isoformat():
+            return False
+        ready = session_close(session) + timedelta(seconds=DELAY_SECONDS)
+        previous = 0 if previous_started_at is None else number(previous_started_at)
+        if previous is None or previous < 0 or previous > as_of.timestamp():
+            return False
+        return previous < ready.timestamp()
+    except (ValueError, TypeError, OverflowError, OSError):
+        return False
 
 
 def parse_grouped(payload, session):

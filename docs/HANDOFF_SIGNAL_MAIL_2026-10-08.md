@@ -1,5 +1,28 @@
 # Account-Übergabe – Signal-Mails, 08.10.2026
 
+## Aktueller enger Auftrag – 12.10.2026: Schlusskurs-Versandalter
+
+Nutzer hat tatsächliche TBBB-/PLTR-Zustellung am Montag 04:23 UTC mit Freitag-
+Referenz 09.10. belegt. Die alte pauschale Aussage „keine Zustellung bestätigt“
+darunter ist für diese beiden Mails überholt; volle Trade-Mails/Fills bleiben
+separat. Titel „Ausbruch bestätigt“ nicht umbenennen. Keine Landingpage-Änderung.
+
+Zeitkorrektur lokal implementiert: Same-NY-Date-Grenze nur für die erste separate
+Ausbruchsmail, Close+15-Minuten-Scheduler-Trigger/Priorität und exakte aktuelle
+Session in Startup-Leaves auch bei leeren Ergebnissen. Globaler Swing-Vertrag,
+Full-Trade-Gates, Gap-Früh-/Mittagstermine, Kontoeinstellungen und Installation
+unverändert. 299 und danach 163 überlappende gezielte Fälle bestanden; unabhängiger
+Review ohne Critical/Important-Fund. Gesamtlauf auf eingefrorenen Quellen:
+12.517 passed / 97 failed / 7 skipped, exakt dieselben 97 vorhandenen Windows-/
+Deployment-Fehler, keine neuen Fehler. Separater Release-Abzug: 366 passed,
+keine Fehler. Kein Gesamt-PASS. Noch nicht committet/gepusht/deployt.
+
+Frischer öffentlicher Healthcheck 12.10. ca. 07:50 UTC: healthy,
+`2799972938ee`. Neue Zeitkorrektur nicht live. Maßgeblich für weitere Freigabe:
+`TODO.md` und `docs/POST_CLOSE_BREAKOUT_MAIL_2026-10-12.md` (Test-XMLs, Grenzen,
+Commit-/Servergates). Private Diagnose-/QA-Dateien nicht veröffentlichen; andere
+offene FET/BI/Backtest- und Deployment-Aufgaben nicht mit erledigt markieren.
+
 ## Freigegebene Fortsetzung – 11.10.2026
 
 Der Nutzer hat nach der Diagnose einen **separaten bestätigten Ausbruch-Hinweis**

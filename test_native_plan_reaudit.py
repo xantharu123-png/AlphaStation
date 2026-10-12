@@ -30,7 +30,14 @@ def test_pre_repair_strategy_caches_cannot_defer_new_native_plan_scan(monkeypatc
     stamp = CUTOFF.timestamp()-30
     os.utime(path, (stamp, stamp))
     monkeypatch.setattr(api, "SCAN_CACHE_MAP", {"strategy_scan": str(path)})
-    monkeypatch.setattr(api, "_strategy_cache_path", lambda strategy: str(path))
+    monkeypatch.setattr(api, "_strategy_cache_path", lambda strategy: str(tmp_path / (strategy + ".json")))
+    for strategy in api._AUTO_STOCK_ALERT_STRATEGIES:
+        leaf = dict(payload, diagnostics={"strategy": strategy, "coverage": "complete",
+                    "data_mode": api.stock_swing.MODE,
+                    "analysis_as_of": "2026-09-28T20:00:00+00:00"})
+        leaf_path = tmp_path / (strategy + ".json")
+        leaf_path.write_text(json.dumps(leaf), encoding="utf-8")
+        os.utime(leaf_path, (stamp, stamp))
     assert api._startup_scan_cache_time("strategy_scan", CUTOFF.timestamp()) == (None if legacy else stamp)
     assert json.loads(path.read_text(encoding="utf-8")) == payload
 

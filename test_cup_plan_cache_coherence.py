@@ -89,6 +89,8 @@ def _write_scan_cache(path, rows, cache_io, *, strategy=None):
     if strategy is not None:
         metadata["strategy"] = strategy
         metadata["diagnostics"]["strategy"] = strategy
+        metadata["diagnostics"]["data_mode"] = api.stock_swing.MODE
+        metadata["diagnostics"]["analysis_as_of"] = api.stock_swing.session_close(SESSION).isoformat()
     api.save_cache_file(str(path), rows, metadata=metadata)
     os.utime(path, (cache_io["stamp"], cache_io["stamp"]))
     # The test relies on real readers seeing a valid, completed current generic

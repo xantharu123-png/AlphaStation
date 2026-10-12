@@ -116,6 +116,9 @@ def test_startup_checks_leaf_versions_even_after_recent_manual_scan(scheduler, m
     os.utime(path, (stamp, stamp))
     for index, strategy in enumerate(api._AUTO_STOCK_ALERT_STRATEGIES):
         leaf = dict(payload)
+        leaf["diagnostics"] = {"strategy": strategy, "coverage": "complete",
+                               "data_mode": api.stock_swing.MODE,
+                               "analysis_as_of": "2026-09-29T20:00:00+00:00"}
         if bad_leaf == "version" and index == 1:
             leaf["cache_version"] -= 1
         leaf_path = api.Path(api._strategy_cache_path(strategy))

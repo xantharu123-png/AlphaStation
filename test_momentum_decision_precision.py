@@ -173,7 +173,8 @@ def test_rounded_18_cache_cannot_defer_precision_rebuild_at_startup(monkeypatch,
     monkeypatch.setattr(api, "_strategy_cache_path", lambda *a: "fixture-leaf")
     monkeypatch.setattr(api, "_scan_cache_payload", lambda *a: {
         "results": [], "cache_version": version,
-        "diagnostics": {"coverage": "complete"}})
+        "diagnostics": {"coverage": "complete", "strategy": "Momentum Breakout Long",
+                        "data_mode": swing.MODE, "analysis_as_of": "1969-12-31T21:00:00+00:00"}})
     assert api._startup_scan_cache_time("strategy_scan", 1000.) == expected
 
 
