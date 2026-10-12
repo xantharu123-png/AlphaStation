@@ -108,7 +108,12 @@ Qualitäts-/Empfänger-/Doppelschutz bleiben erforderlich. Lang anhaltende
 Provider-/Workerprobleme können eine rechtzeitige Mail verhindern; der neue
 Vertrag erlaubt ausdrücklich keine nachträgliche Erstmail am nächsten Tag.
 
-Lokal implementiert, noch nicht committet/gepusht oder auf Hetzner installiert.
+Feature-Commit **fd983fa63d88c6504df0cecc23759fd22afc59c8** erfolgreich nach
+`origin/main` gepusht; `git ls-remote` bestätigt exakt diesen Hash. Nur die
+13 geprüften Code-/Test-/Übergabedateien wurden veröffentlicht. Privates
+`output/` und sämtliche übernommenen Deployment-/anderen Änderungen bleiben
+unveröffentlicht und erhalten. Nachfolgende Status-Ergänzung nur Dokumentation.
+Nicht auf Hetzner installiert.
 Keine echten Scans, Mailversuche, Serveränderungen oder Einstellungen durch
 diesen Patch. Neue Serverrevision und reguläre Zustellung nach Update offen.
 Die vom Nutzer gelieferten ursprünglichen TBBB-/PLTR-Mails sind Inboxbelege des

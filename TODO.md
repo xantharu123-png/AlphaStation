@@ -39,8 +39,10 @@
   keine zusätzlichen/geänderten Fehler; 113 neue Fälle bestanden.
   Kein Gesamt-PASS: Windows-/Deployment-Baseline bleibt separat offen.
   API-/Swing-Modulhash vor/nach dem Lauf identisch; XML im Prüfbericht.
-- [ ] Eigene Dateien gezielt committen/pushen; privates `output/`, bisherige
-  Deployment-Löschung und anderes übernommenes WIP nicht mitveröffentlichen.
+- [x] Feature gezielt veröffentlicht: **fd983fa63d88c6504df0cecc23759fd22afc59c8**,
+  Commit und Push nach `origin/main` erfolgreich; Remote-HEAD exakt bestätigt.
+  Nur 13 eigene Code-/Test-/Übergabedateien. Privates `output/`, bisherige
+  Deployment-Löschung und anderes übernommenes WIP bleiben unveröffentlicht.
 - [ ] Neue Serverrevision und nächste reguläre Schlusskurs-Zustellung nach
   Nutzer-Pull/Neustart bestätigen. Kein produktiver Scan, SMTP, Pull, Neustart
   oder Einstellungswechsel wurde für diese lokale Korrektur ausgeführt.

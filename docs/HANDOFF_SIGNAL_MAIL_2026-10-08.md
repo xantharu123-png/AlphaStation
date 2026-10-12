@@ -15,7 +15,10 @@ unverändert. 299 und danach 163 überlappende gezielte Fälle bestanden; unabh�
 Review ohne Critical/Important-Fund. Gesamtlauf auf eingefrorenen Quellen:
 12.517 passed / 97 failed / 7 skipped, exakt dieselben 97 vorhandenen Windows-/
 Deployment-Fehler, keine neuen Fehler. Separater Release-Abzug: 366 passed,
-keine Fehler. Kein Gesamt-PASS. Noch nicht committet/gepusht/deployt.
+keine Fehler. Kein Gesamt-PASS. Feature **fd983fa63d88c6504df0cecc23759fd22afc59c8**
+committet und erfolgreich nach `origin/main` gepusht, Remote-Hash bestätigt.
+Nur 13 geprüfte eigene Dateien; anderer WIP und privates `output/` erhalten.
+Noch nicht auf Hetzner installiert.
 
 Frischer öffentlicher Healthcheck 12.10. ca. 07:50 UTC: healthy,
 `2799972938ee`. Neue Zeitkorrektur nicht live. Maßgeblich für weitere Freigabe:
