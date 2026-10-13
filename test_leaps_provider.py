@@ -154,9 +154,9 @@ def test_sec_is_gated_without_market_credentials():
 
 
 def test_daily_history_validates_ms_without_borrowing_ns_quote_clock():
-    p, t, a = provider(Response({'status':'OK','ticker':'SOFI','results':[{'t':1791763200000,'o':20,'h':21,'l':19,'c':20.5,'v':2000}]}))
-    data = p.daily_history('SOFI', completed_through=date(2026,10,12), as_of=date(2026,10,13))
-    assert data['results'][0]['t'] == 1791763200000
+    p, t, a = provider(Response({'status':'OK','ticker':'SOFI','results':[{'t':1791777600000,'o':20,'h':21,'l':19,'c':20.5,'v':2000}]}))
+    data = p.daily_history('SOFI', completed_through=date(2026,10,12), as_of=date(2026,10,13),completion=daily_completion(historical=True))
+    assert data['results'][0]['t'] == 1791777600000
     assert data['results'][0]['c'] == D('20.5')
     assert a.events == [('acquire','market'),('release','market')]
 
@@ -421,14 +421,14 @@ def test_missing_stock_exchange_clock_does_not_borrow_sip_clock():
 def test_daily_history_rejects_wrong_unit_type_or_incomplete_date(timestamp):
     p, _, _ = provider(Response({'status':'OK','ticker':'SOFI','results':[{'t':timestamp,'o':20,'h':21,'l':19,'c':20,'v':100}]}))
     with pytest.raises(LeapsDataError):
-        p.daily_history('SOFI',completed_through=date(2026,10,12),as_of=date(2026,10,13))
+        p.daily_history('SOFI',completed_through=date(2026,10,12),as_of=date(2026,10,13),completion=daily_completion(historical=True))
 
 
 def test_history_never_persists_secret_bearing_pagination_url():
     p, _, _ = provider(Response({'status':'OK','ticker':'SOFI','results':[],
         'next_url':'https://api.massive.com/v2/aggs/ticker/SOFI?apiKey=synthetic-private-key'}))
     with pytest.raises(LeapsDataError, match='history_truncated'):
-        p.daily_history('SOFI',completed_through=date(2026,10,12),as_of=date(2026,10,13))
+        p.daily_history('SOFI',completed_through=date(2026,10,12),as_of=date(2026,10,13),completion=daily_completion(historical=True))
 
 
 def test_old_unchanged_nbbo_new_receipt_retains_only_dated_algebra():
@@ -535,3 +535,167 @@ def test_probe_reference_request_is_bounded_to_sofi_not_the_entire_universe():
     p, t, _ = provider(Response())
     api().probe_capabilities(p,max_requests=1)
     assert 'underlying_ticker=SOFI' in t.calls[0][1] and 'limit=1' in t.calls[0][1]
+
+
+@pytest.mark.parametrize('field', ['option_end_ns','stock_end_ns'])
+@pytest.mark.parametrize('offset', [10,0])
+def test_assessment_expiry_is_capped_by_each_session_end_inclusively(field,offset):
+    option, stock, session = bound_quotes()
+    session = replace(session,**{field:NOW+offset})
+    assessment = api().assess_quote(option,stock,now_ns=NOW,verified_session=session)
+    assert assessment.comparison_eligible
+    assert assessment.expiry_ns == NOW+offset
+    assert api().assess_quote(option,stock,now_ns=NOW+offset,verified_session=session).comparison_eligible
+    later = api().assess_quote(option,stock,now_ns=NOW+offset+1,verified_session=session)
+    assert not later.comparison_eligible
+
+
+def test_quote_freshness_can_expire_before_either_session_end():
+    option, stock, session = bound_quotes(age=60*10**9)
+    assessment = api().assess_quote(option,stock,now_ns=NOW,verified_session=session)
+    assert assessment.comparison_eligible and assessment.expiry_ns == NOW
+
+
+# Synthetic source-window proof; these are not live calendar/entitlement facts.
+# Oct13 bucket start=00ET, witnessed eligible coverage end=20ET, 15-minute lag.
+DAILY_START = 1791864000000000000
+DAILY_END = 1791936000000000000
+DAILY_AVAILABLE = 1791936900000000000
+DAILY_AFTER = 1791939600000000000  # 21ET Oct13, UTC Oct14: as_of is still Oct13.
+
+
+def daily_completion(*, historical=False):
+    mod = api()
+    assert hasattr(mod,'DailyCompletionProof'), 'Verified daily completion feature is missing'
+    shift = 86400*10**9 if historical else 0
+    return mod.DailyCompletionProof('SOFI',date(2026,10,12 if historical else 13),
+        'massive_stock_daily_aggregates','day',1,DAILY_START-shift,DAILY_END-shift,
+        DAILY_END-shift,DAILY_AVAILABLE-shift,D(900),('synthetic-full-source-coverage',))
+
+
+def daily_response(timestamp=1791864000000):
+    return Response({'status':'OK','ticker':'SOFI','adjusted':True,
+                     'results':[{'t':timestamp,'o':20,'h':21,'l':19,'c':20.5,'v':2000}]})
+
+
+def test_same_day_verified_completed_history_is_accepted_without_faking_tomorrow():
+    p, t, _ = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AFTER
+    data = p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())
+    assert data['results'][0]['t'] == 1791864000000
+    assert '/2026-10-13?' in t.calls[0][1]
+
+
+@pytest.mark.parametrize('offset,allowed', [(-1,False),(0,True),(1,True)])
+def test_history_completion_and_lag_availability_have_exact_ns_boundary(offset,allowed):
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AVAILABLE+offset
+    if allowed:
+        assert p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())['ticker'] == 'SOFI'
+        assert len(t.calls) == 1
+    else:
+        with pytest.raises(LeapsDataError,match='unverified_daily_completion'):
+            p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())
+        assert t.calls == [] and a.events == []
+
+
+@pytest.mark.parametrize('target',[date(2026,10,12),date(2026,10,13)])
+def test_historical_or_same_day_history_without_proof_never_requests(target):
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AFTER
+    with pytest.raises(LeapsDataError,match='unverified_daily_completion'):
+        p.daily_history('SOFI',completed_through=target,as_of=date(2026,10,13))
+    assert t.calls == [] and a.events == []
+
+
+@pytest.mark.parametrize('mutation', [dict(ticker='AAPL'),dict(market_date=date(2026,10,12)),
+    dict(source='some_other_feed'),dict(timespan='hour'),dict(multiplier=2),dict(multiplier=True),
+    dict(window_start_ns=DAILY_START-86400*10**9),dict(window_start_ns=DAILY_END),
+    dict(window_end_ns=DAILY_START),dict(completed_ns=DAILY_END-1),
+    dict(completed_ns=DAILY_AFTER+1),dict(available_ns=DAILY_AFTER+1),
+    dict(available_ns=DAILY_END-1),dict(available_ns=DAILY_AVAILABLE-1),
+    dict(feed_lag_s=None),dict(feed_lag_s=D(-1)),dict(feed_lag_s=900),dict(feed_lag_s=D('NaN')),
+    dict(evidence_ids=()),dict(evidence_ids=(' ',))])
+def test_mismatched_future_or_malformed_completion_fails_before_admission(mutation):
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AFTER
+    proof = replace(daily_completion(),**mutation)
+    with pytest.raises(LeapsDataError,match='unverified_daily_completion'):
+        p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=proof)
+    assert t.calls == [] and a.events == []
+
+
+@pytest.mark.parametrize('field',['window_start_ns','window_end_ns','completed_ns','available_ns'])
+@pytest.mark.parametrize('bad',[True,'1791936000000000000',1791936000000])
+def test_completion_clock_metadata_is_strict_integer_ns(field,bad):
+    with pytest.raises(LeapsDataError):
+        replace(daily_completion(),**{field:bad})
+
+
+@pytest.mark.parametrize('day',[date(2026,10,12),date(2026,10,14)])
+def test_as_of_must_be_truthful_in_injected_clock_eastern_date(day):
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AFTER
+    with pytest.raises(LeapsDataError,match='invalid_as_of'):
+        p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=day,completion=daily_completion())
+    assert t.calls == [] and a.events == []
+
+
+def test_as_of_et_midnight_is_not_rounded_forward_from_last_nanosecond():
+    p, _, _ = provider(daily_response())
+    p.clock_ns = lambda: 1791950400000000000-1  # Oct14 00ET minus one nanosecond.
+    assert p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())['ticker'] == 'SOFI'
+
+
+@pytest.mark.parametrize('timestamp',[1791864000001,1791900000000,1791950400000])
+def test_returned_target_daily_bucket_must_match_verified_source_window(timestamp):
+    p, _, _ = provider(daily_response(timestamp))
+    p.clock_ns = lambda: DAILY_AFTER
+    with pytest.raises(LeapsDataError,match='incomplete_daily_bar'):
+        p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())
+
+
+@pytest.mark.parametrize('status,reason',[(401,'authorization_denied'),(403,'authorization_denied'),(429,'rate_limited')])
+def test_sec_authority_failure_does_not_poison_independent_market_requests(status,reason):
+    p, t, a = provider(Response(status=status),Response())
+    for _ in range(2):
+        with pytest.raises(LeapsDataError,match=reason):
+            p.company_facts('1818874',configured_sec_user_agent='Synthetic Research synthetic@example.invalid')
+    assert len(t.calls) == 1
+    assert p.list_contract_page(run()).complete
+    assert len(t.calls) == 2
+    assert 'Authorization' not in t.calls[0][2] and 'Authorization' in t.calls[1][2]
+    assert a.events == [('acquire','sec'),('release','sec'),('acquire','market'),('release','market')]
+    assert not a.held
+
+
+@pytest.mark.parametrize('status,reason',[(401,'authorization_denied'),(403,'authorization_denied'),(429,'rate_limited')])
+def test_market_authority_failure_is_global_to_market_but_not_sec(status,reason):
+    p, t, a = provider(Response(status=status),Response({'cik':1818874,'facts':{}}))
+    for request in (lambda:p.list_contract_page(run()),lambda:p.underlying_quote('SOFI')):
+        with pytest.raises(LeapsDataError,match=reason):
+            request()
+    assert len(t.calls) == 1
+    assert p.company_facts('1818874',configured_sec_user_agent='Synthetic Research synthetic@example.invalid')['cik'] == 1818874
+    assert len(t.calls) == 2
+    assert 'Authorization' in t.calls[0][2] and 'Authorization' not in t.calls[1][2]
+    assert a.events == [('acquire','market'),('release','market'),('acquire','sec'),('release','sec')]
+    assert not a.held
+
+
+@pytest.mark.parametrize('instant',[DAILY_END-4*3600*10**9,DAILY_END-1])
+def test_regular_close_or_before_full_source_completion_is_not_daily_completion(instant):
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: instant
+    with pytest.raises(LeapsDataError,match='unverified_daily_completion'):
+        p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=daily_completion())
+    assert t.calls == [] and a.events == []
+
+
+def test_resource_unbounded_lag_is_a_safe_completion_error():
+    p, t, a = provider(daily_response())
+    p.clock_ns = lambda: DAILY_AFTER
+    proof = replace(daily_completion(),feed_lag_s=D('1e999999999'))
+    with pytest.raises(LeapsDataError,match='unverified_daily_completion'):
+        p.daily_history('SOFI',completed_through=date(2026,10,13),as_of=date(2026,10,13),completion=proof)
+    assert t.calls == [] and a.events == []

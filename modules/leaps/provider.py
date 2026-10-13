@@ -15,6 +15,7 @@ import json
 import re
 from threading import Lock
 from urllib.parse import parse_qsl, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .contracts import decimal_context, expiry_window, parse_decimal, parse_ns_epoch
 from .models import (CapabilityEvidence, GreeksObservation, LeapsDataError, OptionContract,
@@ -35,6 +36,34 @@ class OptionQuote:
 class StockQuote:
     ticker: str
     quote: QuoteObservation
+
+
+@dataclass(frozen=True)
+class DailyCompletionProof:
+    """Trusted producer evidence for a complete provider ET daily bucket.
+
+    window_start is the aggregate bucket start; exclusive window_end is the
+    end of ALL eligible source coverage, not merely the regular stock session.
+    No schedule, completion or lag is inferred from quotes or receipt time.
+    """
+    ticker: str
+    market_date: date
+    source: str
+    timespan: str
+    multiplier: int
+    window_start_ns: int
+    window_end_ns: int
+    completed_ns: int
+    available_ns: int
+    feed_lag_s: Decimal
+    evidence_ids: tuple[str, ...]
+
+    def __post_init__(self):
+        if not isinstance(self.evidence_ids, (list, tuple)):
+            raise _error('unverified_daily_completion')
+        object.__setattr__(self, 'evidence_ids', tuple(self.evidence_ids))
+        for field in ('window_start_ns','window_end_ns','completed_ns','available_ns'):
+            _wire_ns(getattr(self, field))
 
 
 @dataclass(frozen=True)
@@ -115,12 +144,41 @@ def _unique_object(pairs):
     return result
 
 
+def _eastern_date(source_ns):
+    try:
+        return datetime.fromtimestamp(source_ns // 10**9, timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
+    except ZoneInfoNotFoundError:
+        raise _error('calendar_unavailable') from None
+
+
+def _verify_daily_completion(proof, ticker, completed_through, now_ns):
+    if (not isinstance(proof, DailyCompletionProof) or proof.ticker != ticker
+            or type(proof.market_date) is not date or proof.market_date != completed_through
+            or proof.source != 'massive_stock_daily_aggregates' or proof.timespan != 'day'
+            or type(proof.multiplier) is not int or proof.multiplier != 1
+            or not _evidence_ids(proof.evidence_ids)
+            or not isinstance(proof.feed_lag_s, Decimal) or not proof.feed_lag_s.is_finite()
+            or proof.feed_lag_s < 0
+            or not proof.window_start_ns < proof.window_end_ns <= proof.completed_ns <= proof.available_ns <= now_ns
+            or proof.window_start_ns % 10**6 != 0
+            or _eastern_date(proof.window_start_ns) != completed_through
+            or _eastern_date(proof.window_end_ns - 1) != completed_through):
+        raise _error('unverified_daily_completion')
+    with decimal_context():
+        try:
+            lag = parse_decimal(proof.feed_lag_s)
+        except LeapsDataError:
+            raise _error('unverified_daily_completion') from None
+        if proof.available_ns - proof.completed_ns < lag * 10**9:
+            raise _error('unverified_daily_completion')
+
+
 class MassiveLeapsProvider:
     def __init__(self, transport, clock_ns, admission, capability):
         self.transport, self.clock_ns = transport, clock_ns
         self.admission, self.capability = admission, capability
-        self._denied = False
-        self._paused = False
+        self._denied = set()
+        self._paused = set()
         self._lock = Lock()
         self._seen = {}
         self.request_count = 0
@@ -130,9 +188,9 @@ class MassiveLeapsProvider:
         origin = 'https://api.massive.com' if scope == 'market' else 'https://data.sec.gov'
         url = origin + path + ('?' + urlencode(params) if params else '')
         with self._lock:
-            if self._denied:
+            if scope in self._denied:
                 raise _error('authorization_denied')
-            if self._paused:
+            if scope in self._paused:
                 raise _error('rate_limited')
             for attempt in range(2):
                 if self._request_ceiling is not None and self.request_count >= self._request_ceiling:
@@ -154,10 +212,10 @@ class MassiveLeapsProvider:
                     if not retry:
                         status = response.status_code
                         if status in (401, 403):
-                            self._denied = True
+                            self._denied.add(scope)
                             raise _error('authorization_denied')
                         if status == 429:
-                            self._paused = True
+                            self._paused.add(scope)
                             raise _error('rate_limited')
                         if 300 <= status < 400:
                             raise _error('redirect_rejected')
@@ -310,10 +368,14 @@ class MassiveLeapsProvider:
             source_ns=source_ns, received_ns=now, size_unit='contracts', feed_mode=mode,
             feed_lag_s=lag, source='massive_option_snapshot')
 
-    def daily_history(self, ticker, *, completed_through, as_of):
+    def daily_history(self, ticker, *, completed_through, as_of, completion=None):
         ticker = _ticker(ticker)
-        if type(completed_through) is not date or type(as_of) is not date or completed_through >= as_of:
+        now_ns = _wire_ns(self.clock_ns())
+        if type(as_of) is not date or as_of != _eastern_date(now_ns):
+            raise _error('invalid_as_of')
+        if type(completed_through) is not date or completed_through > as_of:
             raise _error('invalid_completed_date')
+        _verify_daily_completion(completion, ticker, completed_through, now_ns)
         start = completed_through - timedelta(days=730)
         data = self._request(f'/v2/aggs/ticker/{ticker}/range/1/day/{start}/{completed_through}',
                              {'adjusted':'true','sort':'asc','limit':50000})
@@ -324,7 +386,9 @@ class MassiveLeapsProvider:
         for bar in data.get('results', []):
             if not isinstance(bar, Mapping) or type(bar.get('t')) is not int or not 10**12 <= bar['t'] < 10**13:
                 raise _error('invalid_ms_epoch')
-            if datetime.fromtimestamp(bar['t'] / 1000, timezone.utc).date() > completed_through:
+            bar_date = _eastern_date(bar['t'] * 10**6)
+            if (bar_date > completed_through or
+                    (bar_date == completed_through and bar['t'] * 10**6 != completion.window_start_ns)):
                 raise _error('incomplete_daily_bar')
             for key in ('o','h','l','c','v'):
                 if _wire_number(bar.get(key)) < 0:
@@ -404,13 +468,15 @@ def assess_quote(option, underlying, *, now_ns, verified_session):
             reasons.append(label + '_size_evidence_insufficient')
     if oq.source_ns is not None and sq.source_ns is not None and abs(oq.source_ns - sq.source_ns) > 30*10**9:
         reasons.append('source_time_skew')
-    if not _session_matches(verified_session, option, underlying, now_ns):
+    session_verified = _session_matches(verified_session, option, underlying, now_ns)
+    if not session_verified:
         reasons.append('unverified_session')
     if all(reason.endswith('_size_evidence_insufficient') for reason in reasons):
         with decimal_context():
             if oq.ask + option.contract.strike < sq.bid:
                 reasons.append('suspicious_price_relation')
-    expiry_ns = min(deadlines) if all(value is not None for value in deadlines) else None
+    expiry_ns = (min(*deadlines, verified_session.option_end_ns, verified_session.stock_end_ns)
+                 if session_verified and all(value is not None for value in deadlines) else None)
     return QuoteAssessment(algebra, not reasons, 'adequate' if not reasons else 'insufficient', tuple(reasons), expiry_ns)
 
 
