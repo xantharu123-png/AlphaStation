@@ -12,7 +12,7 @@ import math
 from zoneinfo import ZoneInfo
 
 from .contracts import parse_decimal, parse_ns_epoch
-from .models import LeapsDataError, UnderlyingEvidence
+from .models import LeapsDataError, UnderlyingEvidence, _freeze
 from .provider import DailyCompletionProof, _verify_daily_completion
 
 
@@ -148,6 +148,49 @@ def build_underlying_evidence(ticker, *, completed_bars, facts, sources, as_of):
     return UnderlyingEvidence(ticker,indicators,analysis,coverage,tuple(sources),as_of)
 
 
+class UnderlyingLoadPaused(LeapsDataError):
+    """Transient refusal plus immutable acquired evidence for worker persistence."""
+    def __init__(self,code,authority,progress):
+        super().__init__(code,'provider')
+        self.authority=authority
+        self.progress=_freeze(progress)
+
+
+def _restore_progress(checkpoint,ticker,listing,as_of,now_ns):
+    try:
+        expected={'ticker','listing','proof','history_done','bars','sources','reasons','failures'}
+        if not isinstance(checkpoint,Mapping) or set(checkpoint)!=expected:
+            raise ValueError()
+        progress=_plain(checkpoint)
+        if progress['ticker']!=ticker or progress['listing']!=_plain(listing) or type(progress['history_done']) is not bool:
+            raise ValueError()
+        for key in ('bars','sources','reasons','failures'):
+            if not isinstance(progress[key],list):
+                raise ValueError()
+        proof=progress['proof']
+        if proof is not None:
+            if not isinstance(proof,DailyCompletionProof) or proof.market_date>as_of:
+                raise ValueError()
+            _verify_daily_completion(proof,ticker,proof.market_date,now_ns)
+        if not progress['history_done']:
+            if proof is None or any(progress[key] for key in ('bars','sources','reasons','failures')):
+                raise ValueError()
+        if progress['bars']:
+            if proof is None or progress['sources']!=[proof]:
+                raise ValueError()
+            _bars(progress['bars'],proof.market_date)
+        if progress['sources'] and progress['sources']!=[proof]:
+            raise ValueError()
+        if any(not isinstance(reason,str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}',reason) for reason in progress['reasons']):
+            raise ValueError()
+        for failure in progress['failures']:
+            if not isinstance(failure,dict) or set(failure)!={'authority','reason'} or failure['authority']!='market' or failure['reason'] not in progress['reasons']:
+                raise ValueError()
+        return progress
+    except (KeyError,TypeError,ValueError,ArithmeticError):
+        raise LeapsDataError('invalid_underlying_checkpoint','underlying') from None
+
+
 class CachedUnderlyingLoader:
     """Run-scoped cache. All acquisitions use the supplied admitted provider.
 
@@ -162,17 +205,24 @@ class CachedUnderlyingLoader:
         self._cache={}
         self._facts={}
 
-    def load(self,ticker,listing,*,now_ns):
+    def load(self,ticker,listing,*,now_ns,checkpoint=None):
         now_ns=parse_ns_epoch(now_ns)
         as_of=datetime.fromtimestamp(now_ns//10**9,timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
         key=(ticker,as_of,tuple(sorted((str(k),str(v)) for k,v in listing.items())))
+        progress=_restore_progress(checkpoint,ticker,listing,as_of,now_ns) if checkpoint is not None else None
         if key in self._cache:
             return self._cache[key]
-        bars=[]; facts=None; sources=[]; reasons=[]; failures=[]
-        proof=self.completion_producer(ticker,as_of,now_ns) if self.completion_producer else None
-        if proof is None:
+        if progress is None:
+            proof=self.completion_producer(ticker,as_of,now_ns) if self.completion_producer else None
+            progress=dict(ticker=ticker,listing=_plain(listing),proof=proof,history_done=False,
+                          bars=[],sources=[],reasons=[],failures=[])
+        proof=progress['proof']
+        bars=progress['bars']; sources=progress['sources']; reasons=progress['reasons']; failures=progress['failures']
+        facts=None
+        if not progress['history_done'] and proof is None:
             reasons.append('unverified_daily_completion')
-        else:
+            progress['history_done']=True
+        elif not progress['history_done']:
             try:
                 if not isinstance(proof,DailyCompletionProof):
                     raise LeapsDataError('unverified_daily_completion','underlying')
@@ -183,6 +233,8 @@ class CachedUnderlyingLoader:
                     raise LeapsDataError('invalid_history_envelope','underlying')
                 previous=None
                 for raw in data.get('results',()):
+                    if not isinstance(raw,Mapping):
+                        raise LeapsDataError('invalid_completed_history','underlying')
                     timestamp=raw.get('t')
                     if type(timestamp) is not int or not 10**12<=timestamp<10**13:
                         raise LeapsDataError('invalid_completed_history','underlying')
@@ -196,10 +248,15 @@ class CachedUnderlyingLoader:
                 _bars(bars,as_of)  # Validate entire causal OHLCV before facts price use.
                 sources.append(proof)
             except LeapsDataError as error:
-                bars=[]; reasons.append(error.code)
+                if error.code in ('admission_denied','rate_limited'):
+                    raise UnderlyingLoadPaused(error.code,'market',progress) from None
+                bars.clear(); reasons.append(error.code)
                 failures.append({'authority':'market','reason':error.code})
+                if error.code=='unverified_daily_completion':
+                    progress['proof']=None
             except (KeyError,TypeError,ValueError,OverflowError):
-                bars=[]; reasons.append('invalid_completed_history')
+                bars.clear(); reasons.append('invalid_completed_history')
+            progress['history_done']=True
         cik=listing.get('cik')
         verified_listing=(listing.get('ticker')==ticker and listing.get('market')=='stocks'
                           and listing.get('locale')=='us' and listing.get('active') is True
@@ -220,6 +277,10 @@ class CachedUnderlyingLoader:
                            price=bars[-1]['close'] if bars else None)
                 sources.append({'source':'sec_companyfacts','cik':cik,'basis':'live_current_not_pit'})
             except LeapsDataError as error:
+                # Local/shared admission refusal pauses all LEAPS acquisitions;
+                # SEC HTTP429 is authority-local and must not stop market chains.
+                if error.code=='admission_denied':
+                    raise UnderlyingLoadPaused(error.code,'sec',progress) from None
                 reasons.append(error.code)
                 failures.append({'authority':'sec','reason':error.code})
         result=build_underlying_evidence(ticker,completed_bars=bars,facts=facts,sources=sources,as_of=as_of)

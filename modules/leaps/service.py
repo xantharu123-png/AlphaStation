@@ -17,7 +17,7 @@ from .models import (LeapsDataError, LeapsSnapshot, OptionContract, QuoteObserva
                      UnderlyingObservation, UnderlyingEvidence, GreeksObservation, to_json_value)
 from .pricing import evaluate_expiry, scenario_prices, spread_metrics
 from .provider import OptionQuote, StockQuote, VerifiedSession, DailyCompletionProof, assess_quote
-from .underlying import CachedUnderlyingLoader
+from .underlying import CachedUnderlyingLoader, UnderlyingLoadPaused
 
 
 @dataclass(frozen=True)
@@ -147,13 +147,13 @@ def _decode(value):
 def _save(state,run):
     payload=_encode(state)
     body=json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False)
-    return json.dumps({'version':1,'run':_fingerprint(run),'digest':sha256(body.encode()).hexdigest(),'state':payload},separators=(',',':'))
+    return json.dumps({'version':2,'run':_fingerprint(run),'digest':sha256(body.encode()).hexdigest(),'state':payload},separators=(',',':'))
 
 
 def _load(checkpoint,run):
     try:
         raw=json.loads(checkpoint)
-        if raw['version']!=1 or raw['run']!=_fingerprint(run):
+        if raw['version']!=2 or raw['run']!=_fingerprint(run):
             raise LeapsDataError('checkpoint_mismatch','provider')
         body=json.dumps(raw['state'],sort_keys=True,separators=(',',':'),allow_nan=False)
         if raw['digest']!=sha256(body.encode()).hexdigest():
@@ -163,7 +163,7 @@ def _load(checkpoint,run):
             raise ValueError('checkpoint fields')
         if state['phase'] not in ('reference','listings','intersection','underlying','chain','done','failed'):
             raise ValueError('checkpoint phase')
-        for key in ('seen','references','listings','contracts','underlyings','stocks','options','sessions','observed','exclusions','chain_anomalies'):
+        for key in ('seen','references','listings','contracts','underlyings','underlying_progress','stocks','options','sessions','observed','exclusions','chain_anomalies'):
             if not isinstance(state[key],dict):
                 raise ValueError('checkpoint collection')
         for key in ('reference_conflicts','listing_conflicts','listing_complete','tickers','chain_complete','chain_failed','reasons','sources'):
@@ -195,6 +195,15 @@ def _load(checkpoint,run):
             if (symbol not in state['contracts'] or option.contract!=state['contracts'][symbol]
                     or ticker not in state['underlyings'] or ticker not in state['stocks']):
                 raise ValueError('checkpoint option binding')
+        for ticker,pending in state['underlying_progress'].items():
+            if (state['phase']!='underlying' or state['index']>=len(state['tickers'])
+                    or ticker!=state['tickers'][state['index']] or ticker not in state['stocks']
+                    or state['stocks'][ticker].ticker!=ticker or not isinstance(pending,Mapping)
+                    or set(pending)!={'authority','reason','acquisition'}
+                    or pending['authority'] not in ('market','sec')
+                    or pending['reason'] not in ('admission_denied','rate_limited')
+                    or not isinstance(pending['acquisition'],Mapping)):
+                raise ValueError('checkpoint pending underlying')
         return state
     except LeapsDataError:
         raise
@@ -205,7 +214,7 @@ def _load(checkpoint,run):
 def _initial():
     return dict(phase='reference',cursor=None,seen={},references={},reference_conflicts=[],reference_duplicates=0,
         reference_complete=False,listings={},listing_conflicts=[],listing_kind=0,listing_complete=[],
-        contracts={},tickers=[],index=0,underlyings={},stocks={},options={},sessions={},observed={},
+        contracts={},tickers=[],index=0,underlyings={},underlying_progress={},stocks={},options={},sessions={},observed={},
         chain_complete=[],chain_failed=[],exclusions={},chain_anomalies={},reasons=[],sources=[])
 
 
@@ -314,6 +323,7 @@ def _snapshot(state,provider,run,*,pause=None):
     status=('paused' if pause else 'failed' if state['phase']=='failed' else
             ('partial' if state['reasons'] else 'complete') if state['phase']=='done' else 'running')
     return LeapsSnapshot(run,status,{'comparisons':tuple(rows),'underlyings':state['underlyings'],
+        'pending_underlyings':{ticker:{'authority':item['authority'],'reason':item['reason']} for ticker,item in state['underlying_progress'].items()},
         'exclusions':tuple(state['exclusions'].values()),'chain_anomalies':state['chain_anomalies'],
         'filter_fingerprint':_fingerprint(run.filters)},
         coverage,tuple(dict.fromkeys((*state['reasons'],*((pause,) if pause else ())))),_save(state,run),tuple(state['sources']))
@@ -352,17 +362,27 @@ def discover(provider,run,checkpoint=None):
             ticker=state['tickers'][state['index']]
             now=provider.market.clock_ns()
             # Acquire stock first so denied admission never repeats quality IO.
+            if ticker not in state['stocks']:
+                try:
+                    state['stocks'][ticker]=StockQuote(ticker,provider.market.underlying_quote(ticker))
+                except LeapsDataError as error:
+                    if error.code in ('admission_denied','rate_limited'):
+                        raise
+                    state['reasons'].append(error.code)
+                    state['stocks'][ticker]=StockQuote(ticker,QuoteObservation())
+            loader=provider.underlying_loader
             try:
-                stock=StockQuote(ticker,provider.market.underlying_quote(ticker))
-            except LeapsDataError as error:
-                if error.code in ('admission_denied','rate_limited'):
-                    raise
-                state['reasons'].append(error.code)
-                stock=StockQuote(ticker,QuoteObservation())
-            quality=provider.underlying_loader.load(ticker,state['listings'][ticker],now_ns=now)
+                if isinstance(loader,CachedUnderlyingLoader):
+                    saved=state['underlying_progress'].get(ticker)
+                    quality=loader.load(ticker,state['listings'][ticker],now_ns=now,checkpoint=saved['acquisition'] if saved else None)
+                else:
+                    quality=loader.load(ticker,state['listings'][ticker],now_ns=now)
+            except UnderlyingLoadPaused as error:
+                state['underlying_progress'][ticker]={'authority':error.authority,'reason':error.code,'acquisition':error.progress}
+                raise
             if quality.ticker!=ticker:
                 raise LeapsDataError('underlying_identity_mismatch','underlying')
-            state['stocks'][ticker]=stock
+            state['underlying_progress'].pop(ticker,None)
             state['underlyings'][ticker]=quality
             state['phase']='chain'
         elif phase=='chain':
@@ -395,6 +415,8 @@ def discover(provider,run,checkpoint=None):
             if page.complete:
                 _chain_end(state,ticker,True)
     except LeapsDataError as error:
+        if error.code=='invalid_underlying_checkpoint':
+            raise
         if error.code in ('admission_denied','rate_limited'):
             return _snapshot(state,provider,run,pause=error.code)
         state['reasons'].append(error.code)

@@ -8,7 +8,7 @@ import pytest
 from modules.leaps.models import UnderlyingEvidence, QuoteObservation, LeapsDataError
 from modules.leaps.provider import StockQuote
 from tests.fixtures.leaps.provider import NOW, contract, chain_raw, run, Response, Admission, Transport, capability
-from tests.fixtures.leaps.discovery import Market, session
+from tests.fixtures.leaps.discovery import Market, session, completion
 
 
 def api(name):
@@ -95,12 +95,6 @@ def test_listing_cik_missing_user_agent_and_facts_are_not_fabricated():
     loader=api('underlying').CachedUnderlyingLoader(Provider())
     result=loader.load('SOFI',{'ticker':'SOFI','cik':'123'},now_ns=NOW)
     assert result.facts['score'] is None
-
-
-def completion(ticker,as_of,now):
-    from modules.leaps.provider import DailyCompletionProof
-    return DailyCompletionProof(ticker,date(2026,10,12),'massive_stock_daily_aggregates','day',1,
-        1791777600000000000,1791849600000000000,1791849600000000000,1791849600000000000,D(0),('synthetic-full-source-window',))
 
 
 def test_admitted_loader_caches_history_and_sec_per_underlying_not_contract():
@@ -224,3 +218,29 @@ def test_legitimate_company_total_above_option_price_limit_is_preserved():
     q=quality(facts=fact_debt(D('15000000000000')))
     assert q.facts['metrics']['latest_debt']==15000000000000
     assert 'invalid_company_fact_values' not in q.coverage['reasons']
+
+
+@pytest.mark.parametrize('mutation',['ticker','listing','proof','bars','shape'])
+def test_unfinished_loader_checkpoint_is_validated_before_any_io(mutation):
+    from tests.fixtures.leaps.provider import listing
+    mod=api('underlying')
+    assert hasattr(mod,'UnderlyingLoadPaused'), 'resumable underlying progress missing'
+    class Source:
+        def daily_history(self,*args,**kw):
+            raise LeapsDataError('admission_denied','provider')
+    loader=mod.CachedUnderlyingLoader(Source(),completion_producer=completion)
+    with pytest.raises(mod.UnderlyingLoadPaused) as caught:
+        loader.load('SOFI',listing(cik='123'),now_ns=NOW)
+    checkpoint=dict(caught.value.progress)
+    with pytest.raises(TypeError): caught.value.progress['ticker']='WRONG'
+    if mutation=='ticker': checkpoint['ticker']='WRONG'
+    elif mutation=='listing': checkpoint['listing']=listing('WRONG')
+    elif mutation=='proof': checkpoint['proof']=completion('WRONG',None,None)
+    elif mutation=='bars': checkpoint['bars']=[None]
+    else: checkpoint['history_done']='yes'
+    class Never:
+        def daily_history(self,*args,**kw): pytest.fail('invalid checkpoint called history')
+        def company_facts(self,*args,**kw): pytest.fail('invalid checkpoint called SEC')
+    restored=mod.CachedUnderlyingLoader(Never(),completion_producer=lambda *args:pytest.fail('invalid checkpoint called proof factory'))
+    with pytest.raises(LeapsDataError,match='invalid_underlying_checkpoint'):
+        restored.load('SOFI',listing(cik='123'),now_ns=NOW,checkpoint=checkpoint)

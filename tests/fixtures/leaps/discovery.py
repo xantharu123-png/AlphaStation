@@ -1,7 +1,8 @@
 """Synthetic paginated discovery source and explicit proof factories."""
 from copy import deepcopy
+from datetime import date
 from modules.leaps.models import PageResult, QuoteObservation, LeapsDataError
-from modules.leaps.provider import MassiveLeapsProvider, VerifiedSession
+from modules.leaps.provider import MassiveLeapsProvider, VerifiedSession, DailyCompletionProof
 from tests.fixtures.leaps.provider import NOW, D, Admission, Transport, capability, raw_contract, listing, chain_raw, terms
 
 
@@ -55,3 +56,8 @@ def session(contract, stock, now_ns):
 
 def term_producer(raw, listing, run):
     return terms(listing['type'])
+
+
+def completion(ticker,as_of,now):
+    return DailyCompletionProof(ticker,date(2026,10,12),'massive_stock_daily_aggregates','day',1,
+        1791777600000000000,1791849600000000000,1791849600000000000,1791849600000000000,D(0),('synthetic-full-source-window',))
