@@ -191,8 +191,8 @@ class ExpiryResult(_Immutable):
     premium_roi: Decimal
     break_even: Decimal
     exercise_cash: Decimal
-    stock_pnl: Decimal
-    stock_price_roi: Decimal
+    stock_pnl: Decimal | None
+    stock_price_roi: Decimal | None
     delta_shares: Decimal | None
 
 
