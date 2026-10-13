@@ -219,6 +219,15 @@ def test_adr_listing_with_standard_normative_proof_is_eligible():
     assert c.parse_standard_contract(raw, listing, evidence).shares == 100
 
 
+def test_european_exercise_is_not_admitted_by_v1_american_standard_proof():
+    c, m = api()
+    raw, listing, evidence = standard()
+    raw["exercise_style"] = "european"
+    with pytest.raises(m.LeapsDataError) as error:
+        c.parse_standard_contract(raw, listing, evidence)
+    assert error.value.scope == "contract"
+
+
 def test_proven_fraction_greeks_remain_fraction_and_provenance_nullable():
     _, m = api()
     greeks = m.GreeksObservation(delta=Decimal("0.35"), iv=Decimal("0.4"), units_evidence={"delta": "fraction", "iv": "fraction"})

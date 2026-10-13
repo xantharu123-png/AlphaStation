@@ -114,7 +114,7 @@ def parse_standard_contract(raw: Mapping, listing: Mapping, evidence: Mapping) -
     if shares != 100 or multiplier != 100 or not isinstance(extras, (list, tuple)) or extras or evidence.get("currency") != "USD" or evidence.get("settlement") != "physical":
         raise LeapsDataError("nonstandard_terms", "contract")
     exercise = raw.get("exercise_style")
-    if exercise not in ("american", "european") or not isinstance(raw.get("primary_exchange"), str) or not raw["primary_exchange"] or not isinstance(listing.get("primary_exchange"), str) or not listing["primary_exchange"]:
+    if exercise != "american" or not isinstance(raw.get("primary_exchange"), str) or not raw["primary_exchange"] or not isinstance(listing.get("primary_exchange"), str) or not listing["primary_exchange"]:
         raise LeapsDataError("unknown_contract_terms", "contract")
     correction = raw.get("correction")
     if correction is not None and (type(correction) is not int or not 0 <= correction <= 10**6):
