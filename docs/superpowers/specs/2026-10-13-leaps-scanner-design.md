@@ -1,7 +1,8 @@
 # LEAPS-Scanner: US-Aktien und gekaufte langfristige Calls
 
-Stand: 13.10.2026. Status: **schriftlicher Entwurf zur Nutzerprüfung**.
-Die Ausrichtung ist bestätigt; dieses Dokument ist noch nicht freigegeben.
+Stand: 13.10.2026. Status: **schriftlicher Entwurf vom Nutzer freigegeben**.
+Freigabe: „ja machen und dann auditieren“, einschließlich mathematischer,
+logischer und praktischer Prüfung. Der Implementierungsplan ist separat zu prüfen.
 Noch kein Produktcode, Optionsdatenabruf, neuer Vertrag, Mailversand oder Serverupdate.
 
 ## 1. Auftrag und Erfolgskriterium
@@ -291,8 +292,9 @@ bestehende Aktienbacktest und historische Optionsreferenzen allein reichen nicht
 
 ## 10. Nächste Freigabe und Publikation
 
-Zuerst Nutzerprüfung dieses schriftlichen Entwurfs. Danach gesonderter
-Implementierungsplan und Wahl der Ausführung; erst anschließend Produktcode.
+Die Nutzerfreigabe dieses schriftlichen Entwurfs liegt vor. Nächster Schritt:
+gesonderter Implementierungsplan mit Nutzerprüfung und Wahl der Ausführung;
+erst anschließend Produktcode.
 Daten-/Lizenzzugang, Offline-/Browserabnahme, Git-Publish, Serverinstallation und
 reale Funktionsabnahme bleiben getrennte Schritte. Keine Installation umstellen
 oder ein gelöschtes Deploy-Skript wiederherstellen.
