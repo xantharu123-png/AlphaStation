@@ -48400,9 +48400,11 @@ async def api_leaps_capabilities(request: Request):
 
 @app.get("/api/leaps/results")
 async def api_leaps_results(request: Request, limit: int = 50, offset: int = 0,
-                            view: str = "complete", run_id: Optional[str] = None):
+                            view: str = "complete", run_id: Optional[str] = None,
+                            sort_by: str = "be_rise", order: str = "asc"):
     await _leaps_access(request, "results")
-    return await _leaps_call("results", limit=limit, offset=offset, view=view, run_id=run_id)
+    return await _leaps_call("results", limit=limit, offset=offset, view=view, run_id=run_id,
+                             sort_by=sort_by, order=order)
 
 
 @app.get("/api/leaps/status")

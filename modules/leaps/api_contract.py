@@ -183,12 +183,38 @@ def _public_row(row, now):
     return to_json_value(result)
 
 
+_SORT_KEYS = {
+    'underlying':lambda row:row['contract'].underlying,
+    'strike':lambda row:row['contract'].strike,
+    'expiry':lambda row:row['contract'].expiry,
+    # Original Task4 one-contract economics, not new browser cash arithmetic.
+    'cost_per_contract':lambda row:row['scenarios'][0]['result'].debit if row.get('scenarios') else None,
+    'break_even':lambda row:row.get('break_even'),
+    'be_rise':lambda row:row.get('be_rise'),
+    'spread':lambda row:row.get('spread'),
+    'delta':lambda row:row['greeks'].delta,
+    'open_interest':lambda row:row.get('open_interest'),
+}
+
+
+def _sort_rows(rows, sort_by, order):
+    # Stable ascending contract-ID ties in BOTH directions. Missing is not zero:
+    # split nulls before descending order, so unknown stays last on every page.
+    stable = sorted(rows,key=lambda row:row['contract'].id)
+    values = [(_SORT_KEYS[sort_by](row),row) for row in stable]
+    present = [(value,row) for value,row in values if value is not None]
+    present.sort(key=lambda item:item[0],reverse=order=='desc')
+    return [row for _,row in present]+[row for value,row in values if value is None]
+
+
 class LeapsApiService:
     def __init__(self, store, *, runner=None, clock_ns=time.time_ns):
         self.store, self.runner, self.clock_ns = store, runner, clock_ns
         if runner is not None and runner.store is not store:
             raise LeapsApiError(503,'unbound_runner_store')
         self._worker = None
+        self._worker_running = False
+        self._dispatch_pending = False
         self._lock = threading.Lock()
         self._last_start = None
         self._worker_error = None
@@ -203,13 +229,17 @@ class LeapsApiService:
         options = (state['last_complete'],state['latest']) if view == 'complete' else (state['latest'],)
         return next((s for s in options if s is not None and (run_id is None or s.run.run_id==run_id)),None)
 
-    def results(self, *, limit=50, offset=0, view='complete', run_id=None):
+    def results(self, *, limit=50, offset=0, view='complete', run_id=None, sort_by='be_rise', order='asc'):
         if type(limit) is not int or not 1<=limit<=100 or type(offset) is not int or not 0<=offset<=10**9:
             raise LeapsApiError(422,'invalid_page')
+        sort_by = 'underlying' if sort_by=='ticker' else sort_by
+        if not isinstance(sort_by,str) or sort_by not in _SORT_KEYS or order not in ('asc','desc'):
+            raise LeapsApiError(422,'invalid_sort')
         state = self._read()
         snapshot = self._select(state,view=view,run_id=run_id)
         if snapshot is None:
-            return {'run_id':None,'snapshot_id':None,'status':'empty','rows':[],'total':0,'next_offset':None}
+            return {'run_id':None,'snapshot_id':None,'status':'empty','rows':[],'total':0,'next_offset':None,
+                    'sort_by':sort_by,'order':order}
         rows = snapshot.data.get('comparisons',())
         if not isinstance(rows,(tuple,list)):
             raise LeapsApiError(503,'invalid_store')
@@ -217,10 +247,11 @@ class LeapsApiService:
         now = self.clock_ns()
         coverage = dict(snapshot.coverage)
         coverage['eligible'] = sum(r.get('filter_status')=='passed' and _current_assessment(r,now).comparison_eligible for r in rows)
+        ordered = _sort_rows(rows,sort_by,order)
         return {'run_id':snapshot.run.run_id,'snapshot_id':snapshot_identity(snapshot),'status':snapshot.status,
-                'rows':[_public_row(r,now) for r in rows[offset:offset+limit]],'total':total,
+                'rows':[_public_row(r,now) for r in ordered[offset:offset+limit]],'total':total,
                 'next_offset':offset+limit if offset+limit<total else None,
-                'coverage':to_json_value(coverage),'reasons':list(snapshot.reasons)}
+                'coverage':to_json_value(coverage),'reasons':list(snapshot.reasons),'sort_by':sort_by,'order':order}
 
     def status(self):
         state = self._read()
@@ -262,16 +293,34 @@ class LeapsApiService:
 
     def _dispatch(self):
         with self._lock:
-            if self._worker and self._worker.is_alive():
+            self._dispatch_pending = True
+            if self._worker_running:
                 return
+            self._worker_running = True
             def work():
-                try:
-                    self.runner.run_slice()
-                except Exception:
-                    self._worker_error = 'worker_failed'
+                while True:
+                    with self._lock:
+                        self._dispatch_pending = False
+                    try:
+                        self.runner.run_slice()
+                    except Exception:
+                        self._worker_error = 'worker_failed'
+                    # A native slice may have released its owner while this
+                    # thread is still alive. Consume accepted dispatches before
+                    # atomically becoming idle; never lose the exit handoff.
+                    with self._lock:
+                        if self._dispatch_pending:
+                            continue
+                        self._worker_running = False
+                        return
             self._worker_error = None
             self._worker = threading.Thread(target=work,name='leaps-worker',daemon=True)
-            self._worker.start()
+            try:
+                self._worker.start()
+            except Exception:
+                self._worker_running = False
+                self._dispatch_pending = False
+                raise
 
     def _claim(self):
         # One LEAPS throttle for scan AND resume, not legacy manual middleware.

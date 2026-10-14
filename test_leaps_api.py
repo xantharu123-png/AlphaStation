@@ -379,3 +379,120 @@ def test_real_comparison_native_finite_indicator_metrics_remain_readable(monkeyp
     enabled(monkeypatch,tmp_path,rows=[comparison])
     response = request('/api/leaps/results')
     assert response.status_code==200 and response.json()['rows'][0]['observation']['quote']['ask']=='5.2'
+
+
+@pytest.mark.parametrize('operation',['resume','scan'])
+def test_accepted_operation_handoff_after_native_owner_release_without_extra_http(monkeypatch,tmp_path,operation):
+    """An alive EXITING thread must not discard accepted persisted runnable work."""
+    entered, release_request = threading.Event(), threading.Event()
+    exiting, release_exit = threading.Event(), threading.Event()
+    def before(url):
+        if not entered.is_set():
+            entered.set()
+            assert release_request.wait(3)
+    runner, transport = real_runner(tmp_path,before=before)
+    original_slice = runner.run_slice
+    first_slice = True
+    def hold_after_native_release():
+        nonlocal first_slice
+        result = original_slice()  # Native owner released in its REAL finally.
+        if first_slice:
+            first_slice = False
+            exiting.set()
+            assert release_exit.wait(3)
+        return result
+    monkeypatch.setattr(runner,'run_slice',hold_after_native_release)
+    (tmp_path/'access').mkdir()
+    enabled(monkeypatch,tmp_path/'access')
+    clock = [NOW]
+    service = contract_api().LeapsApiService(runner.store,runner=runner,clock_ns=lambda:clock[0])
+    monkeypatch.setattr(api,'_LEAPS_BACKEND_FACTORY',lambda:service)
+    predecessor = None
+    try:
+        initial = request('/api/leaps/scan',method='POST',body={'run_id':'handoff-first'})
+        assert initial.status_code==200 and entered.wait(1)
+        predecessor = service._worker
+        assert request('/api/leaps/control',method='POST',body={'run_id':'handoff-first','action':'pause'}).status_code==200
+        release_request.set()
+        assert exiting.wait(1) and predecessor.is_alive()
+        assert runner.snapshot().status=='paused'
+        from modules.leaps.admission import OSLease
+        owner = OSLease(runner.store.root/'worker.lock')
+        assert owner.acquire()  # The exact reviewer boundary, not an IO pause.
+        owner.release()
+        clock[0] += 60*10**9
+        if operation=='resume':
+            response = request('/api/leaps/control',method='POST',body={'run_id':'handoff-first','action':'resume'})
+            expected_run, reference_calls = 'handoff-first', 1
+        else:
+            response = request('/api/leaps/scan',method='POST',body={'run_id':'handoff-next'})
+            expected_run, reference_calls = 'handoff-next', 2
+        assert response.status_code==200 and response.json()['status']=='queued'
+        assert runner.snapshot().run.run_id==expected_run
+        # Response has ENDED while predecessor still held alive. No further HTTP.
+        release_exit.set()
+        predecessor.join(3)
+        assert not predecessor.is_alive()
+        saved = runner.snapshot()
+        assert saved.status=='complete' and saved.run.run_id==expected_run
+        assert saved.coverage['parsed']==1
+        assert sum('/reference/options/contracts' in url for url in transport.calls)==reference_calls
+    finally:
+        release_request.set()
+        release_exit.set()
+        if predecessor is not None:
+            predecessor.join(3)
+
+
+def sorting_row(ticker,strike,ask,delta=None,open_interest=None):
+    """Real comparison producer; synthetic raw values, never display rounding."""
+    from modules.leaps.contracts import parse_standard_contract
+    from modules.leaps.models import GreeksObservation
+    from tests.fixtures.leaps.provider import raw_contract,listing,terms
+    baseline = row()
+    selected_contract = parse_standard_contract(raw_contract(ticker,strike),listing(ticker),terms())
+    observation = replace(baseline['observation'],contract=selected_contract,
+        quote=replace(baseline['observation'].quote,ask=ask),
+        greeks=GreeksObservation(delta=delta,units_evidence={'delta':'fraction'}),open_interest=open_interest)
+    stock = StockQuote(ticker,Market().underlying_quote(ticker))
+    underlying = replace(baseline['underlying'],ticker=ticker)
+    return compare_contract(selected_contract,observation,ComparisonEvidence(underlying,stock,session(selected_contract,stock,NOW)),run(),NOW)
+
+
+@pytest.mark.parametrize('field',['break_even','be_rise','delta','open_interest'])
+@pytest.mark.parametrize('order,expected',[('asc',['AAA','BBB','CCC']),('desc',['BBB','AAA','CCC'])])
+def test_server_global_sort_before_pagination_raw_decimal_zero_and_unknown_last(monkeypatch,tmp_path,field,order,expected):
+    nine = sorting_row('AAA',3,D(6),D(0),0)
+    ten = sorting_row('BBB',4,D(6),D(1),10)
+    missing = sorting_row('CCC',5,None)
+    assert nine['break_even']==D(9) and ten['break_even']==D(10)
+    enabled(monkeypatch,tmp_path,rows=[ten,missing,nine])
+    pages = [request(f'/api/leaps/results?limit=1&offset={offset}&sort_by={field}&order={order}') for offset in range(3)]
+    assert all(response.status_code==200 for response in pages)
+    assert [p.json()['rows'][0]['contract']['underlying'] for p in pages]==expected
+    assert len({p.json()['snapshot_id'] for p in pages})==1
+
+
+@pytest.mark.parametrize('field',['underlying','ticker','strike','expiry','cost_per_contract','spread'])
+@pytest.mark.parametrize('order',['asc','desc'])
+def test_sort_whitelist_and_stable_contract_id_ties(monkeypatch,tmp_path,field,order):
+    first = sorting_row('AAA',3,D(9))
+    second = sorting_row('BBB',3,D(10))
+    enabled(monkeypatch,tmp_path,rows=[second,first])
+    result = request(f'/api/leaps/results?sort_by={field}&order={order}').json()
+    expected = ['AAA','BBB'] if order=='asc' or field in ('strike','expiry') else ['BBB','AAA']
+    assert [r['contract']['underlying'] for r in result['rows']]==expected
+    assert result['sort_by']==('underlying' if field=='ticker' else field) and result['order']==order
+
+
+@pytest.mark.parametrize('query',['sort_by=unsupported','sort_by=cursor','order=up','order=ASC'])
+def test_sort_schema_rejects_unsupported_field_or_direction(monkeypatch,tmp_path,query):
+    enabled(monkeypatch,tmp_path)
+    assert request('/api/leaps/results?'+query).status_code==422
+
+
+def test_default_sort_remains_raw_be_rise_ascending(monkeypatch,tmp_path):
+    nine = sorting_row('AAA',3,D(6))
+    ten = sorting_row('BBB',4,D(6))
+    enabled(monkeypatch,tmp_path,rows=[ten,nine])
+    assert [r['contract']['underlying'] for r in request('/api/leaps/results').json()['rows']]==['AAA','BBB']
