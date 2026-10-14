@@ -318,15 +318,17 @@ def _snapshot(state,provider,run,*,pause=None):
     for symbol,option in state['options'].items():
         ticker=option.contract.underlying
         evidence=ComparisonEvidence(state['underlyings'][ticker],state['stocks'][ticker],state['sessions'].get(symbol))
+        assessment=assess_quote(option,evidence.stock,now_ns=now,verified_session=evidence.session)
         key=(evidence_keys[ticker],_fingerprint((option,evidence.session)),
+             assessment.algebra_eligible,
              evidence.stock.quote.source_ns is not None and evidence.stock.quote.source_ns<=now)
         cached=provider._comparisons.get(symbol)
         if cached is None or cached[0]!=key:
             row=compare_contract(option.contract,option,evidence,run,now)
         else:
-            # Economics depend on immutable original evidence; current source
-            # eligibility still depends on now and must NEVER be cached fresh.
-            row=dict(cached[1],assessment=assess_quote(option,evidence.stock,now_ns=now,verified_session=evidence.session))
+            # Reuse economics only within the same original-source validity
+            # boundaries. Current freshness/session assessment is never cached.
+            row=dict(cached[1],assessment=assessment)
         retained[symbol]=(key,row)
         rows.append(row)
     provider._comparisons=retained

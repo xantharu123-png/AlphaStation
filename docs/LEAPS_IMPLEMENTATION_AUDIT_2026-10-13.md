@@ -102,7 +102,7 @@ not a statistical latency service level.
 
 At 2,000 contracts metadata is 2,021 bytes; latest/complete share one body.
 Cold page20 traced peak is 148,651,858 bytes, warm 24,935,824 bytes. Scenario
-cold/warm is 1.92468/0.02346 s. The final-source concurrent migrated-state
+cold/warm is 1.92468/0.02346 s. The pre-review-cache-fix concurrent migrated-state
 page20/status repeat was 1.77098/0.03137 s with both responses 200. These are
 distinct experiments.
 
@@ -131,16 +131,28 @@ That projected C2000 concurrent result/status again returned 200/200 in
 the verified browser source/bundle pair is identical. A subsequently reproduced
 out-of-order clock sampling race was corrected by sampling under the metadata
 lock. Its 41 focused integration cases and 901 clean-projection LEAPS/frontend
-tests passed without warnings or skips. The final frozen full run completed in
+tests passed without warnings or skips. The **PRE-review-cache-fix** full run completed in
 639.29 s: **14,082 passed / 97 failed / 7 skipped / 0 errors**, exit 1. All 97
 failure identities (classname and name) and all seven skip identities match the
 inherited baseline; no new or missing failures. Its one warning is
 `PytestAssertRewriteWarning: Module already imported so cannot be rewritten; anyio`.
 This is not an overall PASS. The earlier full runs (14,077 and 14,080 passed,
 each with the same 97 failures and seven skips) are respectively pre-first-read-
-corner and pre-concurrency-fix, not final-source qualification.
+corner and pre-concurrency-fix, not latest-source qualification.
 
-The complete offline suite qualifies the frozen working checkout, including
+Independent Task 8 review then reproduced an option-clock transition defect in
+cached economics: assessment changed while scenarios, break-even and active
+filter results stayed stale. Fix round 1 now invalidates that cache when actual
+option algebra validity changes, while preserving original evidence and unchanged-
+page reuse. Partial → admission-denied pause → clock recovery/resume, the inverse
+transition and the separate stock-time boundary are covered. The complete owned
+integration file passed **45 tests**; the fresh clean HEAD projection passed
+**905 LEAPS/frontend tests**, both without warnings or skips. The 14,082-pass
+full run predates this repair and does not qualify it. Per controller Ruling 40,
+a fresh immutable full suite is deferred until after the final review/fix wave.
+No public DTO/UI/assets changed, so the same-byte browser evidence was not rerun.
+
+The recorded complete offline suite qualifies its frozen pre-review working checkout, including
 inherited WIP. The clean HEAD projection qualifies LEAPS and its exact two
 prerequisites separately; it does not certify unrelated inherited fixes or a
 clean-checkout full-project PASS.
@@ -158,15 +170,15 @@ are EOL-only equivalents, not raw-byte-identical Git blobs. Projected `api.py`
 matches its HEAD blob raw. The actual browser/package projection and source/bundle
 verification use those recorded exported bytes; no inherited API/UI WIP is copied.
 
-Final product/test raw SHA256 (identical in working and clean projection):
+Current product/test raw SHA256 (identical in working and fix-round clean projection):
 
 | Owned source | SHA256 |
 |---|---|
-|`modules/leaps/service.py`|`E13BDE0AAC90ECDDF3E2A33D390BE8CAFA69F5CCB0D6DFDFB253AA963FCD1843`|
+|`modules/leaps/service.py`|`2FF29F708174811433A3CA711B5A54F9BEF96DD28E66E3A343949926016A44FF`|
 |`modules/leaps/provider.py`|`DE71C15C58A3C2F844ACC09E2AAE8B8D69DFD197B867E73EEDAAADB3724A27DA`|
 |`modules/leaps/runtime.py`|`71AA35F746D70E9069BFF273CCFFA4A806D52F72957438BB78B4D7535EA52F18`|
 |`modules/leaps/api_contract.py`|`819457C384C505B74A70446EADF60F39DB509D6A49C79774ECB685D452B1E708`|
-|`test_leaps_admission_isolation.py`|`EC9C9E5512896E6283EFDC3DCEBEDF5657509B80D6430D27ECB3BD1D5413B6CF`|
+|`test_leaps_admission_isolation.py`|`F04D9E5C5744DEBB797C9DDEEDE493B1E1E9CD75A73F95F73A2A91F22C0EF28B`|
 |`tests/fixtures/leaps/whole_flow.py`|`FC54952850E3CF45A34EE4070E4EB2979D6CA3007E6F647ABE89F5A481836858`|
 
 The real helper consumers are covered: finite completed OHLCV/analytics and
@@ -185,7 +197,7 @@ The user-deleted `deploy/safe_deploy.sh` remains deleted.
 
 ## Open gates
 
-- Independent Task 8 review and final whole-branch review.
+- Independent Task 8 fix re-review, final whole-branch review and post-review full suite.
 - Uncapped full-market capacity and bounded transport/response requirements.
 - Separately authorized, at most three-request live capability check; verified
   source/session/terms evidence and actual multiuser display-license evidence.

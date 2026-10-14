@@ -361,6 +361,65 @@ def test_unchanged_contract_math_not_rebuilt_each_page_and_expiry_not_renewed(mo
     assert all(row['observation'].quote.source_ns==NOW-1 for row in expired.data['comparisons'])
 
 
+@pytest.mark.parametrize('boundary',['option','stock'])
+@pytest.mark.parametrize('recreate_provider',[False,True])
+def test_cached_economics_follow_original_source_boundary_through_pause_resume(boundary,recreate_provider):
+    from modules.leaps.models import LeapsDataError
+    from modules.leaps.service import discover
+    from tests.fixtures.leaps.discovery import Market
+
+    market=Market()
+    option_source=NOW-1 if boundary=='option' else NOW-20*10**9
+    stock_source=NOW-20*10**9 if boundary=='option' else NOW-1
+    market.chains['SOFI'][0][0]['last_quote']['last_updated']=option_source
+    market.chains['SOFI'].append(LeapsDataError('admission_denied','provider'))
+    original_stock=market.underlying_quote
+    market.underlying_quote=lambda ticker:replace(original_stock(ticker),source_ns=stock_source)
+    provider=DiscoveryProvider(market,terms_producer=term_producer,session_producer=session)
+    specification=replace(run(),filters={'max_be_rise':D('.02'),'max_spread':D('.03')})
+    partial=None
+    for _ in range(20):
+        partial=discover(provider,specification,partial.cursor if partial else None)
+        if partial.data['comparisons']:
+            break
+    assert partial.status=='running'
+    initial=partial.data['comparisons'][0]
+    assert initial['assessment'].algebra_eligible and initial['assessment'].comparison_eligible
+    assert len(initial['scenarios'])==6 and initial['break_even']==D('20.2')
+    assert initial['be_rise']==D('.01') and initial['filter_status']=='passed'
+    if recreate_provider:
+        # A real saved partial is decoded; no terminal replay or replaced row.
+        provider=DiscoveryProvider(market,terms_producer=term_producer,session_producer=session)
+    market.clock_ns=lambda:NOW-10*10**9
+    paused=discover(provider,specification,partial.cursor)
+    assert paused.status=='paused' and 'admission_denied' in paused.reasons
+    denied=paused.data['comparisons'][0]
+    assert denied['assessment'].algebra_eligible is (boundary=='stock')
+    assert not denied['assessment'].comparison_eligible
+    assert boundary+'_future_source' in denied['assessment'].reasons
+    assert len(denied['scenarios'])==(1 if boundary=='stock' else 0)
+    assert denied['break_even']==(D('20.2') if boundary=='stock' else None)
+    assert denied['be_rise'] is None and denied['filter_status']=='missing_evidence'
+    assert set(denied['filter_missing'])==({'max_be_rise'} if boundary=='stock' else {'max_be_rise','max_spread'})
+    market.clock_ns=lambda:NOW
+    market.chains['SOFI'][1]=[]  # Complete the pending page without new quote evidence.
+    completed=discover(provider,specification,paused.cursor)
+    recovered=completed.data['comparisons'][0]
+    assert completed.status=='complete'
+    assert recovered['assessment'].algebra_eligible and recovered['assessment'].comparison_eligible
+    assert len(recovered['scenarios'])==6 and recovered['break_even']==D('20.2')
+    assert recovered['be_rise']==D('.01') and recovered['filter_status']=='passed'
+    assert not recovered['filter_missing'] and not recovered['filter_rejected']
+    assert completed.coverage['eligible']==1 and completed.coverage['filter_unknown']==0
+    for row in (initial,denied,recovered):
+        assert row['observation']==initial['observation'] and row['contract']==initial['contract']
+        assert row['observation'].quote.ask==D('5.2')
+        assert row['observation'].quote.source_ns==option_source
+        assert row['observation'].quote.received_ns==NOW
+        assert row['stock_reference'].source_ns==stock_source
+        assert row['terms_fingerprint']==initial['terms_fingerprint']
+
+
 def test_expired_api_comparison_cannot_regain_freshness_when_wallclock_regresses(monkeypatch,tmp_path):
     runner,service=flow(monkeypatch,tmp_path,WholeFlowTransport())
     finish(runner)
