@@ -76,7 +76,7 @@ async function main() {
         if (state.capabilityHold) await new Promise(resolve => state.capabilityReleases.push(resolve));
         return respond(reply);
       }
-      if (url.pathname === '/api/leaps/status') return respond({ run_id: state.activeRun, status: state.status, progress: { completed: 3, total: 22, phase: 'chains' }, reasons: [], last_complete_run_id: state.run, worker_error: null });
+      if (url.pathname === '/api/leaps/status') return respond({ run_id: state.activeRun, status: state.status, terminal:false,resumable:state.status==='paused',restartable:!['queued','running'].includes(state.status),market_date:'2026-10-14',filters:{},progress: { completed: 3, total: 22, phase: 'chain' }, reasons: [], last_complete_run_id: state.run, worker_error: null });
       if (url.pathname === '/api/leaps/results') {
         const query = Object.fromEntries(url.searchParams); state.reads.push(query);
         const saved = { run_id: query.view === 'latest' ? state.latestRun : state.run, snapshot_id: state.snapshot, status: query.view === 'latest' ? 'partial' : 'complete', rows: Array.from({ length: 22 }, (_, i) => row(i)), total: 22, next_offset: null, coverage: { eligible: 22 }, reasons: [], sort_by: query.sort_by, order: query.order };

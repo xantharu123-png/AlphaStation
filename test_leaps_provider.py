@@ -210,7 +210,7 @@ def test_inadequate_observations_never_become_comparable(change):
         option = replace(option,quote=replace(option.quote,**modifications[change]))
     result = api().assess_quote(option,stock,now_ns=NOW,verified_session=session)
     assert not result.comparison_eligible and result.liquidity_status != 'adequate'
-    assert result.algebra_eligible is (change != 'future')
+    assert result.algebra_eligible is (change not in ('future','missing_source','crossed'))
 
 
 @pytest.mark.parametrize('offset,want', [(30*10**9,True),(30*10**9+1,False)])

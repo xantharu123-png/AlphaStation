@@ -37,9 +37,12 @@ def auth(monkeypatch):
     monkeypatch.setattr(api.time, 'time_ns', lambda: NOW)
     monkeypatch.setattr(api, '_LEAPS_POLICY_FACTORY', None, raising=False)
     monkeypatch.setattr(api, '_LEAPS_BACKEND_FACTORY', None, raising=False)
+    from modules.leaps import api_contract
+    if hasattr(api_contract,'LeapsReadAdmission'):
+        monkeypatch.setattr(api,'_LEAPS_READ_ADMISSION',api_contract.LeapsReadAdmission(),raising=False)
 
 
-def request(path, *, method='GET', token='admin', body=None, headers=None, cookie=False):
+def request(path, *, method='GET', token='admin', body=None, headers=None, cookie=False, raw_body=None):
     async def call():
         hdr = dict(headers or {})
         if token and not cookie:
@@ -59,7 +62,7 @@ def request(path, *, method='GET', token='admin', body=None, headers=None, cooki
             nonlocal received
             if not received:
                 received = True
-                return {'type':'http.request','body':json.dumps(body).encode() if body is not None else b'', 'more_body':False}
+                return {'type':'http.request','body':raw_body if raw_body is not None else json.dumps(body).encode() if body is not None else b'', 'more_body':False}
             await finished.wait()
             return {'type':'http.disconnect'}
         async def send(message):
@@ -68,7 +71,9 @@ def request(path, *, method='GET', token='admin', body=None, headers=None, cooki
                 finished.set()
         await api.app(scope,receive,send)
         content = b''.join(item.get('body',b'') for item in messages).decode()
-        return SimpleNamespace(status_code=next(item['status'] for item in messages if item['type']=='http.response.start'),text=content,json=lambda:json.loads(content))
+        return SimpleNamespace(status_code=next(item['status'] for item in messages if item['type']=='http.response.start'),
+            headers={key.decode():value.decode() for item in messages if item['type']=='http.response.start' for key,value in item['headers']},
+            text=content,json=lambda:json.loads(content))
     return asyncio.run(call())
 
 

@@ -210,3 +210,76 @@ The user-deleted `deploy/safe_deploy.sh` remains deleted.
 Inherited API/UI WIP, unrelated source/tests/docs and the deleted deploy script
 are preserved. The controller owns the central TODO/progress record. No accounts,
 subscriptions, licenses, secrets, orders, SMTP or server changes were made.
+
+## Final audit repair wave (I1–I9 and M1, 2026-10-14)
+
+This section supersedes the earlier implementation descriptions where noted;
+the historical QA results above remain PRE-final-wave evidence. Publication does
+not make any live-data, licensing, deployment or full-market capacity claim.
+
+- Snapshot directories are private/traversable (0700 POSIX), payload files 0600;
+  Windows retains the existing native ACL policy. A genuine non-root Linux
+  probe uses actual LeapsStore/OSLease on native `/tmp`; its injected stdlib
+  atomic writer is not qualification of the application's atomic writer there.
+- Status exposes terminal/resumable/restartable flags bound to stored run/date/
+  version state. Terminal partial and previous-date paused runs offer new Start;
+  a compatible soft-slice partial can Resume without changing run identity.
+- Invalid never-dated/crossed option premiums cannot supply saved or fresh
+  break-even, ranking or scenarios. Valid dated one-sided/stale premiums retain
+  their original provenance, including archived clock-rollback distinctions.
+- Each accepted new run gets a fresh underlying loader without Start IO;
+  same-run continuation retains completed acquisitions. Revised filings across
+  two persistent-run dates are covered. Old capital fields are unknown, not zero.
+- Authenticated LEAPS reads have bounded per-API-worker/account admission:
+  heavy results/scenarios 30/60 seconds and burst 6/second; status/capabilities
+  120/60 seconds and burst 20/second, with at most two heavy processors per
+  worker. Ownership includes response serialization and survives client abort.
+  Account state is bounded to 4096; 429 includes integer Retry-After. JSON POST
+  bodies are capped at 16 KiB before parsing, after auth/origin checks. This is
+  explicitly not a deployment-global throttle or old-scanner cooldown change.
+- Selected-underlying evidence is compact and initially collapsed, separating
+  completed technical/history dates, SEC quality, valuation, provenance and
+  bank/REIT/missing-history limitations. Verified listing name and dated days
+  remaining are displayed without inventing unavailable source values.
+- Exact Decimal stock-reference capital is n*100*S0 with native share count;
+  invalid S0 remains unknown. UI places it beside premium debit and explains
+  price-only/non-Delta-matched comparison plus physical-exercise funding risks.
+- Optional filters preserve immutable run criteria and distinguish passed,
+  excluded and missing evidence. Calendar maturity bounds (whole 12–24 months),
+  originally dated USD stock price and same-completed-day close/EMA200 join the
+  existing bounds. Percent input is normalized with Decimal only on the server.
+  There is no reference-universe truncation or browser money calculation.
+- Default physical HTTP uses an isolated executable, never importing the parent
+  application. Each admitted attempt has a 20-second total startup/DNS/connect/
+  headers/body deadline, existing 3/10-second idle limits, no redirects/retries,
+  and 8 MiB response cap. It requests identity encoding and rejects compressed
+  successful responses BEFORE decompression: legitimate compressed success may
+  therefore become explicit partial transport evidence. Non-200 authority
+  remains intact. Optional SEC failure retains partial classification.
+  Parent/child IPC is bounded; secrets use anonymous stdin, not argv/files/logs.
+  Offline denial automatically follows existing launcher markers and cannot be
+  disabled by the additional deny-only switch. Physical exit is confirmed before
+  native ownership releases; uncertain OS termination retains ownership and
+  marks blocked quiescence, not a universal OS-termination guarantee. Trusted
+  injected transport adapters still require their own composition qualification.
+
+Executed repair evidence includes actual RED regressions and GREEN native/API/
+math/UI tests. The final clean package passed 961 tests in 65.71 seconds with
+zero failures/errors/skips/warnings; robustness suites passed 149 and 180 tests.
+Real shipped browser components with
+actual clean-backend DTO exports passed at 1440×900 and 390×844 (all new recovery,
+filter, capital, evidence and company cases): zero unexpected errors and two
+inherited Tailwind warnings. The retained full-app browser flow passed both
+viewports, 272 requests and 44 scenarios, with zero unexpected errors and 20
+explained inherited/injected messages. Final immutable projection, paired bundle,
+fresh package/browser/POSIX results and exact raw Git mapping are recorded in the
+private final-fix report; these scoped counts are not whole-project suite claims.
+
+The final whole-project offline run is reserved until source freeze and scoped
+local publication, with original plugins. Its required gate is exact comparison
+of all 97 inherited failure and seven skip identities, not a claim of overall
+PASS. Independent final rereview and this frozen full-run gate remain open at
+the point this source/audit commit is created. The controller records their
+eventual outcomes separately without mutating frozen source during the run.
+Full-market capacity, actual operator multiworker topology, real provider access/
+display rights, activation, push/deploy and server acceptance remain OFF-gated.

@@ -48311,17 +48311,20 @@ def autotrader_clear_positions(authorization: Optional[str] = Header(None)):
 # Standalone LEAPS composition: disabled and lazy until trusted server injection.
 # No environment, provider, secret, namespace or cache initialization here.
 from modules.leaps.api_contract import (
-    LeapsAccessPolicy, LeapsApiError, parse_scenario as _leaps_parse_scenario,
+    LeapsAccessPolicy, LeapsApiError, LeapsReadAdmission, parse_scenario as _leaps_parse_scenario,
     parse_scan as _leaps_parse_scan, parse_control as _leaps_parse_control,
 )
 from modules.leaps.models import LeapsDataError as _LeapsDataError
 _LEAPS_POLICY_FACTORY = None  # (authenticated_email, actual_admin) -> policy
 _LEAPS_BACKEND_FACTORY = None  # () -> singleton LeapsApiService; trusted only
+_LEAPS_READ_ADMISSION = LeapsReadAdmission()  # explicitly per API worker
+_LEAPS_PENDING_READS = set()  # retain processing after a disconnected client
 
 
 def _leaps_http_error(error):
     if isinstance(error, LeapsApiError):
-        return HTTPException(error.status, detail={"reason": error.reason})
+        return HTTPException(error.status, detail={"reason": error.reason},
+                             headers={"Retry-After": str(error.retry_after)} if error.retry_after is not None else None)
     if isinstance(error, _LeapsDataError):
         stale = error.code in ("unknown_run", "stale_run", "run_binding_mismatch", "terminal_run")
         return HTTPException(409 if stale else 503, detail={"reason": error.code})
@@ -48355,6 +48358,7 @@ async def _leaps_access(request, endpoint):
             raise LeapsApiError(403, "admin_identity_mismatch")
         if endpoint != "capabilities":
             policy.require(endpoint, time.time_ns())
+        request.scope['leaps_authenticated_identity'] = email
         return policy
     except Exception as error:
         raise _leaps_http_error(error) from None
@@ -48372,30 +48376,71 @@ async def _leaps_body(request):
         return json.loads(raw, object_pairs_hook=unique,
                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     try:
-        raw = await request.body()
-        if len(raw) > 65536:
-            raise ValueError()
+        length=request.headers.get('content-length')
+        if length is not None and (not length.isdigit() or int(length)>16384):
+            raise HTTPException(413, detail={"reason":"body_too_large"})
+        raw=bytearray()
+        async for chunk in request.stream():
+            if len(chunk)>16384-len(raw):
+                raise HTTPException(413, detail={"reason":"body_too_large"})
+            raw.extend(chunk)
         return await run_in_threadpool(decode, raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(422, detail={"reason": "invalid_schema"}) from None
 
 
-async def _leaps_call(method, *args, **kwargs):
-    def call():
-        if _LEAPS_BACKEND_FACTORY is None:
-            raise LeapsApiError(503, "configured_backend_required")
-        backend = _LEAPS_BACKEND_FACTORY()
-        return getattr(backend, method)(*args, **kwargs)
+def _leaps_read_claim(request, endpoint):
     try:
-        return await run_in_threadpool(call)
+        return _LEAPS_READ_ADMISSION.claim(request.scope.get('leaps_authenticated_identity'), endpoint)
+    except LeapsApiError as error:
+        raise _leaps_http_error(error) from None
+
+
+async def _leaps_call(method, *args, _read_token=None, **kwargs):
+    import asyncio
+    task=None
+    def call():
+        try:
+            if _LEAPS_BACKEND_FACTORY is None:
+                raise LeapsApiError(503, "configured_backend_required")
+            backend = _LEAPS_BACKEND_FACTORY()
+            result=getattr(backend, method)(*args, **kwargs)
+            if _read_token is not None:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(result)  # encode while admitted, off event loop
+            return result
+        finally:
+            if _read_token is not None:
+                _read_token.release()
+    try:
+        if _read_token is None:
+            return await run_in_threadpool(call)
+        async def process():
+            return await run_in_threadpool(call)
+        task=asyncio.create_task(process())
+        _LEAPS_PENDING_READS.add(task)
+        def finished(done):
+            _LEAPS_PENDING_READS.discard(done)
+            if not done.cancelled():
+                done.exception()  # retrieve errors even after client abort
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
     except Exception as error:
+        if _read_token is not None and task is None:
+            _read_token.release()
         raise _leaps_http_error(error) from None
 
 
 @app.get("/api/leaps/capabilities")
 async def api_leaps_capabilities(request: Request):
     policy = await _leaps_access(request, "capabilities")
-    return policy.public(time.time_ns())
+    token=_leaps_read_claim(request,'capabilities')
+    try:
+        return dict(policy.public(time.time_ns()),read_admission_scope='api_worker')
+    finally:
+        token.release()
 
 
 @app.get("/api/leaps/results")
@@ -48403,24 +48448,30 @@ async def api_leaps_results(request: Request, limit: int = 50, offset: int = 0,
                             view: str = "complete", run_id: Optional[str] = None,
                             sort_by: str = "be_rise", order: str = "asc"):
     await _leaps_access(request, "results")
-    return await _leaps_call("results", limit=limit, offset=offset, view=view, run_id=run_id,
+    token=_leaps_read_claim(request,'results')
+    return await _leaps_call("results", _read_token=token, limit=limit, offset=offset, view=view, run_id=run_id,
                              sort_by=sort_by, order=order)
 
 
 @app.get("/api/leaps/status")
 async def api_leaps_status(request: Request):
     await _leaps_access(request, "status")
-    return await _leaps_call("status")
+    return await _leaps_call("status", _read_token=_leaps_read_claim(request,'status'))
 
 
 @app.post("/api/leaps/scenarios")
 async def api_leaps_scenarios(request: Request):
     await _leaps_access(request, "scenarios")
+    token=_leaps_read_claim(request,'scenarios')
     try:
         body = _leaps_parse_scenario(await _leaps_body(request))
     except LeapsApiError as error:
+        token.release()
         raise _leaps_http_error(error) from None
-    return await _leaps_call("scenarios", body)
+    except BaseException:
+        token.release()
+        raise
+    return await _leaps_call("scenarios", body, _read_token=token)
 
 
 @app.post("/api/leaps/scan")

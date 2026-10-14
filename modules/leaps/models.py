@@ -194,6 +194,9 @@ class ExpiryResult(_Immutable):
     stock_pnl: Decimal | None
     stock_price_roi: Decimal | None
     delta_shares: Decimal | None
+    # Defaults preserve old stored DTOs as unknown, never invented capital.
+    stock_reference_capital: Decimal | None = None
+    stock_share_count: int | None = None
 
 
 @dataclass(frozen=True)

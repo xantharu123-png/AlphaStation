@@ -72,6 +72,16 @@ def expiry_window(as_of: date) -> tuple[date, date]:
         raise LeapsDataError("invalid_market_date", "underlying") from None
 
 
+def add_calendar_months(as_of: date, months: int) -> date:
+    if type(as_of) is not date or type(months) is not int or not 12<=months<=24:
+        raise LeapsDataError('invalid_maturity_months','contract')
+    year, month=divmod(as_of.year*12+as_of.month-1+months,12)
+    try:
+        return date(year,month+1,min(as_of.day,monthrange(year,month+1)[1]))
+    except ValueError:
+        raise LeapsDataError('invalid_market_date','underlying') from None
+
+
 def parse_standard_contract(raw: Mapping, listing: Mapping, evidence: Mapping) -> OptionContract:
     """Parse Massive reference wire data + stock listing + trusted terms proof.
 

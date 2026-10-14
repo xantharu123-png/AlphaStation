@@ -73,7 +73,9 @@ def _decode(value):
     if kind == 'map':
         return {k: _decode(v) for k, v in body.items()}
     cls = _TYPES.get(kind)
-    if cls is None or set(body) != {f.name for f in fields(cls)}:
+    optional={'stock_reference_capital','stock_share_count'} if cls is models.ExpiryResult else set()
+    expected={f.name for f in fields(cls)} if cls else set()
+    if cls is None or set(body)-expected or expected-set(body)-optional:
         raise _error()
     return cls(**{k: _decode(v) for k, v in body.items()})
 
@@ -226,7 +228,7 @@ class LeapsStore:
             if target.is_symlink() or not target.is_file() or sha256(target.read_bytes()).hexdigest()!=identity:
                 raise _error()
         self.blobs.mkdir(exist_ok=True)
-        _private_permissions(self.blobs)
+        _private_permissions(self.blobs, directory=True)
         # Pending names are never garbage collected or referenced by metadata.
         # Another publisher cannot prune a not-yet-committed snapshot.
         pending=self.blobs/('.pending-'+uuid4().hex+'.json')
@@ -579,6 +581,9 @@ class LeapsRunner:
                 result = LeapsSnapshot(run, 'queued', {}, {'progress': {'completed': 0, 'total': None, 'phase': 'queued'}}, (), None, ())
                 state['latest'], state['control'] = self.store.prepare(result), {'run_id': run.run_id, 'action': 'run'}
                 self.store._write(state)
+                # Only an accepted NEW run gets fresh acquisitions. Start does
+                # no IO; resumed checkpoints and same-run caches stay intact.
+                self.provider = self._wrap(self.provider)
                 self._authorized_run = run
                 return result
             finally:

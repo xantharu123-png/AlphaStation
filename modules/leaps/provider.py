@@ -251,6 +251,8 @@ class MassiveLeapsProvider:
                         response = self.transport.request('GET', url, headers=headers, timeout=(3, 10), allow_redirects=False)
                     except (ConnectionError, TimeoutError):
                         retry = True
+                    except LeapsDataError:
+                        raise
                     except Exception:
                         raise _error('transport_error') from None
                     if not retry:
@@ -485,6 +487,17 @@ def _session_matches(session, option, stock, now_ns):
             and session.stock_start_ns <= stock.quote.source_ns <= now_ns <= session.stock_end_ns)
 
 
+def valid_premium(quote, observed_ns=None):
+    """Dated noncontradictory Ask; old age/one-sidedness alone is not invalid.
+
+    A saved assessment may survive clock rollback, but never repairs a premium
+    that lacked original evidence or was already future-dated on receipt.
+    """
+    return (quote.source_ns is not None and quote.ask is not None and quote.ask > 0
+            and (observed_ns is None or quote.source_ns <= observed_ns)
+            and (quote.bid is None or quote.bid <= quote.ask))
+
+
 def assess_quote(option, underlying, *, now_ns, verified_session):
     """Dated Ask-only algebra is separate from current two-sided comparison.
 
@@ -498,7 +511,7 @@ def assess_quote(option, underlying, *, now_ns, verified_session):
         raise _error('invalid_assessment_input')
     reasons = []
     oq, sq = option.quote, underlying.quote
-    algebra = oq.ask is not None and oq.ask > 0 and (oq.source_ns is None or oq.source_ns <= now_ns)
+    algebra = valid_premium(oq, now_ns)
     if not algebra:
         reasons.append('no_valid_ask')
     if underlying.ticker != option.contract.underlying:

@@ -11,7 +11,7 @@ import re
 import math
 from zoneinfo import ZoneInfo
 
-from .contracts import parse_decimal, parse_ns_epoch
+from .contracts import parse_decimal, parse_ns_epoch, decimal_context
 from .models import LeapsDataError, UnderlyingEvidence, _freeze
 from .provider import DailyCompletionProof, _verify_daily_completion
 
@@ -106,6 +106,20 @@ def build_underlying_evidence(ticker, *, completed_bars, facts, sources, as_of):
         try:
             native=_bars(completed_bars,as_of)
             indicators=build_ticker_detail_indicators(native)
+            # Preserve exact closed prices before the native float adapter.
+            # Same SMA-seeded EMA definition, local Decimal50 for predicate
+            # boundaries; never compare the latest quote with an older EMA.
+            indicators['completed_close']=parse_decimal(completed_bars[-1]['close'])
+            indicators['completed_close_session']=completed_bars[-1]['date']
+            indicators['ema200_decimal']=None
+            if len(completed_bars)>=200:
+                with decimal_context():
+                    closes=[parse_decimal(bar['close']) for bar in completed_bars]
+                    ema=sum(closes[:200],Decimal(0))/200
+                    for close in closes[200:]:
+                        ema+=(close-ema)*Decimal(2)/201
+                    indicators['ema200_decimal']=ema
+            indicators['filter_ema_method']='completed_daily_sma_seed_decimal50'
             history=indicators['indicators_meta']['status']
             invalid=[]
             indicators=_finite_analytics(indicators,invalid)

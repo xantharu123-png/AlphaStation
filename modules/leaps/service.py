@@ -12,7 +12,7 @@ from hashlib import sha256
 import json
 import re
 
-from .contracts import decimal_context, expiry_window, parse_decimal, parse_standard_contract
+from .contracts import decimal_context, expiry_window, add_calendar_months, parse_decimal, parse_standard_contract
 from .models import (LeapsDataError, LeapsSnapshot, OptionContract, QuoteObservation,
                      UnderlyingObservation, UnderlyingEvidence, GreeksObservation, to_json_value)
 from .pricing import evaluate_expiry, scenario_prices, spread_metrics
@@ -44,18 +44,30 @@ class DiscoveryProvider:
         self._comparisons={}
 
 
-_FILTERS={'max_be_rise','max_spread','min_open_interest','min_delta','max_delta'}
+_FILTERS={'max_be_rise','max_spread','min_open_interest','min_delta','max_delta',
+          'min_maturity_months','max_maturity_months','min_underlying_price','max_underlying_price','close_above_ema200'}
 
 
 def _filters(run):
     if set(run.filters)-_FILTERS:
         raise LeapsDataError('unsupported_filter','provider')
-    values={key:parse_decimal(value) for key,value in run.filters.items()}
+    if 'close_above_ema200' in run.filters and run.filters['close_above_ema200'] is not True:
+        raise LeapsDataError('invalid_filter','provider')
+    values={key:(True if key=='close_above_ema200' else parse_decimal(value)) for key,value in run.filters.items()}
     if any(value<0 for key,value in values.items() if key!='max_be_rise'):
         raise LeapsDataError('invalid_filter','provider')
     if any(values[key]>1 for key in ('min_delta','max_delta') if key in values):
         raise LeapsDataError('invalid_filter','provider')
     if values.get('min_delta',Decimal(0))>values.get('max_delta',Decimal(1)):
+        raise LeapsDataError('invalid_filter','provider')
+    for key in ('min_maturity_months','max_maturity_months'):
+        if key in values and (values[key]!=values[key].to_integral_value() or not 12<=values[key]<=24):
+            raise LeapsDataError('invalid_filter','provider')
+    if values.get('min_maturity_months',12)>values.get('max_maturity_months',24):
+        raise LeapsDataError('invalid_filter','provider')
+    if ('min_open_interest' in values and values['min_open_interest']!=values['min_open_interest'].to_integral_value()
+            or any(values[key]<=0 for key in ('min_underlying_price','max_underlying_price') if key in values)
+            or values.get('min_underlying_price',0)>values.get('max_underlying_price',Decimal('1e12'))):
         raise LeapsDataError('invalid_filter','provider')
     return values
 
@@ -88,16 +100,38 @@ def compare_contract(contract, observation, evidence, run, now_ns):
         if observation.quote.bid is None or 0<=observation.quote.bid<=ask:
             spread,loss=spread_metrics(observation.quote.bid,ask)
         scenarios=tuple({'terminal':terminal,'result':evaluate_expiry(contract,ask,terminal,underlying=stock,delta=observation.greeks.delta)} for terminal in scenario_prices(price))
+    indicators=evidence.underlying.indicators
+    meta=indicators.get('indicators_meta',{})
+    close,ema=indicators.get('completed_close'),indicators.get('ema200_decimal')
+    technical=None
+    if (meta.get('history_valid') is True and meta.get('available',{}).get('ema200') is True
+            and isinstance(close,Decimal) and close.is_finite() and close>0
+            and isinstance(ema,Decimal) and ema.is_finite() and ema>0
+            and indicators.get('completed_close_session')==meta.get('indicator_session')):
+        try:
+            day=date.fromisoformat(meta['indicator_session'])
+            if day<=run.market_date:
+                technical=close>ema
+        except (ValueError,TypeError):
+            pass
     metrics={'max_be_rise':rise,'max_spread':spread,'min_open_interest':observation.open_interest,
-             'min_delta':observation.greeks.delta,'max_delta':observation.greeks.delta}
+             'min_delta':observation.greeks.delta,'max_delta':observation.greeks.delta,
+             'min_underlying_price':price,'max_underlying_price':price,'close_above_ema200':technical,
+             'min_maturity_months':contract.expiry,'max_maturity_months':contract.expiry}
     missing=[]; rejected=[]
     for key,value in filters.items():
         metric=metrics[key]
+        if key in ('min_maturity_months','max_maturity_months'):
+            value=add_calendar_months(run.market_date,int(value))
         if metric is None:
             missing.append(key)
+        elif key=='close_above_ema200' and not metric:
+            rejected.append(key)
         elif (key.startswith('max_') and metric>value) or (key.startswith('min_') and metric<value):
             rejected.append(key)
     return LeapsSnapshot(run,'comparison',dict(contract=contract,terms_fingerprint=contract.terms_fingerprint,
+        company_name=None,company_name_source=None,
+        remaining_term={'basis_date':run.market_date,'days':(contract.expiry-run.market_date).days},
         observation=observation,assessment=assessment,stock_reference=stock,underlying=evidence.underlying,
         break_even=be,be_rise=rise,spread=spread,ask_to_bid_loss=loss,scenarios=scenarios,
         greeks=observation.greeks,open_interest=observation.open_interest,open_interest_basis=observation.open_interest_basis,
@@ -329,6 +363,9 @@ def _snapshot(state,provider,run,*,pause=None):
             # Reuse economics only within the same original-source validity
             # boundaries. Current freshness/session assessment is never cached.
             row=dict(cached[1],assessment=assessment)
+        name=state['listings'].get(ticker,{}).get('name')
+        name=name.strip() if isinstance(name,str) and 0<len(name.strip())<=256 else None
+        row=dict(row,company_name=name,company_name_source='verified_listing_reference' if name else None)
         retained[symbol]=(key,row)
         rows.append(row)
     provider._comparisons=retained

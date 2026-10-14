@@ -80,6 +80,8 @@ def evaluate_expiry(
             exercise_cash=shares * strike, stock_pnl=stock_pnl,
             stock_price_roi=stock_roi,
             delta_shares=None if delta is None else shares * delta,
+            stock_reference_capital=None if initial is None else shares * initial,
+            stock_share_count=100 * quantity,
         )
 
 

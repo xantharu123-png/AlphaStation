@@ -5,28 +5,89 @@ capability evidence does not grant display rights. Cached source clocks are not
 renewed by publication/read time. All synchronous methods run off the API loop.
 """
 from collections.abc import Mapping
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import math
 import re
 import threading
 import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .contracts import parse_decimal, parse_quantity
+from .contracts import parse_decimal, parse_quantity, decimal_context
 from .models import CapabilityEvidence, LeapsDataError, QuoteAssessment, RunSpec, UnderlyingObservation, ExpiryResult, to_json_value
 from .pricing import evaluate_expiry, scenario_prices
-from .provider import OptionQuote
-from .runtime import _encode
+from .provider import OptionQuote, valid_premium
+from .runtime import _encode, SUPPORTED_SCHEMA_VERSION, SUPPORTED_METHODOLOGY_VERSION
 
 
 class LeapsApiError(ValueError):
-    def __init__(self, status, reason):
+    def __init__(self, status, reason, *, retry_after=None):
         self.status, self.reason = status, reason
+        self.retry_after = retry_after
         super().__init__(reason)
+
+
+class LeapsReadAdmission:
+    """Bounded API-WORKER policy, NOT a deployment-wide/account budget claim.
+
+    Authenticated account identities are supplied only by the server route.
+    No evictions of live windows (which would reset an attacker's quota).
+    A held heavy token follows actual work, independent of client lifetime.
+    """
+    def __init__(self, *, clock=time.monotonic, max_accounts=4096):
+        self.clock=clock
+        self.max_accounts=max_accounts
+        self._accounts={}
+        self._heavy=0
+        self._lock=threading.Lock()
+
+    def claim(self, identity, endpoint):
+        if not isinstance(identity,str) or not identity or len(identity)>512:
+            raise LeapsApiError(401,'login_required')
+        heavy=endpoint in ('results','scenarios')
+        key=sha256(identity.encode()).hexdigest()
+        now=self.clock()
+        with self._lock:
+            for old,item in list(self._accounts.items()):
+                if now-item['last']>=60 and not item['active']:
+                    del self._accounts[old]
+            if key not in self._accounts:
+                if len(self._accounts)>=self.max_accounts:
+                    raise LeapsApiError(429,'read_account_capacity',retry_after=60)
+                self._accounts[key]={'heavy':deque(),'light':deque(),'last':now,'active':0}
+            item=self._accounts[key]
+            item['last']=now
+            queue=item['heavy' if heavy else 'light']
+            while queue and now-queue[0]>=60:
+                queue.popleft()
+            limit,burst=(30,6) if heavy else (120,20)
+            recent=[t for t in queue if now-t<1]
+            wait=max(60-(now-queue[0]) if len(queue)>=limit else 0,
+                     1-(now-recent[0]) if len(recent)>=burst else 0)
+            if wait>0:
+                raise LeapsApiError(429,'read_rate_limited',retry_after=max(1,math.ceil(wait)))
+            if heavy and self._heavy>=2:
+                raise LeapsApiError(429,'heavy_read_busy',retry_after=1)
+            queue.append(now)
+            if heavy:
+                self._heavy+=1
+                item['active']+=1
+        gate=self
+        class Token:
+            released=False
+            def release(self):
+                with gate._lock:
+                    if not self.released:
+                        self.released=True
+                        if heavy:
+                            gate._heavy-=1
+                            item['active']-=1
+        return Token()
 
 
 @dataclass(frozen=True)
@@ -119,10 +180,18 @@ def parse_scenario(body):
 def parse_scan(body, now):
     _object(body, set(), {'run_id','filters'})
     filters = body.get('filters',{})
-    if not isinstance(filters,dict) or any(not isinstance(v,str) for v in filters.values()):
+    if not isinstance(filters,dict) or any((v is not True if k=='close_above_ema200' else not isinstance(v,str)) for k,v in filters.items()):
         raise LeapsApiError(422,'invalid_filters')
     try:
-        parsed = {key:parse_decimal(value) for key,value in filters.items()}
+        parsed = {}
+        for key,value in filters.items():
+            target={'max_be_rise_percent':'max_be_rise','max_spread_percent':'max_spread',
+                    'min_delta_percent':'min_delta','max_delta_percent':'max_delta'}.get(key,key)
+            if target in parsed or (target!=key and target in filters):
+                raise LeapsApiError(422,'invalid_filters')
+            with decimal_context():
+                parsed[target]=(True if key=='close_above_ema200' else
+                                parse_decimal(value)/100 if target!=key else parse_decimal(value))
         day = datetime.fromtimestamp(now // 10**9,timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
         run = RunSpec(_identifier(body.get('run_id',uuid4().hex)),day,parsed,'full-universe','1','1')
         from .service import _filters
@@ -167,7 +236,9 @@ def _current_assessment(row, now, clock_regressed=False):
     for scenario in row.get('scenarios',()):
         if (not isinstance(scenario,Mapping) or not money(scenario.get('terminal'))
                 or not isinstance(scenario.get('result'),ExpiryResult)
-                or not all(money(value) for value in vars(scenario['result']).values())):
+                or not all(money(value) for key,value in vars(scenario['result']).items() if key!='stock_share_count')
+                or (scenario['result'].stock_share_count is not None and
+                    (type(scenario['result'].stock_share_count) is not int or not 100<=scenario['result'].stock_share_count<=10**8))):
             raise LeapsApiError(503,'invalid_store')
     assessment = row['assessment']
     source = row['observation'].quote.source_ns
@@ -181,11 +252,14 @@ def _current_assessment(row, now, clock_regressed=False):
             reasons=tuple(dict.fromkeys((*reasons,label+'_future_source')))
     if clock_regressed:
         reasons=tuple(dict.fromkeys((*reasons,'clock_regression')))
-    return replace(assessment,comparison_eligible=valid,reasons=tuple(reasons))
+    algebra=assessment.algebra_eligible is True and valid_premium(row['observation'].quote,row['observation'].quote.received_ns)
+    return replace(assessment,algebra_eligible=algebra,comparison_eligible=valid and algebra,reasons=tuple(reasons))
 
 
 def _public_row(row, now, clock_regressed=False):
     result = dict(row,assessment=_current_assessment(row,now,clock_regressed))
+    if not result['assessment'].algebra_eligible:
+        result.update(break_even=None,be_rise=None,spread=None,ask_to_bid_loss=None,scenarios=())
     result['comparison_scope_quantity'] = 1
     return to_json_value(result)
 
@@ -208,7 +282,9 @@ def _sort_rows(rows, sort_by, order):
     # Stable ascending contract-ID ties in BOTH directions. Missing is not zero:
     # split nulls before descending order, so unknown stays last on every page.
     stable = sorted(rows,key=lambda row:row['contract'].id)
-    values = [(_SORT_KEYS[sort_by](row),row) for row in stable]
+    values = [(None if sort_by in ('cost_per_contract','break_even','be_rise','spread')
+               and not valid_premium(row['observation'].quote,row['observation'].quote.received_ns)
+               else _SORT_KEYS[sort_by](row),row) for row in stable]
     present = [(value,row) for value,row in values if value is not None]
     present.sort(key=lambda item:item[0],reverse=order=='desc')
     return [row for _,row in present]+[row for value,row in values if value is None]
@@ -280,6 +356,7 @@ class LeapsApiService:
             entry['orders'][ordering]=_sort_rows(rows,sort_by,order)
         ordered=entry['orders'][ordering]
         return {'run_id':snapshot.run.run_id,'snapshot_id':self._identity(snapshot),'status':snapshot.status,
+                'market_date':snapshot.run.market_date.isoformat(),'filters':to_json_value(snapshot.run.filters),
                 'rows':[_public_row(r,now,regressed) for r in ordered[offset:offset+limit]],'total':total,
                 'next_offset':offset+limit if offset+limit<total else None,
                 'coverage':to_json_value(coverage),'reasons':list(snapshot.reasons),'sort_by':sort_by,'order':order}
@@ -287,7 +364,20 @@ class LeapsApiService:
     def status(self):
         state = self.store.read(metadata=True)
         snapshot = state['latest']
+        phase=snapshot.coverage.get('progress',{}).get('phase') if snapshot else None
+        terminal=bool(snapshot and (snapshot.status in ('complete','failed') or phase in ('done','failed')))
+        today=datetime.fromtimestamp(self.clock_ns()//10**9,timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
+        compatible=bool(snapshot and snapshot.run.market_date==today
+                        and snapshot.run.schema_version==SUPPORTED_SCHEMA_VERSION
+                        and snapshot.run.methodology_version==SUPPORTED_METHODOLOGY_VERSION)
+        resumable=bool(compatible and not terminal and snapshot.status in ('paused','partial')
+                       and phase in ('queued','reference','listings','intersection','underlying','chain')
+                       and not state.get('authorities',{}).get('market',{}).get('reason'))
         return {'run_id':snapshot.run.run_id if snapshot else None,'status':snapshot.status if snapshot else 'empty',
+                'terminal':terminal,'resumable':resumable,
+                'restartable':snapshot is None or snapshot.status not in ('queued','running'),
+                'market_date':snapshot.run.market_date.isoformat() if snapshot else None,
+                'filters':to_json_value(snapshot.run.filters) if snapshot else {},
                 'progress':to_json_value(snapshot.coverage.get('progress')) if snapshot else None,
                 'reasons':list(snapshot.reasons) if snapshot else [],
                 'last_complete_run_id':state['last_complete'].run.run_id if state['last_complete'] else None,
@@ -305,7 +395,7 @@ class LeapsApiService:
         row = matches[0]
         now,regressed=self.store.observe_clock(self.clock_ns)
         public = _public_row(row,now,regressed)
-        if not row['assessment'].algebra_eligible:
+        if not public['assessment']['algebra_eligible']:
             raise LeapsApiError(422,'no_valid_stored_ask')
         option, quantity = row['observation'], body['quantity']
         reference = row.get('stock_reference')

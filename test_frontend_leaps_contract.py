@@ -93,3 +93,30 @@ def test_customer_and_unproven_capability_cannot_control():
     assert evaluate(f'leapsControlReason({json.dumps(unproven)}, "scan", null)') == 'Daten-/Budgetnachweis fehlt'
     assert evaluate(f'leapsControlReason({json.dumps(POLICY)}, "pause", null)') == 'Kein aktiver Lauf'
     assert evaluate(f'leapsControlReason({json.dumps(POLICY)}, "scan", null)') == ''
+
+
+@pytest.mark.parametrize('status,action,allowed', [
+    ({'run_id':'A','status':'partial','terminal':True,'restartable':True,'resumable':False},'scan',True),
+    ({'run_id':'A','status':'partial','terminal':False,'restartable':True,'resumable':True},'resume',True),
+    ({'run_id':'A','status':'paused','terminal':False,'restartable':True,'resumable':False},'scan',True),
+    ({'run_id':'A','status':'paused','terminal':False,'restartable':True,'resumable':False},'resume',False),
+])
+def test_server_flags_support_terminal_and_old_date_recovery(status,action,allowed):
+    assert (evaluate(f'leapsControlReason({json.dumps(POLICY)},{json.dumps(action)},{json.dumps(status)})')=='') is allowed
+
+
+def test_optional_filter_submission_does_not_do_browser_financial_math():
+    assert evaluate('leapsFilterBody({max_be_rise_percent:"25.001", min_maturity_months:"15", max_underlying_price:"123.456789012345",close_above_ema200:true,min_delta_percent:""})')=={
+        'filters':{'max_be_rise_percent':'25.001','min_maturity_months':'15','max_underlying_price':'123.456789012345','close_above_ema200':True}}
+
+
+def test_evidence_panel_uses_server_facts_separates_valuation_and_unknowns():
+    evidence={'as_of':'2026-10-13','indicators':{'ema50':12.5,'ema200':None,'indicators_meta':{'indicator_session':'2026-10-12','completed_history_bars':50}},
+        'facts':{'profile':'financial','specialist_data_required':True,'as_of':'2026-09-30','score':100,'metrics':{'latest_debt':1234,'fcf_yield_pct':None}},
+        'coverage':{'history':'partial','facts':'partial'},'sources':[{'source':'sec_companyfacts','basis':'live_current_not_pit'}]}
+    result=evaluate(f'leapsEvidenceSummary({json.dumps(evidence)})')
+    assert result['history_date']=='2026-10-12' and result['bars']==50
+    assert result['technical']['EMA50']=='12.50' and result['technical']['EMA200']=='–'
+    assert result['quality']['Schulden USD']=='1234.00'
+    assert result['valuation']['FCF-Rendite %']=='–'
+    assert result['specialist'] is True and 'score' not in result
