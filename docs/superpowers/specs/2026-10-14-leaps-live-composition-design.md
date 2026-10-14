@@ -1,158 +1,239 @@
-# LEAPS: schmale Produktionsanbindung
+# LEAPS: schlanker Anschluss mit echten Bid/Ask-Daten
 
-Stand: 14.10.2026. **Schriftlicher Entwurf zur Prüfung, keine Implementierungs-
-oder Produktionsfreigabe.** Nutzerfreigabe dieser Stufe: „Ja, schmalen Entwurf
-vorbereiten“. Die bestehende LEAPS-Kernrechnung bleibt unverändert.
+Stand: 14.10.2026, Revision des Entwurfs nach Claudes Gegenprüfung.
+**Schriftlicher Entwurf zur Prüfung, keine Code-/Produktionsfreigabe.**
+Ersetzt den Anschlussentwurf aus `d88584a`, der so nicht umgesetzt werden soll.
+Die Nutzerwahl ist ausdrücklich **„Nur echte Bid/Ask-Daten“**. Kein Richtpreis-Modus.
 
-## 1. Gewünschtes Ergebnis und Grenzen
+## 1. Ergebnis, Vorschlag und Grenzen
 
-Der vorhandene eigenständige Scanner soll tatsächliche langfristige Calls auf
-US-Aktien/ADR im Fenster von 12–24 Kalendermonaten finden. Kein Beschränken auf
-Momentum-/BI-Treffer oder eine kleine Tickerliste. Kontrakte, beobachteter Ask,
-Prämienkosten und Verfalls-Szenarien sollen in der vorhandenen kompakten App-
-Ansicht erscheinen. Vergleich und Szenario sind keine Order oder Kursprognose.
+Langfristige Standard-Calls auf liquide US-Aktien/ADR, Verfall in 12–24
+Kalendermonaten, mit echten Kontrakten, Bid/Ask, Kosten und Verfalls-Szenarien.
+Eigenständiges Universum, nicht nur Momentum-/BI-Treffer. Vorgeschlagen ist ein
+langsam laufender Nacht-Screener; keine Sofort-Kaufempfehlung oder neue Mailart.
 
-Diese Anbindung darf bestehende Aktien-, BI- und Mailprüfungen nicht verdrängen.
-Scannerbedingungen, Mailgrenzen, Zeitpläne, Abos und Brokerzugänge bleiben
-unverändert. Keine neuen Options-Mails, automatische Orders, Tarifbuchungen,
-Installationsmigration oder Wiederherstellung des gelöschten Deployskripts.
+Empfohlen: reine bestehende Kontrakt-/Verfallsrechnung weiterverwenden,
+Provider-/Laufsteuerungsfehler beheben und die tatsächlichen Produktionsadapter
+in **einem** Baupaket anschließen. Nicht obligatorische Mechanik in weitere
+Entwürfe auslagern. Alternativen: unveränderten schweren Anschluss bauen
+(verworfen), oder allein manuelle Einzelaktien abfragen (verfehlt Scanauftrag).
 
-## 2. Tatsächlicher Ausgangspunkt
+Neue Liquiditätsfilter und Nachtplanung unten sind **Vorschläge für LEAPS**,
+keine Änderung bereits vereinbarter Aktien-/BI-/Krypto-Scannerbedingungen,
+Mailgrenzen oder Zeitpläne. Keine Orders, Abobuchung, Brokeranbindung,
+Landingpage-Umschreibung, Installationsmigration oder Wiederherstellung des
+gelöschten Deployskripts. Andere Befunde aus dem Claude-Audit sind getrennte Arbeit.
 
-Provider, Rechnung, Speicher, Laufsteuerung und API-Verträge sind vorhanden.
-Die produktiven Policy-/Backend-Factories in `api.py` sind noch nicht gebunden.
-Echte Terms-/Sitzungsproduzenten und vollständige gemeinsame Prioritätsmeldung
-fehlen. Ein API-Key oder Feature-Schalter allein schließt diese Lücken nicht.
+## 2. Nachgewiesene Anschlussfehler — im selben Baupaket beheben
 
-Die auf Nutzerauftrag durchsuchte verbundene Gmail-Mailbox enthält keine
-passende Massive-/Polygon-Abo- oder Zugangsbestätigung. Das beweist weder das
-Fehlen eines Abos noch Rechte anderer Konten. Tatsächliche Options-/Aktien-
-Quote-Rechte, Feed-Verzögerung und zulässige App-Anzeige bleiben ungeprüft.
+| Stelle | Tatsächliches Problem | Ziel |
+| --- | --- | --- |
+| `provider.py:371–398` | Greeks/IV bleiben nur im Rohdatensatz; normalisierte Werte fehlen. | Delta/IV wirklich zuordnen, dokumentierte Anbieter-Einheiten verwenden. Nur `units_evidence` ergänzen reicht nicht. |
+| `provider.py:235,264–266`, `runtime.py` | 429 und temporäre Admission-Ablehnung führen zu persistentem Pausenzustand. | Temporär warten und automatisch fortsetzen; 401/403 und manuelle Pause getrennt lassen. |
+| `runtime.py:534–547` | Gleichheit mit heutigem ET-Datum verhindert Wiederaufnahme über Mitternacht. | Festen Bewertungsstand erhalten; Restcursor wiederaufnehmen, überholten Lauf ehrlich abschließen. |
+| `service.py:79–99,372`, `api_contract.py` | Datiertes Ask kann mit anderem Aktienzeitstand relative Kennzahlen und Rang erhalten. | Vergleichsfähigkeit **vor** Filtern/Ranking prüfen; veraltete Zeilen separat ohne Rang. |
+| Live-Factories, Terms, Priorität | Produktionsadapter fehlen; Fixtures sind keine echten Quellen. | Kleine reale Adapter, API-/BG-Anschluss und Speicher im selben Paket, nicht nur Featureflag. |
+| Probe | UTC-Tag statt gemeinsamem ET-Bewertungsdatum. | Kalender-/Zeitzonenlogik wiederverwenden, auch vor UTC-/ET-Tageswechsel testen. |
 
-## 3. Gewählter schmaler Ansatz
+429 ist heute nicht irreparabel: explizite Reconciliation/Resume existiert.
+Das Problem ist die fehlende automatische Erholung. Fehlende Greeks können
+auch ein legitimes Anbieterergebnis sein; kein Nullwert und kein geratenes Delta.
 
-Empfohlen ist eine feste Composition mit realen Referenzdaten, konservativ
-klassifizierten Standardkontrakten und zunächst belegten regulären Sitzungen.
-Unbelegte Tageshistorie bleibt ausdrücklich eingeschränkt, anstatt den gesamten
-Callvergleich zu sperren. Kein zusätzlicher Datenanbieter wird beschafft.
+## 3. Datenzugang — vorhandenen Polygon-Account prüfen
 
-Alternativen: bestätigte Tagesabschlussdaten zusätzlich anbinden; oder bereits
-verfügbare echte OCC-/Börsenartefakte für stärkere Termsbelege verwenden. Beide
-erfordern nachgewiesenen vorhandenen Zugang und gehören nicht automatisch zum
-ersten Anschluss. Es werden keine Testfixtures zu Produktivbelegen umbenannt.
+**Massive ist der neue Name von Polygon.io**, kein neuer Anbieterauftrag.
+Stocks- und Options-Berechtigung werden getrennt im vorhandenen Dashboard
+festgestellt: Tarif, Datenklassen, Feedverzögerung, zulässiges Publikum, Prüfdatum.
+Die frühere erfolglose Mailboxsuche bestätigt oder widerlegt kein Abo.
+[Umbenennung](https://www.massive.com/blog/polygon-is-now-massive).
 
-| Baustein | Aufgabe / bestehender Anschluss |
+Options-Referenzdaten stehen auch im Basic-Tarif bereit. Starter liefert
+Greeks/IV und OI, aber keine Bid/Ask-Quotes; individuelles Advanced enthält
+Optionsquotes. Aktienpreise im Snapshot hängen vom **Stocks**-Zugang ab.
+Ein bestehendes Aktienabo beweist keinen Optionsquote-Zugang.
+[Tarife](https://massive.com/pricing?product=options),
+[Snapshot-Schema](https://massive.com/docs/rest/options/snapshots/option-chain-snapshot).
+
+Anschluss bleibt standardmäßig OFF, zunächst nur für den wirklichen Admin.
+Bei Anzeige für andere Personen ist der erlaubte Vertrag separat nachzuweisen,
+auch für Tester und abgeleitete Werte. API-Zugriff ist kein Lizenznachweis.
+[Anzeigerechte](https://massive.com/knowledge-base/article/which-plan-do-i-need-to-show-massive-data-in-my-app).
+Keine Abos buchen, keine veröffentlichten Schlüssel für Probes verwenden.
+
+## 4. Universum und tatsächliche Kontrakte
+
+Vorgeschlagene Voreinstellung: US-CS/ADR, Preis des Zielsitzungsschlusses
+≥10 USD, höchstens sieben Kalendertage alte Market Cap ≥2 Mrd. USD,
+Mittelwert der täglichen `Close × Volume` der letzten 20
+vollständigen Handelssitzungen ≥20 Mio. USD. Watchlist und Scanner-Treffer werden
+ergänzend durchsucht, **nicht** von diesen Liquiditäts-/Kontraktprüfungen befreit.
+Fehlender Cap-/Historienbeleg heißt unprüfbar, nicht automatisch passend.
+Kein verstecktes Acht-/200-Tickerlimit und keine Behauptung „gesamter Aktienmarkt“.
+
+Referenz: `/v3/reference/options/contracts`, datiert höchstens sieben Tage
+cachen, bei abweichendem Snapshot neu prüfen. Call, `cfi == OCASPS`, American,
+100 Shares, keine Zusatzliefergegenstände, passender Basiswert/Strike/Verfall.
+Währung und Symbolalias müssen geklärt sein; Anpassungen oder Widersprüche
+bleiben ausgeschlossen. `OCASPS` allein genügt nicht: Zusatzliefergegenstände
+gesondert prüfen. Der 100er-Prämienmultiplikator ist eine dokumentierte
+Standardproduktregel, kein erfundenes API-Feld oder einzelnes Zertifikat.
+[Referenzschema](https://massive.com/docs/rest/options/contracts/all-contracts),
+[Standardprodukt](https://www.theocc.com/clearance-and-settlement/clearing/equity-options-product-specifications).
+
+Je Ticker gefilterter Chain-Snapshot für Calls im 12–24-Monatsfenster.
+**Alle** `next_url`-Seiten folgen, gleiche Verträge deduplizieren, Schema prüfen.
+Eine Chain hat bis 250 Einträge je Seite; ein Aufruf oder zwei Seiten sind kein
+Vollständigkeitsnachweis. Unterbrochene Chain = partiell, nicht null Treffer.
+Keine blind befolgten Fremd-URLs oder Schlüssel in URL/DTO/Protokoll.
+
+## 5. Preisbasis, Griechen und Historie
+
+Nur tatsächliche positive, ungekreuzte Bid/Ask-Werte mit Originalquellzeit;
+Spread auf den Mid bezogen. Abrufzeit separat, niemals Quellzeit erneuern.
+Last Trade, Mid und FMV sind **kein** Ask-Ersatz. Ask ist beobachteter Angebotskurs,
+kein garantierter Fill. Modell-Delta/-IV aus dem Snapshot normalisieren, Quelle
+und Einheiten festhalten; endliches Call-Delta in [0,1], endliche IV ≥0.
+Eine dort fehlende Modellzeit bleibt unbekannt.
+Keine Einheiten aus der Wertehöhe raten, keine erfundene griechische Modellzeit.
+
+Zwei ausdrücklich verschiedene Preisstände:
+
+- **Aktueller Vergleich während regulärer Sitzung:** Beide Quotes tatsächlich
+  aktuell, Echtzeitfeeds mit Lag0, originaler Zeitversatz ≤30s; bisherige
+  Alters-/Größenprüfungen nicht zu einer bloßen Warnung abschwächen. Dieser
+  Status kann nur nach tatsächlicher erneuter Quote-Abfrage entstehen.
+  Verzögerte Quotes bleiben datiert und heißen auch tagsüber nicht Livekurs.
+- **Nacht-Ergebnis:** Datiertes Research mit dem letzten abgeschlossenen
+  Handelstag. Für ein Schlussstand-Ranking Optionsquote aus den letzten
+  15 Minuten der regulären Sitzung und tatsächlicher Aktien-Tagesschluss
+  derselben Sitzung; Referenz ist ausdrücklich `session_close`, kein Bid/Ask.
+  Standard-US-Aktienoptionen, Kalender/DST/verkürzte Sitzung beachten.
+  Keine erweiterten Sitzungen automatisch übernehmen. Datenquelle des Bars,
+  Originaldatum und abgeleitetes Sitzungsende getrennt speichern. Das ist ein
+  **datierter Vergleich**, weder synchrones NBBO noch aktuell handelbarer Preis.
+
+Die zweite Basis erweitert bewusst den Research-Vertrag, **nicht** die aktuelle
+Quote-Freigabe. Fehlender/älterer Ask, andere Sitzung oder außerhalb des
+Schlussfensters: isolierter datierter Prämien-Payoff möglich, aber **kein**
+Extrinsik-/BE-Ranking und keine preisabhängige Filterfreigabe. Beim aktuellen
+Vergleich verwendet jeder Preisvergleich denselben passenden Quote-Zeitstand.
+Das reine Ablaufdatum/Strike/Ask-Payoff bleibt von fehlender Aktienhistorie getrennt.
+
+Historie: vorhandene datierte adjusted Tagesbars mit Kalender, eindeutigen
+Sitzungen, plausiblen OHLCV und ausgeschlossenem offenem Tag verwenden. Keine
+separate `DailyCompletionProof`-Hierarchie als allgemeine Scanvoraussetzung.
+Adjustmentbasis dokumentieren; fehlende Sequenz sperrt die betroffene
+HV-/EMA-Kennzahl, nicht die gesamte Kontraktliste. SEC-Daten nur soweit nötig
+und separat cachen; SEC-Rate-Limit ist keine Massive-Berechtigungssperre.
+
+## 6. Kennzahlen — deskriptiv, keine Gewinnwahrscheinlichkeit
+
+`A` = Ask je Aktie, `K` = Strike, `S` = deklarierter vergleichbarer Aktienstand,
+`n` = positive ganzzahlige Kontraktzahl, `T` = Tage bis Verfall /365
+(ACT/365F, Bewertungsdatum fix); endliche positive A/K/S/T für relative Kennzahlen.
+Kosten, Steuern, Finanzierung und Dividenden sind nicht erfundene Nullwerte.
+
+| Kennzahl | Definition / Grenze |
 | --- | --- |
-| Trusted Composition | Private, serverseitig übergebene Konfiguration; feste Provider-/Backend-/Policy-Factories, kein Browser-Importpfad. |
-| Quellenbelege | Datierte, versionsgebundene Account-, Feed-, Kontrakt- und Sitzungsbelege; fehlend/abgelaufen bedeutet ungeprüft. |
-| Terms-/Sitzungsadapter | Reine Zuordnung tatsächlicher Referenzzeilen zu den bestehenden Terms-/`VerifiedSession`-Verträgen. |
-| Admission-Anschluss | Bestehenden gemeinsamen Zähler und tatsächliche Prozess-/Owner-Teilnahme qualifizieren; keine parallele Schattenquote. |
-| Runner / API | Vorhandene `DiscoveryProvider`, `LeapsStore`, `LeapsRunner` und singleton `LeapsApiService` verbinden. |
+| Kosten / Prämienrisiko | `100 × n × A`; möglicher Verlust der **gesamten** bezahlten Prämie zzgl. Kosten für den voll bezahlten Einzel-Long-Call. Risiko nach Ausübung/Finanzierung separat. |
+| Verfalls-P&L | `100 × n × (max(S_T − K,0) − A)`. Keine Vor-Verfallsbewertung oder identische Exposure zu 100 Aktien behaupten. |
+| Break-even | `K + A`; notwendige jährliche Aktienpreisänderung `(BE/S)^(1/T) − 1`, keine Optionsrendite oder Prognose. |
+| Extrinsik | `E = A − max(S − K,0)`; absolut, `E/S`, monatlich `E/(12×T)`, jährliche Rangbasis `E/(S×T)`. Negatives E = inkonsistente Vergleichsbasis, kein Schnäppchen. |
+| Delta-Hebel | `Delta × S/A`; lokale Modell-Exposure, nicht konstante Hebelwirkung über die Laufzeit. Delta0 ist gültig, fehlend bleibt unbekannt. |
+| Spread / OI / Volumen | `(Ask−Bid)/Mid`; OI vom vorherigen Tagesende, Volumen mit eigener Sitzung/Quelle. Nicht austauschbar. |
+| IV vs HV | 252 vollständige logarithmische Sessionrenditen aus 253 adjusted Closes: Stichproben-Standardabweichung (Nenner251) ×√252. IV−HV in Prozentpunkten; Quotient nur bei HV>0. Unterschiedliche Horizonte, kein Überpreisbeweis. |
+| Dividendenvergleich | Nur datierte bekannte Ausschüttungen zeigen. Kein Yield×Laufzeit als gesicherte Gesamtsumme. Kein vollständiger Zukunftsbeleg = Gesamtwert unbekannt; nicht zum Options-BE addieren. |
 
-Import, Policy-Prüfung und Statuslesen führen keinen Providerabruf aus. Start
-und Fortsetzung sind explizite Adminaktionen; kein neuer automatischer Zeitplan.
-Der tatsächliche angemeldete Account bestimmt Berechtigungen. Private Schlüssel
-gehen ausschließlich in Transport-Header, nie in DTOs, URLs oder Protokolle.
+Decimal für Geld/ungerundete Schwellen. Potenzen/Logarithmen numerisch mit
+festgelegter Präzision berechnen; Rundung erst für Anzeige, keine Behauptung
+exakter irrationaler Ergebnisse. Extrinsik p.a. ist eine lineare Aufteilung der
+Prämie, **nicht** Theta, Effektivzins oder erwarteter jährlicher Verlust.
 
-## 4. Tatsächliche Daten statt Ersatzwerte
+Default-Filter vorgeschlagen: Delta 0,70–0,85, Mid-Spread ≤10%, OI ≥100.
+Fehlende Werte nicht bestehen lassen. Ranking aufsteigend `E/(S×T)` ausschließlich
+im vergleichbaren Zielsession-Bestand; Moneyness/Delta und BE daneben zeigen.
+Ältere Ergebnisse separat ohne Rang, Gleichstand deterministisch nach Symbol.
+Kein zusammengewürfelter „profitabel“-Score; IV/HV und Dividenden nicht zwingende
+Scan-Gates. Nachgemessene Quellenlimits bleiben sichtbar in der Diagnose.
 
-**Kontrakte:** Tatsächliches Call-Symbol, Strike, Verfall und US-Aktien-/ADR-
-Notierung müssen zusammenpassen. Tatsächlicher CFI-Code `OCASPS`, American-
-Style, 100 Shares und keine zusätzlichen Liefergegenstände werden gegen die
-OCC-Klassifikation und Standardproduktregeln geprüft. Die Ableitung von
-physischer Standardlieferung und 100er-Prämienmultiplikator wird als datierte
-quellenübergreifende Ableitung gespeichert, nicht als erfundenes Massive-Feld.
-Fehlende/widersprüchliche CFI-, Währungs- oder Aliasbelege bleiben ausgeschlossen.
-Aktuell einfache Standardbedingungen beweisen keine nie angepasste Historie.
-[Massive-Vertragsschema](https://massive.com/docs/rest/options/contracts/all-contracts),
-[OCC-CFI-Zuordnung](https://www.theocc.com/getmedia/5bb03145-905b-4d83-b647-eaa2cb076e93/ENCORE_DDS_Guide_Non_Proprietary_Transmissions.pdf),
-[OCC-Standardproduktregeln](https://www.theocc.com/clearance-and-settlement/clearing/equity-options-product-specifications).
+## 7. Nachtlauf, temporäres Warten und gemeinsame Priorität
 
-**Sitzungen:** Ein tatsächlicher Kontrakt wird mit Basiswert, Klasse, Marktdatum,
-Kalender und gültiger Regelversion verbunden. Zunächst nur belegte reguläre
-Sitzungsintervalle, einschließlich Feiertagen/verkürzten Tagen. Keine allgemeine
-Aktien-RTH-Flagge als vollständiger Options-Sitzungsbeleg. Erweiterte Sitzungen
-werden nicht aus einem Blog oder Testsymbol aktiviert; getrennte Zeitfenster
-und klassenspezifische Berechtigung bleiben nötig.
-[Cboe-Sitzungs-/Klassenregeln](https://www.cboe.com/document/tech-spec/document/technical-specifications/equity-options-extended-trading-hours-faq).
+Vorschlag: `bg_service` täglich 01:00 America/New_York, erster Lauf für die
+letzte abgeschlossene US-Sitzung. Kein erneuter Lauf für dieselbe bereits
+fertige Zielsession über Wochenende/Feiertag; Admin-Start/Abbruch bleiben möglich.
+Ein Worker, zunächst ein physischer Request/s, keine unbeschränkten Queues.
+Bezahlte Anbieterrechte ersetzen nicht die eigene CPU-/Latenzbegrenzung.
 
-**Quotes:** Originalzeiten, Feedmodus und belegter Lag für Option und Aktie
-getrennt. Kein Last-/Mid-/FMV-Ersatz für Ask, keine Uhrerneuerung beim Lesen.
-Vorhandene Grenzen für Quotealter/Zeitversatz bleiben unverändert. Ohne passende
-Aktienquote kein aktueller Aktienkostenvergleich; eine gültige isolierte
-Verfallsrechnung kann weiterhin datiert sichtbar sein. Keine Fill-Garantie.
+429: gültiges `Retry-After` respektieren; sonst exponentiell 15/30/60/120/300s
+mit begrenztem Jitter. Nach fünf aufeinanderfolgenden Rate-Limit-Antworten
+Restcursor als partiell sichern; nächster regulärer Versuch kann fortsetzen.
+401/403: betreffenden Zugang sperren bis wirkliche Konfiguration geändert ist,
+kein Backoff-Angriff. Prioritäts-/Budgetwartezeit ist `waiting` mit automatischer
+erneuter Prüfung, nicht `admin_paused`. Manuelle Pause verlangt manuelles Fortsetzen.
+Retry-Antwortzeiten und tatsächliche Versuche zählen, Cursor nicht vorschnell vorrücken.
 
-**Historie:** Ohne wirklichen Tagesabschlussbeleg kein EMA-/Historien-Claim.
-`CachedUnderlyingLoader` unterstützt diesen begrenzten Modus bereits; Daily-
-Completion ist kein allgemeines Scan-Gate. Aktive EMA-Filter mit fehlender
-Evidenz bleiben „nicht prüfbar“. Ein empfangener REST-Bar oder eine vergangene
-Uhrzeit ist kein Abschlussbeleg; unadjusted Flat Files sind nicht automatisch
-identisch zur adjusted REST-Historie. SEC-Daten bleiben getrennt und gecacht.
-[Massive-Datengrundlagen](https://massive.com/docs/flat-files/stocks/overview).
+Midnight ändert **nicht** den gespeicherten Bewertungsstand oder Quotezeiten.
+Fortsetzung derselben Zielsession zulassen, bis ein neuer Nachtlauf sie ersetzt;
+alten Lauf dann partiell archivieren und neuer Lauf bekommt neues ET-Datum.
+Keine Exception außerhalb der Fehlerbehandlung, die einen Lauf „running“ stehen lässt.
 
-## 5. Gemeinsame Laststeuerung: ausdrücklich keine erfundene Freigabe
+Bestehendes `_PROGRESS` ist prozesslokal, `bg_status.json` ereignisbasiert und
+Limiter-JSON nur ein Zähler. Das ist **keine** reale gemeinsame Prioritätsfreigabe.
+Nachtzeit allein schützt nicht vor BI-/Aktien-/Schutzjobs, die nachts weiterlaufen.
+Im selben Baupaket kleiner prozessübergreifender Guard mit tatsächlichen
+Start-/Ende-Meldungen der relevanten API-/BG-Marktjobs, LEAPS-Admission unter
+demselben kurzen Guard. Ein laufender Abruf darf enden; danach warten neue
+LEAPS-Abrufe. Fehlende Meldung/abgestürzter Worker nicht als idle interpretieren.
+Keine neue Owner-Zertifikathierarchie oder pauschale 5s-Inode-Belegpflicht.
+Teilnahme und Crash-Recovery müssen **im echten Anschluss** getestet werden.
 
-Vor Bindung von `FileBudget` sind tatsächliche Account-Allokation, installierter
-Limiter-Modus, native gemeinsame Lock-/State-Identität und alle Verbraucher
-nachzuweisen. Der Anwendungs-Default 200/min ist kein Accountbeleg. Der alte
-Limiter besitzt Selbstheilung, lokalen Fallback und einen Wartezeit-Bypass;
-deshalb reicht sein passendes JSON-Format nicht für einen harten Budgetbeleg.
-Nicht qualifizierbare Pfade bleiben für LEAPS blockiert. Eine dafür notwendige
-Änderung alten Limitierverhaltens darf nicht unter dieser Anbindung versteckt
-werden: konkret abgrenzen und vor Umsetzung separat entscheiden.
+Physisches HTTP außerhalb kurzer State-Locks; begrenzte Antwortgrößen und
+Transportlaufzeit. Deadline umfasst Antwortbody, nicht nur einzelne Socket-
+Lesevorgänge. Kein Task als beendet melden, während sein Abruf weiterläuft.
+Den wiederverwendbaren Client/Worker im Bauplan festlegen; keinen Prozess pro
+Request als obligatorischen Architekturvertrag. Originaler shared Limiter darf
+nicht als harter Accountnachweis umetikettiert werden. Keine globale Änderung
+seiner Scannerregeln nötig; LEAPS erhält eigene langsame Admission und Priorität.
 
-Prioritätsstarts in API und Hintergrunddienst müssen denselben kurzen nativen
-Reservation-Guard benutzen. Ein vollständiger tatsächlicher Owner-Roster
-umfasst auch Alert-/Schutzabrufe und pausierte/noch endende Worker. Zeitpunkte
-jedes beteiligten Prozesses bleiben eigenständig; ein frischer Publisher darf
-die fehlende Aktualität eines anderen Prozesses nicht erneuern. Unbekannt,
-Workerabsturz oder fehlende Teilnahme ist nicht „idle“. Die bestehenden fünf
-Sekunden Frischegrenze und Lock-Identitätsprüfung bleiben erhalten.
+## 8. Speicher, API und kompakte App
 
-Kein HTTP unter dem gemeinsamen kurzen Guard. Ein bereits zugelassener Abruf
-darf enden, wenn danach ein Prioritätsjob startet; neue LEAPS-Abrufe warten.
-Der eigene Request-Lease bleibt bis zum tatsächlichen Transportende gehalten.
-Retries zählen als eigene physische Versuche. Kein künstliches Minimum von
-einem Request, wenn der bestehende LEAPS-Budgetvertrag null zulässt.
+Ein datierter Ergebnis-Snapshot pro Lauf, atomisch über Tempdatei/Replace.
+Kleiner Cursor-/Statusstand nach einer Chain-Seite bzw. einem Ticker; nicht den
+gesamten N-Kontraktbestand nach jedem Eintrag umschreiben. Nach Abbruch letzte
+fertige Auswertung behalten, neue als partiell kennzeichnen. Begrenzte RAM-
+Seiten und paginierte Resultat-API; Ressourcenmessung gehört in denselben Bauplan.
 
-## 6. Berechtigungen, Bedienung und Ressourcen
+Reine Pricing-/Kontraktfunktionen weiterverwenden. Schweren bestehenden
+Admission-/Authority-/Watermark-/Checkpoint-Pfad nicht blind löschen oder mit
+synthetischen Belegen umgehen: Night-Research-Vertrag explizit getrennt anbinden,
+nicht parallel denselben Speicher inkompatibel schreiben. Import-/Statuslesen
+ohne Anbieter-I/O; private Konfiguration nur serverseitig.
 
-Standard bleibt **OFF**. Erst tatsächlich geprüfte Quellen- und für das konkrete
-Publikum gültige Anzeigerechte erlauben Start/Lesen. Zunächst nur der tatsächliche
-Admin; auch dafür keine erfundene Displaylizenz. Eine erfolgreiche API-Antwort
-bestätigt technischen Zugriff, nicht automatisch die Mehrnutzer-Lizenz.
+Chart zuerst, dann schmale Liste mit Laufzeit, Strike, Bid/Ask, Datum, Delta,
+Kosten, BE und Extrinsik p.a. Mini-Payoff; Box „Prämie X USD · bis 100% Verlust“.
+Einmaliger klarer Hinweis „Daten vom … · Markt geschlossen“ beim Nachtstand.
+Keine Bestätigung eines jetzt handelbaren Preises. Rohcodes/Beleglisten in
+Prüfdetails, keine Textwände pro Aktie. Adminaktionen nicht für andere anzeigen.
+Keine LEAPS-Mails, keine neuen Watch-/Jetzt-Kanäle, keine anderen UI-Texte ändern.
 
-Bestehende kompakte Ansicht, keine neuen Textblöcke unter Aktien. Fehlender
-Zugang oder wartende Priorität ergibt einen kurzen Status; Belegdetails bleiben
-in der Diagnose. Quelle-/Budgetfehler ergeben partiell/blockiert, nicht null
-Möglichkeiten. Es wird kein neuer Score, Entry/Stop/TP oder WATCH/JETZT-Kanal
-eingeführt.
+## 9. Abnahme und noch fehlende Entscheidungen
 
-Die bisherige 2.000-Kontrakt-Simulation ist kein Vollmarkt-Kapazitätsnachweis.
-Vor Aktivierung werden repräsentativer Bestand, Speicher/Checkpoint-Kosten,
-kalte Resultatabfrage, API-Reaktionszeit, Gesamtzeit und Quotealter unter realem
-Budget gemessen. Keine künstliche Acht-Ticker-Grenze. Wenn Vollmarkt unter dem
-vorhandenen Speichermodell nicht tragfähig ist, bleibt Aktivierung gesperrt;
-eine chunkweise Datenhaltung wäre ein gesonderter begründeter Entwurf.
+1. Diesen **überarbeiteten** Entwurf freigeben, danach Bauplan und Ausführungsmethode.
+2. Zusammenhängendes Baupaket: Normalisierung, Feld-Terms, vollständige Pagination,
+   Zeitbasis/Ranking, Cooldown/Resume/Midnight, kleine echte Priorität, Speicher,
+   API/kompakte UI. Diese notwendigen Teile nicht in unbestimmte Folgeentwürfe auslagern.
+3. Offline Gegenfälle: Einheiten/Missing-Greeks, Zusatz-Deliverables/Alias, Null/
+   Kreuzquote, alter Ask/neuer Aktienkurs, Wochenenden/DST/verkürzte Sitzung,
+   429/Retry-After/401/403, konkurrierender Job/Crash, Cursor/Replace-Ausfall.
+4. Mathematische Gegenrechnung und unveränderte Scanner-/Mailregressionen;
+   repräsentativen liquiden Bestand für Laufzeit/RAM/Resultatantwort messen.
+5. Wirkliche Stocks-/Optionsquote-Rechte und Publikum im vorhandenen Account
+   klären. Nur gesondert autorisiert bis drei physische technische Probe-Requests;
+   keine Vollabdeckung oder Lizenz aus diesen drei Antworten ableiten.
+6. Erst geprüfte Veröffentlichung, bewusste Serverinstallation und separat
+   freigegebener echter Admin-Vollauf. Technische Schlüssel zuvor sicher erneuert.
 
-## 7. Abnahme und Reihenfolge
-
-1. Schriftlichen Entwurf prüfen; danach erst Bauplan und Ausführungsmethode.
-2. Private Konfiguration ohne IO beim Import, fehlende/abgelaufene/mismatched
-   Belege, tatsächliche Accountidentität und Geheimnisfreiheit offline testen.
-3. Reale Referenz-/CFI-Zuordnung, Sitzung/DST/Feiertag, Feedlag und Originalzeit
-   gegen unabhängige Fälle prüfen; eingeschränkte Historie nicht schönrechnen.
-4. Mehrprozess-Reservation, gleichzeitig startenden Prioritätsjob, stale Owner,
-   Prozessabsturz, Budget-/Inodefehler und physische Retryzählung nachweisen.
-   Fehlt vollständige Teilnahme oder harte Budgetqualifikation: OFF erhalten.
-5. Unveränderte Scanner-/Mailregeln, Laufsteuerung und Desktop/Mobil regressieren.
-   Repräsentative Vollmarktlast separat qualifizieren, nicht aus Testzahlen ableiten.
-6. Nur gesondert autorisiert höchstens drei physische technische Provider-
-   Probeversuche; Access/Lag-Ergebnis und Displaylizenz getrennt dokumentieren.
-7. Erst nach geprüfter Veröffentlichung und tatsächlichem Serverzugang normal
-   installieren, native Lock-/Pfad-/Dienstrealität bestätigen und ausdrücklich
-   gestarteten realen Lauf abnehmen. Kein Serverumbau aus dieser Spec.
-
-Ein Kern-Test-PASS ist keine Livefreigabe. Dieser Entwurf kauft keine Daten,
-aktiviert keinen Scanner und behauptet weder echte Optionsabdeckung noch
-SMTP-/Broker-Ausführung. Unabhängige offene BI-/Signal-Mail-Arbeit bleibt getrennt.
+Ausstehend: reale Tarife/Zugänge und Freigabe der vorgeschlagenen LEAPS-
+Liquiditätsfilter, Nachtplanung und datierten Schlussstand-Rankingbasis.
+Nur-Bid/Ask-Produktwahl ist geklärt; kein günstiger Ersatzmodus. Dieses Dokument
+aktiviert nichts und behauptet weder echte Vollabdeckung noch Mail-/Broker-Ausführung.
