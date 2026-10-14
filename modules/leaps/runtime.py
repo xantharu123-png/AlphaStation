@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from . import models
 from .admission import OSLease, private_namespace, _private_permissions
 from .models import LeapsDataError, LeapsSnapshot, RunSpec
-from .provider import MassiveLeapsProvider, OptionQuote, StockQuote, VerifiedSession, DailyCompletionProof
+from .provider import MassiveLeapsProvider, OptionQuote, StockQuote, VerifiedSession, DailyCompletionProof, authority_error
 
 
 _TYPES = {cls.__name__: cls for cls in (
@@ -153,7 +153,7 @@ class LeapsStore:
             if type(state['authorities']) is not dict:
                 raise _error()
             for scope, record in state['authorities'].items():
-                if (scope not in ('market', 'sec') or type(record) is not dict
+                if (scope not in ('market', 'sec', 'market:stock_quotes', 'market:option_quotes', 'market:option_reference', 'market:stock_reference', 'market:stock_history') or type(record) is not dict
                         or set(record) != {'reason', 'run_id', 'cursor', 'observed_ns', 'evidence_ids'}
                         or record['reason'] not in ('authorization_denied', 'rate_limited', None)
                         or (record['run_id'] is not None and not isinstance(record['run_id'], str))
@@ -223,6 +223,9 @@ class AuthorityProvider:
     _SCOPES = {'list_contract_page': 'market', 'list_listing_page': 'market',
                'chain_page': 'market', 'underlying_quote': 'market',
                'daily_history': 'market', 'company_facts': 'sec'}
+    _RESOURCES = {'list_contract_page':'market:option_reference', 'list_listing_page':'market:stock_reference',
+                  'chain_page':'market:option_quotes','underlying_quote':'market:stock_quotes',
+                  'daily_history':'market:stock_history','company_facts':'sec'}
 
     def __init__(self, provider, store, admission, clock_ns):
         if not isinstance(provider, MassiveLeapsProvider) or provider.admission is not admission:
@@ -238,9 +241,10 @@ class AuthorityProvider:
             scope = self._SCOPES[name]
             with self.store.lock():
                 state = self.store._read()
-                record = state['authorities'].get(scope)
-                if record and record['reason']:
-                    raise _error(record['reason'])
+                for authority in (scope, self._RESOURCES[name]):
+                    record = state['authorities'].get(authority)
+                    if record and record['reason']:
+                        raise authority_error(record['reason'], authority)
                 # Pause requests are checked before every physical public unit,
                 # including history/SEC inside a discovery underlying safe unit.
                 if state['control'] and state['control']['action'] == 'pause':
@@ -252,7 +256,8 @@ class AuthorityProvider:
                     with self.store.lock():
                         state = self.store._read()
                         latest = state['latest']
-                        state['authorities'][scope] = {
+                        authority = getattr(error, 'authority', scope)
+                        state['authorities'][authority] = {
                             'reason': error.code, 'run_id': latest.run.run_id if latest else None,
                             'cursor': latest.cursor if latest else None,
                             'observed_ns': str(self.clock_ns()), 'evidence_ids': []}

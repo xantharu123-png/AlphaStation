@@ -96,6 +96,29 @@ def _error(code):
     return LeapsDataError(code, 'provider')
 
 
+def resource_authority(path, scope='market'):
+    """403 entitlement class, distinct from shared budget/credential authority."""
+    if scope == 'sec':
+        return 'sec'
+    if path.startswith('/v2/last/nbbo/'):
+        return 'market:stock_quotes'
+    if path.startswith('/v3/snapshot/options/'):
+        return 'market:option_quotes'
+    if path.startswith('/v3/reference/options/'):
+        return 'market:option_reference'
+    if path.startswith('/v3/reference/tickers'):
+        return 'market:stock_reference'
+    if path.startswith('/v2/aggs/ticker/'):
+        return 'market:stock_history'
+    return 'market'
+
+
+def authority_error(code, authority):
+    error = _error(code)
+    error.authority = authority
+    return error
+
+
 def _ticker(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Z][A-Z0-9.\-]{0,15}', value):
         raise _error('invalid_ticker')
@@ -188,8 +211,11 @@ class MassiveLeapsProvider:
         origin = 'https://api.massive.com' if scope == 'market' else 'https://data.sec.gov'
         url = origin + path + ('?' + urlencode(params) if params else '')
         with self._lock:
+            resource = resource_authority(path, scope)
             if scope in self._denied:
-                raise _error('authorization_denied')
+                raise authority_error('authorization_denied', scope)
+            if resource in self._denied:
+                raise authority_error('authorization_denied', resource)
             if scope in self._paused:
                 raise _error('rate_limited')
             for attempt in range(2):
@@ -212,8 +238,9 @@ class MassiveLeapsProvider:
                     if not retry:
                         status = response.status_code
                         if status in (401, 403):
-                            self._denied.add(scope)
-                            raise _error('authorization_denied')
+                            authority = scope if status == 401 else resource
+                            self._denied.add(authority)
+                            raise authority_error('authorization_denied', authority)
                         if status == 429:
                             self._paused.add(scope)
                             raise _error('rate_limited')
@@ -514,8 +541,10 @@ def probe_capabilities(provider, *, max_requests=3):
                         results[index] = True
             except LeapsDataError as error:
                 if error.code == 'authorization_denied':
-                    results = [False, False, False]
-                    break
+                    if getattr(error, 'authority', 'market') == 'market':
+                        results = [False, False, False]
+                        break
+                    results[index] = False
                 if error.code in ('probe_request_limit', 'admission_denied', 'rate_limited'):
                     break
     finally:

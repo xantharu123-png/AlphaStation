@@ -45,7 +45,7 @@ def test_reference_uses_calendar_window_and_decimal_wire_json():
     assert a.events == [('acquire', 'market'), ('release', 'market')]
 
 
-@pytest.mark.parametrize('status', [401, 403])
+@pytest.mark.parametrize('status', [401])
 def test_authorization_denial_is_global_and_not_retried(status):
     p, t, a = provider(Response(status=status), Response())
     for action in (lambda: p.list_contract_page(run()), lambda: p.underlying_quote('SOFI')):
@@ -263,7 +263,7 @@ def test_probe_total_request_ceiling_includes_retry_attempts():
     assert evidence.option_quotes is None and evidence.display_rights is None
 
 
-@pytest.mark.parametrize('status',[401,403])
+@pytest.mark.parametrize('status',[401])
 def test_probe_globally_denied_access_stops_after_one_request(status):
     p, t, _ = provider(Response(status=status))
     evidence = api().probe_capabilities(p)
@@ -607,7 +607,7 @@ def test_sec_authority_failure_does_not_poison_independent_market_requests(statu
     assert not a.held
 
 
-@pytest.mark.parametrize('status,reason',[(401,'authorization_denied'),(403,'authorization_denied'),(429,'rate_limited')])
+@pytest.mark.parametrize('status,reason',[(401,'authorization_denied'),(429,'rate_limited')])
 def test_market_authority_failure_is_global_to_market_but_not_sec(status,reason):
     p, t, a = provider(Response(status=status),Response({'cik':1818874,'facts':{}}))
     for request in (lambda:p.list_contract_page(run()),lambda:p.underlying_quote('SOFI')):

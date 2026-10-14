@@ -29104,6 +29104,7 @@ def _promote_auth_cookie_to_bearer(request: Request) -> None:
     token = str(request.cookies.get(_AUTH_SESSION_COOKIE) or "").strip()
     if not token:
         return
+    request.scope["leaps_cookie_auth"] = True
     headers = list(request.scope.get("headers") or [])
     headers.append((b"authorization", f"Bearer {token}".encode("latin-1")))
     request.scope["headers"] = headers
@@ -48306,6 +48307,141 @@ def autotrader_clear_positions(authorization: Optional[str] = Header(None)):
 
 
 # ── Admin System ──
+
+# Standalone LEAPS composition: disabled and lazy until trusted server injection.
+# No environment, provider, secret, namespace or cache initialization here.
+from modules.leaps.api_contract import (
+    LeapsAccessPolicy, LeapsApiError, parse_scenario as _leaps_parse_scenario,
+    parse_scan as _leaps_parse_scan, parse_control as _leaps_parse_control,
+)
+from modules.leaps.models import LeapsDataError as _LeapsDataError
+_LEAPS_POLICY_FACTORY = None  # (authenticated_email, actual_admin) -> policy
+_LEAPS_BACKEND_FACTORY = None  # () -> singleton LeapsApiService; trusted only
+
+
+def _leaps_http_error(error):
+    if isinstance(error, LeapsApiError):
+        return HTTPException(error.status, detail={"reason": error.reason})
+    if isinstance(error, _LeapsDataError):
+        stale = error.code in ("unknown_run", "stale_run", "run_binding_mismatch", "terminal_run")
+        return HTTPException(409 if stale else 503, detail={"reason": error.code})
+    return HTTPException(503, detail={"reason": "leaps_unavailable"})
+
+
+async def _leaps_access(request, endpoint):
+    try:
+        if not HAS_AUTH:
+            raise LeapsApiError(503, "auth_unavailable")
+        token = _token_from_authorization(request.headers.get("authorization"))
+        payload = await run_in_threadpool(verify_token, token) if token else None
+        email = str((payload or {}).get("email") or "").strip().lower()
+        if not email:
+            raise LeapsApiError(401, "login_required")
+        admin = email in ADMIN_EMAILS
+        if endpoint in ("scan", "control") and not admin:
+            raise LeapsApiError(403, "admin_required")
+        if request.method == "POST":
+            origin = request.headers.get("origin")
+            cookie_auth = request.scope.get("leaps_cookie_auth") is True
+            allowed = set(_cors_origins) | {str(request.base_url).rstrip("/")}
+            if (cookie_auth and not origin) or (origin is not None and origin not in allowed):
+                raise LeapsApiError(403, "untrusted_origin")
+        policy = (await run_in_threadpool(_LEAPS_POLICY_FACTORY, email, admin)
+                  if _LEAPS_POLICY_FACTORY else LeapsAccessPolicy(admin=admin))
+        if not isinstance(policy, LeapsAccessPolicy):
+            raise LeapsApiError(503, "invalid_access_policy")
+        # The real authenticated admin identity cannot be manufactured by policy.
+        if policy.admin != admin:
+            raise LeapsApiError(403, "admin_identity_mismatch")
+        if endpoint != "capabilities":
+            policy.require(endpoint, time.time_ns())
+        return policy
+    except Exception as error:
+        raise _leaps_http_error(error) from None
+
+
+async def _leaps_body(request):
+    def decode(raw):
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError()
+                result[key] = value
+            return result
+        return json.loads(raw, object_pairs_hook=unique,
+                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    try:
+        raw = await request.body()
+        if len(raw) > 65536:
+            raise ValueError()
+        return await run_in_threadpool(decode, raw)
+    except Exception:
+        raise HTTPException(422, detail={"reason": "invalid_schema"}) from None
+
+
+async def _leaps_call(method, *args, **kwargs):
+    def call():
+        if _LEAPS_BACKEND_FACTORY is None:
+            raise LeapsApiError(503, "configured_backend_required")
+        backend = _LEAPS_BACKEND_FACTORY()
+        return getattr(backend, method)(*args, **kwargs)
+    try:
+        return await run_in_threadpool(call)
+    except Exception as error:
+        raise _leaps_http_error(error) from None
+
+
+@app.get("/api/leaps/capabilities")
+async def api_leaps_capabilities(request: Request):
+    policy = await _leaps_access(request, "capabilities")
+    return policy.public(time.time_ns())
+
+
+@app.get("/api/leaps/results")
+async def api_leaps_results(request: Request, limit: int = 50, offset: int = 0,
+                            view: str = "complete", run_id: Optional[str] = None):
+    await _leaps_access(request, "results")
+    return await _leaps_call("results", limit=limit, offset=offset, view=view, run_id=run_id)
+
+
+@app.get("/api/leaps/status")
+async def api_leaps_status(request: Request):
+    await _leaps_access(request, "status")
+    return await _leaps_call("status")
+
+
+@app.post("/api/leaps/scenarios")
+async def api_leaps_scenarios(request: Request):
+    await _leaps_access(request, "scenarios")
+    try:
+        body = _leaps_parse_scenario(await _leaps_body(request))
+    except LeapsApiError as error:
+        raise _leaps_http_error(error) from None
+    return await _leaps_call("scenarios", body)
+
+
+@app.post("/api/leaps/scan")
+async def api_leaps_scan(request: Request):
+    await _leaps_access(request, "scan")
+    try:
+        run = _leaps_parse_scan(await _leaps_body(request), time.time_ns())
+    except LeapsApiError as error:
+        raise _leaps_http_error(error) from None
+    return await _leaps_call("scan", run)
+
+
+@app.post("/api/leaps/control")
+async def api_leaps_control(request: Request):
+    policy = await _leaps_access(request, "control")
+    try:
+        run_id, action = _leaps_parse_control(await _leaps_body(request))
+        if action == "resume":
+            policy.require("scan", time.time_ns())
+    except LeapsApiError as error:
+        raise _leaps_http_error(error) from None
+    return await _leaps_call("control", run_id, action)
+
 
 def _require_admin(authorization: Optional[str], *, read_only: bool = False):
     """
