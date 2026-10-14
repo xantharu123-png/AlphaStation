@@ -54,7 +54,7 @@ async function main() {
     const context = await browser.newContext({ viewport });
     const page = await context.newPage(); currentPage = page; page.setDefaultTimeout(12000);
     const state = { admin: true, capabilities: policy(), run: 'run-A', snapshot: 'a'.repeat(64), activeRun: 'run-B', status: 'running', resultDelay: 0,
-      slowScenario: null, scenarioDelay: 0, scenario409: false, result403: false, sortDelay: null, latestRun: 'run-B', tabs: null, chart403: false, posts: [], reads: [] };
+      slowScenario: null, scenarioDelay: 0, scenario409: false, result403: false, sortDelay: null, latestRun: 'run-B', tabs: null, chart403: false, posts: [], reads: [], capabilityRequests: 0, capabilityHold: true, capabilityReleases: [] };
     const errors = [], expectedHttp = new Set();
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => {
@@ -71,7 +71,11 @@ async function main() {
       summary.requests.push({ viewport, method: request.method(), path: url.pathname });
       const respond = (data, status = 200) => { if([403,409].includes(status)) expectedHttp.add(url.href); return route.fulfill({ status, json: data }).catch(() => {}); };
       if (url.pathname === '/api/auth/me') return respond({ user: { email: 'synthetic@example.invalid', name: 'Synthetic QA', is_admin: state.admin, plan: 'pro' }, limits: { allowed_tabs: state.tabs, has_sidebar_detail: true } });
-      if (url.pathname === '/api/leaps/capabilities') return respond(state.capabilities);
+      if (url.pathname === '/api/leaps/capabilities') {
+        ++state.capabilityRequests; const reply = structuredClone(state.capabilities);
+        if (state.capabilityHold) await new Promise(resolve => state.capabilityReleases.push(resolve));
+        return respond(reply);
+      }
       if (url.pathname === '/api/leaps/status') return respond({ run_id: state.activeRun, status: state.status, progress: { completed: 3, total: 22, phase: 'chains' }, reasons: [], last_complete_run_id: state.run, worker_error: null });
       if (url.pathname === '/api/leaps/results') {
         const query = Object.fromEntries(url.searchParams); state.reads.push(query);
@@ -87,12 +91,12 @@ async function main() {
       if (url.pathname === '/api/leaps/scenarios') {
         const body = request.postDataJSON(); state.posts.push(body);
         summary.scenarioRequests.push({viewport,body,stale:state.scenario409});
-        assert.equal(Object.hasOwn(body, 'terminal_prices'), false, 'default prices must be omitted');
-        const old = body.contract_id === state.slowScenario || state.scenarioDelay;
+        if (Object.hasOwn(body,'terminal_prices')) { assert.equal(body.terminal_prices.length,1); assert.equal(typeof body.terminal_prices[0],'string'); }
+        const old = body.contract_id === state.slowScenario || state.scenarioDelay || body.terminal_prices?.[0] === state.slowPrice;
         const result = { ...body, hypothetical: true, fees: 'unknown', quantity_is_fill_evidence: false, comparison_scope_quantity: 1,
           assessment: row().assessment, requested_size_liquidity: 'unverified', option_depth_unit: 'contracts', stock_depth_unit: 'shares',
           stock_reference_kind: 'bid', stock_reference_is_executable_buy: false, quote_source_ns: row().observation.quote.source_ns,
-          scenarios: [{ terminal: '110.5', result: expiryResult(body.quantity, old ? '999' : '0') }] };
+          scenarios: [{ terminal: body.terminal_prices?.[0] ?? '110.5', result: expiryResult(body.quantity, old ? '999' : '0') }] };
         const stale = state.scenario409;
         if (old) await pause(700);
         return stale ? respond({ detail: { reason: 'stale_selection' } }, 409) : respond(result);
@@ -114,7 +118,16 @@ async function main() {
       if (viewport.width < 600) { await page.getByRole('button', { name: 'Navigation öffnen', exact: true }).click(); await page.locator('.mobile-nav-sheet').getByRole('button', { name: new RegExp('^' + name + '(?:\\s|$)') }).first().click(); }
       else { await page.locator('.mega-nav').getByRole('button', { name: /^Aktien/ }).hover(); await page.locator('.mega-panel-dropdown').waitFor(); const item = page.locator('.mega-panel-dropdown').getByRole('button', { name: new RegExp('^' + name + '(?:\\s|$)') }); assert.equal(await item.count(), 1, `${name} navigation must be explicitly available`); await item.click(); await page.mouse.move(1000, 400); }
     };
-    await page.goto(base.href, { waitUntil: 'networkidle' });
+    if (!['chart','custom'].includes(args['review-case'])) {
+      const initialTime = Date.now(); await page.clock.install({time:initialTime}); await page.clock.pauseAt(initialTime);
+      await page.goto(base.href, { waitUntil: 'domcontentloaded' });
+      while (!state.capabilityRequests) await pause(10);
+      await page.clock.fastForward(15000); await pause(50);
+      assert.equal(state.capabilityRequests,1,'valid slow capability request must survive the 15s polling boundary without overlap/cancellation');
+      await page.clock.fastForward(1000); state.capabilityHold=false; state.capabilityReleases.shift()();
+      await page.locator('.mobile-nav-item-name').filter({hasText:/^LEAPS$/}).waitFor({state:'attached'}); await page.clock.resume();
+      summary.checks.push({viewport,heldCapabilityAt16s:true});
+    } else { state.capabilityHold=false; await page.goto(base.href,{waitUntil:'networkidle'}); }
     assert.match(await page.title(), /Alpha Station/); assert.equal(new URL(page.url()).origin, base.origin);
     await navigateMenu('LEAPS');
     const scanner = page.getByRole('region', { name: 'LEAPS Scanner', exact: true });
@@ -133,13 +146,25 @@ async function main() {
     assert.match(await detail.innerText(), /Aktienreferenz \(BID\)/); assert.match(await detail.innerText(), /Optionsprämie \(ASK\)/); assert.equal(await detail.locator('details[open]').count(), 0);
     assert.ok(!/ENTRY|STOP|TradeHealth|Wyckoff|Reminder/.test(await detail.innerText()));
     await screenshot('chart-first');
+    assert.equal(await detail.getByLabel('Eigener Verfallskurs USD',{exact:true}).count(),1,'freely chosen absolute expiry price must be available');
+    await detail.getByText('Eigener Verfallskurs (optional)',{exact:true}).click();
+    const customPrice=detail.getByLabel('Eigener Verfallskurs USD',{exact:true});
+    await customPrice.fill('123.456'); await detail.getByRole('cell',{name:'$123.46',exact:true}).waitFor(); assert.deepEqual(state.posts.at(-1).terminal_prices,['123.456']);
+    await customPrice.fill('0'); await detail.getByRole('cell',{name:'$0.00',exact:true}).waitFor(); assert.deepEqual(state.posts.at(-1).terminal_prices,['0']);
+    await detail.getByLabel('Kontraktanzahl',{exact:true}).fill('2'); await detail.getByText(/Debit \(2 Kontrakte\)/).waitFor(); assert.deepEqual(state.posts.at(-1).terminal_prices,['0']);
+    const beforeInvalid=state.posts.length; await customPrice.fill('-1'); await detail.getByText(/Nichtnegativen USD-Verfallskurs/).waitFor(); await pause(100); assert.equal(state.posts.length,beforeInvalid,'invalid custom input must not become a fake zero request');
+    state.slowPrice='150'; await customPrice.fill('150'); await pause(70); await customPrice.fill('175'); await detail.getByRole('cell',{name:'$175.00',exact:true}).waitFor(); await pause(800); assert.ok(!/999\.00/.test(await detail.innerText()),'old custom-price reply must not replace new scenario');
+    await screenshot('custom-expiry-price');
+    await customPrice.fill(''); await detail.getByRole('cell',{name:'$110.50',exact:true}).waitFor(); assert.equal(Object.hasOwn(state.posts.at(-1),'terminal_prices'),false,'empty custom field must request server defaults');
+    await detail.getByLabel('Kontraktanzahl',{exact:true}).fill('1'); await detail.getByText(/Debit \(1 Kontrakte\)/).waitFor(); assert.equal(Object.hasOwn(state.posts.at(-1),'terminal_prices'),false);
+    await detail.getByText('Eigener Verfallskurs (optional)',{exact:true}).click(); state.slowPrice=null;
     await detail.getByLabel('Kontraktanzahl', { exact: true }).fill('2'); await detail.getByText(/Debit \(2 Kontrakte\): \$1100.00/).waitFor();
     // Exact zero and nullable Greeks are different, and large cash remains exact.
-    await detail.locator('summary').click(); assert.match(await detail.innerText(), /IV: – · Delta: –/); await screenshot('scenario-quantity');
+    await detail.getByText('Kontrakt-/Daten-Details',{exact:true}).click(); assert.match(await detail.innerText(), /IV: – · Delta: –/); await screenshot('scenario-quantity');
     await detail.getByRole('button', { name: 'LEAPS schließen' }).click();
     state.slowScenario = 'call-0'; detail = await open('call-0'); await pause(70); await detail.getByRole('button', { name: 'LEAPS schließen' }).click(); detail = await open('call-1');
     await detail.getByText(/Debit \(1 Kontrakte\)/).waitFor(); await pause(800); assert.match(await detail.innerText(), /Kontrakt call-1/); assert.ok(!/999\.00/.test(await detail.innerText()));
-    await detail.locator('summary').click(); assert.match(await detail.innerText(), /Delta: 0.00/);
+    await detail.getByText('Kontrakt-/Daten-Details',{exact:true}).click(); assert.match(await detail.innerText(), /Delta: 0.00/);
     // Quantity and tab identities invalidate late JSON, not only HTTP headers.
     state.scenarioDelay = 700; await detail.getByLabel('Kontraktanzahl', { exact: true }).fill('3'); await pause(70); state.scenarioDelay = 0; await detail.getByLabel('Kontraktanzahl', { exact: true }).fill('2');
     await detail.getByText(/Debit \(2 Kontrakte\): \$1100.00/).waitFor(); await pause(800); assert.ok(!/999\.00/.test(await detail.innerText()));
@@ -185,8 +210,54 @@ async function main() {
     detail = await open('call-0'); await detail.getByText(/Chart-Zugang nicht freigegeben/).waitFor(); assert.match(await detail.innerText(), /Szenarien nicht freigegeben/); assert.equal(await detail.getByLabel('Kontraktanzahl', {exact:true}).isDisabled(),true);
     assert.equal(summary.requests.filter(item => item.path === '/api/chart-data').length,chartRequests); await screenshot('separate-chart-scenario-rights');
     await detail.getByRole('button',{name:'LEAPS schließen'}).click();
+    if (args['review-case'] !== 'capabilities') {
+      state.chart403=false;
+      // Mount the REAL shipped component at its public prop boundary, not a mock
+      // or React-internals mutation. Existing full-App flow remains above.
+      const selected={kind:'leaps',ticker:'SOFI',run_id:'run-A',snapshot_id:state.snapshot,row:row()};
+      await page.evaluate(({selection,access})=>{
+        const host=document.createElement('div'); host.id='leaps-fixture-host';document.body.appendChild(host);
+        function ChartRightsFixture(){const [allowed,setAllowed]=React.useState(true);return React.createElement(React.Fragment,null,
+          React.createElement('button',{id:'leaps-fixture-revoke',onClick:()=>setAllowed(false)},'Revoke chart'),
+          React.createElement('button',{id:'leaps-fixture-grant',onClick:()=>setAllowed(true)},'Grant chart'),
+          React.createElement(LeapsContractDetail,{selection,policy:access,chartAllowed:allowed,onClose:()=>{},onDenied:()=>{throw new Error('unexpected fixture access denial');}}));}
+        ReactDOM.render(React.createElement(ChartRightsFixture),host);
+      },{selection:selected,access:policy(false)});
+      const fixture=page.locator('#leaps-fixture-host'), fixtureDetail=fixture.getByRole('complementary',{name:'LEAPS-Kontrakt'});
+      await fixtureDetail.locator('canvas').first().waitFor();
+      await fixtureDetail.evaluate(el=>{window.leapsSameDetail=el;window.leapsPriorCanvas=el.querySelector('canvas');});
+      const beforeGrantRequests=summary.requests.filter(item=>item.path==='/api/chart-data').length;
+      await page.evaluate(()=>document.getElementById('leaps-fixture-revoke').click());
+      await fixtureDetail.getByText(/Chart-Zugang nicht freigegeben/).waitFor();
+      assert.equal(await fixtureDetail.locator('canvas').count(),0,'revoked same-mounted chart must dispose all candles');
+      assert.equal(await fixtureDetail.evaluate(el=>el===window.leapsSameDetail),true,'detail identity must survive entitlement change');
+      assert.ok(!(await fixtureDetail.innerText()).includes('Synthetic daily candles'),'revoked chart source metadata must clear');
+      await screenshot('chart-rights-revoked');
+      await page.evaluate(()=>document.getElementById('leaps-fixture-grant').click());
+      await fixtureDetail.locator('canvas').first().waitFor();
+      assert.equal(await fixtureDetail.evaluate(el=>el===window.leapsSameDetail&&el.querySelector('canvas')!==window.leapsPriorCanvas),true);
+      assert.equal(summary.requests.filter(item=>item.path==='/api/chart-data').length,beforeGrantRequests+1,'regrant must fetch fresh authorized candles');
+      await screenshot('chart-rights-regranted');
+      await page.evaluate(()=>{const host=document.getElementById('leaps-fixture-host');ReactDOM.unmountComponentAtNode(host);host.remove();});
+      summary.checks.push({viewport,sameMountedChartTrueFalseTrue:true});
+    }
     state.tabs = null; state.capabilities = policy(false); state.chart403 = true; await page.reload({waitUntil:'networkidle'}); await navigateMenu('LEAPS'); detail = await open('call-0'); await detail.getByText('Chart-Zugang nicht freigegeben', {exact:true}).waitFor();
     await detail.getByRole('button',{name:'LEAPS schließen'}).click();
+    if (args['review-case'] !== 'chart' && args['review-case'] !== 'custom') {
+      detail=await open('call-0'); await detail.getByText('Chart-Zugang nicht freigegeben',{exact:true}).waitFor();
+      state.capabilityHold=true; const beforeRenewal=state.capabilityRequests;
+      await page.clock.pauseAt(await page.evaluate(()=>Date.now())); await page.clock.fastForward(15000);
+      while(!state.capabilityReleases.length) await pause(10);
+      assert.equal(state.capabilityRequests,beforeRenewal+1,'one renewal request only');
+      await page.clock.fastForward(20001); await scanner.waitFor({state:'detached'});
+      assert.equal(await page.getByRole('complementary',{name:'LEAPS-Kontrakt'}).count(),0,'timed-out rights renewal must remove prior granted detail');
+      assert.equal(await page.locator('.mega-item-name,.mobile-nav-item-name').filter({hasText:/^LEAPS$/}).count(),0,'timed-out renewal must fail closed');
+      state.capabilityHold=false; state.capabilityReleases.splice(0).forEach(release=>release()); await pause(100);
+      assert.equal(await page.locator('.mega-item-name,.mobile-nav-item-name').filter({hasText:/^LEAPS$/}).count(),0,'late expired capability response must not restore old grant');
+      await screenshot('capability-renewal-timeout');
+      await page.clock.fastForward(15000); await page.locator('.mobile-nav-item-name').filter({hasText:/^LEAPS$/}).waitFor({state:'attached'}); await page.clock.resume();
+      summary.checks.push({viewport,capabilityRenewalTimeoutFailClosed:true});
+    }
     summary.viewports.push(viewport); summary.checks.push({ viewport, identity: true, notBlank: true, overlayAbsent: true, chartFirst: true, savedCache: true, controls: true, contractQuantityTabRunSortPageRaces: true, expiryOriginal: true, rights: true });
     assert.deepEqual(errors, [], 'console/pageerror/network health'); await context.close();
   }

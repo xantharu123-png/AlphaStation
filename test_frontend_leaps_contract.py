@@ -72,6 +72,20 @@ def test_selection_identity_changes_on_run_snapshot_contract_and_quantity():
     assert evaluate(f'leapsSelectionKey({json.dumps(selection)}, 2)') != first
 
 
+@pytest.mark.parametrize('value,valid,want', [('', True, None), ('0', True, '0'), ('123.456', True, '123.456'),
+    ('1000000000000', True, '1000000000000'), ('-1', False, None), ('NaN', False, None),
+    ('1e3', True, '1e3'), ('1000000000000.1', False, None), ('1.1234567890123', False, None)])
+def test_custom_expiry_price_obeys_existing_strict_wire_without_fake_zero(value, valid, want):
+    assert evaluate(f'leapsCustomPrice({json.dumps(value)})') == {'valid': valid, 'value': want}
+
+
+def test_custom_scenario_is_exact_string_and_part_of_reply_identity():
+    selection = {'run_id': 'run-A', 'snapshot_id': 'a'*64, 'row': {'contract': {'id': 'call-A'}}}
+    assert evaluate(f'leapsScenarioRequest({json.dumps(selection)}, 2, "0")') == {
+        'run_id': 'run-A', 'snapshot_id': 'a'*64, 'contract_id': 'call-A', 'quantity': 2, 'terminal_prices': ['0']}
+    assert evaluate(f'leapsSelectionKey({json.dumps(selection)}, 2, "0")') != evaluate(f'leapsSelectionKey({json.dumps(selection)}, 2, "")')
+
+
 def test_customer_and_unproven_capability_cannot_control():
     customer = {**POLICY, 'admin': False}
     assert evaluate(f'leapsControlReason({json.dumps(customer)}, "scan", null)') == 'Nur Admin'

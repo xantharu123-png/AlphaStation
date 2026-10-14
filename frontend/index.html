@@ -6189,11 +6189,27 @@ function leapsQuoteCurrent(row, nowMs = Date.now()) {
     const now = BigInt(nowMs) * 1000000n;
     return BigInt(source) <= now && now <= BigInt(expiry);
 }
-function leapsScenarioRequest(selection, quantity) {
-    return { run_id: selection.run_id, snapshot_id: selection.snapshot_id, contract_id: selection.row.contract.id, quantity };
+function leapsCustomPrice(text) {
+    const invalid = { valid: false, value: null };
+    if (typeof text !== 'string') return invalid;
+    const value = text.trim();
+    if (!value) return { valid: true, value: null };
+    if (value.length > 64) return invalid;
+    const parts = value.match(/^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/);
+    if (!parts) return invalid;
+    const fraction = parts[3] || parts[4] || '', exponent = Number(parts[5] || 0);
+    const coefficient = BigInt((parts[2] || '0') + fraction), power = exponent - fraction.length;
+    if (!Number.isSafeInteger(exponent) || fraction.length > 12 || power < -12 || (parts[1] === '-' && coefficient !== 0n)) return invalid;
+    if (coefficient !== 0n && (power > 12 || coefficient > 10n ** BigInt(12 - power))) return invalid;
+    return { valid: true, value };
 }
-function leapsSelectionKey(selection, quantity = 1) {
-    return JSON.stringify([selection?.run_id, selection?.snapshot_id, selection?.row?.contract?.id, quantity]);
+function leapsScenarioRequest(selection, quantity, customPrice = null) {
+    const body = { run_id: selection.run_id, snapshot_id: selection.snapshot_id, contract_id: selection.row.contract.id, quantity };
+    if (customPrice !== null) body.terminal_prices = [customPrice];
+    return body;
+}
+function leapsSelectionKey(selection, quantity = 1, customPrice = '') {
+    return JSON.stringify([selection?.run_id, selection?.snapshot_id, selection?.row?.contract?.id, quantity, customPrice]);
 }
 // LEAPS React flow
 async function leapsJson(path, init = {}, signal) {
@@ -6220,9 +6236,11 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
     const row = selection.row, contract = row.contract, quote = row.observation.quote;
     const now = useLeapsClock();
     const [quantityText, setQuantityText] = useState('1');
+    const [customPriceText, setCustomPriceText] = useState('');
+    const customPrice = leapsCustomPrice(customPriceText);
     const quantity = /^\d+$/.test(quantityText) ? Number(quantityText) : null;
     const quantityValid = Number.isSafeInteger(quantity) && quantity >= 1 && quantity <= 1000000;
-    const identity = leapsSelectionKey(selection, quantityText);
+    const identity = leapsSelectionKey(selection, quantityText, customPriceText);
     const identityRef = useRef(identity); identityRef.current = identity;
     const [scenario, setScenario] = useState(null), [scenarioError, setScenarioError] = useState(null), [invalid, setInvalid] = useState(false);
     const [chartData, setChartData] = useState(null), [chartError, setChartError] = useState(null);
@@ -6232,8 +6250,8 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
         const controller = new AbortController();
         if (invalid) return () => controller.abort();
         setScenario(null); setScenarioError(null);
-        if (!scenarioAllowed || !quantityValid) return () => controller.abort();
-        leapsJson('scenarios', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leapsScenarioRequest(selection, quantity)) }, controller.signal)
+        if (!scenarioAllowed || !quantityValid || !customPrice.valid) return () => controller.abort();
+        leapsJson('scenarios', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leapsScenarioRequest(selection, quantity, customPrice.value)) }, controller.signal)
             .then(data => {
                 if (controller.signal.aborted || identityRef.current !== identity) return;
                 if (data.run_id !== selection.run_id || data.snapshot_id !== selection.snapshot_id || data.contract_id !== contract.id || data.quantity !== quantity) throw new Error('Szenario-Identität stimmt nicht überein');
@@ -6245,9 +6263,10 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
                 else setScenarioError(error.message);
             });
         return () => controller.abort();
-    }, [identity, scenarioAllowed, quantityValid, invalid]);
+    }, [identity, scenarioAllowed, quantityValid, customPrice.valid, invalid]);
     useEffect(() => {
         const controller = new AbortController();
+        setChartData(null); setChartError(null);
         if (!chartAllowed) return () => controller.abort();
         const deadline = setTimeout(() => { controller.abort(); setChartError('Chart-Anfrage dauert zu lange'); }, 20000);
         fetch(`${API}/api/chart-data?ticker=${encodeURIComponent(selection.ticker)}&timeframe=1D&overlays=`, { signal: controller.signal })
@@ -6261,24 +6280,25 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
         return () => { clearTimeout(deadline); controller.abort(); };
     }, [selection.ticker, selection.run_id, selection.snapshot_id, contract.id, chartAllowed]);
     useEffect(() => {
-        if (!container.current || !chartData?.candles?.length || !window.LightweightCharts) return;
+        if (!chartAllowed || !container.current || !chartData?.candles?.length || !window.LightweightCharts) return;
         const chart = window.LightweightCharts.createChart(container.current, { width: sidebarChartContainerWidth(container.current), height: 300,
             layout: { background: { type: 'solid', color: '#0f172a' }, textColor: '#cbd5e1' }, grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } } });
         try { chart.addCandlestickSeries({ upColor: '#10b981', downColor: '#ef4444', borderVisible: false }).setData(chartData.candles); chart.timeScale().fitContent(); }
         catch (_) { setChartError('Chartdaten sind nicht konsistent'); }
         const resize = new ResizeObserver(() => resizeSidebarChart(chart, container.current, 300)); resize.observe(container.current);
         return () => { resize.disconnect(); chart.remove(); };
-    }, [chartData]);
+    }, [chartData, chartAllowed]);
+    const visibleChart = chartAllowed ? chartData : null;
     const results = scenario?.identity === identity && !invalid ? scenario.data : null;
     return <aside className="detail-sidebar sidebar-wide" style={{ width: 'min(760px, 100%)' }} aria-label="LEAPS-Kontrakt">
         <div className="detail-sidebar-content" style={{ overflowY: 'auto', maxHeight: '100vh', paddingBottom: 40 }}>
             <header className="flex items-start justify-between mb-3"><div><h2 className="text-xl font-bold">{selection.ticker} · LEAPS</h2><p className="text-xs text-gray-500">Kontrakt {contract.id}</p></div><button aria-label="LEAPS schließen" onClick={onClose} className="text-2xl">×</button></header>
             <section aria-label="Basiswertchart" className="mb-4">
                 <h3 className="font-semibold">Basiswertchart · UNDERLYING ONLY</h3>
-                <p className="text-xs mb-2">1D · Quelle: {chartData?.source || 'unbekannt'} · Kerzendatum: {chartData?.chart_freshness?.last_candle_time || 'unbekannt'}</p>
+                <p className="text-xs mb-2">1D · Quelle: {visibleChart?.source || 'unbekannt'} · Kerzendatum: {visibleChart?.chart_freshness?.last_candle_time || 'unbekannt'}</p>
                 {!chartAllowed ? <p role="status">Chart-Zugang nicht freigegeben (bestehendes Chart-Recht).</p> : chartError ? <p role="alert">{chartError}</p> : !chartData ? <p role="status">Basiswertchart wird geladen…</p> : null}
-                <div ref={container} style={{ minHeight: chartAllowed ? 300 : 0, background: '#0f172a', borderRadius: 8 }} />
-                {chartData && <p className="text-xs mt-1">Chartstand: {typeof chartData.chart_as_of === 'number' ? new Date(chartData.chart_as_of * 1000).toISOString() : 'unbekannt'} · {chartData.chart_freshness?.stale === true ? 'datierter Chart' : 'Chart-Frische separat; keine Optionsquote'}</p>}
+                {chartAllowed && <div ref={container} style={{ minHeight: 300, background: '#0f172a', borderRadius: 8 }} />}
+                {visibleChart && <p className="text-xs mt-1">Chartstand: {typeof visibleChart.chart_as_of === 'number' ? new Date(visibleChart.chart_as_of * 1000).toISOString() : 'unbekannt'} · {visibleChart.chart_freshness?.stale === true ? 'datierter Chart' : 'Chart-Frische separat; keine Optionsquote'}</p>}
             </section>
             <section aria-label="Kontraktvergleich" className="border-t pt-3">
                 <h3 className="font-semibold mb-2">Call · Strike ${leapsFormat(contract.strike)} · {contract.expiry}</h3>
@@ -6290,10 +6310,12 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
                 <p className="text-xs">Optionsquelle: {quote.source || 'unbekannt'} · {quote.feed_mode || 'Feed unbekannt'}{quote.feed_lag_s != null ? ` · Feedlag ${quote.feed_lag_s}s` : ''}<br/>Originalquote: <time>{leapsNsDate(quote.source_ns)}</time> · <span data-testid="leaps-validity">{leapsQuoteCurrent(row, now) ? 'Aktuell vergleichbar (n=1)' : 'Datiert · nur hypothetische Algebra'}</span></p>
                 <p className="text-xs mt-1">Aktienquelle: {leapsNsDate(row.stock_reference?.source_ns)} · Ergebnislauf {selection.run_id}</p>
                 <label className="block mt-3 text-sm">Kontraktanzahl <input aria-label="Kontraktanzahl" type="number" min="1" max="1000000" value={quantityText} onChange={event => setQuantityText(event.target.value)} disabled={!scenarioAllowed || invalid} className="border rounded px-2 py-1 w-24 ml-2" /></label>
+                <details className="border rounded p-2 mt-2 text-xs"><summary>Eigener Verfallskurs (optional)</summary><label className="block mt-2">Absoluter Aktienkurs am Verfall (USD)<input aria-label="Eigener Verfallskurs USD" type="text" inputMode="decimal" maxLength="64" placeholder="Leer = Serverszenarien" value={customPriceText} onChange={event => setCustomPriceText(event.target.value)} disabled={!scenarioAllowed || invalid} className="block border rounded px-2 py-1 w-full mt-1" /></label><p>Leer nutzt Serverdefaults; 0 ist ein eigener Kurs. Nur Verfallsszenario, keine Änderung an ASK/Strike/Kontrakt.</p></details>
                 {!scenarioAllowed && <p role="status">Szenarien nicht freigegeben</p>}
                 {!quantityValid && <p role="alert">Ganzzahl 1 bis 1.000.000 erforderlich</p>}
+                {!customPrice.valid && <p role="alert">Nichtnegativen USD-Verfallskurs bis 1e12 mit maximal 12 Nachkommastellen eingeben.</p>}
                 {scenarioError && <p role="alert" className="text-amber-700 mt-2">{scenarioError}</p>}
-                {scenarioAllowed && quantityValid && !results && !scenarioError && <p role="status">Serverszenarien werden geladen…</p>}
+                {scenarioAllowed && quantityValid && customPrice.valid && !results && !scenarioError && <p role="status">Serverszenarien werden geladen…</p>}
                 <p className="text-xs mt-2">Hypothetisch bis Verfall · Gebühren/Slippage unbekannt · Stückzahl ist kein Nachweis ausführbarer Liquidität.</p>
                 {results && <><p className="text-sm mt-2">Debit ({quantity} Kontrakte): <strong>${leapsFormat(results.scenarios?.[0]?.result?.debit)}</strong> · Größenliquidität: {results.requested_size_liquidity || 'unverified'}</p>
                     <div className="overflow-x-auto mt-2"><table className="w-full text-xs"><thead><tr>{['Aktie am Verfall', 'Options-P/L $', 'Prämien-ROI', 'Aktien-P/L $', 'Aktienkurs-ROI'].map(label => <th key={label} className="p-2 text-right">{label}</th>)}</tr></thead><tbody>{results.scenarios.map((point, i) => <tr key={i} className="border-t"><td className="p-2">${leapsFormat(point.terminal)}</td><td className="p-2">{leapsFormat(point.result.pnl)}</td><td className="p-2">{leapsFormat(point.result.premium_roi, 2, true)}</td><td className="p-2">{leapsFormat(point.result.stock_pnl)}</td><td className="p-2">{leapsFormat(point.result.stock_price_roi, 2, true)}</td></tr>)}</tbody></table></div></>}
@@ -6400,11 +6422,12 @@ function App() {
         clearLeapsSelection();
     }, [clearLeapsSelection]);
     useEffect(() => {
-        let disposed = false, controller = null;
+        let disposed = false, controller = null, running = false;
         setLeapsAccess(null); clearLeapsSelection();
         if (!accountIdentity) return;
         const refresh = async () => {
-            controller?.abort(); const request = new AbortController(); controller = request;
+            if (disposed || running) return;
+            running = true; const request = new AbortController(); controller = request;
             try {
                 const policy = await leapsJson('capabilities', {}, request.signal);
                 if (disposed || request.signal.aborted) return;
@@ -6413,7 +6436,8 @@ function App() {
                     clearLeapsSelection();
                     setScanCache(previous => Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith('leaps:v1:'))));
                 }
-            } catch (_) { if (!disposed && !request.signal.aborted) denyLeapsAccess(); }
+            } catch (_) { if (!disposed) denyLeapsAccess(); }
+            finally { running = false; }
         };
         refresh(); const timer = setInterval(refresh, 15000);
         return () => { disposed = true; controller?.abort(); clearInterval(timer); };
