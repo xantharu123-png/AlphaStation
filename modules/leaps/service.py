@@ -5,7 +5,7 @@ completion discovery are injected by the deployment's separately verified
 evidence layer. A checkpoint is trusted local runtime state, NOT a client token.
 """
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date
 from decimal import Decimal
 from hashlib import sha256
@@ -40,6 +40,8 @@ class DiscoveryProvider:
         self.terms_producer=terms_producer
         self.session_producer=session_producer
         self.underlying_loader=underlying_loader or CachedUnderlyingLoader(market)
+        self._comparison_run=None
+        self._comparisons={}
 
 
 _FILTERS={'max_be_rise','max_spread','min_open_interest','min_delta','max_delta'}
@@ -69,8 +71,12 @@ def compare_contract(contract, observation, evidence, run, now_ns):
         raise LeapsDataError('comparison_identity_mismatch','contract')
     assessment=assess_quote(observation,evidence.stock,now_ns=now_ns,verified_session=evidence.session)
     quote=evidence.stock.quote
-    # Actual stock bid, even when dated; its clock and assessment remain visible.
-    price=quote.bid if quote.bid is not None and quote.bid>0 else None
+    # A dated, genuine one-sided bid is a reference, not an executable buy.
+    # Missing/future original time or contradictory positive sides cannot anchor
+    # relative scenarios/ranking. Receipt time never repairs source evidence.
+    valid_source=quote.source_ns is not None and quote.source_ns<=now_ns
+    crossed=quote.bid is not None and quote.ask is not None and quote.ask>0 and quote.bid>quote.ask
+    price=quote.bid if valid_source and not crossed and quote.bid is not None and quote.bid>0 else None
     stock=UnderlyingObservation(evidence.stock.ticker,price,'bid' if price else None,quote.source_ns,quote.feed_mode)
     ask=observation.quote.ask
     be=rise=spread=loss=None
@@ -301,11 +307,29 @@ def _chain_end(state,ticker,complete):
 
 def _snapshot(state,provider,run,*,pause=None):
     now=provider.market.clock_ns()
+    run_key=_fingerprint(run)
+    if provider._comparison_run!=run_key:
+        provider._comparison_run=run_key
+        provider._comparisons={}
+    evidence_keys={ticker:_fingerprint((state['underlyings'][ticker],stock))
+                   for ticker,stock in state['stocks'].items() if ticker in state['underlyings']}
     rows=[]
+    retained={}
     for symbol,option in state['options'].items():
         ticker=option.contract.underlying
         evidence=ComparisonEvidence(state['underlyings'][ticker],state['stocks'][ticker],state['sessions'].get(symbol))
-        rows.append(compare_contract(option.contract,option,evidence,run,now))
+        key=(evidence_keys[ticker],_fingerprint((option,evidence.session)),
+             evidence.stock.quote.source_ns is not None and evidence.stock.quote.source_ns<=now)
+        cached=provider._comparisons.get(symbol)
+        if cached is None or cached[0]!=key:
+            row=compare_contract(option.contract,option,evidence,run,now)
+        else:
+            # Economics depend on immutable original evidence; current source
+            # eligibility still depends on now and must NEVER be cached fresh.
+            row=dict(cached[1],assessment=assess_quote(option,evidence.stock,now_ns=now,verified_session=evidence.session))
+        retained[symbol]=(key,row)
+        rows.append(row)
+    provider._comparisons=retained
     rows.sort(key=lambda row:(row['be_rise'] is None,row['be_rise'] or Decimal(0),row['contract'].id))
     coverage=dict(reference_seen=len(state['references']),reference_total=len(state['references']) if state['reference_complete'] else None,
         reference_complete=state['reference_complete'],reference_duplicates=state['reference_duplicates'],
@@ -400,17 +424,32 @@ def discover(provider,run,checkpoint=None):
                 if symbol not in state['contracts'] or state['contracts'][symbol].underlying!=ticker:
                     state['chain_anomalies'][ticker+':'+symbol]='unmatched_chain_contract'
                     continue  # Chain-only records are never admitted secretly.
-                if symbol in state['observed']:
-                    if state['observed'][symbol]!=raw:
-                        _exclude(state,symbol,'conflicting_chain_observation')
-                    continue
-                state['observed'][symbol]=raw
+                previous=state['options'].get(symbol)
+                if symbol in state['observed'] and symbol in state['exclusions']:
+                    continue  # A proven conflict remains excluded on replay.
                 try:
                     contract=state['contracts'][symbol]
-                    state['options'][symbol]=provider.market.parse_chain_item(raw,contract)
+                    observation=provider.market.parse_chain_item(raw,contract)
+                    if previous is not None:
+                        old,new=previous.quote,observation.quote
+                        # Validate contract binding before considering chronology.
+                        # Metadata-only changes and receipt time are not a new
+                        # quote; original provider time is the sole ordering key.
+                        if replace(new,received_ns=old.received_ns)==old:
+                            continue
+                        if old.source_ns is not None and new.source_ns is not None:
+                            if new.source_ns<old.source_ns:
+                                continue
+                            if new.source_ns==old.source_ns:
+                                raise LeapsDataError('conflicting_chain_observation','provider')
+                        else:
+                            raise LeapsDataError('conflicting_chain_observation','provider')
+                    state['observed'][symbol]=raw
+                    state['options'][symbol]=observation
                     state['sessions'][symbol]=(provider.session_producer(contract,state['stocks'][ticker],provider.market.clock_ns())
                                                if provider.session_producer else None)
                 except LeapsDataError as error:
+                    state['observed'].setdefault(symbol,raw)
                     _exclude(state,symbol,error.code)
             if page.complete:
                 _chain_end(state,ticker,True)

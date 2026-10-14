@@ -147,7 +147,7 @@ def snapshot_identity(snapshot):
     return sha256(json.dumps(_encode(content),sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
 
-def _current_assessment(row, now):
+def _current_assessment(row, now, clock_regressed=False):
     if not isinstance(row,Mapping) or not isinstance(row.get('observation'),OptionQuote) or not isinstance(row.get('assessment'),QuoteAssessment):
         raise LeapsApiError(503,'invalid_store')
     if row.get('contract') != row['observation'].contract or row.get('terms_fingerprint') != row['contract'].terms_fingerprint:
@@ -171,14 +171,21 @@ def _current_assessment(row, now):
             raise LeapsApiError(503,'invalid_store')
     assessment = row['assessment']
     source = row['observation'].quote.source_ns
-    valid = (assessment.comparison_eligible is True and assessment.expiry_ns is not None
-             and now <= assessment.expiry_ns and source is not None and source <= now)
+    stock_source = reference.source_ns
+    valid = (not clock_regressed and assessment.comparison_eligible is True and assessment.expiry_ns is not None
+             and now <= assessment.expiry_ns and source is not None and source <= now
+             and stock_source is not None and stock_source <= now)
     reasons = assessment.reasons if valid or not assessment.comparison_eligible else (*assessment.reasons,'cached_comparison_expired')
+    for label,original in (('option',source),('stock',stock_source)):
+        if original is not None and original>now:
+            reasons=tuple(dict.fromkeys((*reasons,label+'_future_source')))
+    if clock_regressed:
+        reasons=tuple(dict.fromkeys((*reasons,'clock_regression')))
     return replace(assessment,comparison_eligible=valid,reasons=tuple(reasons))
 
 
-def _public_row(row, now):
-    result = dict(row,assessment=_current_assessment(row,now))
+def _public_row(row, now, clock_regressed=False):
+    result = dict(row,assessment=_current_assessment(row,now,clock_regressed))
     result['comparison_scope_quantity'] = 1
     return to_json_value(result)
 
@@ -218,10 +225,30 @@ class LeapsApiService:
         self._lock = threading.Lock()
         self._last_start = None
         self._worker_error = None
+        self._derived = {}
+        self._current_snapshot_ids = set()
 
     def _read(self):
-        with self.store.lock():
-            return self.store._read()
+        state=self.store.read()
+        retained={id(state[key]) for key in ('latest','last_complete') if state[key] is not None}
+        with self._lock:
+            self._current_snapshot_ids=retained
+            self._derived={key:value for key,value in self._derived.items() if key in retained}
+        return state
+
+    def _derived_for(self,snapshot):
+        # Store verifies ACTUAL blob bytes before handing us an immutable object.
+        # Keep at most current latest/complete; no history/universe-sized copies.
+        with self._lock:
+            if id(snapshot) not in self._current_snapshot_ids:
+                return {'snapshot':snapshot,'orders':{}}
+            return self._derived.setdefault(id(snapshot),{'snapshot':snapshot,'orders':{}})
+
+    def _identity(self,snapshot):
+        entry=self._derived_for(snapshot)
+        if 'identity' not in entry:
+            entry['identity']=snapshot_identity(snapshot)
+        return entry['identity']
 
     def _select(self, state, *, view='complete', run_id=None):
         if view not in ('complete','latest'):
@@ -244,17 +271,21 @@ class LeapsApiService:
         if not isinstance(rows,(tuple,list)):
             raise LeapsApiError(503,'invalid_store')
         total = len(rows)
-        now = self.clock_ns()
+        now,regressed=self.store.observe_clock(self.clock_ns)
         coverage = dict(snapshot.coverage)
-        coverage['eligible'] = sum(r.get('filter_status')=='passed' and _current_assessment(r,now).comparison_eligible for r in rows)
-        ordered = _sort_rows(rows,sort_by,order)
-        return {'run_id':snapshot.run.run_id,'snapshot_id':snapshot_identity(snapshot),'status':snapshot.status,
-                'rows':[_public_row(r,now) for r in ordered[offset:offset+limit]],'total':total,
+        coverage['eligible'] = sum(r.get('filter_status')=='passed' and _current_assessment(r,now,regressed).comparison_eligible for r in rows)
+        entry=self._derived_for(snapshot)
+        ordering=(sort_by,order)
+        if ordering not in entry['orders']:
+            entry['orders'][ordering]=_sort_rows(rows,sort_by,order)
+        ordered=entry['orders'][ordering]
+        return {'run_id':snapshot.run.run_id,'snapshot_id':self._identity(snapshot),'status':snapshot.status,
+                'rows':[_public_row(r,now,regressed) for r in ordered[offset:offset+limit]],'total':total,
                 'next_offset':offset+limit if offset+limit<total else None,
                 'coverage':to_json_value(coverage),'reasons':list(snapshot.reasons),'sort_by':sort_by,'order':order}
 
     def status(self):
-        state = self._read()
+        state = self.store.read(metadata=True)
         snapshot = state['latest']
         return {'run_id':snapshot.run.run_id if snapshot else None,'status':snapshot.status if snapshot else 'empty',
                 'progress':to_json_value(snapshot.coverage.get('progress')) if snapshot else None,
@@ -265,14 +296,15 @@ class LeapsApiService:
     def scenarios(self, body):
         state = self._read()
         snapshot = next((s for s in (state['latest'],state['last_complete']) if s is not None
-                         and s.run.run_id==body['run_id'] and snapshot_identity(s)==body['snapshot_id']),None)
+                         and s.run.run_id==body['run_id'] and self._identity(s)==body['snapshot_id']),None)
         if snapshot is None:
             raise LeapsApiError(409,'stale_snapshot')
         matches = [r for r in snapshot.data.get('comparisons',()) if r.get('contract') and r['contract'].id==body['contract_id']]
         if len(matches)!=1:
             raise LeapsApiError(409,'stored_contract_unavailable')
         row = matches[0]
-        public = _public_row(row,self.clock_ns())
+        now,regressed=self.store.observe_clock(self.clock_ns)
+        public = _public_row(row,now,regressed)
         if not row['assessment'].algebra_eligible:
             raise LeapsApiError(422,'no_valid_stored_ask')
         option, quantity = row['observation'], body['quantity']

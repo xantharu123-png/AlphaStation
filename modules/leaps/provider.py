@@ -8,6 +8,8 @@ Admission owns the cross-process lease; provider-local serialization is not a
 replacement. Every attempted request, including retries and SEC, acquires it.
 """
 from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -206,6 +208,20 @@ class MassiveLeapsProvider:
         self._seen = {}
         self.request_count = 0
         self._request_ceiling = None
+        self._attempt_scope = ContextVar('leaps_attempt_scope', default=None)
+
+    @contextmanager
+    def bound_attempts(self, scope):
+        """Trusted call-local reservation scope; never a shared mutable guard.
+
+        Runtime holds its control lock only through admission, not physical IO.
+        Context reset also protects later unbound probe/direct-provider calls.
+        """
+        token=self._attempt_scope.set(scope)
+        try:
+            yield
+        finally:
+            self._attempt_scope.reset(token)
 
     def _request(self, path, params=None, *, scope='market', user_agent=None):
         origin = 'https://api.massive.com' if scope == 'market' else 'https://data.sec.gov'
@@ -221,7 +237,9 @@ class MassiveLeapsProvider:
             for attempt in range(2):
                 if self._request_ceiling is not None and self.request_count >= self._request_ceiling:
                     raise _error('probe_request_limit')
-                decision = self.admission.try_acquire(scope)
+                attempt_scope=self._attempt_scope.get()
+                with attempt_scope() if attempt_scope is not None else nullcontext():
+                    decision = self.admission.try_acquire(scope)
                 if decision.allowed is not True:
                     raise _error('admission_denied')
                 retry = False
