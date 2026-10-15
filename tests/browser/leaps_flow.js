@@ -76,7 +76,7 @@ async function main() {
         if (state.capabilityHold) await new Promise(resolve => state.capabilityReleases.push(resolve));
         return respond(reply);
       }
-      if (url.pathname === '/api/leaps/status') return respond({ run_id: state.activeRun, status: state.status, terminal:false,resumable:state.status==='paused',restartable:!['queued','running'].includes(state.status),market_date:'2026-10-14',filters:{},progress: { completed: 3, total: 22, phase: 'chain' }, reasons: [], last_complete_run_id: state.run, worker_error: null });
+      if (url.pathname === '/api/leaps/status') return respond({ run_id: state.activeRun, status: state.status, automatic_wait:state.automaticWait===true,terminal:false,resumable:state.status==='paused',restartable:!['queued','running'].includes(state.status),market_date:'2026-10-14',filters:{},progress: { completed: 3, total: 22, phase: 'chain' }, reasons: [], last_complete_run_id: state.run, worker_error: null });
       if (url.pathname === '/api/leaps/results') {
         const query = Object.fromEntries(url.searchParams); state.reads.push(query);
         const saved = { run_id: query.view === 'latest' ? state.latestRun : state.run, snapshot_id: state.snapshot, status: query.view === 'latest' ? 'partial' : 'complete', rows: Array.from({ length: 22 }, (_, i) => row(i)), total: 22, next_offset: null, coverage: { eligible: 22 }, reasons: [], sort_by: query.sort_by, order: query.order };
@@ -104,7 +104,7 @@ async function main() {
       if (url.pathname === '/api/leaps/control' || url.pathname === '/api/leaps/scan') {
         const body = request.postDataJSON(); state.posts.push(body);
         assert.equal(state.admin, true); if (body.action) assert.equal(body.run_id, state.activeRun);
-        state.status = body.action === 'pause' ? 'paused' : 'queued'; const acknowledgment = {run_id:state.activeRun,status:state.status}, rejected=state.holdControlError;
+        state.status = body.action === 'pause' ? 'paused' : 'queued'; state.automaticWait=false; const acknowledgment = {run_id:state.activeRun,status:state.status}, rejected=state.holdControlError;
         if (state.holdControl) await new Promise(resolve => { state.releaseControl=resolve; });
         return rejected ? respond({detail:{reason:'old_control_error'}},409) : respond(acknowledgment);
       }
@@ -132,12 +132,23 @@ async function main() {
     await navigateMenu('LEAPS');
     const scanner = page.getByRole('region', { name: 'LEAPS Scanner', exact: true });
     await scanner.getByRole('table', { name: 'LEAPS Kontrakte' }).waitFor();
+    assert.equal(state.reads[0].sort_by, 'extrinsic_annual_fraction', 'initial ranking uses server annual extrinsic');
     assert.equal(await scanner.getByRole('progressbar').count(), 1);
     assert.equal(await scanner.locator('details[open]').count(), 0);
     assert.match(await scanner.innerText(), /Letzter vollständiger Ergebnislauf run-A/);
     assert.equal(await page.locator('#boot-error-overlay').count(), 0);
     assert.ok((await page.locator('#root').innerText()).length > 100);
     assert.ok(!/WATCH|JETZT kaufen|JETZT_TRADEN/.test(await scanner.innerText()));
+    state.status='paused'; state.automaticWait=true;
+    await scanner.getByRole('button',{name:'Neu laden',exact:true}).click();
+    await scanner.getByRole('button',{name:'Pause',exact:true}).click();
+    assert.equal(state.posts.at(-1).action,'pause');
+    // The POST precedes the following status response/React commit. Wait for
+    // the actual disabled state, not merely the already-visible button.
+    await page.waitForFunction(button => button.disabled,
+      await scanner.getByRole('button',{name:'Pause',exact:true}).elementHandle());
+    assert.equal(await scanner.getByRole('button',{name:'Pause',exact:true}).isDisabled(),true);
+    state.status='running'; await scanner.getByRole('button',{name:'Neu laden',exact:true}).click();
     const screenshot = async label => { const file = path.resolve(args.output, `${viewport.width}-${label}.png`); await page.screenshot({ path: file, fullPage: false }); summary.screenshots.push(file); };
     await screenshot('saved-results');
     const open = async id => { await scanner.getByRole('button', { name: `Basiswertchart ${id}`, exact: true }).click(); return page.getByRole('complementary', { name: 'LEAPS-Kontrakt' }); };
@@ -180,7 +191,7 @@ async function main() {
     await scanner.getByLabel('Ergebnisstand', { exact: true }).selectOption('latest'); await scanner.getByText(/Gespeichert: run-B/).waitFor(); state.scenarioDelay = 0; detail = await open('call-0'); await detail.getByText(/Ergebnislauf run-B/).waitFor(); await pause(800); assert.ok(!/999\.00/.test(await detail.innerText()));
     await detail.getByRole('button', { name: 'LEAPS schließen' }).click();
     await scanner.getByRole('button', { name: 'Pause', exact: true }).click(); await scanner.getByRole('button', { name: 'Fortsetzen', exact: true }).waitFor({ state: 'visible' });
-    await scanner.getByRole('button', { name: 'Fortsetzen', exact: true }).click(); assert.equal(state.posts.filter(item => item.action).length, 2);
+    await scanner.getByRole('button', { name: 'Fortsetzen', exact: true }).click(); assert.equal(state.posts.filter(item => item.action).length, 3);
     // A late control acknowledgment for B cannot overwrite newly observed active C.
     state.holdControl = true; await scanner.getByRole('button',{name:'Pause',exact:true}).click();
     while (!state.releaseControl) await pause(10);
@@ -203,8 +214,10 @@ async function main() {
     // Fresh login with null legacy tabs cannot grant LEAPS by itself.
     state.result403 = false; state.capabilities = { ...policy(false), enabled: false }; state.admin = false; await page.reload({ waitUntil: 'networkidle' });
     await page.getByRole('button', { name: 'Navigation öffnen', exact: true }).count(); assert.equal(await page.locator('.mega-item-name,.mobile-nav-item-name').filter({ hasText: /^LEAPS$/ }).count(), 0);
-    state.capabilities = policy(false); await page.reload({ waitUntil: 'networkidle' }); await navigateMenu('LEAPS'); await scanner.getByRole('button', { name: 'Start', exact: true }).waitFor();
-    assert.equal(await scanner.getByRole('button', { name: 'Start', exact: true }).isDisabled(), true); assert.match(await scanner.innerText(), /Nur Admin/);
+    state.capabilities = policy(false); await page.reload({ waitUntil: 'networkidle' }); await navigateMenu('LEAPS'); await scanner.getByRole('table', { name: 'LEAPS Kontrakte' }).waitFor();
+    for (const name of ['Start', 'Pause', 'Fortsetzen']) assert.equal(await scanner.getByRole('button', { name, exact: true }).count(), 0, 'admin controls are absent for readers');
+    assert.equal(await scanner.getByRole('group', { name: 'Optionale Filter für einen neuen Lauf' }).count(), 0);
+    assert.ok(!/Nur Admin|Aktiver Lauf:|Gespeichert: run-|Ergebnislauf run-/.test(await scanner.innerText()), 'reader status hides raw run metadata');
     state.tabs = ['scanner']; state.capabilities.endpoint_capabilities.scenarios = false; await page.reload({ waitUntil: 'networkidle' }); await navigateMenu('LEAPS');
     const chartRequests = summary.requests.filter(item => item.path === '/api/chart-data').length;
     detail = await open('call-0'); await detail.getByText(/Chart-Zugang nicht freigegeben/).waitFor(); assert.match(await detail.innerText(), /Szenarien nicht freigegeben/); assert.equal(await detail.getByLabel('Kontraktanzahl', {exact:true}).isDisabled(),true);
@@ -246,7 +259,9 @@ async function main() {
     if (args['review-case'] !== 'chart' && args['review-case'] !== 'custom') {
       detail=await open('call-0'); await detail.getByText('Chart-Zugang nicht freigegeben',{exact:true}).waitFor();
       state.capabilityHold=true; const beforeRenewal=state.capabilityRequests;
-      await page.clock.pauseAt(await page.evaluate(()=>Date.now())); await page.clock.fastForward(15000);
+      // fastForward works with the running clock. pauseAt(Date.now()) races
+      // the browser protocol and can try to move the clock into the past.
+      await page.clock.fastForward(15000);
       while(!state.capabilityReleases.length) await pause(10);
       assert.equal(state.capabilityRequests,beforeRenewal+1,'one renewal request only');
       await page.clock.fastForward(20001); await scanner.waitFor({state:'detached'});

@@ -1,5 +1,45 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 15.10.2026 – Freigegebene Claude-Korrekturen umgesetzt; Anbieter folgt danach
+
+Nutzerauftrag: umsetzen, **anschließend** IBKR/Optionsdatenanbieter besprechen.
+[Änderungen und offene Produktionsschritte](docs/LEAPS_CLAUDE_REPAIRS_2026-10-15.md).
+
+- [x] Delta/IV-Normalisierung inklusive echter Modellpräzision durch alle
+  Rechenstufen; einfache Anbieterfeld-Terms an Discovery angeschlossen.
+- [x] Automatisches temporäres Warten bei 429/Budget/Priorität; echtes
+  Retry-After vom isolierten Transport, begrenzter Backoff, fünfmal 429 führt
+  zu gespeichertem Teillauf. Manuelle Pause und 401/403 bleiben getrennt.
+- [x] ET-Mitternacht, Probe-Datum, SEC-/Adjustierungs-Checkpoint und
+  Clock-Fehlerzustand korrigiert; bestehendes vollständiges Ergebnis bleibt.
+- [x] Keine Rang-/Filterfreigabe aus alten, verzögerten oder zeitversetzten
+  Preisen; Prüfung vor globaler Pagination, isolierter Ask-Payoff bleibt möglich.
+- [x] Zeitwert/BE p.a., Delta-Hebel, adjustierte Jahres-HV und Volumen ergänzt;
+  kompakte LEAPS-UI mit Prämienrisiko und Server-Payoff. Andere Scanner/
+  Mailgrenzen und Landingpage-Texte unverändert gelassen.
+- [x] Vor dem Push Altdatei-Kompatibilität abgesichert: Quotes in Schema 1 ohne
+  die drei neuen Volumenfelder bleiben lesbar; sechs Regressionen PASS.
+- [x] LEAPS-Zwischenlauf 1.115 PASS; Desktop-/Mobil-Browserflüsse einschließlich
+  echter synthetischer Backend-DTOs bestanden. Zwei unabhängige Review-Befunde
+  (Payoff-Interpolation, Pause während automatischer Wartezeit) mit RED/GREEN
+  behoben und nachgeprüft; 41 gezielte Tests PASS. Bundle `6dbad8f2e7ae` geprüft.
+- [x] Projektweiter Nachlauf nach Altdatei-Korrektur: **14.455 PASS,
+  7 plattformbedingte SKIP, 0 FAIL/ERROR** in 1.313,09 Sekunden; darin
+  **1.123 LEAPS-Tests PASS**. `output/lh/qa-d20590f0cc11/results.xml`.
+  Separater isolierter Veröffentlichungsstand: **1.155 PASS**, kein Skip/Fehler.
+  Keine LEAPS-Skips. Skip-Namen/Gründe und Browserbelege im Prüfbericht.
+  Vorheriger Gesamtlauf bei 39 % für Review-Korrekturen kontrolliert beendet,
+  kein vollständiges Ergebnis daraus ableiten.
+- [ ] Danach Anbieter/Datenrechte und realen Leseadapter festlegen; tatsächliche
+  Market-Cap-/Dollarvolumen-Anreicherung, Referenzcache und BG-Nachtlauf daran
+  anschließen. Kein Abo, kein Broker-/Server-/Mailabruf oder Produktivlauf in
+  dieser Runde. Nur echte Bid/Ask; keine erneute Frage nach vorhandenem IBKR.
+- [ ] Eigene Änderungen noch nicht committet/gepusht; Hetzner unverändert.
+  Umfangreiches geerbtes WIP nicht pauschal stagen oder überschreiben.
+  Nutzer hat Commit/Push jetzt ausdrücklich beauftragt. Index enthält nur das
+  abgegrenzte LEAPS-Paket, einschließlich sechs Altdatei-Regressionen. Isolierter
+  Veröffentlichungstest: 1.155 PASS; Bundle `37129d2f1112`; Desktop/Mobil grün.
+
 ## 12.10.2026 – TBBB/PLTR: Schlusskurs-Versand lokal korrigiert, Veröffentlichung offen
 
 - [x] Nutzerauftrag „erledigen“: ausschließlich bestätigte Schlusskurs-Ausbrüche

@@ -128,7 +128,7 @@ def test_persistent_runner_new_runs_refresh_facts_without_start_io(tmp_path, mon
 @pytest.mark.parametrize('status,phase,day,expected', [
     ('partial','done',date(2026,10,13),(True,False,True)),
     ('partial','chain',date(2026,10,13),(False,True,True)),
-    ('paused','chain',date(2026,10,12),(False,False,True)),
+    ('paused','chain',date(2026,10,12),(False,True,True)),
 ])
 def test_status_separates_terminal_resumable_restartable(tmp_path,status,phase,day,expected):
     store = LeapsStore(tmp_path, write_json_atomic, clock_ns=lambda: NOW)
@@ -169,7 +169,8 @@ def test_calendar_maturity_filter_uses_stored_market_date_not_365_days(expiry,ex
     c=replace(contract(),expiry=expiry)
     option=replace(original['observation'],contract=c)
     stock=StockQuote('SOFI',Market().underlying_quote('SOFI'))
-    value=compare_contract(c,option,ComparisonEvidence(original['underlying'],stock,None),dated,NOW)
+    from tests.fixtures.leaps.discovery import session
+    value=compare_contract(c,option,ComparisonEvidence(original['underlying'],stock,session(c,stock,NOW)),dated,NOW)
     assert value['filter_status']==expected
     assert value['remaining_term']=={'basis_date':date(2026,1,31),'days':(expiry-date(2026,1,31)).days}
 
@@ -181,7 +182,8 @@ def test_underlying_active_filters_use_dated_completed_evidence_not_quote_vs_ema
                open=D(100+i),high=D(102+i),low=D(99+i),close=D(101+i),volume=D(1000)) for i in range(210)]
     quality=build_underlying_evidence('SOFI',completed_bars=bars,facts=None,sources=(),as_of=run().market_date)
     filtered=replace(run(),filters={'min_underlying_price':D(20),'max_underlying_price':D(20),'close_above_ema200':True})
-    evidence=ComparisonEvidence(quality,stock,None)
+    from tests.fixtures.leaps.discovery import session
+    evidence=ComparisonEvidence(quality,stock,session(contract(),stock,NOW))
     result=compare_contract(contract(),original['observation'],evidence,filtered,NOW)
     assert result['filter_status']=='passed'  # quote20 < EMA, but completed close310 > EMA
     assert quality.indicators['completed_close']==D(310)
@@ -236,8 +238,10 @@ def test_actual_backend_native_recovery_preserves_run_binding(tmp_path,monkeypat
             assert runner.run_slice().status=='complete'
             return
         clock.now+=86400*10**9
-        assert not backend.status()['resumable'] and backend.status()['restartable']
-        with pytest.raises(Exception,match='stale_run'): runner.resume(run().run_id)
+        assert backend.status()['resumable'] and backend.status()['restartable']
+        resumed=runner.resume(run().run_id)
+        assert resumed.run.market_date==run().market_date
+        runner.pause(run().run_id)
     current=replace(run(),run_id='replacement',market_date=run().market_date+timedelta(days=case=='stale_paused'))
     before=list(transport.calls)
     ack=backend.scan(current)

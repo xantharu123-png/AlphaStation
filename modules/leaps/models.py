@@ -137,7 +137,7 @@ class GreeksObservation(_Immutable):
     source_ns: int | None = None
 
     def __post_init__(self):
-        from .contracts import parse_decimal
+        from .contracts import parse_greek_decimal
         for name in ("delta", "iv"):
             value = getattr(self, name)
             if not self.units_evidence or self.units_evidence.get(name) != "fraction":
@@ -145,7 +145,7 @@ class GreeksObservation(_Immutable):
             elif value is not None:
                 if not isinstance(value, Decimal):
                     raise LeapsDataError("invalid_greek_decimal", "contract")
-                parse_decimal(value)
+                parse_greek_decimal(value)
                 if (name == "delta" and not -1 <= value <= 1) or (name == "iv" and value < 0):
                     raise LeapsDataError("invalid_greek_fraction", "contract")
         super().__post_init__()

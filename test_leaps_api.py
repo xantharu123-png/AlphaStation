@@ -467,10 +467,10 @@ def sorting_row(ticker,strike,ask,delta=None,open_interest=None):
 @pytest.mark.parametrize('field',['break_even','be_rise','delta','open_interest'])
 @pytest.mark.parametrize('order,expected',[('asc',['AAA','BBB','CCC']),('desc',['BBB','AAA','CCC'])])
 def test_server_global_sort_before_pagination_raw_decimal_zero_and_unknown_last(monkeypatch,tmp_path,field,order,expected):
-    nine = sorting_row('AAA',3,D(6),D(0),0)
-    ten = sorting_row('BBB',4,D(6),D(1),10)
-    missing = sorting_row('CCC',5,None)
-    assert nine['break_even']==D(9) and ten['break_even']==D(10)
+    nine = sorting_row('AAA',18,D(6),D(0),0)
+    ten = sorting_row('BBB',19,D(6),D(1),10)
+    missing = sorting_row('CCC',20,None)
+    assert nine['break_even']==D(24) and ten['break_even']==D(25)
     enabled(monkeypatch,tmp_path,rows=[ten,missing,nine])
     pages = [request(f'/api/leaps/results?limit=1&offset={offset}&sort_by={field}&order={order}') for offset in range(3)]
     assert all(response.status_code==200 for response in pages)
@@ -481,8 +481,8 @@ def test_server_global_sort_before_pagination_raw_decimal_zero_and_unknown_last(
 @pytest.mark.parametrize('field',['underlying','ticker','strike','expiry','cost_per_contract','spread'])
 @pytest.mark.parametrize('order',['asc','desc'])
 def test_sort_whitelist_and_stable_contract_id_ties(monkeypatch,tmp_path,field,order):
-    first = sorting_row('AAA',3,D(9))
-    second = sorting_row('BBB',3,D(10))
+    first = sorting_row('AAA',18,D(9))
+    second = sorting_row('BBB',18,D(10))
     enabled(monkeypatch,tmp_path,rows=[second,first])
     result = request(f'/api/leaps/results?sort_by={field}&order={order}').json()
     expected = ['AAA','BBB'] if order=='asc' or field in ('strike','expiry') else ['BBB','AAA']
@@ -496,8 +496,10 @@ def test_sort_schema_rejects_unsupported_field_or_direction(monkeypatch,tmp_path
     assert request('/api/leaps/results?'+query).status_code==422
 
 
-def test_default_sort_remains_raw_be_rise_ascending(monkeypatch,tmp_path):
-    nine = sorting_row('AAA',3,D(6))
-    ten = sorting_row('BBB',4,D(6))
+def test_default_sort_is_annual_extrinsic_ascending(monkeypatch,tmp_path):
+    nine = sorting_row('AAA',18,D(6))
+    ten = sorting_row('BBB',19,D(6))
     enabled(monkeypatch,tmp_path,rows=[ten,nine])
-    assert [r['contract']['underlying'] for r in request('/api/leaps/results').json()['rows']]==['AAA','BBB']
+    result = request('/api/leaps/results').json()
+    assert result['sort_by']=='extrinsic_annual_fraction'
+    assert [r['contract']['underlying'] for r in result['rows']]==['AAA','BBB']

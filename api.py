@@ -48446,7 +48446,7 @@ async def api_leaps_capabilities(request: Request):
 @app.get("/api/leaps/results")
 async def api_leaps_results(request: Request, limit: int = 50, offset: int = 0,
                             view: str = "complete", run_id: Optional[str] = None,
-                            sort_by: str = "be_rise", order: str = "asc"):
+                            sort_by: str = "extrinsic_annual_fraction", order: str = "asc"):
     await _leaps_access(request, "results")
     token=_leaps_read_claim(request,'results')
     return await _leaps_call("results", _read_token=token, limit=limit, offset=offset, view=view, run_id=run_id,

@@ -61,7 +61,7 @@ def test_comparison_preserves_exact_be_rise_ask_stock_basis_and_scenarios():
     assert result['stock_reference'].source_ns==NOW-1
     assert result['assessment'].comparison_eligible
     assert len(result['scenarios'])==6 and result['scenarios'][0]['result'].pnl==D('-520')
-    assert result['greeks'].delta is None
+    assert result['greeks'].delta == D('.6') and result['greeks'].iv == D('.4')
     assert result['filter_status']=='passed' and result['terms_fingerprint']==contract().terms_fingerprint
 
 
@@ -69,7 +69,7 @@ def test_ask_only_algebra_and_missing_filter_evidence_stay_visible():
     r=comparison(stock=False,proof=False,filters={'max_be_rise':'0.2','min_delta':'0.5'})
     assert r['break_even']==D('20.2') and r['be_rise'] is None
     assert r['assessment'].algebra_eligible and not r['assessment'].comparison_eligible
-    assert r['filter_status']=='missing_evidence' and r['filter_missing']==('max_be_rise','min_delta')
+    assert r['filter_status']=='missing_evidence' and r['filter_missing']==('max_be_rise',)
 
 
 def test_strict_filter_bounds_raw_unrounded_and_fingerprint():

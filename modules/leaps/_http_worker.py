@@ -7,9 +7,28 @@ Parent enforces total startup/DNS/connect/headers/body deadline and observes exi
 import json
 import socket
 import sys
+import re
+from datetime import timezone
+from email.utils import parsedate_to_datetime, format_datetime
 from urllib.parse import urlsplit
 
 LIMIT=8*1024*1024
+
+
+def _safe_retry_after(value):
+    """Only bounded standard delay/date metadata may cross the child wire."""
+    if not isinstance(value,str) or not 1 <= len(value) <= 128 or any(ord(c)<32 or ord(c)>126 for c in value):
+        return None
+    value=value.strip()
+    if re.fullmatch('[0-9]{1,10}',value):
+        return str(int(value)) if int(value)<=2**31 else None
+    try:
+        parsed=parsedate_to_datetime(value)
+        if parsed.tzinfo is not None and 0 <= parsed.timestamp() < 10**11:
+            return format_datetime(parsed.astimezone(timezone.utc),usegmt=True)
+    except (ValueError,TypeError,OverflowError):
+        pass
+    return None
 
 
 def execute():
@@ -40,7 +59,12 @@ def execute():
         try:
             with session.get(url,headers=headers,timeout=(3,10),allow_redirects=False,stream=True) as response:
                 if response.status_code!=200:
-                    return {'status':response.status_code},b''
+                    meta={'status':response.status_code}
+                    if response.status_code==429:
+                        retry_after=_safe_retry_after(response.headers.get('Retry-After'))
+                        if retry_after is not None:
+                            meta['retry_after']=retry_after
+                    return meta,b''
                 # Reject BEFORE any decompression allocation. Identity's raw
                 # body equals decoded body; compressed JSON is not silently lost.
                 if response.headers.get('Content-Encoding','identity').strip().lower() not in ('','identity'):

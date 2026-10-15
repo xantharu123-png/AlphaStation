@@ -153,7 +153,9 @@ def test_rank_is_raw_be_rise_with_stable_contract_id_and_null_last():
 
 
 def test_filter_unknown_stays_visible_and_counter_separate_from_eligible():
-    snap=finish(wrapper(Market()),replace(run(),filters={'min_delta':'0.2'}))
+    market=Market()
+    market.chains['SOFI'][0][0].pop('greeks')
+    snap=finish(wrapper(market),replace(run(),filters={'min_delta':'0.2'}))
     assert snap.coverage['filter_unknown']==1 and snap.coverage['eligible']==0
     assert len(snap.data['comparisons'])==1 and snap.data['comparisons'][0]['filter_status']=='missing_evidence'
 
@@ -302,7 +304,7 @@ def test_malformed_persisted_underlying_progress_rejected_before_any_new_request
     assert len(p.market.calls)==before
 
 
-def test_sec_http429_stays_authority_local_and_does_not_pause_market_discovery():
+def test_sec_http429_waits_without_discarding_pending_underlying():
     from modules.leaps.provider import MassiveLeapsProvider
     from modules.leaps.underlying import CachedUnderlyingLoader
     from tests.fixtures.leaps.provider import Admission, Transport, Response, capability
@@ -312,13 +314,15 @@ def test_sec_http429_stays_authority_local_and_does_not_pause_market_discovery()
     source=MassiveLeapsProvider(transport,lambda:NOW,admission,capability())
     m.company_facts=source.company_facts
     p=wrapper(m,underlying_loader=CachedUnderlyingLoader(m,configured_sec_user_agent='Synthetic Research'))
-    snap=finish(p)
-    assert snap.status=='complete' and snap.coverage['parsed']==snap.coverage['eligible']==2
-    assert len(transport.calls)==1 and not snap.data['pending_underlyings']
-    for evidence in snap.data['underlyings'].values():
-        assert evidence.facts['score'] is None
-        assert {'authority':'sec','reason':'rate_limited'} in evidence.coverage['provider_failures']
-    # Provider authority state was not silently reset by loader or discovery.
+    snap=None
+    for _ in range(12):
+        snap=service().discover(p,run(),snap.cursor if snap else None)
+        if snap.status=='paused':
+            break
+    assert snap.status=='paused' and snap.coverage['parsed']==0
+    assert len(transport.calls)==1
+    assert next(iter(snap.data['pending_underlyings'].values()))=={'authority':'sec','reason':'rate_limited'}
+    # Before the retry deadline, no extra physical request is made.
     with pytest.raises(LeapsDataError,match='rate_limited'):
         source.company_facts('789',configured_sec_user_agent='Synthetic Research')
     assert len(transport.calls)==1

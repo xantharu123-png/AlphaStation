@@ -6160,7 +6160,7 @@ function leapsControlReason(policy, action, status) {
     if (policy?.endpoint_capabilities?.[action === 'scan' ? 'scan' : 'control'] !== true) return 'Steuerung nicht freigegeben';
     if (action !== 'pause' && (!policy?.display_rights_verified || !['reference', 'option_quotes', 'standard_terms', 'sessions', 'budget'].every(key => policy?.capabilities?.[key] === true))) return 'Daten-/Budgetnachweis fehlt';
     if (action !== 'scan' && !status?.run_id) return 'Kein aktiver Lauf';
-    if (action === 'pause' && (!['queued', 'running'].includes(status?.status) || status?.terminal === true)) return 'Lauf nicht aktiv';
+    if (action === 'pause' && ((!['queued', 'running'].includes(status?.status) && status?.automatic_wait !== true) || status?.terminal === true)) return 'Lauf nicht aktiv';
     if (action === 'resume' && status?.resumable !== true) return 'Nicht fortsetzbar; neuen Lauf starten';
     if (action === 'scan' && status && status.restartable !== true) return 'Bestehender Lauf zuerst pausieren';
     return '';
@@ -6171,6 +6171,10 @@ const LEAPS_FILTER_FIELDS = [
     ['min_maturity_months', 'Min. Laufzeit Monate (12–24)'], ['max_maturity_months', 'Max. Laufzeit Monate (12–24)'],
     ['min_underlying_price', 'Min. Aktienreferenz USD'], ['max_underlying_price', 'Max. Aktienreferenz USD'],
 ];
+function leapsInitialFilters() {
+    return { min_delta_percent: '70', max_delta_percent: '85', max_spread_percent: '10',
+        min_open_interest: '100', min_underlying_price: '10' };
+}
 function leapsFilterBody(values) {
     const filters = {};
     for (const [key] of LEAPS_FILTER_FIELDS) if (typeof values[key] === 'string' && values[key].trim()) filters[key] = values[key].trim();
@@ -6215,6 +6219,40 @@ function leapsFormat(value, digits = 2, percent = false) {
 function leapsNsDate(ns) {
     if (typeof ns !== 'string' || !/^\d+$/.test(ns)) return 'unbekannt';
     try { return new Date(Number(BigInt(ns) / 1000000n)).toISOString().replace('T', ' ').replace('Z', ' UTC'); } catch (_) { return 'unbekannt'; }
+}
+function leapsShortDate(ns) {
+    const value = leapsNsDate(ns);
+    return value === 'unbekannt' ? value : value.slice(0, 10);
+}
+function leapsRunState(value) {
+    return ({ queued: 'Wartet', running: 'Läuft', paused: 'Pausiert', partial: 'Teilstand', complete: 'Abgeschlossen', failed: 'Fehlgeschlagen', cancelled: 'Abgebrochen' })[value] || 'Unbekannt';
+}
+function leapsAnalyticsSummary(analytics) {
+    const leverage = leapsFormat(analytics?.delta_leverage);
+    return { extrinsicAnnual: leapsFormat(analytics?.extrinsic_annual_fraction, 2, true),
+        requiredAnnual: leapsFormat(analytics?.break_even_annual_required_stock_return, 2, true),
+        deltaLeverage: leverage === '–' ? leverage : `${leverage}×` };
+}
+function leapsPremiumSummary(results) {
+    const debit = leapsFormat(results?.scenarios?.[0]?.result?.debit);
+    return `Prämie ${debit} USD · maximaler Prämienverlust ${debit} USD`;
+}
+function leapsPayoffPresentation(scenarios) {
+    if (!Array.isArray(scenarios) || scenarios.length < 2 || scenarios.length > 100) return null;
+    const decimal = value => typeof value === 'string' && /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value) && Number.isFinite(Number(value));
+    if (scenarios.some(point => !decimal(point?.terminal) || !decimal(point?.result?.pnl))) return null;
+    // Binary numbers are SVG coordinates only. Exact server prices/P&L remain
+    // untouched for labels; never derive a payoff, debit or return in the UI.
+    const values = scenarios.map(point => ({ terminal: point.terminal, pnl: point.result.pnl,
+        px: Number(point.terminal), py: Number(point.result.pnl) })).sort((a, b) => a.px - b.px);
+    const minX = values[0].px, maxX = values[values.length - 1].px;
+    if (minX === maxX) return null;
+    const minY = Math.min(0, ...values.map(point => point.py)), maxY = Math.max(0, ...values.map(point => point.py));
+    const coordinate = value => Number(value.toFixed(2));
+    const y = value => coordinate(114 - (value - minY) / (maxY - minY || 1) * 100);
+    const points = values.map(point => ({ x: coordinate(24 + (point.px - minX) / (maxX - minX) * 312),
+        y: y(point.py), terminal: point.terminal, pnl: point.pnl }));
+    return { points, zeroY: y(0) };
 }
 function leapsQuoteCurrent(row, nowMs = Date.now()) {
     const source = row?.observation?.quote?.source_ns, expiry = row?.assessment?.expiry_ns;
@@ -6267,6 +6305,7 @@ function useLeapsClock() {
 /** Selection DTO: {kind:'leaps',ticker,run_id,snapshot_id,row:server comparison}. */
 function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenied }) {
     const row = selection.row, contract = row.contract, quote = row.observation.quote;
+    const admin = policy?.admin === true, metrics = leapsAnalyticsSummary(row.analytics);
     const now = useLeapsClock();
     const evidence = leapsEvidenceSummary(row.underlying);
     const [quantityText, setQuantityText] = useState('1');
@@ -6324,9 +6363,10 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
     }, [chartData, chartAllowed]);
     const visibleChart = chartAllowed ? chartData : null;
     const results = scenario?.identity === identity && !invalid ? scenario.data : null;
+    const payoff = leapsPayoffPresentation(results?.scenarios);
     return <aside className="detail-sidebar sidebar-wide" style={{ width: 'min(760px, 100%)' }} aria-label="LEAPS-Kontrakt">
         <div className="detail-sidebar-content" style={{ overflowY: 'auto', maxHeight: '100vh', paddingBottom: 40 }}>
-            <header className="flex items-start justify-between mb-3"><div><h2 className="text-xl font-bold">{selection.ticker} · LEAPS</h2><p className="text-xs text-gray-500">Kontrakt {contract.id}</p></div><button aria-label="LEAPS schließen" onClick={onClose} className="text-2xl">×</button></header>
+            <header className="flex items-start justify-between mb-3"><div><h2 className="text-xl font-bold">{selection.ticker} · LEAPS</h2>{admin && <p className="text-xs text-gray-500">Kontrakt {contract.id}</p>}</div><button aria-label="LEAPS schließen" onClick={onClose} className="text-2xl">×</button></header>
             <section aria-label="Basiswertchart" className="mb-4">
                 <h3 className="font-semibold">Basiswertchart · UNDERLYING ONLY</h3>
                 <p className="text-xs mb-2">1D · Quelle: {visibleChart?.source || 'unbekannt'} · Kerzendatum: {visibleChart?.chart_freshness?.last_candle_time || 'unbekannt'}</p>
@@ -6341,40 +6381,43 @@ function LeapsContractDetail({ selection, policy, chartAllowed, onClose, onDenie
                     <p>Optionsprämie (ASK)<br/><strong>${leapsFormat(quote.ask)} je Aktie</strong><br/><span className="text-xs">100 Aktien · Multiplikator 100</span></p>
                     <p>Break-even am Verfall<br/><strong>${leapsFormat(row.break_even)}</strong></p><p>Roh-BE-Anstieg<br/><strong>{leapsFormat(row.be_rise, 2, true)}</strong></p>
                 </div>
-                <p className="text-xs">Optionsquelle: {quote.source || 'unbekannt'} · {quote.feed_mode || 'Feed unbekannt'}{quote.feed_lag_s != null ? ` · Feedlag ${quote.feed_lag_s}s` : ''}<br/>Originalquote: <time>{leapsNsDate(quote.source_ns)}</time> · <span data-testid="leaps-validity">{leapsQuoteCurrent(row, now) ? 'Aktuell vergleichbar (n=1)' : row.assessment?.algebra_eligible === true ? 'Datiert · nur hypothetische Algebra' : 'Quote unbrauchbar · keine Prämienrechnung'}</span></p>
-                <p className="text-xs mt-1">Aktienquelle: {leapsNsDate(row.stock_reference?.source_ns)} · Ergebnislauf {selection.run_id}</p>
+                <div className="grid grid-cols-3 gap-2 text-xs border rounded p-2 mb-2" aria-label="LEAPS Kennzahlen"><p>Zeitwert p.a.<br/><strong>{metrics.extrinsicAnnual}</strong></p><p>BE nötig p.a.<br/><strong>{metrics.requiredAnnual}</strong></p><p>Delta-Hebel<br/><strong>{metrics.deltaLeverage}</strong></p></div>
+                <p className="text-xs mb-2">Zeitwert p.a. ist eine lineare Prämienverteilung, kein Theta. BE p.a. ist die nötige Aktienkursänderung bis Verfall, keine Renditeprognose.</p>
+                <p className="text-xs">Originalquote: <time>{leapsShortDate(quote.source_ns)}</time> · <span data-testid="leaps-validity">{leapsQuoteCurrent(row, now) ? 'Aktuell vergleichbar (n=1)' : row.assessment?.algebra_eligible === true ? 'Datiert · nur hypothetische Algebra' : 'Quote unbrauchbar · keine Prämienrechnung'}</span></p>
+                {admin && <p className="text-xs mt-1">Optionsquelle: {quote.source || 'unbekannt'} · {quote.feed_mode || 'Feed unbekannt'}{quote.feed_lag_s != null ? ` · Feedlag ${quote.feed_lag_s}s` : ''}<br/>Aktienquelle: {leapsNsDate(row.stock_reference?.source_ns)} · Ergebnislauf {selection.run_id}</p>}
                 <label className="block mt-3 text-sm">Kontraktanzahl <input aria-label="Kontraktanzahl" type="number" min="1" max="1000000" value={quantityText} onChange={event => setQuantityText(event.target.value)} disabled={!scenarioAllowed || invalid} className="border rounded px-2 py-1 w-24 ml-2" /></label>
                 <details className="border rounded p-2 mt-2 text-xs"><summary>Eigener Verfallskurs (optional)</summary><label className="block mt-2">Absoluter Aktienkurs am Verfall (USD)<input aria-label="Eigener Verfallskurs USD" type="text" inputMode="decimal" maxLength="64" placeholder="Leer = Serverszenarien" value={customPriceText} onChange={event => setCustomPriceText(event.target.value)} disabled={!scenarioAllowed || invalid} className="block border rounded px-2 py-1 w-full mt-1" /></label><p>Leer nutzt Serverdefaults; 0 ist ein eigener Kurs. Nur Verfallsszenario, keine Änderung an ASK/Strike/Kontrakt.</p></details>
                 {!scenarioAllowed && <p role="status">Szenarien nicht freigegeben</p>}
                 {!quantityValid && <p role="alert">Ganzzahl 1 bis 1.000.000 erforderlich</p>}
                 {!customPrice.valid && <p role="alert">Nichtnegativen USD-Verfallskurs bis 1e12 mit maximal 12 Nachkommastellen eingeben.</p>}
-                {scenarioError && <p role="alert" className="text-amber-700 mt-2">{scenarioError}</p>}
+                {scenarioError && <p role="alert" className="text-amber-700 mt-2">{admin ? scenarioError : 'Szenarien derzeit nicht verfügbar. Ergebnisstand neu laden.'}</p>}
                 {scenarioAllowed && quantityValid && customPrice.valid && !results && !scenarioError && <p role="status">Serverszenarien werden geladen…</p>}
                 <p className="text-xs mt-2">Hypothetisch bis Verfall · Gebühren/Slippage unbekannt · Stückzahl ist kein Nachweis ausführbarer Liquidität.</p>
-                {results && <><p className="text-sm mt-2">Debit ({quantity} Kontrakte): <strong>${leapsFormat(results.scenarios?.[0]?.result?.debit)}</strong> · Größenliquidität: {results.requested_size_liquidity || 'unverified'}</p>
+                {results && <><div className="border border-amber-300 bg-amber-50 text-amber-950 rounded p-3 mt-3" data-testid="leaps-premium-risk"><p className="font-semibold text-sm">{leapsPremiumSummary(results)}</p><p className="text-xs mt-1">Debit ({quantity} Kontrakte): ${leapsFormat(results.scenarios?.[0]?.result?.debit)} · vor Gebühren und Kosten; nur vollständig bezahlter Long Call vor Ausübung.</p></div>
                     <p className="text-sm" data-testid="leaps-stock-capital">Aktien-Referenzkapital: <strong>${leapsFormat(results.scenarios?.[0]?.result?.stock_reference_capital)}</strong> · {results.scenarios?.[0]?.result?.stock_share_count ?? 'unbekannt'} Aktien (BID-Referenz, nicht ausführbar)</p>
                     <p className="text-xs">Aktienrendite ist nur Kursrendite vor Dividenden, Finanzierung und Kosten. Gleiche Aktienzahl bedeutet keine identische Delta-Exposure.</p>
+                    {payoff && <figure className="border rounded p-2 mt-3" aria-label="Verfalls-Payoff aus Serverszenarien"><figcaption className="text-xs">Hypothetische Verfallsszenarien · keine Prognose</figcaption><svg viewBox="0 0 360 140" role="img" aria-label="Options-P/L USD bei den gelieferten Verfallskursen" className="w-full" style={{ maxHeight: 160 }}><line x1="24" y1={payoff.zeroY} x2="336" y2={payoff.zeroY} stroke="#94a3b8" strokeDasharray="4 3"/>{payoff.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="3" fill="#2563eb"><title>{`Aktie ${leapsFormat(point.terminal)} USD · Options-P/L ${leapsFormat(point.pnl)} USD`}</title></circle>)}<text x="24" y="135" fontSize="10" fill="currentColor">${leapsFormat(payoff.points[0].terminal)}</text><text x="336" y="135" textAnchor="end" fontSize="10" fill="currentColor">${leapsFormat(payoff.points[payoff.points.length - 1].terminal)}</text></svg><p className="text-xs">Aktienkurs am Verfall → · gestrichelt: P/L 0 USD. Nur gelieferte Szenariopunkte, keine Zwischenkursbewertung.</p></figure>}
                     <div className="overflow-x-auto mt-2"><table className="w-full text-xs"><thead><tr>{['Aktie am Verfall', 'Options-P/L $', 'Prämien-ROI', 'Aktien-P/L $', 'Aktienkurs-ROI'].map(label => <th key={label} className="p-2 text-right">{label}</th>)}</tr></thead><tbody>{results.scenarios.map((point, i) => <tr key={i} className="border-t"><td className="p-2">${leapsFormat(point.terminal)}</td><td className="p-2">{leapsFormat(point.result.pnl)}</td><td className="p-2">{leapsFormat(point.result.premium_roi, 2, true)}</td><td className="p-2">{leapsFormat(point.result.stock_pnl)}</td><td className="p-2">{leapsFormat(point.result.stock_price_roi, 2, true)}</td></tr>)}</tbody></table></div></>}
-                <details className="border rounded p-3 mt-3 text-xs"><summary>Kontrakt-/Daten-Details</summary><p>IV: {leapsFormat(row.greeks?.iv, 2, true)} · Delta: {leapsFormat(row.greeks?.delta)} · OI: {row.open_interest ?? 'unbekannt'} ({row.open_interest_basis || 'Basis unbekannt'})</p><p>Spread: {leapsFormat(row.spread, 2, true)} · ASK→BID-Verlust: {leapsFormat(row.ask_to_bid_loss, 2, true)}</p><p>Filter: {row.filter_status || 'unbekannt'} · Fehlend: {(row.filter_missing || []).join(', ') || '–'} · Abgelehnt: {(row.filter_rejected || []).join(', ') || '–'} · Gründe: {(row.assessment?.reasons || []).join(', ') || '–'}</p><p>Ausübungskapital: ${leapsFormat(results?.scenarios?.[0]?.result?.exercise_cash)} · Delta-Aktien: {leapsFormat(results?.scenarios?.[0]?.result?.delta_shares)}</p><p>Innerer Wert ist keine automatische Barauszahlung. Physische Ausübung kann zusätzliche Mittel für die Aktienlieferung erfordern. Brokerfristen und Ausübungsregeln gelten extern. Behaltene Aktien und etwaige Margin haben fortbestehendes Risiko über die gezahlte Prämie hinaus.</p></details>
+                <details className="border rounded p-3 mt-3 text-xs"><summary>Kontrakt-/Daten-Details</summary><p>IV: {leapsFormat(row.greeks?.iv, 2, true)} · Delta: {leapsFormat(row.greeks?.delta)} · OI: {row.open_interest ?? 'unbekannt'} ({row.open_interest_basis === 'previous_session' ? 'letzte Handelssitzung' : admin ? row.open_interest_basis || 'Basis unbekannt' : 'Basis unbekannt'}) · <span title={`Tagesbasis ${row.volume_session || leapsShortDate(row.volume_source_ns)}`}>Tagesvolumen: {row.volume ?? 'unbekannt'}</span></p><p>Spread: {leapsFormat(row.spread, 2, true)} · ASK→BID-Verlust: {leapsFormat(row.ask_to_bid_loss, 2, true)}</p><p>Originalquote: {leapsNsDate(quote.source_ns)} · Aktienreferenz: {leapsNsDate(row.stock_reference?.source_ns)}</p>{admin && <p>Filter: {row.filter_status || 'unbekannt'} · Fehlend: {(row.filter_missing || []).join(', ') || '–'} · Abgelehnt: {(row.filter_rejected || []).join(', ') || '–'} · Gründe: {(row.assessment?.reasons || []).join(', ') || '–'} · Größenliquidität: {results?.requested_size_liquidity || 'unverified'}</p>}<p>Ausübungskapital: ${leapsFormat(results?.scenarios?.[0]?.result?.exercise_cash)} · Delta-Aktien: {leapsFormat(results?.scenarios?.[0]?.result?.delta_shares)}</p><p>Innerer Wert ist keine automatische Barauszahlung. Physische Ausübung kann zusätzliche Mittel für die Aktienlieferung erfordern. Brokerfristen und Ausübungsregeln gelten extern. Behaltene Aktien und etwaige Margin haben fortbestehendes Risiko über die gezahlte Prämie hinaus.</p></details>
             </section>
             <details className="border rounded p-3 mt-3 text-xs" aria-label="Basiswert-Evidenz"><summary>Basiswert-Evidenz · Technik, SEC und separate Bewertung</summary>
-                <p>Technik: {row.underlying?.coverage?.history || 'unbekannt'} · Tagesbasis {evidence.history_date} · {evidence.bars} abgeschlossene Kerzen</p>
+                <p>Technik: {admin ? row.underlying?.coverage?.history || 'unbekannt' : row.underlying?.coverage?.history === 'complete' ? 'belegt' : 'teilweise/unbekannt'} · Tagesbasis {evidence.history_date} · {evidence.bars} abgeschlossene Kerzen</p>
                 {Object.entries(evidence.technical).map(([label,value]) => <p key={label}>{label}: {value}</p>)}
                 <p className="font-semibold mt-2">SEC-Unternehmensqualität · getrennt von Bewertung</p>
-                <p>Abdeckung: {row.underlying?.coverage?.facts || 'unbekannt'} · Profil: {evidence.profile} · Facts-Stand: {evidence.facts_date}</p>
+                <p>Abdeckung: {admin ? row.underlying?.coverage?.facts || 'unbekannt' : row.underlying?.coverage?.facts === 'complete' ? 'belegt' : 'teilweise/unbekannt'} · Profil: {admin ? evidence.profile : ({financial:'Finanzunternehmen',reit:'Immobiliengesellschaft',operating_company:'Unternehmen'})[evidence.profile] || 'unbekannt'} · Facts-Stand: {evidence.facts_date}</p>
                 {Object.entries(evidence.quality).map(([label,value]) => <p key={label}>{label}: {value}</p>)}
-                <p>Cashflow-Basis: {row.underlying?.facts?.cashflow_methodology || 'unbekannt'} · Verwässerungsbasis: {row.underlying?.facts?.metrics?.share_dilution_basis || 'unbekannt'}</p>
+                {admin && <p>Cashflow-Basis: {row.underlying?.facts?.cashflow_methodology || 'unbekannt'} · Verwässerungsbasis: {row.underlying?.facts?.metrics?.share_dilution_basis || 'unbekannt'}</p>}
                 <p className="font-semibold mt-2">Separate Bewertung</p>{Object.entries(evidence.valuation).map(([label,value]) => <p key={label}>{label}: {value}</p>)}
                 {evidence.specialist && <p>Bank/REIT: Spezialdaten fehlen bzw. sind erforderlich; keine vollständige Branchenbewertung.</p>}
-                <p>Grenzen: {(row.underlying?.coverage?.reasons || []).join(', ') || 'keine zusätzlichen Gründe geliefert'}. Fehlende Historie/Facts bleiben unbekannt. Kein Zielkurs, keine Prognose und kein LEAPS-Score.</p>
-                <p>Quellen: {(row.underlying?.sources || []).map(source => typeof source === 'string' ? source : [source.source,source.basis,source.market_date].filter(Boolean).join(' · ')).join('; ') || 'unbekannt'} · Evidenzstand {row.underlying?.as_of || 'unbekannt'}. SEC aktuell/nicht point-in-time; Frischebasis {row.underlying?.facts?.freshness_basis || 'unbekannt'}.</p>
+                <p>{admin && <>Grenzen: {(row.underlying?.coverage?.reasons || []).join(', ') || 'keine zusätzlichen Gründe geliefert'}. </>}Fehlende Historie/Facts bleiben unbekannt. Kein Zielkurs, keine Prognose und kein LEAPS-Score.</p>
+                <p>{admin && <>Quellen: {(row.underlying?.sources || []).map(source => typeof source === 'string' ? source : [source.source,source.basis,source.market_date].filter(Boolean).join(' · ')).join('; ') || 'unbekannt'} · </>}Evidenzstand {row.underlying?.as_of || 'unbekannt'}. SEC aktuell/nicht point-in-time{admin ? `; Frischebasis ${row.underlying?.facts?.freshness_basis || 'unbekannt'}` : ''}.</p>
             </details>
         </div>
     </aside>;
 }
 function LeapsTab({ policy, account, scanCache, updateScanCache, onSelectTicker, onDenied, onInvalidate }) {
-    const [filterInputs, setFilterInputs] = useState({});
-    const [sort, setSort] = useState('be_rise'), [order, setOrder] = useState('asc'), [offset, setOffset] = useState(0), [view, setView] = useState('complete');
+    const [filterInputs, setFilterInputs] = useState(leapsInitialFilters);
+    const [sort, setSort] = useState('extrinsic_annual_fraction'), [order, setOrder] = useState('asc'), [offset, setOffset] = useState(0), [view, setView] = useState('complete');
     const [revision, setRevision] = useState(0), [status, setStatus] = useState(null), [error, setError] = useState(null), [pending, setPending] = useState(null);
     const scope = JSON.stringify([account, view, sort, order, offset]);
     const cacheKey = `leaps:v1:${scope}`;
@@ -6383,7 +6426,7 @@ function LeapsTab({ policy, account, scanCache, updateScanCache, onSelectTicker,
     const readRef = useRef(0), operationRef = useRef(0);
     const activeStatusRef = useRef(status); activeStatusRef.current = status;
     const now = useLeapsClock();
-    const allowed = leapsReadAccess(policy);
+    const allowed = leapsReadAccess(policy), admin = policy?.admin === true;
     const data = allowed && snapshot.scope === scope ? snapshot.data : null;
     useEffect(() => { onInvalidate(); }, [scope]);
     useEffect(() => {
@@ -6426,22 +6469,25 @@ function LeapsTab({ policy, account, scanCache, updateScanCache, onSelectTicker,
         } catch (failure) { if (serial === operationRef.current && scopeRef.current === expectedScope && activeStatusRef.current?.run_id === expectedRun) { setError(failure.message); if ([401, 403].includes(failure.status)) onDenied(); } }
         finally { if (serial === operationRef.current) setPending(null); }
     };
-    const columns = [['underlying', 'Basiswert'], ['strike', 'Strike $'], ['expiry', 'Verfall'], ['cost_per_contract', 'Debit n=1 $'], ['break_even', 'BE $'], ['be_rise', 'BE-Anstieg'], ['spread', 'Spread'], ['delta', 'Delta'], ['open_interest', 'OI']];
+    const columns = [['underlying', 'Basiswert'], ['strike', 'Strike $'], ['expiry', 'Verfall'], ['cost_per_contract', 'Prämie n=1 $'], ['extrinsic_annual_fraction', 'Zeitwert p.a.'], ['break_even_annual_required_stock_return', 'BE nötig p.a.', false], ['delta_leverage', 'Delta-Hebel', false], ['break_even', 'BE $'], ['delta', 'Delta']];
     if (!allowed) return <p role="status">LEAPS-Ergebniszugang nicht freigegeben</p>;
     return <section aria-label="LEAPS Scanner" className="space-y-4">
         <header><h1 className="text-2xl font-bold">LEAPS</h1><p className="text-sm text-gray-500">Calls · 12–24 Kalendermonate · Basiswertchart vor Kontraktvergleich</p></header>
-        <fieldset className="border rounded p-3 text-xs" disabled={policy?.admin !== true || !!pending}><legend>Optionale Filter für einen neuen Lauf</legend><div className="grid grid-cols-2 md:grid-cols-3 gap-2">{LEAPS_FILTER_FIELDS.map(([key,label]) => <label key={key}>{label}<input aria-label={label} inputMode="decimal" maxLength="64" value={filterInputs[key] || ''} onChange={event => setFilterInputs(old => ({...old,[key]:event.target.value}))} placeholder="ohne Grenze" className="block border rounded p-1 w-full" /></label>)}</div><label className="block mt-2"><input type="checkbox" checked={filterInputs.close_above_ema200 === true} onChange={event => setFilterInputs(old => ({...old,close_above_ema200:event.target.checked}))} /> Abgeschlossener Tageskurs über EMA200 (gleiche Tagesbasis)</label><p>Leer = kein Filter. Änderungen gelten erst mit Start eines neuen Laufs; Fortsetzen behält dessen gespeicherte Kriterien.</p></fieldset>
-        <div className="flex flex-wrap items-center gap-2">{[['scan', 'Start'], ['pause', 'Pause'], ['resume', 'Fortsetzen']].map(([action, label]) => { const reason = pending ? 'Serverbestätigung ausstehend' : !status ? 'Statusprüfung ausstehend' : leapsControlReason(policy, action, status); return <span key={action}><button disabled={!!reason} onClick={() => control(action)} className="button button-secondary" title={reason}>{label}</button>{reason && <small className="block text-xs text-gray-500">{reason}</small>}</span>; })}<button onClick={() => setRevision(value => value + 1)} className="button button-secondary">Neu laden</button></div>
-        <div><div className="text-xs mb-1">Aktiver Lauf: {status?.run_id || 'unbekannt'} · {status?.status || 'Status wird geladen'} · {status?.progress?.phase || 'Phase unbekannt'}</div><progress aria-label="LEAPS Fortschritt" max={status?.progress?.total > 0 ? status.progress.total : 1} value={status?.progress?.total > 0 ? status.progress.completed || 0 : undefined} style={{ width: '100%', height: 8 }} /><p className="text-xs">{status?.progress?.completed ?? '–'} / {status?.progress?.total ?? 'unbekannt'} · {(status?.reasons || []).join(', ')}</p></div>
+        {admin && <fieldset className="border rounded p-3 text-xs" disabled={!!pending}><legend>Optionale Filter für einen neuen Lauf</legend><div className="grid grid-cols-2 md:grid-cols-3 gap-2">{LEAPS_FILTER_FIELDS.map(([key,label]) => <label key={key}>{label}<input aria-label={label} inputMode="decimal" maxLength="64" value={filterInputs[key] || ''} onChange={event => setFilterInputs(old => ({...old,[key]:event.target.value}))} placeholder="ohne Grenze" className="block border rounded p-1 w-full" /></label>)}</div><label className="block mt-2"><input type="checkbox" checked={filterInputs.close_above_ema200 === true} onChange={event => setFilterInputs(old => ({...old,close_above_ema200:event.target.checked}))} /> Abgeschlossener Tageskurs über EMA200 (gleiche Tagesbasis)</label><p>Leer = kein Filter. Änderungen gelten erst mit Start eines neuen Laufs; Fortsetzen behält dessen gespeicherte Kriterien.</p></fieldset>}
+        <div className="flex flex-wrap items-center gap-2">{admin && [['scan', 'Start'], ['pause', 'Pause'], ['resume', 'Fortsetzen']].map(([action, label]) => { const reason = pending ? 'Serverbestätigung ausstehend' : !status ? 'Statusprüfung ausstehend' : leapsControlReason(policy, action, status); return <span key={action}><button disabled={!!reason} onClick={() => control(action)} className="button button-secondary" title={reason}>{label}</button>{reason && <small className="block text-xs text-gray-500">{reason}</small>}</span>; })}<button onClick={() => setRevision(value => value + 1)} className="button button-secondary">Neu laden</button></div>
+        <div><div className="text-sm mb-1">{leapsRunState(status?.status)} · {status?.market_date || 'Datum unbekannt'}</div>{admin && <div className="text-xs mb-1">Aktiver Lauf: {status?.run_id || 'unbekannt'} · {status?.status || 'Status wird geladen'} · {status?.progress?.phase || 'Phase unbekannt'}</div>}<progress aria-label="LEAPS Fortschritt" max={status?.progress?.total > 0 ? status.progress.total : 1} value={status?.progress?.total > 0 ? status.progress.completed || 0 : undefined} style={{ width: '100%', height: 8 }} /><p className="text-xs">{status?.progress?.completed ?? '–'} / {status?.progress?.total ?? 'unbekannt'}{admin ? ` · ${(status?.reasons || []).join(', ')}` : ''}</p></div>
         <p className="text-xs" data-testid="leaps-active-filters">Unveränderliche Laufkriterien ({status?.market_date || 'Datum unbekannt'}): {leapsFilterText(status?.filters)}</p>
-        {status?.restartable && status?.run_id && <p className="text-xs">Start beginnt einen neuen Lauf. {status.resumable ? 'Fortsetzen verwendet unverändert den gespeicherten Lauf.' : 'Der vorhandene Lauf ist terminal, veraltet oder nicht sicher fortsetzbar.'}</p>}
-        {error && <p role="alert" className="text-amber-700">{error}</p>}
-        <div className="flex flex-wrap gap-3 items-center text-sm"><label>Ergebnisstand <select aria-label="Ergebnisstand" value={view} onChange={event => { setView(event.target.value); setOffset(0); }} className="border rounded p-1"><option value="complete">Letzter vollständiger Lauf</option><option value="latest">Neuester Teil-/Laufstand</option></select></label><span>{data ? `Gespeichert: ${data.run_id || 'leer'} · ${data.status}` : 'Gespeicherte Ergebnisse werden geladen…'}{data && !snapshot.verified ? ' · wird verifiziert' : ''}</span></div>
-        {data && status?.run_id && data.run_id !== status.run_id && <p className="text-xs text-amber-700">Letzter vollständiger Ergebnislauf {data.run_id}; Steuerung gilt separat für {status.run_id}.</p>}
+        {admin && status?.restartable && status?.run_id && <p className="text-xs">Start beginnt einen neuen Lauf. {status.resumable ? 'Fortsetzen verwendet unverändert den gespeicherten Lauf.' : 'Der vorhandene Lauf ist terminal, veraltet oder nicht sicher fortsetzbar.'}</p>}
+        {error && <p role="alert" className="text-amber-700">{admin ? error : 'LEAPS-Daten derzeit nicht verfügbar. Bitte später neu laden.'}</p>}
+        <div className="flex flex-wrap gap-3 items-center text-sm"><label>Ergebnisstand <select aria-label="Ergebnisstand" value={view} onChange={event => { setView(event.target.value); setOffset(0); }} className="border rounded p-1"><option value="complete">Letzter vollständiger Lauf</option><option value="latest">Neuester Teil-/Laufstand</option></select></label><span>{data ? admin ? `Gespeichert: ${data.run_id || 'leer'} · ${data.status}` : `Gespeichert · ${leapsRunState(data.status)}` : 'Gespeicherte Ergebnisse werden geladen…'}{data && !snapshot.verified ? ' · wird verifiziert' : ''}</span></div>
+        {admin && data && status?.run_id && data.run_id !== status.run_id && <p className="text-xs text-amber-700">Letzter vollständiger Ergebnislauf {data.run_id}; Steuerung gilt separat für {status.run_id}.</p>}
         <p className="text-xs">Ergebnis-Kriterien: {leapsFilterText(data?.filters)} · Nicht prüfbar: {data?.coverage?.filter_unknown ?? '–'} · Ausgeschlossen: {data?.coverage?.filter_excluded ?? '–'} · Aktuell vergleichbar und passend: {data?.coverage?.eligible ?? '–'}</p>
-        <div className="card border overflow-x-auto"><table className="w-full text-xs" style={{ minWidth: 830 }} aria-label="LEAPS Kontrakte"><thead><tr>{columns.map(([field, label]) => <th key={field} className="p-3 text-left" aria-sort={sort === field ? order === 'asc' ? 'ascending' : 'descending' : 'none'}><button onClick={() => { setSort(field); setOrder(sort === field && order === 'asc' ? 'desc' : 'asc'); setOffset(0); }}>{label}{sort === field ? order === 'asc' ? ' ↑' : ' ↓' : ''}</button></th>)}<th className="p-3">Quote / Chart</th></tr></thead><tbody>{(data?.rows || []).map(row => <tr key={row.contract.id} className="border-t"><td className="p-3 font-semibold">{row.contract.underlying}<small className="block font-normal">{row.company_name || 'Unternehmen unbekannt'}</small><small className="block">{({passed:'Filter passend',excluded:'Filter ausgeschlossen',missing_evidence:'Filter nicht prüfbar'})[row.filter_status] || 'Filter unbekannt'}</small></td><td className="p-3">{leapsFormat(row.contract.strike)}</td><td className="p-3">{row.contract.expiry}<small className="block">{row.remaining_term?.days ?? '–'} Tage ab {row.remaining_term?.basis_date || 'unbekannt'}</small></td><td className="p-3">{leapsFormat(row.scenarios?.[0]?.result?.debit)}</td><td className="p-3">{leapsFormat(row.break_even)}</td><td className="p-3">{leapsFormat(row.be_rise, 2, true)}</td><td className="p-3">{leapsFormat(row.spread, 2, true)}</td><td className="p-3">{leapsFormat(row.greeks?.delta)}</td><td className="p-3">{row.open_interest ?? '–'}</td><td className="p-3"><span>{leapsQuoteCurrent(row, now) ? 'Aktuell n=1' : row.assessment?.algebra_eligible === true ? 'Datiert' : 'Quote unbrauchbar'}</span><small className="block">{row.observation?.quote?.feed_mode || 'Feed unbekannt'} · {leapsNsDate(row.observation?.quote?.source_ns)}</small><button aria-label={`Basiswertchart ${row.contract.id}`} className="text-blue-600 underline" onClick={() => onSelectTicker({ kind: 'leaps', ticker: row.contract.underlying, run_id: data.run_id, snapshot_id: data.snapshot_id, row })}>Basiswertchart</button></td></tr>)}</tbody></table></div>
+        <div className="card border overflow-x-auto"><table className="w-full text-xs" style={{ minWidth: 830 }} aria-label="LEAPS Kontrakte"><thead><tr>{columns.map(([field, label, sortable = true]) => <th key={field} className="p-3 text-left" aria-sort={sortable ? sort === field ? order === 'asc' ? 'ascending' : 'descending' : 'none' : undefined}>{sortable ? <button onClick={() => { setSort(field); setOrder(sort === field && order === 'asc' ? 'desc' : 'asc'); setOffset(0); }}>{label}{sort === field ? order === 'asc' ? ' ↑' : ' ↓' : ''}</button> : label}</th>)}<th className="p-3">Quote / Chart</th></tr></thead><tbody>{(data?.rows || []).map(row => {
+            const metrics = leapsAnalyticsSummary(row.analytics);
+            return <tr key={row.contract.id} className="border-t"><td className="p-3 font-semibold">{row.contract.underlying}<small className="block font-normal">{row.company_name || 'Unternehmen unbekannt'}</small><small className="block">{({passed:'Filter passend',excluded:'Filter ausgeschlossen',missing_evidence:'Filter nicht prüfbar'})[row.filter_status] || 'Filter unbekannt'}</small></td><td className="p-3">{leapsFormat(row.contract.strike)}</td><td className="p-3">{row.contract.expiry}<small className="block">{row.remaining_term?.days ?? '–'} Tage ab {row.remaining_term?.basis_date || 'unbekannt'}</small></td><td className="p-3">{leapsFormat(row.scenarios?.[0]?.result?.debit)}</td><td className="p-3">{metrics.extrinsicAnnual}</td><td className="p-3">{metrics.requiredAnnual}</td><td className="p-3">{metrics.deltaLeverage}</td><td className="p-3">{leapsFormat(row.break_even)}</td><td className="p-3">{leapsFormat(row.greeks?.delta)}</td><td className="p-3"><span>{leapsQuoteCurrent(row, now) ? 'Aktuell n=1' : row.assessment?.algebra_eligible === true ? 'Datiert' : 'Quote unbrauchbar'}</span><small className="block">{leapsShortDate(row.observation?.quote?.source_ns)}</small><button aria-label={`Basiswertchart ${row.contract.id}`} className="text-blue-600 underline" onClick={() => onSelectTicker({ kind: 'leaps', ticker: row.contract.underlying, run_id: data.run_id, snapshot_id: data.snapshot_id, row })}>Basiswertchart</button></td></tr>;
+        })}</tbody></table></div>
         <div className="flex gap-3 items-center text-sm"><button disabled={offset === 0} onClick={() => setOffset(value => Math.max(0, value - 20))} className="button button-secondary">Zurück</button><span>{offset + 1}–{offset + (data?.rows?.length || 0)} / {data?.total ?? '–'}</span><button disabled={!data || data.next_offset == null} onClick={() => setOffset(data.next_offset)} className="button button-secondary">Weiter</button></div>
-        <details className="text-xs border rounded p-3"><summary>Abdeckung und separate Einschränkungen</summary><p>Ergebnisgründe: {(data?.reasons || []).join(', ') || '–'}. Abdeckung: {data ? JSON.stringify(data.coverage) : 'unbekannt'}.</p><p>Kein Kauf-/Orderhinweis. Aktien-BID ist eine Referenz, Options-ASK die Prämienbasis. Nicht belegte IV/Delta/Fees bleiben unbekannt. Datierte Algebra bestätigt keine heutige Ausführbarkeit; serverseitige Rohsortierung vor Pagination.</p></details>
+        <details className="text-xs border rounded p-3"><summary>Abdeckung und separate Einschränkungen</summary>{admin && <p>Ergebnisgründe: {(data?.reasons || []).join(', ') || '–'}. Abdeckung: {data ? JSON.stringify(data.coverage) : 'unbekannt'}.</p>}<p>Zeitwert p.a. ist keine Rendite und kein Theta. BE nötig p.a. beschreibt die nötige Aktienkursänderung, keine Prognose. Fehlende Kennzahlen bleiben unbekannt.</p><p>Kein Kauf-/Orderhinweis. Aktien-BID ist eine Referenz, Options-ASK die Prämienbasis. Nicht belegte IV/Delta/Fees bleiben unbekannt. Datierte Algebra bestätigt keine heutige Ausführbarkeit; serverseitige Rohsortierung vor Pagination.</p></details>
     </section>;
 }
 // Main App

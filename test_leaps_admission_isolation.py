@@ -65,20 +65,20 @@ def test_original_stock_source_controls_relative_math_not_option_ask(monkeypatch
     payload = response.json()
     row = payload['rows'][0]
     assert row['stock_reference']['price'] == ('20' if valid else None)
-    assert row['be_rise'] == ('0.01' if valid else None)
+    assert row['be_rise'] is None
     assert row['observation']['quote']['ask'] == '5.2'
     assert row['observation']['quote']['source_ns'] == str(NOW-1)
     assert row['assessment']['comparison_eligible'] is False
     assert row['assessment']['algebra_eligible'] is True
-    assert len(row['scenarios']) == (6 if valid else 1)
+    assert len(row['scenarios']) == 1
     result = request('/api/leaps/scenarios', method='POST', body=scenario_body(payload,terminal_prices=['25'])).json()
     expiry = result['scenarios'][0]['result']
     assert D(expiry['debit']) == 1560 and D(expiry['intrinsic']) == 3000 and D(expiry['pnl']) == 1440
-    assert expiry['stock_pnl'] == ('1500' if valid else None)
-    assert expiry['stock_price_roi'] == ('0.25' if valid else None)
+    assert expiry['stock_pnl'] is None
+    assert expiry['stock_price_roi'] is None
     assert result['quote_source_ns'] == str(NOW-1)
     defaults = request('/api/leaps/scenarios', method='POST', body=scenario_body(payload)).json()
-    assert len(defaults['scenarios']) == (6 if valid else 1)
+    assert len(defaults['scenarios']) == 1
     assert snapshot.sources[0]['request_id'] == 'reference-wire-1'
 
 
@@ -400,7 +400,7 @@ def test_cached_economics_follow_original_source_boundary_through_pause_resume(b
     assert len(denied['scenarios'])==(1 if boundary=='stock' else 0)
     assert denied['break_even']==(D('20.2') if boundary=='stock' else None)
     assert denied['be_rise'] is None and denied['filter_status']=='missing_evidence'
-    assert set(denied['filter_missing'])==({'max_be_rise'} if boundary=='stock' else {'max_be_rise','max_spread'})
+    assert set(denied['filter_missing'])=={'max_be_rise','max_spread'}
     market.clock_ns=lambda:NOW
     market.chains['SOFI'][1]=[]  # Complete the pending page without new quote evidence.
     completed=discover(provider,specification,paused.cursor)

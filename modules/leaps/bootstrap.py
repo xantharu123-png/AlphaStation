@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from .admission import Admission, FileBudget, PriorityGate
 from .models import CapabilityEvidence, LeapsDataError
 from .provider import MassiveLeapsProvider
+from ._http_worker import _safe_retry_after
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,9 @@ class OneAttemptTransport:
                 raise LeapsDataError(reason if reason in allowed else 'transport_error','provider')
             if type(meta.get('status')) is not int or len(body)>8*1024*1024:
                 raise LeapsDataError('transport_worker_failed','provider')
-            return SimpleNamespace(status_code=meta['status'],text=body.decode('utf-8'))
+            retry_after=_safe_retry_after(meta.get('retry_after')) if meta['status']==429 else None
+            return SimpleNamespace(status_code=meta['status'],text=body.decode('utf-8'),
+                                   headers={'Retry-After':retry_after} if retry_after is not None else {})
         finally:
             self._stop_and_confirm(child)
             for stream in (child.stdin,child.stdout):

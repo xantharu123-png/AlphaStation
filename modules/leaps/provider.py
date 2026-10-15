@@ -13,13 +13,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 import json
 import re
 from threading import Lock
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .contracts import decimal_context, expiry_window, parse_decimal, parse_ns_epoch
+from .contracts import decimal_context, expiry_window, parse_decimal, parse_greek_decimal, parse_ns_epoch
 from .models import (CapabilityEvidence, GreeksObservation, LeapsDataError, OptionContract,
                      PageResult, QuoteAssessment, QuoteObservation, RunSpec)
 
@@ -32,6 +33,9 @@ class OptionQuote:
     open_interest: int | None
     open_interest_basis: str = 'previous_session'
     reference_source_ns: int | None = None
+    volume: int | None = None
+    volume_source_ns: int | None = None
+    volume_session: str | None = None
 
 
 @dataclass(frozen=True)
@@ -203,7 +207,8 @@ class MassiveLeapsProvider:
         self.transport, self.clock_ns = transport, clock_ns
         self.admission, self.capability = admission, capability
         self._denied = set()
-        self._paused = set()
+        self._retry_at = {}
+        self._rate_backoff = {}
         self._lock = Lock()
         self._seen = {}
         self.request_count = 0
@@ -232,8 +237,14 @@ class MassiveLeapsProvider:
                 raise authority_error('authorization_denied', scope)
             if resource in self._denied:
                 raise authority_error('authorization_denied', resource)
-            if scope in self._paused:
-                raise _error('rate_limited')
+            def waiting_error(code, reason, deadline):
+                error = authority_error(code, scope)
+                error.retry_reason, error.retry_at_ns = reason, deadline
+                return error
+            if scope in self._retry_at:
+                now = parse_ns_epoch(self.clock_ns())
+                if now < self._retry_at[scope]:
+                    raise waiting_error('rate_limited', 'rate_limited', self._retry_at[scope])
             for attempt in range(2):
                 if self._request_ceiling is not None and self.request_count >= self._request_ceiling:
                     raise _error('probe_request_limit')
@@ -241,7 +252,15 @@ class MassiveLeapsProvider:
                 with attempt_scope() if attempt_scope is not None else nullcontext():
                     decision = self.admission.try_acquire(scope)
                 if decision.allowed is not True:
-                    raise _error('admission_denied')
+                    error = _error('admission_denied')
+                    reason, retry = decision.reason, decision.retry_after_s
+                    if isinstance(reason, str) and re.fullmatch('[a-z][a-z0-9_]{0,63}', reason):
+                        error.retry_reason = reason
+                    error.retry_after_s = retry
+                    if (reason in ('request_busy', 'priority_active', 'local_budget_exhausted', 'shared_budget_exhausted')
+                            and isinstance(retry, Decimal) and retry.is_finite() and 0 <= retry <= 2**31):
+                        error.retry_at_ns = parse_ns_epoch(self.clock_ns()) + int(max(Decimal(1), retry) * 10**9)
+                    raise error
                 retry = False
                 try:
                     headers = dict(self.transport.market_headers()) if scope == 'market' else {'User-Agent': user_agent}
@@ -262,8 +281,33 @@ class MassiveLeapsProvider:
                             self._denied.add(authority)
                             raise authority_error('authorization_denied', authority)
                         if status == 429:
-                            self._paused.add(scope)
-                            raise _error('rate_limited')
+                            now = parse_ns_epoch(self.clock_ns())
+                            count = min(self._rate_backoff.get(scope, 0), 4)
+                            deadline = now + (15, 30, 60, 120, 300)[count] * 10**9
+                            self._rate_backoff[scope] = count + 1
+                            headers = getattr(response, 'headers', {})
+                            header = next((v for k,v in headers.items() if isinstance(k,str) and k.lower() == 'retry-after'), None) if isinstance(headers,Mapping) else None
+                            if isinstance(header, str):
+                                try:
+                                    header = header.strip()
+                                    if re.fullmatch('[0-9]{1,10}', header) and int(header) <= 2**31:
+                                        deadline = now + max(1, int(header)) * 10**9
+                                    else:
+                                        parsed = parsedate_to_datetime(header)
+                                        if parsed.tzinfo is not None:
+                                            retry_ns = int(parsed.timestamp()) * 10**9
+                                            if now < retry_ns < 10**20:
+                                                deadline = retry_ns
+                                except (ValueError, TypeError, OverflowError):
+                                    pass
+                            self._retry_at[scope] = deadline
+                            error = waiting_error('rate_limited', 'rate_limited', deadline)
+                            error.retry_exhausted = count == 4
+                            if error.retry_exhausted:
+                                # Next explicitly authorized recovery cycle gets
+                                # a fresh bound; its recorded deadline still holds.
+                                self._rate_backoff.pop(scope, None)
+                            raise error
                         if 300 <= status < 400:
                             raise _error('redirect_rejected')
                         if 500 <= status < 600:
@@ -280,6 +324,8 @@ class MassiveLeapsProvider:
                                 raise _error('invalid_response')
                             if scope == 'market' and data.get('status') not in ('OK', 'DELAYED'):
                                 raise _error('provider_status')
+                            self._retry_at.pop(scope, None)
+                            self._rate_backoff.pop(scope, None)
                             return data
                 except LeapsDataError:
                     raise
@@ -372,8 +418,10 @@ class MassiveLeapsProvider:
         """Late join with independently proven reference/listing terms.
 
         Reference and Greek model clocks are not present in the snapshot
-        schema: they remain None. Raw IV/Greeks are not normalized without
-        separate unit/model evidence. Snapshot price/trade/FMV never supply Ask.
+        schema: they remain None. Massive's documented model fields use
+        fractional delta/IV; their values are never percent-rescaled by size.
+        This unit evidence does not identify a model or a model timestamp.
+        Snapshot price/trade/FMV never supply Ask.
         """
         if not isinstance(raw, Mapping) or not isinstance(contract, OptionContract):
             raise _error('chain_contract_mismatch')
@@ -392,10 +440,33 @@ class MassiveLeapsProvider:
         greeks = raw.get('greeks', {})
         if not isinstance(greeks, Mapping):
             raise _error('invalid_greeks')
-        greek_raw = {key:_wire_number(value) for key,value in greeks.items() if key in ('delta','gamma','theta','vega')}
-        if raw.get('implied_volatility') is not None:
-            greek_raw['implied_volatility'] = _wire_number(raw['implied_volatility'])
-        return OptionQuote(contract, quote, GreeksObservation(raw=greek_raw), _size(raw.get('open_interest')))
+        greek_raw = {key:None if value is None else parse_greek_decimal(value)
+                     for key,value in greeks.items() if key in ('delta','gamma','theta','vega')}
+        if 'implied_volatility' in raw:
+            value = raw['implied_volatility']
+            greek_raw['implied_volatility'] = None if value is None else parse_greek_decimal(value)
+        delta, iv = greek_raw.get('delta'), greek_raw.get('implied_volatility')
+        if delta is not None and not 0 <= delta <= 1:
+            raise _error('invalid_call_delta')
+        if iv is not None and iv < 0:
+            raise _error('invalid_implied_volatility')
+        units = dict(delta='fraction', iv='fraction', source='massive_option_chain_snapshot',
+                     fields=dict(delta='greeks.delta', iv='implied_volatility'),
+                     normalization='provider_fractions_no_rescaling', evidence_ids=(
+                         'https://massive.com/docs/rest/options/snapshots/option-chain-snapshot',
+                         'https://www.massive.com/blog/build-a-0-dte-covered-call-screener-for-spy-with-massive'))
+        day=raw.get('day')
+        if day is not None and not isinstance(day,Mapping):
+            raise _error('invalid_option_day')
+        volume=_size(day.get('volume')) if day is not None else None
+        volume_source=(_wire_ns(day['last_updated'])
+                       if day is not None and day.get('last_updated') is not None else None)
+        if volume_source is not None and volume_source>now:
+            raise _error('future_source')
+        return OptionQuote(contract, quote, GreeksObservation(delta=delta, iv=iv, raw=greek_raw,
+                           units_evidence=units), _size(raw.get('open_interest')),
+                           volume=volume,volume_source_ns=volume_source,
+                           volume_session=_eastern_date(volume_source).isoformat() if volume_source is not None else None)
 
     def _option_quote(self, raw, now):
         if raw is None:
@@ -518,6 +589,8 @@ def assess_quote(option, underlying, *, now_ns, verified_session):
         reasons.append('mismatched_underlying')
     deadlines = [_quote_deadline(q, now_ns, label, reasons) for q,label in ((oq,'option'),(sq,'stock'))]
     for quote, label, unit in ((oq,'option','contracts'),(sq,'stock','shares')):
+        if quote.feed_mode == 'delayed':
+            reasons.append(label + '_delayed_comparison')
         if quote.bid is None or quote.bid <= 0 or quote.ask is None or quote.ask <= 0:
             reasons.append(label + '_two_sided_quote_missing')
         elif quote.bid > quote.ask:
@@ -549,7 +622,7 @@ def probe_capabilities(provider, *, max_requests=3):
     if not isinstance(provider, MassiveLeapsProvider) or provider._request_ceiling is not None:
         raise _error('invalid_probe_provider')
     captured = parse_ns_epoch(provider.clock_ns())
-    market_date = datetime.fromtimestamp(captured // 10**9, timezone.utc).date()
+    market_date = _eastern_date(captured)
     run = RunSpec('capability-probe', market_date, {}, 'probe', '1', '1')
     results = [None, None, None]
     provider._request_ceiling = provider.request_count + max_requests

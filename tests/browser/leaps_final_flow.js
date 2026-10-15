@@ -42,7 +42,7 @@ async function main(){
             }
             if(url.pathname==='/api/leaps/scan'){
                 const body=req.postDataJSON();summary.posts.push(body);
-                assert.deepEqual(body,{filters:{max_be_rise_percent:'25.001',min_maturity_months:'15',max_maturity_months:'18',min_underlying_price:'10.125',close_above_ema200:true}});
+                assert.deepEqual(body,{filters:{max_be_rise_percent:'25.001',max_spread_percent:'10',min_open_interest:'100',min_delta_percent:'70',max_delta_percent:'85',min_maturity_months:'15',max_maturity_months:'18',min_underlying_price:'10.125',close_above_ema200:true}});
                 state.status=fixture.filtered_status;return respond({run_id:state.status.run_id,status:'queued'});
             }
             if(url.pathname==='/api/leaps/control'){
@@ -72,16 +72,24 @@ async function main(){
         await scanner.getByText('Synthetic Verified Company',{exact:true}).waitFor();
         assert.equal(await scanner.getByRole('progressbar').count(),1);assert.equal(await page.locator('#boot-error-overlay').count(),0);
         assert.match(await scanner.innerText(),/465 Tage ab 2026-10-13/);
+        assert.equal(await scanner.getByRole('columnheader', {name:'Zeitwert p.a. ↑',exact:true}).getAttribute('aria-sort'),'ascending');
         assert.equal(await scanner.getByRole('button',{name:'Start',exact:true}).isEnabled(),true);
         assert.equal(await scanner.getByRole('button',{name:'Fortsetzen',exact:true}).isDisabled(),true);
         const shot=async name=>{const file=path.resolve(args.output,viewport.width+'-'+name+'.png');await page.screenshot({path:file,fullPage:false});summary.screenshots.push(file);};
         const open=async()=>{await scanner.getByRole('button',{name:/^Basiswertchart /}).click();const detail=page.getByRole('complementary',{name:'LEAPS-Kontrakt'});await detail.getByText(/Debit \(1 Kontrakte\)/).waitFor();return detail;};
         let detail=await open();await detail.locator('canvas').first().waitFor();
+        assert.match(await detail.getByTestId('leaps-premium-risk').innerText(),/Prämie 520\.00 USD · maximaler Prämienverlust 520\.00 USD/);
+        const payoff=detail.getByRole('img',{name:'Options-P/L USD bei den gelieferten Verfallskursen'});
+        await payoff.waitFor();assert.equal(await payoff.locator('polyline').count(),0);
+        assert.ok(await payoff.locator('circle').count()>=2);
+        assert.equal(await detail.getByRole('figure',{name:'Verfalls-Payoff aus Serverszenarien'}).count(),1);
+        assert.match(await detail.locator('[aria-label="LEAPS Kennzahlen"]').innerText(),/Zeitwert p.a.*BE nötig p.a.*Delta-Hebel/s);
         assert.equal(await detail.locator('details[open]').count(),0);
         assert.ok((await detail.getByRole('region',{name:'Basiswertchart'}).boundingBox()).y<(await detail.getByRole('region',{name:'Kontraktvergleich'}).boundingBox()).y);
         await detail.getByLabel('Kontraktanzahl',{exact:true}).fill('3');await detail.getByText(/Debit \(3 Kontrakte\)/).waitFor();
+        assert.match(await detail.getByTestId('leaps-premium-risk').innerText(),/Prämie 1560\.00 USD · maximaler Prämienverlust 1560\.00 USD/);
         assert.match(await detail.getByTestId('leaps-stock-capital').innerText(),/\$6000\.00.*300 Aktien/);
-        await detail.getByText('Kontrakt-/Daten-Details',{exact:true}).click();assert.match(await detail.innerText(),/Physische Ausübung/);assert.match(await detail.innerText(),/keine identische Delta-Exposure/);
+        await detail.getByText('Kontrakt-/Daten-Details',{exact:true}).click();assert.match(await detail.innerText(),/Physische Ausübung/);assert.match(await detail.innerText(),/keine identische Delta-Exposure/);assert.match(await detail.innerText(),/Tagesvolumen: 123/);
         await detail.getByText('Basiswert-Evidenz · Technik, SEC und separate Bewertung',{exact:true}).click();
         assert.match(await detail.innerText(),/220 abgeschlossene Kerzen/);assert.match(await detail.innerText(),/operating_company/);assert.match(await detail.innerText(),/SEC-Unternehmensqualität/);
         await detail.getByText('Separate Bewertung',{exact:true}).scrollIntoViewIfNeeded();await shot('supported-evidence-capital');
@@ -102,7 +110,7 @@ async function main(){
             await detail.getByRole('button',{name:'LEAPS schließen'}).click();
         }
         state.status=fixture.recovery.stale_paused;await scanner.getByRole('button',{name:'Neu laden',exact:true}).click();await scanner.getByText(/Aktiver Lauf: recovery-stale_paused/).waitFor();
-        assert.equal(await scanner.getByRole('button',{name:'Start',exact:true}).isEnabled(),true);assert.equal(await scanner.getByRole('button',{name:'Fortsetzen',exact:true}).isDisabled(),true);
+        assert.equal(await scanner.getByRole('button',{name:'Start',exact:true}).isEnabled(),true);assert.equal(await scanner.getByRole('button',{name:'Fortsetzen',exact:true}).isEnabled(),true);
         state.status=fixture.recovery.soft_partial;await scanner.getByRole('button',{name:'Neu laden',exact:true}).click();await scanner.getByText(/Aktiver Lauf: recovery-soft_partial/).waitFor();
         await scanner.getByRole('button',{name:'Fortsetzen',exact:true}).click();await scanner.getByText(/· queued ·/).first().waitFor();
         state.status=fixture.recovery.terminal_partial;await scanner.getByRole('button',{name:'Neu laden',exact:true}).click();await scanner.getByText(/Aktiver Lauf: recovery-terminal_partial/).waitFor();

@@ -374,14 +374,13 @@ def test_explicit_new_run_discards_old_cursor_not_complete_history(tmp_path):
     assert runner.store.load_complete() == final
 
 
-def test_stale_date_resume_and_bad_control_id_no_io(tmp_path):
+def test_original_date_resume_after_midnight_and_bad_control_id_no_io(tmp_path):
     runner, transport, clock, _ = make_runner(tmp_path)
     runner.start(run()); runner.pause(run().run_id)
     with pytest.raises(LeapsDataError):
         runner.resume('different')
     clock.now += 86400 * 10**9
-    with pytest.raises(LeapsDataError, match='stale_run'):
-        runner.resume(run().run_id)
+    assert runner.resume(run().run_id).run == run()
     assert transport.calls == []
 
 
@@ -395,7 +394,7 @@ def test_unknown_admission_runner_does_no_io(tmp_path):
     assert transport.calls == []
 
 
-@pytest.mark.parametrize('status,reason', [(401, 'authorization_denied'), (429, 'rate_limited')])
+@pytest.mark.parametrize('status,reason', [(401, 'authorization_denied')])
 def test_sec_failure_is_persisted_and_cannot_poison_market_on_new_provider(tmp_path, status, reason):
     runner, transport, clock, gate = make_runner(tmp_path, sec=True)
     transport.sec_status = status
@@ -545,7 +544,7 @@ def test_worker_owner_blocks_other_process_without_blocking_pause(tmp_path):
         parent.close(); child.close()
 
 
-def test_explicit_fresh_reconciliation_required_before_replacement_can_dispatch(tmp_path):
+def test_optional_rate_reconciliation_does_not_auto_authorize_replacement(tmp_path):
     runner, transport, clock, gate = make_runner(tmp_path)
     runner.start(run()); transport.market_status = 429
     assert runner.run_slice().status == 'paused'
@@ -641,8 +640,8 @@ def test_market_date_boundary_is_exact_at_ny_midnight(tmp_path):
     assert runner.resume(run().run_id).status == 'queued'
     runner.pause(run().run_id)
     clock.now = midnight
-    with pytest.raises(LeapsDataError, match='stale_run'):
-        runner.resume(run().run_id)
+    assert runner.resume(run().run_id).run == run()
+    runner.pause(run().run_id)
     assert runner.start(replace(run(), run_id='next-date', market_date=date(2026, 10, 14))).status == 'queued'
     assert transport.calls == []
 

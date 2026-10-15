@@ -12,10 +12,12 @@ from hashlib import sha256
 import json
 import re
 
-from .contracts import decimal_context, expiry_window, add_calendar_months, parse_decimal, parse_standard_contract
+from .contracts import (decimal_context, expiry_window, add_calendar_months, parse_decimal,
+                        parse_standard_contract, derive_massive_standard_terms)
 from .models import (LeapsDataError, LeapsSnapshot, OptionContract, QuoteObservation,
                      UnderlyingObservation, UnderlyingEvidence, GreeksObservation, to_json_value)
 from .pricing import evaluate_expiry, scenario_prices, spread_metrics
+from .analytics import call_metrics
 from .provider import OptionQuote, StockQuote, VerifiedSession, DailyCompletionProof, assess_quote
 from .underlying import CachedUnderlyingLoader, UnderlyingLoadPaused
 
@@ -37,7 +39,7 @@ class DiscoveryProvider:
     """
     def __init__(self, market, *, terms_producer=None, session_producer=None, underlying_loader=None):
         self.market=market
-        self.terms_producer=terms_producer
+        self.terms_producer=terms_producer if terms_producer is not None else derive_massive_standard_terms
         self.session_producer=session_producer
         self.underlying_loader=underlying_loader or CachedUnderlyingLoader(market)
         self._comparison_run=None
@@ -90,16 +92,18 @@ def compare_contract(contract, observation, evidence, run, now_ns):
     crossed=quote.bid is not None and quote.ask is not None and quote.ask>0 and quote.bid>quote.ask
     price=quote.bid if valid_source and not crossed and quote.bid is not None and quote.bid>0 else None
     stock=UnderlyingObservation(evidence.stock.ticker,price,'bid' if price else None,quote.source_ns,quote.feed_mode)
+    comparable=assessment.comparison_eligible
+    scenario_stock=stock if comparable else replace(stock,price=None,price_kind=None)
     ask=observation.quote.ask
     be=rise=spread=loss=None
     scenarios=()
     if assessment.algebra_eligible:
         with decimal_context():
             be=contract.strike+ask
-            rise=(be-price)/price if price else None
+            rise=(be-price)/price if comparable and price else None
         if observation.quote.bid is None or 0<=observation.quote.bid<=ask:
             spread,loss=spread_metrics(observation.quote.bid,ask)
-        scenarios=tuple({'terminal':terminal,'result':evaluate_expiry(contract,ask,terminal,underlying=stock,delta=observation.greeks.delta)} for terminal in scenario_prices(price))
+        scenarios=tuple({'terminal':terminal,'result':evaluate_expiry(contract,ask,terminal,underlying=scenario_stock,delta=observation.greeks.delta)} for terminal in scenario_prices(scenario_stock.price))
     indicators=evidence.underlying.indicators
     meta=indicators.get('indicators_meta',{})
     close,ema=indicators.get('completed_close'),indicators.get('ema200_decimal')
@@ -114,9 +118,12 @@ def compare_contract(contract, observation, evidence, run, now_ns):
                 technical=close>ema
         except (ValueError,TypeError):
             pass
-    metrics={'max_be_rise':rise,'max_spread':spread,'min_open_interest':observation.open_interest,
+    analytics=(call_metrics(contract,ask,price,run.market_date,delta=observation.greeks.delta,
+                           iv=observation.greeks.iv,hv=indicators.get('hv_252_decimal'))
+               if comparable and price is not None else None)
+    metrics={'max_be_rise':rise,'max_spread':spread if comparable else None,'min_open_interest':observation.open_interest,
              'min_delta':observation.greeks.delta,'max_delta':observation.greeks.delta,
-             'min_underlying_price':price,'max_underlying_price':price,'close_above_ema200':technical,
+             'min_underlying_price':price if comparable else None,'max_underlying_price':price if comparable else None,'close_above_ema200':technical,
              'min_maturity_months':contract.expiry,'max_maturity_months':contract.expiry}
     missing=[]; rejected=[]
     for key,value in filters.items():
@@ -129,13 +136,17 @@ def compare_contract(contract, observation, evidence, run, now_ns):
             rejected.append(key)
         elif (key.startswith('max_') and metric>value) or (key.startswith('min_') and metric<value):
             rejected.append(key)
+    filter_status='missing_evidence' if missing or not comparable else 'excluded' if rejected else 'passed'
+    rank_eligible=bool(comparable and filter_status=='passed' and analytics and analytics['rankable'])
     return LeapsSnapshot(run,'comparison',dict(contract=contract,terms_fingerprint=contract.terms_fingerprint,
         company_name=None,company_name_source=None,
         remaining_term={'basis_date':run.market_date,'days':(contract.expiry-run.market_date).days},
         observation=observation,assessment=assessment,stock_reference=stock,underlying=evidence.underlying,
         break_even=be,be_rise=rise,spread=spread,ask_to_bid_loss=loss,scenarios=scenarios,
+        analytics=analytics,rank_eligible=rank_eligible,
         greeks=observation.greeks,open_interest=observation.open_interest,open_interest_basis=observation.open_interest_basis,
-        filter_status='missing_evidence' if missing else 'excluded' if rejected else 'passed',
+        volume=observation.volume,volume_source_ns=observation.volume_source_ns,volume_session=observation.volume_session,
+        filter_status=filter_status,
         filter_missing=tuple(missing),filter_rejected=tuple(rejected),filter_fingerprint=_fingerprint(run.filters)),{},(),None,()).data
 
 
@@ -358,18 +369,27 @@ def _snapshot(state,provider,run,*,pause=None):
              evidence.stock.quote.source_ns is not None and evidence.stock.quote.source_ns<=now)
         cached=provider._comparisons.get(symbol)
         if cached is None or cached[0]!=key:
-            row=compare_contract(option.contract,option,evidence,run,now)
+            base=compare_contract(option.contract,option,evidence,run,now)
         else:
             # Reuse economics only within the same original-source validity
             # boundaries. Current freshness/session assessment is never cached.
-            row=dict(cached[1],assessment=assessment)
+            base=cached[1]
+        row=dict(base,assessment=assessment)
+        if not assessment.comparison_eligible:
+            row.update(be_rise=None,analytics=None,rank_eligible=False,filter_status='missing_evidence',
+                       filter_missing=tuple(dict.fromkeys((*row['filter_missing'],*(key for key in run.filters
+                           if key in ('max_be_rise','max_spread','min_underlying_price','max_underlying_price'))))))
+            row['scenarios']=(tuple(dict(point,result=replace(point['result'],stock_pnl=None,
+                              stock_price_roi=None,stock_reference_capital=None)) for point in row['scenarios'][:1])
+                              if assessment.algebra_eligible else ())
         name=state['listings'].get(ticker,{}).get('name')
         name=name.strip() if isinstance(name,str) and 0<len(name.strip())<=256 else None
         row=dict(row,company_name=name,company_name_source='verified_listing_reference' if name else None)
-        retained[symbol]=(key,row)
+        retained[symbol]=(key,base)
         rows.append(row)
     provider._comparisons=retained
-    rows.sort(key=lambda row:(row['be_rise'] is None,row['be_rise'] or Decimal(0),row['contract'].id))
+    rows.sort(key=lambda row:(not row['rank_eligible'],
+              row['analytics']['extrinsic_annual_fraction'] if row['rank_eligible'] else Decimal(0),row['contract'].id))
     coverage=dict(reference_seen=len(state['references']),reference_total=len(state['references']) if state['reference_complete'] else None,
         reference_complete=state['reference_complete'],reference_duplicates=state['reference_duplicates'],
         listings_seen=len(state['listings']),listings_complete=tuple(state['listing_complete']),
@@ -381,7 +401,7 @@ def _snapshot(state,provider,run,*,pause=None):
         unobserved=sum(x['reason'] in ('not_observed_in_completed_chain','chain_incomplete') for x in state['exclusions'].values()),
         filter_unknown=sum(row['filter_status']=='missing_evidence' for row in rows),
         filter_excluded=sum(row['filter_status']=='excluded' for row in rows),
-        eligible=sum(row['filter_status']=='passed' and row['assessment'].comparison_eligible for row in rows),
+        eligible=sum(row['rank_eligible'] for row in rows),
         quality_partial=sum(item.coverage.get('quality')!='complete' for item in state['underlyings'].values()))
     status=('paused' if pause else 'failed' if state['phase']=='failed' else
             ('partial' if state['reasons'] else 'complete') if state['phase']=='done' else 'running')

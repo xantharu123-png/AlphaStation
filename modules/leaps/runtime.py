@@ -73,7 +73,8 @@ def _decode(value):
     if kind == 'map':
         return {k: _decode(v) for k, v in body.items()}
     cls = _TYPES.get(kind)
-    optional={'stock_reference_capital','stock_share_count'} if cls is models.ExpiryResult else set()
+    optional = ({'stock_reference_capital', 'stock_share_count'} if cls is models.ExpiryResult
+                else {'volume', 'volume_source_ns', 'volume_session'} if cls is OptionQuote else set())
     expected={f.name for f in fields(cls)} if cls else set()
     if cls is None or set(body)-expected or expected-set(body)-optional:
         raise _error()
@@ -197,8 +198,10 @@ class LeapsStore:
                 raise _error()
             for scope, record in state['authorities'].items():
                 if (scope not in ('market', 'sec', 'market:stock_quotes', 'market:option_quotes', 'market:option_reference', 'market:stock_reference', 'market:stock_history') or type(record) is not dict
-                        or set(record) != {'reason', 'run_id', 'cursor', 'observed_ns', 'evidence_ids'}
+                        or set(record)-{'retry_at_ns'} != {'reason', 'run_id', 'cursor', 'observed_ns', 'evidence_ids'}
                         or record['reason'] not in ('authorization_denied', 'rate_limited', None)
+                        or ('retry_at_ns' in record and (record['reason'] != 'rate_limited'
+                            or type(record['retry_at_ns']) is not int or not 0 < record['retry_at_ns'] < 10**20))
                         or (record['run_id'] is not None and not isinstance(record['run_id'], str))
                         or (record['cursor'] is not None and not isinstance(record['cursor'], str))
                         or not isinstance(record['observed_ns'], str) or not record['observed_ns'].isdigit()
@@ -439,6 +442,7 @@ class AuthorityProvider:
         if not isinstance(provider, MassiveLeapsProvider) or provider.admission is not admission:
             raise _error('unbound_provider_admission')
         self.provider, self.store, self.admission, self.clock_ns = provider, store, admission, clock_ns
+        self.retry_wait = None
 
     def __getattr__(self, name):
         if name == 'parse_chain_item':
@@ -452,6 +456,18 @@ class AuthorityProvider:
                 for authority in (scope, self._RESOURCES[name]):
                     record = state['authorities'].get(authority)
                     if record and record['reason']:
+                        if record['reason'] == 'rate_limited':
+                            # Older records had no retry deadline; conservatively
+                            # wait one minute, never require entitlement repair.
+                            deadline = record.get('retry_at_ns', int(record['observed_ns']) + 60 * 10**9)
+                            if self.clock_ns() >= deadline:
+                                del state['authorities'][authority]
+                                self.store._write(state)
+                                continue
+                            self.retry_wait = {'reason': 'rate_limited', 'retry_at_ns': deadline}
+                            error = authority_error('rate_limited', authority)
+                            error.retry_reason, error.retry_at_ns = 'rate_limited', deadline
+                            raise error
                         raise authority_error(record['reason'], authority)
                 # Pause requests are checked before every physical public unit,
                 # including history/SEC inside a discovery underlying safe unit.
@@ -473,6 +489,14 @@ class AuthorityProvider:
                 with self.provider.bound_attempts(attempt_scope):
                     return getattr(self.provider, name)(*args, **kwargs)
             except LeapsDataError as error:
+                deadline = getattr(error, 'retry_at_ns', None)
+                reason = getattr(error, 'retry_reason', None)
+                if (type(deadline) is int and 0 < deadline < 10**20
+                        and reason in ('rate_limited', 'request_busy', 'priority_active',
+                                       'local_budget_exhausted', 'shared_budget_exhausted')):
+                    self.retry_wait = {'reason': reason, 'retry_at_ns': deadline}
+                    if getattr(error, 'retry_exhausted', False) is True:
+                        self.retry_wait['exhausted'] = True
                 if error.code in ('authorization_denied', 'rate_limited'):
                     with self.store.lock():
                         state = self.store._read_metadata()
@@ -482,6 +506,8 @@ class AuthorityProvider:
                             'reason': error.code, 'run_id': latest.run.run_id if latest else None,
                             'cursor': 'blob:'+latest.blob if latest else None,
                             'observed_ns': str(self.clock_ns()), 'evidence_ids': []}
+                        if error.code == 'rate_limited' and self.retry_wait is not None:
+                            state['authorities'][authority]['retry_at_ns'] = deadline
                         self.store._write(state)
                 raise
         return call
@@ -537,13 +563,14 @@ class LeapsRunner:
             raise _error('invalid_clock')
         return datetime.fromtimestamp(now // 10**9, timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
 
-    def _valid_run(self, run):
+    def _valid_run(self, run, *, existing=False):
         from .service import _filters
         _validate_snapshot(LeapsSnapshot(run, 'queued', {}, {}, (), None, ()))
         _filters(run)  # Existing pure filter validation; no replacement policy.
         if run.schema_version != SUPPORTED_SCHEMA_VERSION or run.methodology_version != SUPPORTED_METHODOLOGY_VERSION:
             raise _error('unsupported_run_version')
-        if run.market_date != self._current_date():
+        today = self._current_date()
+        if run.market_date > today or (not existing and run.market_date != today):
             raise _error('stale_run')
 
     def _owner(self):
@@ -619,12 +646,12 @@ class LeapsRunner:
                 current = state['latest']
                 if current is None or current.run.run_id != run_id:
                     raise _error('unknown_run')
-                self._valid_run(current.run)
+                self._valid_run(current.run, existing=True)
                 if current.status in ('complete', 'failed'):
                     raise _error('terminal_run')
                 if loaded is None or current.run!=loaded.run:
                     raise _error('run_owner_changed')
-                if state['authorities'].get('market', {}).get('reason'):
+                if state['authorities'].get('market', {}).get('reason') == 'authorization_denied':
                     raise _error('authority_reconciliation_required')
                 result = replace(current, status='queued', reasons=tuple(r for r in current.reasons if r not in ('admin_pause', 'slice_deadline', 'admission_denied')))
                 state['latest'], state['control'] = result, {'run_id': run_id, 'action': 'run'}
@@ -637,6 +664,19 @@ class LeapsRunner:
     def authority_states(self):
         with self.store.lock():
             return self.store._read_metadata()['authorities']
+
+    def retry_delay(self):
+        """Remaining automatic wait for this authorized run; no provider IO."""
+        state = self.store.read(metadata=True)
+        current = state['latest']
+        if (current is None or self._authorized_run != current.run or not state['control']
+                or state['control']['action'] != 'run' or current.status != 'paused'):
+            return None
+        retry = current.coverage.get('retry', {})
+        deadline = retry.get('retry_at_ns')
+        if type(deadline) is not int or not 0 < deadline < 10**20:
+            return None
+        return min(60, max(0, deadline - self.clock_ns()) / 10**9)
 
     def reconcile_authority(self, scope, proof, replacement):
         """Separate trusted composition operation; no default auto-unpause."""
@@ -656,6 +696,7 @@ class LeapsRunner:
                 self.admission.budget.allocation(now)
                 wrapped = self._wrap(replacement)
                 state['authorities'][scope] = dict(failure, reason=None, evidence_ids=list(proof.evidence_ids))
+                state['authorities'][scope].pop('retry_at_ns', None)
                 self.store._write(state)
                 self.provider = wrapped
                 self._authorized_run = None
@@ -688,10 +729,26 @@ class LeapsRunner:
                             or state['control']['action'] != 'run' or current.status in ('complete', 'failed')):
                         stop=True
                     else:
-                        self._valid_run(current.run)
-                        now = self.clock_ns()
-                        if now < started:
-                            raise _error('clock_regression')
+                        try:
+                            self._valid_run(current.run, existing=True)
+                            now = self.clock_ns()
+                            if type(started) is not int or started <= 0 or type(now) is not int or now <= 0:
+                                raise _error('invalid_clock')
+                            if now < started:
+                                raise _error('clock_regression')
+                        except LeapsDataError as error:
+                            # Validation can fail between safe units, before
+                            # discover's exception boundary. Keep its last blob/
+                            # cursor and completed history, but never strand the
+                            # store runnable after this worker has exited.
+                            state['latest'] = replace(current, status='failed',
+                                reasons=tuple(dict.fromkeys((*current.reasons, error.code))))
+                            state['control']['action'] = 'pause'
+                            self.store._write(state)
+                            raise
+                        retry = current.coverage.get('retry', {})
+                        if current.status == 'paused' and type(retry.get('retry_at_ns')) is int and now < retry['retry_at_ns']:
+                            stop=True
                         if now - started >= 900 * 10**9:
                             result = replace(current, status='partial', reasons=tuple(dict.fromkeys((*current.reasons, 'slice_deadline'))))
                             state['latest'], state['control']['action'] = result, 'pause'
@@ -704,9 +761,16 @@ class LeapsRunner:
                 if loaded is None or loaded.run!=current.run:
                     raise _error('run_owner_changed')
                 try:
+                    self.provider.market.retry_wait = None
                     result = self._progress(discover(self.provider, current.run, loaded.cursor))
                 except LeapsDataError as error:
                     result = replace(loaded, status='failed', reasons=tuple(dict.fromkeys((*current.reasons, error.code))))
+                retry = self.provider.market.retry_wait if result.status == 'paused' else None
+                if retry is not None:
+                    result = replace(result, coverage=dict(result.coverage, retry=retry))
+                    if retry.get('exhausted') is True:
+                        result = replace(result, status='partial', reasons=tuple(dict.fromkeys(
+                            (*result.reasons, 'rate_limit_retry_exhausted'))))
                 prepared=self.store.prepare(result)
                 with self.store.lock():
                     state = self.store._read_metadata()
@@ -721,7 +785,7 @@ class LeapsRunner:
                             record['cursor'] = 'blob:'+prepared.blob
                     if result.status == 'complete':
                         state['last_complete'] = prepared
-                    if result.status != 'running':
+                    if result.status != 'running' and (retry is None or retry.get('exhausted') is True):
                         state['control']['action'] = 'pause'
                     self.store._write(state)
                 if result.status != 'running':

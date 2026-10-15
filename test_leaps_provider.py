@@ -153,7 +153,7 @@ def test_feed_proof_and_chain_quote_use_independent_source_clocks():
     assert result.quote.feed_mode == 'realtime' and result.quote.feed_lag_s == 0
     assert result.open_interest == 1500 and result.open_interest_basis == 'previous_session'
     assert result.reference_source_ns is None and result.greeks.source_ns is None
-    assert result.greeks.delta is None and result.greeks.iv is None
+    assert result.greeks.delta == D('0.6') and result.greeks.iv == D('0.4')
     assert result.greeks.raw['delta'] == D('0.6') and result.greeks.raw['implied_volatility'] == D('0.4')
 
 
@@ -164,7 +164,7 @@ def test_no_last_quote_never_substitutes_fmv_trade_mid_or_underlying():
     raw.pop('greeks')
     result = p.parse_chain_item(raw, contract())
     assert result.quote.ask is None and result.quote.source_ns is None
-    assert result.greeks.delta is None and result.greeks.iv is None
+    assert result.greeks.delta is None and result.greeks.iv == D('0.4')
 
 
 @pytest.mark.parametrize('field,value', [('ask','5.2'),('bid',True),('last_updated',1791898200000),
@@ -188,7 +188,7 @@ def test_chain_details_must_match_proven_reference(field,value):
 
 
 @pytest.mark.parametrize('age,lag,want', [(60*10**9,D(0),True),(60*10**9+1,D(0),False),
-    (960*10**9,D(900),True),(960*10**9+1,D(900),False)])
+    (960*10**9,D(900),False),(960*10**9+1,D(900),False)])
 def test_source_age_boundary_is_exact_not_receipt_time(age,lag,want):
     option, stock, session = bound_quotes(age=age,lag=lag)
     result = api().assess_quote(option,stock,now_ns=NOW,verified_session=session)

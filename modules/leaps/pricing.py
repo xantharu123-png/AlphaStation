@@ -7,7 +7,7 @@ not a probability. Scenarios are assumptions, not predictions.
 """
 from decimal import Decimal
 
-from .contracts import decimal_context, parse_decimal, parse_quantity
+from .contracts import decimal_context, parse_decimal, parse_greek_decimal, parse_quantity
 from .models import ExpiryResult, LeapsDataError, OptionContract, UnderlyingObservation
 
 
@@ -56,7 +56,9 @@ def evaluate_expiry(
     terminal = _terminal(terminal)
     quantity = parse_quantity(quantity)
     if delta is not None:
-        delta = _wire_decimal(delta)
+        if not isinstance(delta, Decimal):
+            raise LeapsDataError("invalid_greek_decimal", "contract")
+        delta = parse_greek_decimal(delta)
         if not 0 <= delta <= 1:
             raise LeapsDataError("invalid_call_delta", "contract")
     initial = None

@@ -36,6 +36,26 @@ def parse_decimal(value) -> Decimal:
         raise LeapsDataError("invalid_decimal", "contract") from None
 
 
+def parse_greek_decimal(value) -> Decimal:
+    """Exact bounded model number, separate from 12-place money inputs.
+
+    Provider JSON numbers arrive as int/Decimal; strings, floats and booleans
+    are not wire numbers. Up to 36 fractional places are retained without
+    rounding. Bounds also reject zero values with pathological exponents.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise LeapsDataError('invalid_greek_decimal', 'provider')
+    if isinstance(value, int) and not -10**12 <= value <= 10**12:
+        raise LeapsDataError('greek_decimal_bounds', 'provider')
+    result = Decimal(value)
+    if not result.is_finite():
+        raise LeapsDataError('invalid_greek_decimal', 'provider')
+    if (len(str(result)) > 64 or not -36 <= result.as_tuple().exponent <= 12
+            or result.copy_abs() > Decimal('1e12')):
+        raise LeapsDataError('greek_decimal_bounds', 'provider')
+    return result
+
+
 def parse_quantity(value) -> int:
     if type(value) is not int or not 1 <= value <= 10**6:
         raise LeapsDataError("invalid_quantity", "contract")
@@ -80,6 +100,46 @@ def add_calendar_months(as_of: date, months: int) -> date:
         return date(year,month+1,min(as_of.day,monthrange(year,month+1)[1]))
     except ValueError:
         raise LeapsDataError('invalid_market_date','underlying') from None
+
+
+def derive_massive_standard_terms(raw: Mapping, listing: Mapping, run=None) -> Mapping | None:
+    """Pure ordinary US equity/ADR rule from actual reference/listing fields.
+
+    The 100 USD-per-premium-point multiplier is the documented standard
+    product rule, not an API field or a general shares-to-multiplier formula.
+    OCASPS must agree with call, American exercise, 100 shares, no additional
+    deliverables and a matching eligible USD stock listing. The existing
+    contract parser independently joins symbol/strike/expiry and rejects
+    unknown root aliases or contradictory fields. Unsupported terms return
+    None; this helper neither fetches data nor certifies account access.
+
+    ``run`` is intentionally unused, for DiscoveryProvider producer injection.
+    Reference dating/freshness remains the caller's responsibility.
+    """
+    if not isinstance(raw, Mapping) or not isinstance(listing, Mapping):
+        return None
+    extras = raw.get('additional_underlyings', [])
+    if (raw.get('contract_type') != 'call' or raw.get('cfi') != 'OCASPS'
+            or raw.get('exercise_style') != 'american'
+            or type(raw.get('shares_per_contract')) is not int or raw['shares_per_contract'] != 100
+            or not isinstance(extras, (list, tuple)) or extras):
+        return None
+    kind = listing.get('type')
+    if kind not in ('CS', 'ADRC', 'ADRP'):
+        return None
+    evidence = dict(standard=True, asset_class='equity' if kind == 'CS' else 'adr',
+                    currency='USD', settlement='physical', premium_multiplier=100,
+                    source='massive_reference_fields',
+                    premium_multiplier_rule='standard_us_equity_adr_100',
+                    evidence_ids=(
+                        'https://massive.com/docs/rest/options/contracts/all-contracts',
+                        'https://massive.com/docs/rest/stocks/tickers/all-tickers',
+                        'https://www.theocc.com/clearance-and-settlement/clearing/equity-options-product-specifications'))
+    try:
+        parse_standard_contract(raw, listing, evidence)
+    except LeapsDataError:
+        return None
+    return evidence
 
 
 def parse_standard_contract(raw: Mapping, listing: Mapping, evidence: Mapping) -> OptionContract:

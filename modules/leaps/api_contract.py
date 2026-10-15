@@ -179,7 +179,8 @@ def parse_scenario(body):
 
 def parse_scan(body, now):
     _object(body, set(), {'run_id','filters'})
-    filters = body.get('filters',{})
+    filters = body.get('filters',{'min_delta_percent':'70','max_delta_percent':'85',
+                                  'max_spread_percent':'10','min_open_interest':'100','min_underlying_price':'10'})
     if not isinstance(filters,dict) or any((v is not True if k=='close_above_ema200' else not isinstance(v,str)) for k,v in filters.items()):
         raise LeapsApiError(422,'invalid_filters')
     try:
@@ -260,6 +261,10 @@ def _public_row(row, now, clock_regressed=False):
     result = dict(row,assessment=_current_assessment(row,now,clock_regressed))
     if not result['assessment'].algebra_eligible:
         result.update(break_even=None,be_rise=None,spread=None,ask_to_bid_loss=None,scenarios=())
+    if not result['assessment'].comparison_eligible:
+        result.update(be_rise=None,analytics=None,rank_eligible=False,filter_status='missing_evidence')
+        result['scenarios']=tuple(dict(point,result=replace(point['result'],stock_pnl=None,
+                 stock_price_roi=None,stock_reference_capital=None)) for point in result.get('scenarios',()))
     result['comparison_scope_quantity'] = 1
     return to_json_value(result)
 
@@ -275,19 +280,26 @@ _SORT_KEYS = {
     'spread':lambda row:row.get('spread'),
     'delta':lambda row:row['greeks'].delta,
     'open_interest':lambda row:row.get('open_interest'),
+    'extrinsic_annual_fraction':lambda row:(row.get('analytics') or {}).get('extrinsic_annual_fraction'),
 }
 
 
-def _sort_rows(rows, sort_by, order):
+def _sort_rows(rows, sort_by, order, *, now=None, clock_regressed=False):
     # Stable ascending contract-ID ties in BOTH directions. Missing is not zero:
     # split nulls before descending order, so unknown stays last on every page.
     stable = sorted(rows,key=lambda row:row['contract'].id)
+    def current(row):
+        return (row['assessment'].comparison_eligible if now is None else
+                _current_assessment(row,now,clock_regressed).comparison_eligible)
+    eligibility=[(row,current(row)) for row in stable]
+    current_rows=[row for row,eligible in eligibility if eligible and row.get('rank_eligible') is True]
+    other_rows=[row for row,eligible in eligibility if not eligible or row.get('rank_eligible') is not True]
     values = [(None if sort_by in ('cost_per_contract','break_even','be_rise','spread')
                and not valid_premium(row['observation'].quote,row['observation'].quote.received_ns)
-               else _SORT_KEYS[sort_by](row),row) for row in stable]
+               else _SORT_KEYS[sort_by](row),row) for row in current_rows]
     present = [(value,row) for value,row in values if value is not None]
     present.sort(key=lambda item:item[0],reverse=order=='desc')
-    return [row for _,row in present]+[row for value,row in values if value is None]
+    return [row for _,row in present]+[row for value,row in values if value is None]+other_rows
 
 
 class LeapsApiService:
@@ -299,6 +311,7 @@ class LeapsApiService:
         self._worker_running = False
         self._dispatch_pending = False
         self._lock = threading.Lock()
+        self._wakeup = threading.Event()
         self._last_start = None
         self._worker_error = None
         self._derived = {}
@@ -332,7 +345,7 @@ class LeapsApiService:
         options = (state['last_complete'],state['latest']) if view == 'complete' else (state['latest'],)
         return next((s for s in options if s is not None and (run_id is None or s.run.run_id==run_id)),None)
 
-    def results(self, *, limit=50, offset=0, view='complete', run_id=None, sort_by='be_rise', order='asc'):
+    def results(self, *, limit=50, offset=0, view='complete', run_id=None, sort_by='extrinsic_annual_fraction', order='asc'):
         if type(limit) is not int or not 1<=limit<=100 or type(offset) is not int or not 0<=offset<=10**9:
             raise LeapsApiError(422,'invalid_page')
         sort_by = 'underlying' if sort_by=='ticker' else sort_by
@@ -349,12 +362,10 @@ class LeapsApiService:
         total = len(rows)
         now,regressed=self.store.observe_clock(self.clock_ns)
         coverage = dict(snapshot.coverage)
-        coverage['eligible'] = sum(r.get('filter_status')=='passed' and _current_assessment(r,now,regressed).comparison_eligible for r in rows)
-        entry=self._derived_for(snapshot)
-        ordering=(sort_by,order)
-        if ordering not in entry['orders']:
-            entry['orders'][ordering]=_sort_rows(rows,sort_by,order)
-        ordered=entry['orders'][ordering]
+        coverage['eligible'] = sum(r.get('rank_eligible') is True and _current_assessment(r,now,regressed).comparison_eligible for r in rows)
+        # Quote expiry changes eligibility even when the stored snapshot does
+        # not change. Re-evaluate BEFORE global ordering and pagination.
+        ordered=_sort_rows(rows,sort_by,order,now=now,clock_regressed=regressed)
         return {'run_id':snapshot.run.run_id,'snapshot_id':self._identity(snapshot),'status':snapshot.status,
                 'market_date':snapshot.run.market_date.isoformat(),'filters':to_json_value(snapshot.run.filters),
                 'rows':[_public_row(r,now,regressed) for r in ordered[offset:offset+limit]],'total':total,
@@ -367,18 +378,25 @@ class LeapsApiService:
         phase=snapshot.coverage.get('progress',{}).get('phase') if snapshot else None
         terminal=bool(snapshot and (snapshot.status in ('complete','failed') or phase in ('done','failed')))
         today=datetime.fromtimestamp(self.clock_ns()//10**9,timezone.utc).astimezone(ZoneInfo('America/New_York')).date()
-        compatible=bool(snapshot and snapshot.run.market_date==today
+        compatible=bool(snapshot and snapshot.run.market_date<=today
                         and snapshot.run.schema_version==SUPPORTED_SCHEMA_VERSION
                         and snapshot.run.methodology_version==SUPPORTED_METHODOLOGY_VERSION)
         resumable=bool(compatible and not terminal and snapshot.status in ('paused','partial')
                        and phase in ('queued','reference','listings','intersection','underlying','chain')
-                       and not state.get('authorities',{}).get('market',{}).get('reason'))
+                       and state.get('authorities',{}).get('market',{}).get('reason') != 'authorization_denied')
+        retry=snapshot.coverage.get('retry') if snapshot else None
+        automatic_wait=bool(snapshot and snapshot.status=='paused' and not terminal
+                            and isinstance(retry,Mapping) and type(retry.get('retry_at_ns')) is int
+                            and retry['retry_at_ns']>0 and state.get('control')
+                            and state['control'].get('action')=='run')
         return {'run_id':snapshot.run.run_id if snapshot else None,'status':snapshot.status if snapshot else 'empty',
+                'automatic_wait':automatic_wait,
                 'terminal':terminal,'resumable':resumable,
                 'restartable':snapshot is None or snapshot.status not in ('queued','running'),
                 'market_date':snapshot.run.market_date.isoformat() if snapshot else None,
                 'filters':to_json_value(snapshot.run.filters) if snapshot else {},
                 'progress':to_json_value(snapshot.coverage.get('progress')) if snapshot else None,
+                'retry':to_json_value(snapshot.coverage.get('retry')) if snapshot else None,
                 'reasons':list(snapshot.reasons) if snapshot else [],
                 'last_complete_run_id':state['last_complete'].run.run_id if state['last_complete'] else None,
                 'worker_error':self._worker_error}
@@ -399,6 +417,8 @@ class LeapsApiService:
             raise LeapsApiError(422,'no_valid_stored_ask')
         option, quantity = row['observation'], body['quantity']
         reference = row.get('stock_reference')
+        if reference is not None and not public['assessment']['comparison_eligible']:
+            reference=replace(reference,price=None,price_kind=None)
         prices = body.get('terminal_prices')
         if prices is None:
             prices = scenario_prices(reference.price if reference else None)
@@ -416,6 +436,7 @@ class LeapsApiService:
     def _dispatch(self):
         with self._lock:
             self._dispatch_pending = True
+            self._wakeup.set()
             if self._worker_running:
                 return
             self._worker_running = True
@@ -423,10 +444,20 @@ class LeapsApiService:
                 while True:
                     with self._lock:
                         self._dispatch_pending = False
+                        self._wakeup.clear()
                     try:
                         self.runner.run_slice()
+                        delay = self.runner.retry_delay() if callable(getattr(self.runner, 'retry_delay', None)) else None
                     except Exception:
                         self._worker_error = 'worker_failed'
+                        delay = None
+                    if delay is not None:
+                        # No request/store/worker-owner lease is held while idle.
+                        # Wake immediately for accepted controls, otherwise retry
+                        # only after the provider/admission deadline (<=60s chunks).
+                        if delay > 0:
+                            self._wakeup.wait(delay)
+                        continue
                     # A native slice may have released its owner while this
                     # thread is still alive. Consume accepted dispatches before
                     # atomically becoming idle; never lose the exit handoff.
@@ -469,4 +500,5 @@ class LeapsApiService:
             self._dispatch()
         else:
             snapshot = self.runner.pause(run_id)
+            self._wakeup.set()
         return {'run_id':snapshot.run.run_id,'status':snapshot.status}

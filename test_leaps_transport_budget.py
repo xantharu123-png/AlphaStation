@@ -17,7 +17,11 @@ def peer():
         def log_message(self,*args): pass
         def do_GET(self):
             calls.append((self.path,self.headers.get('Accept-Encoding')))
-            self.send_response(403 if self.path=='/denied' else 200)
+            self.send_response(429 if self.path.startswith('/limited') else 403 if self.path=='/denied' else 200)
+            if self.path.startswith('/limited'):
+                self.send_header('Retry-After', '37' if self.path=='/limited' else 'x'*200)
+                self.send_header('Set-Cookie', 'synthetic-do-not-forward')
+                self.send_header('X-Private-Diagnostic', 'synthetic-private-diagnostic')
             if self.path in ('/gzip','/denied'): self.send_header('Content-Encoding','gzip')
             self.end_headers()
             try:
@@ -70,7 +74,10 @@ def test_continuous_body_total_deadline_confirms_exit_before_native_lease_releas
     def spawn(*args,**kwargs):
         child=original(*args,**kwargs); handles.append(child); return child
     monkeypatch.setattr(subprocess,'Popen',spawn)
-    transport=physical_transport(.7)
+    # Includes cold Python/requests startup as well as the body. The peer
+    # streams for three seconds, so a two-second total budget still proves
+    # body cancellation without assuming sub-700ms Windows process startup.
+    transport=physical_transport(2)
     assert gate.try_acquire('market').allowed
     started=time.monotonic()
     try:
@@ -82,7 +89,7 @@ def test_continuous_body_total_deadline_confirms_exit_before_native_lease_releas
     finally:
         gate.release('market')
     assert contender.acquire(); contender.release()
-    assert time.monotonic()-started<2.5
+    assert time.monotonic()-started<4
     assert len(peer[1])==1
 
 
@@ -113,6 +120,20 @@ def test_default_child_inherits_offline_launcher_denial_without_explicit_switch(
 def test_compressed_authorization_failure_retains_http_authority(peer):
     response=get(physical_transport(),peer[0]+'/denied')
     assert response.status_code==403 and response.text==''
+
+
+def test_real_worker_forwards_only_valid_bounded_retry_after(peer):
+    response=get(physical_transport(),peer[0]+'/limited')
+    assert response.status_code==429 and response.text==''
+    assert getattr(response,'headers',{})=={'Retry-After':'37'}
+    assert 'synthetic-do-not-forward' not in repr(response)
+    assert 'synthetic-private-diagnostic' not in repr(response)
+
+
+def test_real_worker_drops_oversize_retry_after_before_parent_decode(peer):
+    response=get(physical_transport(),peer[0]+'/limited-oversize')
+    assert response.status_code==429 and response.text==''
+    assert getattr(response,'headers',{})=={}
 
 
 def test_unknown_native_exit_keeps_quiescence_blocked_until_exit_is_proven():

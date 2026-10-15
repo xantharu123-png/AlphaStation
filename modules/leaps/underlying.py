@@ -5,7 +5,7 @@ EVERY causal bar before the native float analytics adapter. The loader obtains
 that provenance only from an injected verified source-completion producer.
 """
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import re
 import math
@@ -94,11 +94,57 @@ def _bars(values, as_of):
     return [{key:float(value) if isinstance(value,Decimal) else value for key,value in bar.items()} for bar in validated]
 
 
+def _historical_volatility(completed_bars, sources):
+    """HV-only evidence checks after full causal OHLCV validation."""
+    from .analytics import annual_historical_volatility
+
+    meta=dict(status='unavailable',reason=None,adjustment_basis='unknown',
+              close_count=min(len(completed_bars),253),return_count=0,
+              annualization_sessions=252,method='sample_std_log_returns_decimal50')
+    if len(completed_bars)<253:
+        meta['reason']='insufficient_hv_history'
+        return None,meta
+    window=completed_bars[-253:]
+    bases=set()
+    for source in sources:
+        if isinstance(source,Mapping) and source.get('adjusted') is True:
+            basis=source.get('adjustment_basis')
+            if isinstance(basis,str) and basis.strip() and len(basis)<=128:
+                bases.add(basis)
+    if (len(bases)!=1 or any(bar.get('adjusted') is False for bar in window)
+            or any(isinstance(source,Mapping) and source.get('adjusted') is False for source in sources)):
+        meta['reason']='unverified_adjustment_basis'
+        return None,meta
+    meta['adjustment_basis']=next(iter(bases))
+    # Existing exchange calendar includes weekends, holidays and announced
+    # exceptional closures. A missing session never becomes a multi-day return.
+    try:
+        from modules.signal_tracker import _is_us_equity_session
+        sessions=[date.fromisoformat(bar['date']) for bar in window]
+        if any(not _is_us_equity_session(day) for day in sessions):
+            meta['reason']='non_session_hv_history'
+            return None,meta
+        for previous,current in zip(sessions,sessions[1:]):
+            cursor=previous+timedelta(days=1)
+            while cursor<current:
+                if _is_us_equity_session(cursor):
+                    meta['reason']='missing_hv_sessions'
+                    return None,meta
+                cursor+=timedelta(days=1)
+        value=annual_historical_volatility([parse_decimal(bar['close']) for bar in window])
+    except (ImportError,KeyError,TypeError,ValueError,ArithmeticError):
+        meta['reason']='hv_unavailable'
+        return None,meta
+    meta.update(status='available',return_count=252)
+    return value,meta
+
+
 def build_underlying_evidence(ticker, *, completed_bars, facts, sources, as_of):
     """No network. Facts envelope contains companyfacts and optional valuation inputs."""
     from modules.ticker_detail_indicators import build_ticker_detail_indicators
     from modules.business_quality import analyze_company_facts
 
+    sources=tuple(sources)
     reasons=[]
     indicators={}
     history='missing'
@@ -120,6 +166,7 @@ def build_underlying_evidence(ticker, *, completed_bars, facts, sources, as_of):
                         ema+=(close-ema)*Decimal(2)/201
                     indicators['ema200_decimal']=ema
             indicators['filter_ema_method']='completed_daily_sma_seed_decimal50'
+            indicators['hv_252_decimal'],indicators['hv_meta']=_historical_volatility(completed_bars,sources)
             history=indicators['indicators_meta']['status']
             invalid=[]
             indicators=_finite_analytics(indicators,invalid)
@@ -189,11 +236,14 @@ def _restore_progress(checkpoint,ticker,listing,as_of,now_ns):
         if not progress['history_done']:
             if proof is None or any(progress[key] for key in ('bars','sources','reasons','failures')):
                 raise ValueError()
+        valid_sources=(proof is not None and (progress['sources']==[proof] or
+                       progress['sources']==[proof,{'source':'massive_stock_daily_aggregates','adjusted':True,
+                           'adjustment_basis':'split_adjusted','market_date':proof.market_date.isoformat()}]))
         if progress['bars']:
-            if proof is None or progress['sources']!=[proof]:
+            if not valid_sources:
                 raise ValueError()
             _bars(progress['bars'],proof.market_date)
-        if progress['sources'] and progress['sources']!=[proof]:
+        if progress['sources'] and not valid_sources:
             raise ValueError()
         if any(not isinstance(reason,str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}',reason) for reason in progress['reasons']):
             raise ValueError()
@@ -261,6 +311,9 @@ class CachedUnderlyingLoader:
                     previous=day
                 _bars(bars,as_of)  # Validate entire causal OHLCV before facts price use.
                 sources.append(proof)
+                if data.get('adjusted') is True:
+                    sources.append({'source':'massive_stock_daily_aggregates','adjusted':True,
+                                    'adjustment_basis':'split_adjusted','market_date':proof.market_date.isoformat()})
             except LeapsDataError as error:
                 if error.code in ('admission_denied','rate_limited'):
                     raise UnderlyingLoadPaused(error.code,'market',progress) from None
@@ -291,9 +344,9 @@ class CachedUnderlyingLoader:
                            price=bars[-1]['close'] if bars else None)
                 sources.append({'source':'sec_companyfacts','cik':cik,'basis':'live_current_not_pit'})
             except LeapsDataError as error:
-                # Local/shared admission refusal pauses all LEAPS acquisitions;
-                # SEC HTTP429 is authority-local and must not stop market chains.
-                if error.code=='admission_denied':
+                # Retry temporary admission/SEC throttling from this saved unit;
+                # optional SEC authorization failures remain quality-only.
+                if error.code in ('admission_denied','rate_limited'):
                     raise UnderlyingLoadPaused(error.code,'sec',progress) from None
                 reasons.append(error.code)
                 failures.append({'authority':'sec','reason':error.code})
