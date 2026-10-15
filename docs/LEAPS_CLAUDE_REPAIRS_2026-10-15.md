@@ -181,5 +181,13 @@ Das Veröffentlichungs-Bundle wurde **aus diesem abgegrenzten Stand** neu gebaut
 
 Keine Abobuchung, Brokerverbindung, Orders, Signal-Mails, Konto-/Serveränderung,
 Installationsmigration oder Wiederherstellung des gelöschten Deployskripts.
-Stand ist lokal, nicht committet/gepusht und nicht auf Hetzner installiert.
-Vorhandenes fremdes WIP bleibt erhalten.
+Das Quellpaket wurde in `d08b7cb0b94c331aa883723094f2b41ed2ecb434` committet
+(33 abgegrenzte Dateien). Der erste Pushversuch wurde vor Ausführung von der
+Tool-Sicherheitsprüfung abgewiesen. Danach hat der Nutzer den konkreten Umfang
+ausdrücklich freigegeben: `d08b7cb` einschließlich seiner 20 LEAPS-Vorgängercommits
+auf `origin/main`. Der anschließende reguläre Push wurde erfolgreich bestätigt:
+`8e6f385..d08b7cb`. Kein Force-Push, kein Umgehungsversuch und keine
+Serverinstallation. Der Dokumentationsnachtrag verändert keinen Produktcode;
+die Code-Prüfbelege oben bleiben unverändert zugeordnet. Vorhandenes fremdes
+WIP bleibt erhalten. Der normale Server-Pull folgt im Chat; reale Datenanbindung
+und Aktivierung bleiben bis zur Anbieterentscheidung offen.

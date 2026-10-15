@@ -34,11 +34,15 @@ Nutzerauftrag: umsetzen, **anschließend** IBKR/Optionsdatenanbieter besprechen.
   Market-Cap-/Dollarvolumen-Anreicherung, Referenzcache und BG-Nachtlauf daran
   anschließen. Kein Abo, kein Broker-/Server-/Mailabruf oder Produktivlauf in
   dieser Runde. Nur echte Bid/Ask; keine erneute Frage nach vorhandenem IBKR.
-- [ ] Eigene Änderungen noch nicht committet/gepusht; Hetzner unverändert.
-  Umfangreiches geerbtes WIP nicht pauschal stagen oder überschreiben.
-  Nutzer hat Commit/Push jetzt ausdrücklich beauftragt. Index enthält nur das
-  abgegrenzte LEAPS-Paket, einschließlich sechs Altdatei-Regressionen. Isolierter
+- [x] Abgegrenztes LEAPS-Paket in `d08b7cb0b94c331aa883723094f2b41ed2ecb434`
+  committet: 33 Dateien, keine privaten Belege oder fremdes lokales WIP.
   Veröffentlichungstest: 1.155 PASS; Bundle `37129d2f1112`; Desktop/Mobil grün.
+- [x] Nutzer hat `d08b7cb` einschließlich der 20 LEAPS-Vorgängercommits ausdrücklich
+  für `origin/main` freigegeben. Regulärer Push erfolgreich bestätigt:
+  `8e6f385..d08b7cb`; kein Force-Push, kein fremdes lokales WIP veröffentlicht.
+- [ ] Hetzner-Pull/Neustart durch Nutzer und danach Serverrevision prüfen.
+  Server wurde hier nicht verändert. Echte Optionsdaten und Aktivierung bleiben
+  bis zur Anbieterentscheidung offen; kein Abo oder Orderpfad aktiviert.
 
 ## 12.10.2026 – TBBB/PLTR: Schlusskurs-Versand lokal korrigiert, Veröffentlichung offen
 
