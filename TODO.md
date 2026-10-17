@@ -1,5 +1,45 @@
 # Aktuelle Aufgaben / Übergabe
 
+## 17.10.2026 – Accountwechsel: maßgeblicher Einstieg
+
+[Eigenständig lesbare Account-Übergabe](docs/HANDOFF_ACCOUNT_2026-10-17.md).
+Die älteren datierten Abschnitte bleiben erhalten; ihre damaligen offenen
+Checkboxen nicht ohne Abgleich erneut abarbeiten.
+
+- [x] Git am 17.10. neu gelesen: Arbeitsbranch `codex/leaps-scanner`, HEAD und
+  frisch gelesener GitHub-`main` **`5c5b319492f5ef951ad46daa8da0ff290c8f18a2`**.
+  LEAPS-Reparaturen **`d08b7cb0b94c331aa883723094f2b41ed2ecb434`** sind enthalten
+  und veröffentlicht; `5c5b319` ist der anschließende reine Doku-Commit.
+  Diese Übergabe ergänzt nur Dokumentation auf dieser Produktcodebasis.
+- [x] Historische Belege vom 15.10. erneut gelesen, keine Tests neu gestartet:
+  Arbeitskopie einschließlich WIP **14.455 PASS / 7 SKIP**; isoliertes
+  Veröffentlichungspaket **1.155 PASS / 0 SKIP**; beide ohne FAIL/ERROR.
+  Desktop/Mobil und synthetische Backend-DTOs grün; kein Live-Datenbeweis.
+- [x] Umfangreiches geerbtes WIP bleibt erhalten. Veröffentlichte LEAPS-Dateien
+  sind unverändert; API/Frontend/Mail/BI/Deploy/Tests enthalten daneben weiterhin
+  uncommittete fremde bzw. frühere Änderungen. Kein `git add -A`, Reset/Clean,
+  pauschales Bundle-Staging oder Wiederherstellen von `deploy/safe_deploy.sh`.
+- [ ] **Nächster fachlicher Schritt: Optionsdaten mit Nutzer besprechen.**
+  IBKR-Konto und Stocks Starter sind bekannt; nur echte Bid/Ask gewünscht.
+  Tatsächliche IBKR-Datenrechte/Greeks/OI und Nachtleistung vor anderem Abo
+  prüfen. Anbieterwahl, realer Leseadapter, Universumsanreicherung und BG-
+  Nachtlauf bleiben offen. Keine Buchung, Brokerverbindung oder Aktivierung.
+- [ ] **Servergate:** Installation von `5c5b319`/LEAPS wurde hier nicht bestätigt.
+  Zuerst aktuellen Health-/Revisionsstand lesen; nicht wegen alter Texte erneut
+  pullen/neustarten. Ein weiterer reiner Übergabe-Doku-Commit benötigt keinen
+  Dienstneustart. Keine aktuelle Server- oder Postfachkontrolle am 17.10.
+- [ ] **Separates Reparaturpaket:** die breiten Claude-Audit-Reparaturen vom
+  13.10. sind nicht durch den LEAPS-Push pauschal veröffentlicht/abgenommen.
+  Own-Diffs/Abhängigkeiten abgrenzen, separat prüfen/veröffentlichen; danach
+  BI-v9-Live-/Historienlauf und reguläre Aktien-Signalzustellung nachweisen.
+- [ ] **Offene Belege:** echte neue Schlusskurs-Zeitregel-/Aktien-Trade-Mail,
+  alte Wochenkohorte und FET-Fills/Stop/Liquidation bleiben separat ungeklärt.
+  Technische, Crash-, FET- und TBBB/PLTR-Mails wurden historisch empfangen;
+  nicht wieder behaupten, dass nie irgendeine Mail ankam.
+- [ ] **Betreiber-Sicherheit:** offener Schlüsselrotationshinweis vom 14.10.
+  bleibt bestehen; tatsächliche Rotation/Serververwendung heute ungeprüft.
+  Keine alten Schlüssel verwenden/ausgeben, Konten oder Repo-Sichtbarkeit ändern.
+
 ## 15.10.2026 – Freigegebene Claude-Korrekturen umgesetzt; Anbieter folgt danach
 
 Nutzerauftrag: umsetzen, **anschließend** IBKR/Optionsdatenanbieter besprechen.
